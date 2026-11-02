@@ -1,0 +1,24 @@
+// bench/str.zx —— 分配器 + 格式化 + 字节追加。
+// 2 万次整数格式化，逐字节追加进 ArrayList(u8)，末尾做校验和。
+const std = module("std");
+
+const main = fn () u8 {
+    let al = std.heap.page;
+    var sb = std.ArrayList(u8).init(al);
+
+    for (0..20000) i {
+        if (std.format(al, "{}", (i64)(i32)i)) s {
+            for (s[0..]) ch {
+                if (!sb.push(ch)) { std.process.exit(1); }
+            }
+            if (!sb.push((u8)',')) { std.process.exit(1); }
+        }
+    }
+
+    var h: u64 = 5381;
+    for (0..sb.len) i {
+        if (sb.get(i)) ch { h = (h * 33 + (u64)ch) & 0xffffffff; }
+    }
+    std.println("str len={} hash={}", sb.len, h);
+    return 0;
+};
