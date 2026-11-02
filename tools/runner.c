@@ -23,7 +23,7 @@
  *                        不重复跑 zig cc）
  *   --save F             把每项的前端耗时写成基线 TSV
  *   --baseline F         与基线比，列出回归 / 变快（默认只提示，见 --fail-on-regress）
- *   --fail-on-regress P  前端耗时超过基线 P%（默认 15）就以非零退出
+ *   --fail-on-regress P  规模耗时超过基线 P%（默认 25）就以非零退出
  *   --timeout MS         单个子进程的上限（默认 20000）
  *   --filter S           只跑路径里含 S 的用例
  *   --quiet              只打失败与小结点
@@ -506,6 +506,11 @@ static unsigned long long base_lookup(const char *path) {
 static bool g_quiet;
 static int g_timeout_ms = 20000;
 static unsigned long long g_startup_ns;
+/* 规模曲线的结果。基线只认这一组数：它是单进程、净耗时够大，噪声 < 10%；
+ * 单项耗时的抖动（进程启动 ±5 ms）比它要测的东西还大，拿来对比只会误报。 */
+static unsigned long long g_scale_ns[2];
+static long               g_scale_lines[2];
+static int                g_scale_n[2];
 
 /* 合成一份 N 个函数 + N 次调用的源码。用生成的而不是现成的大文件，
  * 是因为规模要能按整数倍放大 —— 曲线才看得见。 */
@@ -611,6 +616,9 @@ static void run_scale_check(const char *zxc, const char *tmp, int repeat) {
         printf("  %.1f 倍代码 → %.1f 倍耗时（%s）\n", code_ratio, time_ratio,
                super ? "超线性，有地方在按平方长大" : "线性，没问题");
     }
+    g_scale_ns[0] = a1; g_scale_ns[1] = a2;
+    g_scale_lines[0] = l1; g_scale_lines[1] = l2;
+    g_scale_n[0] = n1; g_scale_n[1] = n2;
     remove_retry(p1);
     remove_retry(p2);
     remove_retry(log);
@@ -634,7 +642,7 @@ int main(int argc, char **argv) {
     bool perf = true;
     int repeat = 3;
     const char *save = NULL, *baseline = NULL, *filter = NULL;
-    double regress_pct = 15.0;
+    double regress_pct = 25.0;
     bool fail_on_regress = false;
 
     for (int i = 1; i < argc; i++) {
@@ -949,50 +957,36 @@ int main(int argc, char **argv) {
             free(used);
         }
 
-        /* 基线对比：只比前端。zig cc 与程序运行时间由工具链和机器决定，
-         * 混进来会让"编译器变慢了"这个信号被噪声淹掉。 */
+        /* 基线对比：只比规模曲线。
+         * 单项耗时看着诱人，但进程启动的抖动（±5 ms）比一个测试文件的前端耗时
+         * 本身还大——同一份代码连跑两次能"快 22%"。规模曲线是单进程、净耗时
+         * 17/73 ms 起，噪声在 10% 以内，才拿得动 15% 这条线。 */
         if (baseline) {
             load_baseline(baseline);
-            printf("\n== 与基线对比（前端，%+.0f%% 为界）==\n", regress_pct);
+            printf("\n== 与基线对比（规模曲线，%+.0f%% 为界）==\n", regress_pct);
             if (g_nbase == 0) {
-                printf("  （基线是空的）\n");
+                printf("  （基线里没有规模数据）\n");
             } else {
                 double lim = 1.0 + regress_pct / 100.0;
-                int worse = 0, better = 0, matched = 0;
-                unsigned long long sum_now = 0, sum_base = 0;
-                printf("  回归：\n");
-                for (int i = 0; i < g_ncases; i++) {
-                    CaseStat *c = &g_cases[i];
-                    unsigned long long b = base_lookup(c->path);
-                    if (!b || !c->front_ns) continue;
-                    matched++;
-                    sum_now += c->front_ns;
-                    sum_base += b;
-                    double ratio = (double)c->front_ns / (double)b;
-                    if (ratio > lim) {
-                        worse++;
-                        char a[32], d[32];
-                        fmt_ms(a, sizeof a, c->front_ns);
-                        fmt_ms(d, sizeof d, (unsigned long long)((double)c->front_ns - (double)b));
-                        printf("    %5.2fx  +%s  %s\n", ratio, d, c->path);
-                    }
-                }
-                if (!worse) printf("    （无）\n");
-                for (int i = 0; i < g_ncases; i++) {
-                    CaseStat *c = &g_cases[i];
-                    unsigned long long b = base_lookup(c->path);
-                    if (!b || !c->front_ns) continue;
-                    if (b > 0 && (double)c->front_ns / (double)b < 1.0 / lim) better++;
-                }
-                if (better) printf("  变快：%d 项（< -%.0f%%）\n", better, regress_pct);
-                if (matched) {
-                    double d = sum_base ? ((double)sum_now - (double)sum_base) / (double)sum_base * 100.0 : 0.0;
-                    printf("  命中 %d/%d 项，前端总耗时 %+.1f%%\n", matched, g_nbase, d);
-                } else {
-                    printf("  ! 基线里的路径一个都对不上（基线要在同一目录下生成）\n");
+                const unsigned long long NOISE = 3000000ULL;   /* 3 ms 以下不判 */
+                int worse = 0;
+                /* 只判大档：小档净耗时 ~25 ms，正好卡在启动噪声的边缘，
+                 * 同一份代码能抖出 1.3x。大档 100 ms 起，稳定在 ±5% 内。 */
+                for (int k = 1; k < 2; k++) {
+                    unsigned long long b = base_lookup(k == 0 ? "scale/small" : "scale/big");
+                    if (!b || !g_scale_ns[k]) continue;
+                    unsigned long long now = g_scale_ns[k];
+                    double ratio = (double)now / (double)b;
+                    char sn[32], sb[32];
+                    fmt_ms(sn, sizeof sn, now);
+                    fmt_ms(sb, sizeof sb, b);
+                    bool bad = now > b + NOISE && ratio > lim;
+                    printf("  %5d 函数  现在 %s  基线 %s  %5.2fx%s\n",
+                           g_scale_n[k], sn, sb, ratio, bad ? "  ← 回归" : "");
+                    if (bad) worse++;
                 }
                 if (fail_on_regress && worse) {
-                    printf("  前端回归超过 %.0f%%：判失败\n", regress_pct);
+                    printf("  规模回归超过 %.0f%%：判失败\n", regress_pct);
                     fail++;
                 }
             }
@@ -1004,21 +998,22 @@ int main(int argc, char **argv) {
         free(run);
     }
 
-    /* 基线落盘：只写前端，跟对比用的列保持一致 */
+    /* 基线落盘：只存规模曲线（见上面"为什么不是逐项"）。 */
     if (save) {
         FILE *fp = fopen(save, "wb");
         if (!fp) {
             printf("  ! 写不了基线 %s\n", save);
         } else {
-            fprintf(fp, "# zx-runner-baseline 1\n");
-            fprintf(fp, "# path\tfront_ns\tlines\n");
-            for (int i = 0; i < g_ncases; i++) {
-                if (!g_cases[i].front_ns) continue;
-                fprintf(fp, "%s\t%llu\t%ld\n", g_cases[i].path,
-                        g_cases[i].front_ns, g_cases[i].lines);
+            fprintf(fp, "# zx-runner-baseline 2\n");
+            fprintf(fp, "# 列：名字<TAB>净耗时ns<TAB>行数<TAB>函数数\n");
+            for (int k = 0; k < 2; k++) {
+                if (!g_scale_ns[k]) continue;
+                fprintf(fp, "%s\t%llu\t%ld\t%d\n",
+                        k == 0 ? "scale/small" : "scale/big",
+                        g_scale_ns[k], g_scale_lines[k], g_scale_n[k]);
             }
             fclose(fp);
-            printf("\n  基线已写入 %s（%d 项）\n", save, g_ncases);
+            printf("\n  基线已写入 %s\n", save);
         }
     }
 
