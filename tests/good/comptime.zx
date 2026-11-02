@@ -20,7 +20,7 @@ const table = build: {
 // 编译期断言：@compileError 只在真的执行到的时候才报
 const checked = if (table.2 != 3) @compileError("table[2] should be 3") else 0;
 
-fn main() u8 {
+const main = fn () u8 {
     var a: *[N]i32 = undefined;              // 长度 14
     var b: *[FIVE + M]i32 = undefined;       // 长度 8
     let c = table.2;                         // 3
@@ -28,7 +28,7 @@ fn main() u8 {
     let e = add(FIVE, 1);                    // 6
     std.println("{} {} {}", c, d, e);
     return 0;
-}
+};
 
 // expect-output
 // 3 4 6

@@ -1,4 +1,4 @@
 // expect: cannot nest
 // ?T / !T 不嵌套
 const bad: ??i32 = null;
-fn main() void {}
+const main = fn () void {};

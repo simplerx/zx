@@ -11,37 +11,37 @@ const Color = enum {
     const COUNT = 3;
     var calls: i32 = 0;             // 静态变量：全程序一份
 
-    fn name(self: Self) []const u8 {
+    const name = fn (self: Self) []const u8 {
         return switch (self) {
             .red:   "red",
             .green: "green",
             .blue:  "blue",
         };
-    }
+    };
 
-    fn is_cool(self: Self) bool { return self == Color.blue; }
+    const is_cool = fn (self: Self) bool { return self == Color.blue; };
 
     // 自引用：从自己出发算下一个
-    fn next(self: Self) Self {
+    const next = fn (self: Self) Self {
         if (self == Color.blue) { return Self.red; }
         return (Color)((i32)self + 1);
-    }
+    };
 
-    fn count() i32 { return Color.COUNT; }
+    const count = fn () i32 { return Color.COUNT; };
 
-    fn touch() void { Color.calls = Color.calls + 1; }
+    const touch = fn () void { Color.calls = Color.calls + 1; };
 };
 
 const Flag = enum(u8) {
     off = 0, on = 1,
 
-    fn flip(self: Self) Self {
+    const flip = fn (self: Self) Self {
         if (self == Flag.on) { return Flag.off; }
         return Flag.on;
-    }
+    };
 };
 
-fn main() u8 {
+const main = fn () u8 {
     std.println("{} {} {}", Color.red.name(), Color.green.name(), Color.blue.name());
     std.println("cool {} {}", Color.red.is_cool(), Color.blue.is_cool());
 
@@ -59,7 +59,7 @@ fn main() u8 {
     const f = Flag.off;
     std.println("flip {} -> {}", (i32)f, (i32)f.flip());
     return 0;
-}
+};
 
 // expect-output
 // red green blue

@@ -1,9 +1,11 @@
-// label_block.zx —— 标签块（v0.22）：标签写在条件 / 模式之后、块之前。
+// label_block.zx —— 标签写在哪（v0.24）
 //
-// 一条规则区分两个名字：紧跟 `{` 的是**捕获**（绑定的就是匹配到的东西），
+// 一条规则：**标签写在被命名的结构前面**。
+//   块的标签   `t: { … }`              → 跳到块末，交出值
+//   循环的标签 `done: while (…) { … }` → 跳出循环，交出值
+//
+// 块臂里两个名字的区分：紧跟 `{` 的是**捕获**（绑定的就是匹配到的东西），
 // 紧跟 `:` 的是**标签**（块内 `lbl: v;` 交出值）。两者可以同时出现，捕获在前。
-//
-// 这条规则在四处一样：switch 臂、if 臂、while、for。
 const std = module("std");
 
 const Shape = union(enum) {
@@ -36,7 +38,7 @@ const weight = fn (c: Color) i32 {
     };
 };
 
-fn main() i32 {
+const main = fn () i32 {
     const c = Shape{ .circle = 1.5 };
     const r = Shape{ .rect = { 3.0, 4.0 } };
 
@@ -44,15 +46,15 @@ fn main() i32 {
     const i = if (true) tag: { tag: 5; };
     const j = if (false) tag: { tag: 5; } else 0;
 
-    // ⑤ while：没有 break，`done: v;` 就是带值的出口
+    // ⑤ while：标签写在关键字前面——它是循环的名字，`done: v;` 直接跳出循环
     var n: i32 = 0;
-    const w = while (true) done: {
+    const w = done: while (true) {
         n = n + 1;
         if (n == 7) { done: n * 10; }
     };
 
-    // ⑥ for：标签挂在循环上，直接从体内结束剩下的迭代
-    const f = for (0..8) k hit: {
+    // ⑥ for：同上，跳出循环而不是"跳到体末再进下一轮"
+    const f = hit: for (0..8) k {
         if (k == 3) { hit: (i32)k; }
     } else -1;
 
@@ -60,7 +62,7 @@ fn main() i32 {
     std.println("{} {} {} {}", i, j, w, f);
     std.println("{} {}", weight(Color.red), weight(Color.green));
     return 0;
-}
+};
 
 // expect-output
 // 1 2 3 7

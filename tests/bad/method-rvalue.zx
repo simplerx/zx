@@ -1,12 +1,12 @@
 // expect: cannot take the address of this receiver
 const P = struct {
     x: i32,
-    fn bump(self: *Self) void { self.x = 1; }
+    const bump = fn (self: *Self) void { self.x = 1; };
 };
 
-fn mk() P { return P{ .x = 0 }; }
+const mk = fn () P { return P{ .x = 0 }; };
 
-fn main() u8 {
+const main = fn () u8 {
     mk().bump();          // 临时值没有地址
     return 0;
-}
+};

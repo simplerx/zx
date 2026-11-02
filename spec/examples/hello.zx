@@ -5,10 +5,10 @@
 
 const std = module("std");
 
-fn main() u8 {
+const main = fn () u8 {
     std.print("hello, zx\n");
     return 0;
-}
+};
 
 // expect-output
 // hello, zx

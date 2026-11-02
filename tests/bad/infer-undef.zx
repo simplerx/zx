@@ -1,4 +1,4 @@
 // expect: cannot infer the type
-fn main() void {
+const main = fn () void {
     var x = undefined;
-}
+};

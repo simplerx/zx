@@ -4,9 +4,9 @@
 
 const std = module("std");
 
-// 错误码就是整数，用 enum 起名
+// 错误码就是整数，用 enum 起名。
+// 0 留给"无错误"——命名错误码从 1 起（`(error)0` 是编译错误 E0508）。
 const Err = enum(u16) {
-    ok = 0,
     notFound = 1,
     badInput = 2,
     overflow = 3,
@@ -57,7 +57,6 @@ const parseIndex = fn (s: []const u8, needle: u8) !usize {
 // ---------- 分发表：错误码 → 文案 ----------
 const errName = fn (code: error) []const u8 {
     return switch (code) {
-        (error)Err.ok:       "ok",
         (error)Err.notFound: "not found",
         (error)Err.badInput: "bad input",
         (error)Err.overflow: "overflow",
@@ -72,7 +71,7 @@ const peekPayload = fn (m: *const ?i32) i32 {
     return p.0;
 };
 
-fn main() u8 {
+const main = fn () u8 {
     // 成功
     if (parseU8("250")) v {
         std.println("parsed: {}", v);
@@ -106,7 +105,7 @@ fn main() u8 {
     std.println("payload = {}, size = {}", peekPayload(&m), @sizeOf(?i32));
 
     return 0;
-}
+};
 
 // expect-output
 // parsed: 250

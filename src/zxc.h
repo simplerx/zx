@@ -56,7 +56,7 @@ void   buf_free(Buf *b);
     X(FLOAT,    "float")                                                       \
     X(CHAR,     "char")                                                        \
     X(STRING,   "string")                                                      \
-    /* keywords (24) */                                                        \
+    /* keywords (25) */                                                        \
     X(KW_CONST,   "'const'")                                                   \
     X(KW_LET,     "'let'")                                                     \
     X(KW_VAR,     "'var'")                                                     \
@@ -81,6 +81,7 @@ void   buf_free(Buf *b);
     X(KW_PUB,     "'pub'")                                                     \
     X(KW_EXTERN,  "'extern'")                                                  \
     X(KW_ORELSE,  "'orelse'")                                                  \
+    X(KW_TRY,     "'try'")                                                     \
     /* punctuation & operators */                                              \
     X(LPAREN,   "'('")    X(RPAREN,   "')'")                                   \
     X(LBRACKET, "'['")    X(RBRACKET, "']'")                                   \

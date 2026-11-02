@@ -259,11 +259,25 @@ static Node *parse_type_primary(P *p) {
         /* body: fields, methods, decls */
         expect(p, TOK_LBRACE);
         while (!at(p, TOK_RBRACE) && !at(p, TOK_EOF_)) {
-            if (at(p, TOK_KW_FN)) { push(n, parse_fn(p, true)); continue; }
+            /* 方法只有一种写法：`const name = fn (…) R { … };`（v0.24）。
+             * 解析成带名字的 NK_FN——方法表吃的一直是这个形状，语义层
+             * 不用为"两种写法"分叉。 */
+            if (at(p, TOK_KW_CONST) && peek(p, 1)->kind == TOK_IDENT &&
+                peek(p, 2)->kind == TOK_ASSIGN && peek(p, 3)->kind == TOK_KW_FN) {
+                advance(p);                      /* const */
+                const char *mname = take_ident(p);
+                advance(p);                      /* '=' */
+                Node *f = parse_fn(p, true);
+                f->name = mname;
+                expect(p, TOK_SEMI);
+                push(n, f);
+                continue;
+            }
             if (at(p, TOK_KW_CONST) || at(p, TOK_KW_LET) || at(p, TOK_KW_VAR)) {
                 push(n, parse_decl(p));
                 continue;
             }
+            if (at(p, TOK_KW_FN)) { push(n, parse_fn(p, false)); continue; }
             const char *fname = take_ident(p);
             expect(p, TOK_COLON);
             Node *ty = parse_type(p);
@@ -294,11 +308,25 @@ static Node *parse_type_primary(P *p) {
         }
         expect(p, TOK_LBRACE);
         while (!at(p, TOK_RBRACE) && !at(p, TOK_EOF_)) {
-            if (at(p, TOK_KW_FN)) { push(n, parse_fn(p, true)); continue; }
+            /* 方法只有一种写法：`const name = fn (…) R { … };`（v0.24）。
+             * 解析成带名字的 NK_FN——方法表吃的一直是这个形状，语义层
+             * 不用为"两种写法"分叉。 */
+            if (at(p, TOK_KW_CONST) && peek(p, 1)->kind == TOK_IDENT &&
+                peek(p, 2)->kind == TOK_ASSIGN && peek(p, 3)->kind == TOK_KW_FN) {
+                advance(p);                      /* const */
+                const char *mname = take_ident(p);
+                advance(p);                      /* '=' */
+                Node *f = parse_fn(p, true);
+                f->name = mname;
+                expect(p, TOK_SEMI);
+                push(n, f);
+                continue;
+            }
             if (at(p, TOK_KW_CONST) || at(p, TOK_KW_LET) || at(p, TOK_KW_VAR)) {
                 push(n, parse_decl(p));
                 continue;
             }
+            if (at(p, TOK_KW_FN)) { push(n, parse_fn(p, false)); continue; }
             const char *mname = take_ident(p);
             expect(p, TOK_COLON);
             Node *ty = parse_type(p);
@@ -322,11 +350,25 @@ static Node *parse_type_primary(P *p) {
         expect(p, TOK_LBRACE);
         while (!at(p, TOK_RBRACE) && !at(p, TOK_EOF_)) {
             /* 体也是作用域：方法 / 常量成员和变体混着写 */
-            if (at(p, TOK_KW_FN)) { push(n, parse_fn(p, true)); continue; }
+            /* 方法只有一种写法：`const name = fn (…) R { … };`（v0.24）。
+             * 解析成带名字的 NK_FN——方法表吃的一直是这个形状，语义层
+             * 不用为"两种写法"分叉。 */
+            if (at(p, TOK_KW_CONST) && peek(p, 1)->kind == TOK_IDENT &&
+                peek(p, 2)->kind == TOK_ASSIGN && peek(p, 3)->kind == TOK_KW_FN) {
+                advance(p);                      /* const */
+                const char *mname = take_ident(p);
+                advance(p);                      /* '=' */
+                Node *f = parse_fn(p, true);
+                f->name = mname;
+                expect(p, TOK_SEMI);
+                push(n, f);
+                continue;
+            }
             if (at(p, TOK_KW_CONST) || at(p, TOK_KW_LET) || at(p, TOK_KW_VAR)) {
                 push(n, parse_decl(p));
                 continue;
             }
+            if (at(p, TOK_KW_FN)) { push(n, parse_fn(p, false)); continue; }
             Node *m = node_new(NK_PAIR, cur(p)->line, cur(p)->col);
             m->name = take_ident(p);
             if (accept(p, TOK_ASSIGN)) m->a = parse_expr(p);
@@ -703,6 +745,15 @@ static Node *parse_unary(P *p) {
         n->a = parse_unary(p);
         return n;
     }
+    case TOK_KW_TRY: {
+        /* `try e`：e 是 !T，成功取载荷，出错带着同一个码返回。
+         * 它只是 `if (e) v { v } else err { return err; }` 的简写——
+         * 没有栈展开、没有 catch 块，错误值始终在返回值里。 */
+        advance(p);
+        Node *n = node_new(NK_TRY, t->line, t->col);
+        n->a = parse_unary(p);
+        return n;
+    }
     default:
         return parse_postfix(p, parse_primary(p));
     }
@@ -917,8 +968,17 @@ static Node *parse_decl(P *p) {
 static Node *parse_fn(P *p, bool allow_name) {
     Token *t = advance(p);   /* fn */
     Node *n = node_new(NK_FN, t->line, t->col);
-    if (allow_name && at(p, TOK_IDENT) && peek(p, 1)->kind == TOK_LPAREN)
+    if (at(p, TOK_IDENT) && peek(p, 1)->kind == TOK_LPAREN) {
+        /* `fn name(…)` 只留给 `extern`（没有函数体，只是外部符号声明）。
+         * 有函数体的定义一律是值：`const name = fn (…) R { … };`——名字属于
+         * 绑定，不属于函数；名字在 `fn` 后面会让"函数有个自己的名字"和
+         * "一个值被绑到名字上"变成两套东西。 */
+        Token *id = cur(p);
+        if (!allow_name)
+            perr(p, "functions are values: write `const %.*s = fn (…) … { … };`",
+                 (int)(id->len < 40 ? id->len : 40), id->start);
         n->name = take_ident(p);
+    }
     expect(p, TOK_LPAREN);
     if (!at(p, TOK_RPAREN)) {
         for (;;) {
@@ -992,8 +1052,9 @@ static bool starts_binop(TokKind k) {
 }
 
 /* One `if` arm.
- *   t: { … }        labeled block arm
+ *   t: { … }        labeled block arm（标签=块；`t: v;` 交出臂的值）
  *   v { … }         capture + block
+ *   v t: { … }      capture + labeled block
  *   { … }           plain block arm
  *   v expr          capture + single value (sugar)
  *   expr            expression arm
@@ -1126,13 +1187,18 @@ static Node *parse_while(P *p, const char *label) {
     expect(p, TOK_LPAREN);
     n->a = parse_expr(p);
     expect(p, TOK_RPAREN);
-    /* `while (c) v { … }` 捕获；`while (c) lbl: { … }` 标签块——循环体里
-     * `lbl: v;` 结束循环并交出值。没有 `break`，这就是带值的出口。 */
+    /* `while (c) v { … }` 捕获。标签不写在这里——循环的名字写在关键字前面
+     * （`done: while (…) { … }`）：标签是循环的出口，写成后缀看起来像
+     * "体的名字"，读者会以为它只跳到体末、下一轮继续。 */
     if (at(p, TOK_IDENT) && peek(p, 1)->kind == TOK_LBRACE) n->name = take_ident(p);
     if (at(p, TOK_IDENT) && !is_bool_word(cur(p)) && peek(p, 1)->kind == TOK_COLON) {
-        if (n->label) perr(p, "`while` already has a label before the keyword");
-        n->label = take_ident(p);
-        advance(p);                       /* ':' */
+        Token *id = cur(p);
+        if (n->label)
+            perr(p, "`while` is already labeled before the keyword");
+        else
+            perr(p, "the label of a loop goes before the keyword: `%.*s: while (…) { … }`",
+                 (int)(id->len < 40 ? id->len : 40), id->start);
+        advance(p); advance(p);           /* 名字 + ':' */
     }
     n->b = parse_block(p);
     if (accept(p, TOK_KW_ELSE)) n->c = at(p, TOK_LBRACE) ? parse_block(p) : parse_expr(p);
@@ -1170,12 +1236,16 @@ static Node *parse_for(P *p, const char *label, bool allow_nobind) {
     }
     for (int i = 0; i < nseq; i++) push(n, seqs[i]);
     for (int i = 0; i < nbind; i++) push(n, binds[i]);
-    /* 绑定之后可以给循环体贴标签：`for (xs) x lbl: { …; lbl: v; }`。
-     * 标签挂在循环上（不是块上），`lbl: v;` 才能跳出循环。 */
+    /* 绑定之后不再接受标签：循环的名字写在关键字前面
+     * （`done: for (xs) x { … }`），那是循环的出口。 */
     if (at(p, TOK_IDENT) && !is_bool_word(cur(p)) && peek(p, 1)->kind == TOK_COLON) {
-        if (n->label) perr(p, "`for` already has a label before the keyword");
-        n->label = take_ident(p);
-        advance(p);                       /* ':' */
+        Token *id = cur(p);
+        if (n->label)
+            perr(p, "`for` is already labeled before the keyword");
+        else
+            perr(p, "the label of a loop goes before the keyword: `%.*s: for (…) x { … }`",
+                 (int)(id->len < 40 ? id->len : 40), id->start);
+        advance(p); advance(p);           /* 名字 + ':' */
     }
     n->a = node_new(NK_TUPLE, t->line, t->col);   /* arity markers */
     n->a->ival = (uint64_t)nseq;
@@ -1332,7 +1402,8 @@ static Node *parse_stmt(P *p) {
         return parse_decl(p);
 
     case TOK_KW_FN: {
-        Node *f = parse_fn(p, true);
+        Node *f = parse_fn(p, false);
+        accept(p, TOK_SEMI);
         return f;
     }
 
@@ -1463,6 +1534,7 @@ static const char *nk_name(NodeKind k) {
     case NK_RANGE: return "range";
     case NK_UN: return "un";
     case NK_CAST: return "cast";
+    case NK_TRY: return "try";
     case NK_INDEX: return "index";
     case NK_SLICE: return "slice";
     case NK_FIELD: return "field";

@@ -1,7 +1,7 @@
 // expect: only `+` and `-` apply to pointers
-fn main() u8 {
+const main = fn () u8 {
     var a: *[4]i32 = undefined;
     let p: *i32 = a;
     let r = p * 2;
     return 0;
-}
+};

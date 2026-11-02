@@ -1,7 +1,7 @@
 // ArrayList 的完整 API（M19）：增删插、首尾、反转、伸缩、交换。
 const std = module("std");
 
-fn main() u8 {
+const main = fn () u8 {
     let al = std.heap.page;
     var xs = std.ArrayList(i32).init(al);
 
@@ -36,7 +36,7 @@ fn main() u8 {
 
     xs.deinit();
     return 0;
-}
+};
 
 // expect-output
 // [0, 1, 2, 3, 4]

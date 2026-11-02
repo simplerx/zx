@@ -4,13 +4,13 @@
 // `var x: *[N]T = undefined` 不再分配存储，只是指针槽不初始化。
 const std = module("std");
 
-fn total(p: *[4]u64) u64 {
+const total = fn (p: *[4]u64) u64 {
     var s: u64 = 0;
     for (0..4) i { s = s + p[i]; }
     return s;
-}
+};
 
-fn main() u8 {
+const main = fn () u8 {
     // ① 栈分配：和普通局部数组一样用
     var sa = std.stackAlloc(u64, 4);
     for (0..4) i { sa[i] = i + 1; }
@@ -35,13 +35,13 @@ fn main() u8 {
     std.println("pick {d}", pick(&box).0);
 
     return 0;
-}
+};
 
 const Box = struct { v: u64 };
 
-fn pick(b: *Box) *u64 {
+const pick = fn (b: *Box) *u64 {
     return &b.v;        // 被指物不在当前栈帧：放行
-}
+};
 
 // expect-output
 // stack 10 len=4

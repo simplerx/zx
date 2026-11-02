@@ -9,22 +9,22 @@ const Node = struct { value: i32, next: ?*Node };
 var pool: *[128]u8 = undefined;
 var used: usize = 0;
 
-fn bump(n: usize) ?*u8 {
+const bump = fn (n: usize) ?*u8 {
     if (used + n > pool.len) { return null; }
     let p = pool[0..].ptr + used;
     used = used + n;
     return p;
-}
+};
 
-fn noop(p: *u8, n: usize) void { }
+const noop = fn (p: *u8, n: usize) void { };
 
 // 分配器可以当普通参数传下去
-fn render(a: Allocator, n: i32) ![]u8 {
+const render = fn (a: Allocator, n: i32) ![]u8 {
     return std.format(a, "<{}:{}>", n, n * 2);
-}
+};
 
 // 在 arena 上造一个节点：把字节地址当成 *Node 用
-fn push(head: ?*Node, v: i32) ?*Node {
+const push = fn (head: ?*Node, v: i32) ?*Node {
     let mem = bump(16);                 // @sizeOf(Node) == 16
     if (mem) raw {
         let node = (*Node)raw;
@@ -34,9 +34,9 @@ fn push(head: ?*Node, v: i32) ?*Node {
     } else e {
         return null;
     }
-}
+};
 
-fn main() u8 {
+const main = fn () u8 {
     const arena = Allocator{ .alloc = bump, .free = noop };
 
     var a = std.format(arena, "x={} y={}", 1, 2);
@@ -82,7 +82,7 @@ fn main() u8 {
         std.println("oom big");
     }
     return 0;
-}
+};
 
 // expect-output
 // a=[x=1 y=2] used=8

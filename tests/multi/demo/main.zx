@@ -3,7 +3,7 @@ const std = module("std");
 const util = module("util.zx");
 const geo = module("geo.zx");
 
-fn main() u8 {
+const main = fn () u8 {
     std.println("add={} twice={}", util.add(2, 3), util.twice(21));
     std.println("module={} version={}", util.name, util.VERSION);
 
@@ -13,7 +13,7 @@ fn main() u8 {
     std.println("scaled={} {}", q.x, q.y);
     std.println("origin={} {}", geo.origin.x, geo.origin.y);
     return 0;
-}
+};
 
 // expect-output
 // add=5 twice=44

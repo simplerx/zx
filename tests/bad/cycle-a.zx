@@ -1,6 +1,6 @@
 // expect: cyclic module dependency
 const b = module("cycle-b.zx");
 
-fn main() u8 {
+const main = fn () u8 {
     return 0;
-}
+};

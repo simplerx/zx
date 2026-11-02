@@ -1,7 +1,7 @@
 // expect: is declared `noreturn`
 // noreturn 函数也不许掉出末尾：声明"不返回"就必须真的回不来
-fn die(n: i32) noreturn {
+const die = fn (n: i32) noreturn {
     if (n > 0) { @trap(); }
-}
+};
 
-fn main() u8 { return 0; }
+const main = fn () u8 { return 0; };

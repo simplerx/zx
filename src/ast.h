@@ -13,6 +13,7 @@ typedef enum {
     NK_UN,              /* op a  — -, +, !, ~, & (addr) */
     NK_UNWRAP,          /* a.? — 可选/错误联合体解包；空则 trap（G1） */
     NK_ORELSE,          /* a orelse b — 空/错则取 b（G1） */
+    NK_TRY,             /* try a — !T 出错就把同一个码原样返回（v0.23） */
     NK_CAST,            /* (T)e — a=type, b=expr */
     NK_INDEX,           /* base[idx] */
     NK_SLICE,           /* base[lo..hi] (hi NULL → open) */

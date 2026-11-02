@@ -1,6 +1,22 @@
-# Zx 语言规格 v0.22
+# Zx 语言规格 v0.24
 
 > 依据 `plan` + 五轮修订意见。语言名 **Zx**，源文件 `.zx`。后端先出 C。
+
+## v0.23 → v0.24 的改动
+
+| # | 改动 | 影响 |
+|---|---|---|
+| 53 | **标签写在被离开的结构前面**：循环的标签统一到关键字前——`done: while (…) { … }`、`hit: for (…) x { … }`。`while (…) tag: { … }`、`for (…) x tag: { … }` 报错并指路（不静默兼容）。理由：标签是**循环的出口**，写在体前会被读成"体的名字"，读者以为只跳到体末、下一轮继续 | §8.2、§8.3、§8.5 |
+| 54 | **函数定义只有一种写法**：`const name = fn (…) R { … };`。`fn name(…)` 只保留给没有函数体的 `extern` 声明；结构体 / 联合体 / 枚举体里的方法同样是 const 绑定（解析成同一个形状的方法表条目）。名字属于绑定，不属于函数 | §9、§4.5 |
+
+## v0.22 → v0.23 的改动
+
+| # | 改动 | 影响 |
+|---|---|---|
+| 49 | **`try` 错误传播**：`try e` 把 `!T` 的错误原样往上返回，成功取载荷。它是 `if (e) v { v } else err { return err; }` 的简写——没有栈展开、没有 catch 块、类型不变。新增关键字（第 25 个） | §5.1、§1.1 |
+| 50 | **`!void` 可用**：`fn f() !void` 的三条成功路径（走到底、`return;`、`try x();`）原先全被堵死——走到底报"缺返回"、`return;` 报"没有值"、`{}` 不被认。现在全部成立；`!void` 的载荷是 0 字节，所以也**不能捕获**（`if (x) v` 报错，写 `if (x) { … }`） | §5、§8.1 |
+| 51 | **错误码 0 保留给"无错误"**：`(error)0`、以及值为 0 的枚举变体（`enum { open, … }` 的 `open`）都不许当错误码——它会静默变成"成功 + 未初始化的 payload"。新增 **E0508** | §5、§17.2 |
+| 52 | **`.size` / `.len` 字段优先**：聚合体自己有同名字段时，`s.size` 是那个字段而不是 `sizeof(s)`。类型检查、常量折叠、代码生成三处统一（以前后端无条件发 `layout_size`，`h.size` 静默变成 8） | §3.3 |
 
 ## v0.21 → v0.22 的改动
 
@@ -197,12 +213,12 @@ R10 的动机很简单：这些行为一旦发布就改不动了。趁现在只�
 
 ---
 
-### 1.1 关键字（24 个）
+### 1.1 关键字（25 个）
 
 ```
 const  let  var  fn  module  type  null  undefined
 if  else  while  for  inline  switch  continue  return
-defer  struct  union  enum  error  pub  extern  orelse
+defer  struct  union  enum  error  pub  extern  orelse  try
 ```
 
 `pub` 只出现在文件作用域的声明前面，决定这个声明是否对外可见（§11）。
@@ -336,7 +352,9 @@ const Buffer = fn (T: type, n: usize) type {
 | 切片 `[]T` | 运行时 `usize` | 运行时 `len × @sizeOf(T)` |
 | 元组 `{A,B,C}` | 字段数，编译期 | 总字节数，编译期 |
 
-它们是**编译器字段**，不是内存里的成员：`&.{0,1,2}` 只占 8 字节，`.len` 在编译期就被换成常量 3。因此 `len` / `size` / `ptr` 三个名字**不能再作为结构体字段名**，声明时报错。
+它们是**编译器字段**，不是内存里的成员：`&.{0,1,2}` 只占 8 字节，`.len` 在编译期就被换成常量 3。
+
+**聚合体自己有同名字段时，字段优先**（v0.23）：`struct { size: i32 }` 的 `s.size` 就是那个字段，不是字节数；要类型大小写 `@sizeOf(T)`。这条不是可选的实现细节——类型检查、常量折叠、代码生成三处必须用同一条规则，否则 `s.size` 会静默变成 `sizeof(s)`（编译过、答案是 8）。
 
 ```zx
 var array = &.{0, 1, 2};             // *[3]i32
@@ -355,9 +373,9 @@ let tb = t.size;                     // 3 个字段的总字节数（含对齐�
 数量只在 `*T` 上丢失，这正是"退化成裸指针"的代价：
 
 ```zx
-fn head(p: *i32) i32 { p.len }            // 编译错误：*i32 没有数量
-fn head2(p: *[3]i32) i32 { p.0 }          // 正确：数量在类型里
-fn head3(xs: []const i32) i32 { xs.0 }    // 正确：切片带运行时长度
+const head = fn (p: *i32) i32 { p.len };            // 编译错误：*i32 没有数量
+const head2 = fn (p: *[3]i32) i32 { p.0 };          // 正确：数量在类型里
+const head3 = fn (xs: []const i32) i32 { xs.0 };    // 正确：切片带运行时长度
 ```
 
 ### 3.4 声明、读取、切片
@@ -379,9 +397,9 @@ array.size       // 12，编译期
 **跨函数传数组**三种写法，按"要不要长度"选：
 
 ```zx
-fn sum(xs: []const i32) i32 { … }            // 长度随值走，16 字节，通用
-fn sum3(xs: *const [3]i32) i32 { … }         // 长度在类型里，8 字节，只收 3 个的
-fn sumAny(n: usize, xs: *const i32) i32 { … } // 长度另传，最灵活最丑
+const sum = fn (xs: []const i32) i32 { … };            // 长度随值走，16 字节，通用
+const sum3 = fn (xs: *const [3]i32) i32 { … };         // 长度在类型里，8 字节，只收 3 个的
+const sumAny = fn (n: usize, xs: *const i32) i32 { … }; // 长度另传，最灵活最丑
 ```
 
 **空数组字面量**推不出元素类型，必须写期待类型：
@@ -566,7 +584,7 @@ let anon = { .x = 1, .y = 2 };     // 匿名结构体（.{ … } 同义）
 
 ```zx
 var p: Person = .{ .name = "ann" };
-fn zero() Person { return .{ .name = "" }; }
+const zero = fn () Person { return .{ .name = "" }; };
 take(.{ .name = "bob" });
 ```
 
@@ -601,12 +619,12 @@ const Color = enum {
     const FIRST = Color.red;          // 编译期常量，可用变体算
     var calls: u32 = 0;               // 挂在类型上的全局，整个程序一份
 
-    fn name(self: Self) []const u8 {  // 方法：第一参数叫 self
+    const name = fn (self: Self) []const u8 {  // 方法：第一参数叫 self
         return switch (self) { Color.red => "red", Color.green => "green", Color.blue => "blue" };
-    }
-    fn isCool(self: Self) bool { return self != Color.red; }
-    fn count() u32 { return 3; }      // 关联函数：第一参数不叫 self
-    fn touch() void { Color.calls = Color.calls + 1; }
+    };
+    const isCool = fn (self: Self) bool { return self != Color.red; };
+    const count = fn () u32 { return 3; };      // 关联函数：第一参数不叫 self
+    const touch = fn () void { Color.calls = Color.calls + 1; };
 };
 
 const s = Color.red.name();           // "red"
@@ -695,16 +713,16 @@ v.f            // UB
 
 ### 4.5 方法
 
-结构体体、联合体体里的 `fn` 就是方法——**它是"第一个参数是接收者的普通函数"，没有别的**：
+结构体体、联合体体、枚举体里的函数就是方法——**它是"第一个参数是接收者的普通函数"，没有别的**。写法与顶层一致，是 `const` 绑定（v0.24）：
 
 ```zx
 const Vec = struct {
     x: i32,
     y: i32,
 
-    fn add(self: Self, o: Self) Self { return Self{ .x = self.x + o.x, .y = self.y + o.y }; }
-    fn shift(self: *Self, d: i32) void { self.x = self.x + d; }
-    fn len2(self: *const Self) i32 { return self.x * self.x + self.y * self.y; }
+    const add = fn (self: Self, o: Self) Self { return Self{ .x = self.x + o.x, .y = self.y + o.y }; };
+    const shift = fn (self: *Self, d: i32) void { self.x = self.x + d; };
+    const len2 = fn (self: *const Self) i32 { return self.x * self.x + self.y * self.y; };
 };
 
 var a = Vec{ .x = 1, .y = 2 };
@@ -725,7 +743,7 @@ a.add(a).len2();  // 链式就是普通调用链
 
 - `p.f()` 需要 `*Self` 而 `p` 是值时，编译器自动补 `&p`——所以 `a.shift(10)` 里的 `a` 必须是 `var`；对右值（`Vec{…}.shift(1)`）报错，先绑到 `let`。
 - **`Self` 是体里的类型别名**，等于这个聚合体本身。自引用写 `next: ?*Self`，泛型体里也一样（见 §10.2）。
-- **第一参数不叫 `self` 就是关联函数**：`fn count() u32` 写在体里，用 `Color.count()` / `Ints.init(al)` 调，没有接收者。代码生成上没有区别，区别只在怎么调——`x.f()` 找不到接收者可补。
+- **第一参数不叫 `self` 就是关联函数**：`const count = fn () u32` 写在体里，用 `Color.count()` / `Ints.init(al)` 调，没有接收者。代码生成上没有区别，区别只在怎么调——`x.f()` 找不到接收者可补。
 - 方法**不能与字段重名**，参数里**不能出现 `type`**（泛型写在类型上，不写在方法上）。
 - 联合体的方法照写，`self.tag` 读标签、`self.成员` 读载荷（§4.4）。
 
@@ -765,7 +783,16 @@ sizeof(!T) = align_up(sizeof(T) + 2, align(!T))
 - `null` 是多态字面量：期望类型为 `?T` 时定型为该 `?T`。**它没有自己的类型**——
   离开"有 `?T` 落点"的位置（初始化、赋值、实参、返回、字段）就是编译错误：
   `let a = null;`、`null.?`、`null orelse x` 全错（§5.1）。
-- `?T` / `!T` **不嵌套**（`??T`、`?!T` 是编译错误）。
+- `?T` / `!T` **不嵌套**（`??T`、`?!T` 是编译错误）。两个都要表达时，
+  用 `!?T` 之外的办法：把 `?T` 当载荷（`!?T` 仍不合法），或者让"没有"也成为
+  一个错误码。
+- **错误码 0 保留给"无错误"**：`(error)0` 是编译错误（E0508），值为 0 的枚举
+  变体当错误码也一样（`enum { open, read }` 的 `open` 是 0）。命名错误码从 1 起。
+  否则"出错了"会静默变成"成功了 + 一段未初始化的 payload"。
+- **`!void` 是合法的**：payload 是 0 字节，整个值就是一个 `u16` 标签。它是
+  "可能失败的副作用"的标准写法——三条成功路径都成立：走到底、`return;`、
+  `try x();`。因为它没有载荷，`if (x) v { … }` 不能捕获（`v` 无所指），
+  写 `if (x) { … }`。
 - tag 为"空 / 出错"时 payload 是未初始化数据：**读它是 UB，取地址永远安全**。
 
 ```zx
@@ -780,20 +807,53 @@ const q: *const i32 = &c;     // 同上
 
 对 `?T` / `!T` 取字段时，`.0` 是 payload，`.tag` 是标签。
 
-### 5.1 取值：`orelse` 与 `.?`
+### 5.1 取值：`try`、`orelse` 与 `.?`
 
-三种退出方式，各有各的用途：`if` 捕获（§8.1）管"分支里做事"，`orelse` 管
-"给个默认值"，`.?` 管"这里必须得有值"。
+**四种出口，各管一段**，互不重叠：
+
+| 写法 | 左值 | 结果类型 | 空 / 出错时 | 用在 |
+|---|---|---|---|---|
+| `try e` | `!T` | `T` | 带着同一个错误码 `return` | 我在中间层，说了不算 |
+| `if (u) v {}` | `?T` / `!T` | 各臂统一 | `else e` 拿到错误码 | 就地处理这一处 |
+| `a orelse b` | `?T` / `!T` | `T` | 取 `b`（`b` 只在需要时求值） | 有合理的默认值 |
+| `a.?` | `?T` / `!T` | `T` | 打一行说明后 `abort()` | 这里不该出错 |
 
 ```
+try e             // 出错就带着同一个码往上返回（v0.23）
 a orelse b        // 有值取 payload；空 / 出错取 b（b 只在需要时求值）
 a.?               // 有值取 payload；空 / 出错 → 运行时 trap
 ```
 
-| | 左值 | 结果类型 | 空 / 出错时 |
-|---|---|---|---|
-| `a orelse b` | `?T` / `!T` | `T` | 取 `b`（`b` 的类型必须是 `T`） |
-| `a.?` | `?T` / `!T` | `T` | 打一行说明后 `abort()` |
+#### `try`：把错误交给上一层
+
+```zx
+const read_head = fn (p: []const u8) !i32 {
+    let fd = try open_file(p);        // 出错就在这里返回，一行
+    if (fd < 0) { return (error)Err.read; }
+    return fd + 1;
+};
+```
+
+它**完全等价**于下面这段，只是不必每次都写出来：
+
+```zx
+let r = open_file(p);
+if (r) fd { … } else e { return e; }
+```
+
+- **是明式的，不是异常**。调用点写着 `try`，读者就知道这个函数在这里可能退出；
+  没有栈展开、没有 catch 块、返回类型也不变（还是那个 `!T`）。这和"不做
+  `try`/`catch` 那套"并不矛盾——被否掉的是**隐式跳转**，`try` 只是把
+  `if (…) return e` 这个明式写法压缩成两个词。
+- **左边必须是 `!T`**。`?T` 的"空"不是错误，没有错误码可往上带——那种情况用
+  `orelse` 或 `if` 捕获。
+- **所在函数必须能返回错误**（`!U`，U 可以不同）。否则报错：错误没地方去。
+- **`defer` 体里不能用**：defer 在返回路径上执行，它自己再"提前返回"会把正在
+  返回的值覆盖掉。就地处理掉。
+- **不是左值**，不能 `try x = 1`。
+- **前向传播时 `defer` 照常执行**（和普通 `return` 一样）。
+
+#### `orelse` 与 `.?`
 
 - **`orelse` 是关键字，不是运算符**，优先级只比赋值高一层：`a orelse 0 + 1` 读作
   `a orelse (0 + 1)`，`a orelse b == c` 读作 `(a orelse b) == c`。它是"取个值回来"，
@@ -819,18 +879,18 @@ a.?               // 有值取 payload；空 / 出错 → 运行时 trap
 ```zx
 const Node = struct { v: i32, next: ?*Node };
 
-fn second(n: ?*Node) i32 {
+const second = fn (n: ?*Node) i32 {
     let p = n.?;                 // 这里必须真有节点
     return p.next.?.v;           // 第二层也一样
-}
+};
 
-fn port(cfg: Config) u16 {
+const port = fn (cfg: Config) u16 {
     return cfg.port orelse 8080; // 没配就用默认值
-}
+};
 
-fn name(user: *User) []const u8 {
+const name = fn (user: *User) []const u8 {
     return user.name.?;          // 这里必须有，缺了就该炸
-}
+};
 ```
 
 ---
@@ -929,7 +989,7 @@ orelse                                        右结合（关键字形式，不�
 <<  >>
 +  -
 *  /  %
-前缀： &  -  !  ~  (T)                          右结合
+前缀： &  -  +  !  ~  (T)  try                右结合
 后缀： .name  .N  .len  .size  .?  [i]  [a..b]  (args)
 ```
 
@@ -1122,27 +1182,29 @@ done: for (xs[0..]) x {
 
 ```
 while (cond)        { … }
-while (cond)  lbl:  { … }                  // 标签块：体内 `lbl: v;` 结束循环并交值
 while (u) v         { … }                  // 循环到空/出错
-while (u) v   lbl:  { … }
 while (u) v         { … } else e { … }     // 结束时执行 else
 while (cond)        { … } else { … }
+
+lbl: while (cond)   { … }                  // 循环的名字：体内 `lbl: v;` 结束循环并交值
+lbl: while (u) v    { … }
 ```
 
 - `u` 形式每轮重新求值 `u`，有值则绑定 `v` 执行体，为空/出错则结束并把终止值交给 `else`。
 - 没有 `: (自增)` 子句，自增写在体内。
-- **标签挂在循环上，不是挂在块上**（v0.22）：`while (true) done: { … done: 42; }`
-  里 `done:` 是循环的名字，收割直接跳到循环之后——这也是没有 `break` 的语言里
-  唯一的提前出口。写 `done: while (…)` 前缀形式等价，同一个标签。
+- **标签写在 `while` 前面**（v0.24）：标签是**循环**的名字，收割直接跳到循环之后——
+  这是没有 `break` 的语言里唯一的提前出口。写在条件后面（`while (…) lbl: { … }`）
+  看起来像"体的名字"，读者会以为只跳到体末、下一轮继续；那正是它**不能**做的事，
+  所以这种写法直接报错并指出位置。
 - 没有执行过收割就正常跑完时，循环的值取 `else`；连 `else` 都没有就是 `{}`。
 
 ```zx
 var i: usize = 0;
 while (i < 10) { i = i + 1; }
 
-// 带值的循环：标签贴在条件后，`done: v;` 结束循环（没有 break）
+// 带值的循环：标签在关键字前，`done: v;` 结束循环（没有 break）
 var n: i32 = 0;
-const w = while (true) done: {
+const w = done: while (true) {
     n = n + 1;
     if (n == 7) { done: n * 10; }        // 循环的值 = 70
 };
@@ -1154,11 +1216,13 @@ while (it.next()) v { total = total + v; } else { std.print("done\n"); }
 
 ```
 for (seq)              x       { … }
-for (seq)              x  lbl: { … }      // 标签块：体内 `lbl: v;` 结束循环并交值
 for (seq1, seq2)       x, y    { … }
 for (xs, 0..)          x, i    { … }      // 值 + 下标，最常用
 for (0..n, 0..m)       i, j    { … }
 for (…) … { … } else { … }
+
+lbl: for (seq)         x       { … }      // 循环的名字：体内 `lbl: v;` 结束循环并交值
+lbl: for (…) x, i      { … }
 ```
 
 - 序列**只有两种**：切片 `[]T`、整数范围 `lo..hi`（左闭右开，两端同型整数）。
@@ -1168,8 +1232,9 @@ for (…) … { … } else { … }
 - 绑定是元素值的只读拷贝。
 - 数组 `*[N]T` 不是序列，先 `arr[0..]` 变切片（零开销，只多存一个 N）。
 - `else` 只在**正常跑完**时执行：`else 表达式` 是值形式（表达式的值就是循环的值），`else { … }` 是语句形式。收割离开时跳过 `else`。
-- 标签写在绑定之后、块之前（v0.22）：`for (0..8) k hit: { … hit: k; }`。
-  和 `while` 一样，标签是循环的名字，收割直接从体内结束剩下的迭代。
+- **标签写在 `for` 前面**（v0.24），和 `while` 同一条规则：标签是循环的名字，
+  收割直接从体内结束剩下的迭代。写在绑定之后（`for (0..8) k hit: { … }`）报错
+  并指路——那个位置读起来像体的名字，而收割要跳的是循环。
 
 ```zx
 for (xs) x { sum = sum + x; }                 // 单绑定
@@ -1179,7 +1244,7 @@ for (0..n) i { buf[i] = 0; }                  // 纯整数范围
 for (0..rows, 0..cols) r, c { grid[r][c] = 0; }
 
 // 找到第一个满足条件的下标（没有 break）
-const idx = for (0..n) i hit: {
+const idx = hit: for (0..n) i {
     if (xs[i] == target) { hit: (i32)i; }
 } else -1;
 ```
@@ -1308,11 +1373,10 @@ tag: {};        // 无值离开（值 {}）
 | 写法 | 值 |
 |---|---|
 | `tag: { … }` 块 | 收割的值；没执行过收割就是 `{}` |
-| `{ … } tag: { … }` / `if (c) tag: { … }` | 同上（v0.22：标签贴在块前） |
-| `tag: if (…) { … }` / `if (…) …` | 收割的值；没有 `else` 且条件为假是零值 |
+| `if (c) tag: { … }` / switch 臂 `模式: tag: { … }` | 同上：标签是那一臂**块的名字** |
+| `tag: if (…) { … }` | 收割的值；没有 `else` 且条件为假是零值 |
 | `tag: for (…) x { … }` 循环 | 收割的值；正常跑完取 `else` 的值 |
 | `tag: while (…) { … }` 循环 | 同上 |
-| `for (…) x tag: { … }` / `while (c) tag: { … }` | 同上（v0.22：标签贴在块前） |
 | 函数体 | **不用标签**，用 `return` |
 | `struct` / `union` / `enum` 的体 | 不能加标签 |
 
@@ -1349,11 +1413,16 @@ let firstBig = found: for (xs[0..]) x {
 
 **语法判定**：语句位置遇到 `IDENT ":"`——后面跟 `for` / `while` / `switch` / `if` 是标签作用域；跟 `{` 时套用 §4.1 的花括号判定（元组 → 收割语句，块 → 标签作用域）；其他表达式是收割语句。规则只有一条：**`标签名: 值` 是收割，`标签名: 结构` 是打标签**。
 
-**标签也可以写在结构后面**（v0.22）：`if (c) tag: { … }`、`while (c) tag: { … }`、
-`for (…) x tag: { … }`、switch 臂 `模式: tag: { … }`。这时标签是**块的名字**，
-而 `while` / `for` 的标签挂在循环上（收割才能结束循环）。两种位置的标签作用域
-相同，选哪种只看读起来顺不顺；块臂里的名字后面跟 `:` 还是 `{` 决定了它是标签
-还是捕获。
+**标签写在它要离开的那个结构前面**（v0.24）。两种情况，同一条理由：
+
+- **块**：`tag: { … }`。臂里就是 `if (c) tag: { … }`、switch 臂 `模式: tag: { … }`——
+  标签紧贴块，名字后面跟 `:` 是标签、跟 `{` 是捕获。
+- **循环**：`tag: while (…)`、`tag: for (…) x`。标签在关键字**前面**，因为收割离开的
+  是循环，不是循环体。写在体前（`while (…) tag: { … }`）会读成"体的名字"——那样
+  `tag: v;` 只该跳到体末、下一轮继续，可它实际要结束整个循环，所以这种写法报错
+  并指出位置。
+
+位置一致之后只有一条判据：**标签在结构前**；写在后面就是错，不存在"两种都对"。
 
 ---
 
@@ -1412,14 +1481,15 @@ const copy = fn (n: usize) []u8 {
 ```zx
 const add = fn (a: i32, b: i32) i32 { return a + b; };
 
-fn fact(n: i32) i32 {                  // 声明形式：允许自递归
+const fact = fn (n: i32) i32 {                  // 声明形式：允许自递归
     if (n <= 1) { return 1; }
     return n * fact(n - 1);
-}
+};
 ```
 
-- **两种写法等价**：`fn name(…) R { … }` 就是 `const name = fn (…) R { … };` 的简写
-  （都支持自递归）。规范形式是 const 绑定——函数是值。
+- **定义只有一种写法**：`const name = fn (…) R { … };`（v0.24）。名字属于**绑定**，
+  不属于函数——函数是值，绑到名字上才叫得出来；`fn name(…)` 只留给没有函数体的
+  `extern` 声明。这样"函数名"这个概念不存在，`fn` 后面永远直接是参数表。
 - 类型 `fn(i32, i32) i32`，大小 8 字节。
 - 没有 `->`，返回类型紧跟参数表。
 - 无重载、无默认参数、无变参；多返回值用元组。
@@ -1428,8 +1498,8 @@ fn fact(n: i32) i32 {                  // 声明形式：允许自递归
 - **函数体是块，返回值只能靠 `return`。** 末尾表达式是语句，不是返回值：
 
 ```zx
-fn bad() i32 { 1 }              // 编译错误：块值 {} 不是 i32
-fn ok()  i32 { return 1; }      // ✓
+const bad = fn () i32 { 1 };              // 编译错误：块值 {} 不是 i32
+const ok = fn ()  i32 { return 1; };      // ✓
 ```
 
 函数体不参与标签收割；`return` 是离开函数的唯一方式。
@@ -1440,13 +1510,13 @@ fn ok()  i32 { return 1; }      // ✓
 到达性分析：只要有一条路径能落到函数体末尾的 `}` 就是编译错误。
 
 ```zx
-fn bad(n: i32) i32 {            // ✗ 条件不成立就掉出去了
+const bad = fn (n: i32) i32 {            // ✗ 条件不成立就掉出去了
     if (n > 0) { return 1; }
-}
+};
 
-fn alsoBad(xs: []const i32) i32 {   // ✗ 循环可能一次都不跑
+const alsoBad = fn (xs: []const i32) i32 {   // ✗ 循环可能一次都不跑
     for (xs) x { return x; }
-}
+};
 ```
 
 能拦住路径的只有三样东西：
@@ -1467,10 +1537,10 @@ fn alsoBad(xs: []const i32) i32 {   // ✗ 循环可能一次都不跑
 编译错误，不是警告：
 
 ```zx
-fn f(n: i32) i32 {
+const f = fn (n: i32) i32 {
     return n;
     n + 1;              // ✗ unreachable code: the `return` above never falls through
-}
+};
 ```
 
 判定和 §9.1 是同一条（能拦住路径的东西才能拦住后续语句），报错会点出原因：
@@ -1553,7 +1623,7 @@ const List = fn (T: type, cap: usize) type {
     return struct {
         buf: *[cap]T,
         len: usize,
-        fn push(self: *Self, v: T) bool { … }   // ✓ T / cap 在方法体里照常可用
+        const push = fn (self: *Self, v: T) bool { … };   // ✓ T / cap 在方法体里照常可用
     };
 };
 ```
@@ -1585,8 +1655,8 @@ const Person = module("model.zx").Person;
 ```zx
 // util.zx
 pub const VERSION: u32 = 3;
-pub fn add(a: i32, b: i32) i32 { return a + b; }
-fn secret(n: i32) i32 { return n * 2; }       // 私有
+pub const add = fn (a: i32, b: i32) i32 { return a + b; };
+const secret = fn (n: i32) i32 { return n * 2; };       // 私有
 
 // main.zx
 const util = module("util.zx");
@@ -1756,7 +1826,7 @@ const areaOf = fn (s: Shape) !f64 {
     };
 };
 
-fn main() u8 {
+const main = fn () u8 {
     let shapes = &.{
         Shape{ .circle = 2.0 },
         Shape{ .rect = {3.0, 4.0} },
@@ -1774,7 +1844,7 @@ fn main() u8 {
 
     std.println("total area: {}", total);
     return 0;
-}
+};
 
 ```
 
@@ -1918,14 +1988,14 @@ struct_, union_, enum_, optional, error_union, function, type_
 `*[N]T` 的 `kind` 是 `.array`（数量在类型里），裸 `*T` 才是 `.pointer`。
 
 ```zx
-fn kindName(T: type) []const u8 {
+const kindName = fn (T: type) []const u8 {
     return switch (@typeInfo(T).kind) {
         .int_: "int",
         .struct_: "struct",
         .slice: "slice",
         else: "?",
     };
-}
+};
 ```
 
 因为它整块都是编译期值，`const info = @typeInfo(T);` 之后 `info.kind` / `info.bytes`
@@ -1963,7 +2033,7 @@ TypeInfo / FieldInfo 是**纯编译期类型**（FieldInfo 里装着一个 `type
 字段遍历用 `inline for`（§8.3.1）。比较任意结构体的泛型函数只需要这几行：
 
 ```zx
-fn eql(T: type, x: T, y: T) bool {
+const eql = fn (T: type, x: T, y: T) bool {
     const info = @typeInfo(T);
     if (info.kind != std.TypeKind.struct_) {
         return x == y;              // 标量 / bool：直接比
@@ -1975,7 +2045,7 @@ fn eql(T: type, x: T, y: T) bool {
         }
     }
     return true;
-}
+};
 ```
 
 ---
@@ -2095,7 +2165,7 @@ file.zx:12:9: error[E0403]: cannot assign to 'n': it is not a `var`
 | E02xx | 语法 | E0201 `expected X, found Y`；E0202 其他形态错 |
 | E03xx | 类型与表达式 | E0301 类型不匹配 / 没有隐式转换；E0302 字面量越界；E0303 参数个数；E0304 没有这个成员；E0305 类型形状（`*i32` 没有数量、`?T` 不能嵌套）；E0306 运算符与操作数（`*` 不能乘指针、序列长度不等）；E0307 聚合字面量（union 必须恰好初始化一个成员） |
 | E04xx | 名字、声明、可见性 | E0401 未定义名字/类型；E0402 重复定义；E0403 不可写/不能取地址；E0404 私有、位置不对；E0405 控制流位置（`continue` 在循环外、标签不存在） |
-| E05xx | 语言规则 | E0501 需要编译期值（R1）；E0502 到达性/不可达；E0503 逃逸；E0504 穷尽性；E0505 编译期除零；E0506 编译期可见的空解包（必 abort）；E0507 用户主动报错（`@compileError` / `@trap`） |
+| E05xx | 语言规则 | E0501 需要编译期值（R1）；E0502 到达性/不可达；E0503 逃逸；E0504 穷尽性；E0505 编译期除零；E0506 编译期可见的空解包（必 abort）；E0507 用户主动报错（`@compileError` / `@trap`）；E0508 错误码为 0（0 表示"无错误"） |
 | E06xx | 模块 | E0601 找不到模块 / 循环依赖 / 私有成员 |
 | E07xx | 泛型 | E0701 泛型参数与单态化 |
 | E08xx | 内建与格式串 | E0802 格式动词与实参不匹配 |

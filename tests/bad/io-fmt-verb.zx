@@ -2,8 +2,8 @@
 // 不认识的动词在编译期报，不等到运行时 abort
 const std = module("std");
 
-fn main() u8 {
+const main = fn () u8 {
     var h: usize = 0;
     std.io.print(h, "{q}", 1);
     return 0;
-}
+};

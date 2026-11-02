@@ -1,5 +1,5 @@
 // expect: unknown type 'Self'
-fn main() u8 {
+const main = fn () u8 {
     var v: Self = undefined;
     return 0;
-}
+};

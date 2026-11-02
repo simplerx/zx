@@ -2,4 +2,4 @@
 // *[3]T 与 *[4]T 是两个类型，不能互相赋值
 const a: *const [3]i32 = &.{1, 2, 3};
 const b: *const [4]i32 = a;
-fn main() void {}
+const main = fn () void {};

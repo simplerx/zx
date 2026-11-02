@@ -1,5 +1,5 @@
 // expect: duplicate declaration 'x'
-fn main() void {
+const main = fn () void {
     var x: i32 = 1;
     var x: i32 = 2;
-}
+};

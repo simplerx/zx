@@ -2,16 +2,16 @@ const std = module("std");
 const F = "v={}";
 
 // 运行时格式串：fmt 是变量，走运行时解析器——输出必须和编译期路径一致
-fn rt(fmt: []const u8, n: i32, s: []const u8) void {
+const rt = fn (fmt: []const u8, n: i32, s: []const u8) void {
     std.println(fmt, n, s);
-}
+};
 
 // 分配器是普通的值，可以当参数传
-fn build(a: Allocator, n: i32) ![]u8 {
+const build = fn (a: Allocator, n: i32) ![]u8 {
     return std.format(a, "<{}:{}>", n, n * 2);
-}
+};
 
-fn main() u8 {
+const main = fn () u8 {
     // 1. 编译期路径：逐段 printf，零解析零分配
     std.println("hex={x} dec={d} bin={b} ch={c} str={s}", 255, 42, 5, 'A', "hi");
     std.println(F, 7);
@@ -40,7 +40,7 @@ fn main() u8 {
         alloc.free(s2.ptr, s2.len);
     }
     return 0;
-}
+};
 
 // expect-output
 // hex=ff dec=42 bin=101 ch=A str=hi

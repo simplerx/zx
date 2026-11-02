@@ -13,10 +13,10 @@ const run = fn () i32 {
     return x;
 };
 
-fn main() u8 {
+const main = fn () u8 {
     std.println("{}", run());
     return 0;
-}
+};
 
 // expect-output
 // bye

@@ -12,19 +12,19 @@ const std = module("std");
 const Node = struct { v: i32, next: ?*Node };
 
 // 惰性探针：被调用就会打一行
-fn noisy(tag: []const u8, v: i32) i32 {
+const noisy = fn (tag: []const u8, v: i32) i32 {
     std.println("side {}", tag);
     return v;
-}
+};
 
 // ③ 捕获 + `.?`，两种写法都给同一个答案
-fn or_neg(o: ?i32) i32 {
+const or_neg = fn (o: ?i32) i32 {
     return o orelse -1;
-}
+};
 
-fn must(o: ?i32) i32 {
+const must = fn (o: ?i32) i32 {
     return o.?;
-}
+};
 
 // ⑤ 编译期折叠
 const NONE: ?i32 = null;
@@ -34,7 +34,7 @@ const SOME: ?i32 = 7;
 const FROM_SOME: i32 = SOME orelse 0;
 const FROM_UNWRAP: i32 = SOME.?;
 
-fn main() i32 {
+const main = fn () i32 {
     let a: ?i32 = 3;
     let b: ?i32 = null;
 
@@ -63,7 +63,7 @@ fn main() i32 {
     // ⑤ const 侧的折叠
     std.println("{} {} {} {}", FALLBACK, FROM_SOME, FROM_UNWRAP, NAME orelse "s");
     return 0;
-}
+};
 
 // expect-output
 // 3 -1 3

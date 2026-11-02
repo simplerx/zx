@@ -8,19 +8,19 @@ const Vec = struct {
     len: usize = 0,
 };
 
-fn push(v: *Vec, x: i32) bool {
+const push = fn (v: *Vec, x: i32) bool {
     if (v.len >= MAX) { return false; }
     v.data[v.len] = x;
     v.len = v.len + 1;
     return true;
-}
+};
 
-fn get(v: Vec, i: usize) ?i32 {
+const get = fn (v: Vec, i: usize) ?i32 {
     if (i >= v.len) { return null; }
     return v.data[i];
-}
+};
 
-fn sortUp(v: *Vec) void {
+const sortUp = fn (v: *Vec) void {
     var i: usize = 0;
     while (i + 1 < v.len) {
         var j: usize = 0;
@@ -34,38 +34,38 @@ fn sortUp(v: *Vec) void {
         }
         i = i + 1;
     }
-}
+};
 
-fn dump(tag: []const u8, v: Vec) void {
+const dump = fn (tag: []const u8, v: Vec) void {
     std.print("{}:", tag);
     for (v.data[0..v.len]) x { std.print(" {}", x); }
     std.print("\n");
-}
+};
 
-fn fib(n: i32) i32 {
+const fib = fn (n: i32) i32 {
     if (n < 2) { return n; }
     return fib(n - 1) + fib(n - 2);
-}
+};
 
 const State = enum { idle, running, done };
 
-fn step(s: State) State {
+const step = fn (s: State) State {
     return switch (s) {
         .idle: State.running,
         .running: State.done,
         else: State.idle,
     };
-}
+};
 
-fn nameOf(s: State) []const u8 {
+const nameOf = fn (s: State) []const u8 {
     return switch (s) {
         .idle: "idle",
         .running: "running",
         else: "done",
     };
-}
+};
 
-fn main() u8 {
+const main = fn () u8 {
     var raw = std.stackAlloc(i32, MAX);
     var v = Vec{ .data = raw, .len = 0 };
 
@@ -100,7 +100,7 @@ fn main() u8 {
     std.println("full? pushes={} len={}", pushes, v.len);
 
     return 0;
-}
+};
 
 // expect-output
 // in : 5 3 9 1 7

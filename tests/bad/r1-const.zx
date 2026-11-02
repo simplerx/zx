@@ -2,9 +2,9 @@
 // R1：const 的初值必须能在编译期算出来
 const std = module("std");
 
-fn main() u8 {
+const main = fn () u8 {
     var n: i32 = 3;
     const k = n + 1;          // n 是运行时槽位 → 报错
     std.println("{}", k);
     return 0;
-}
+};

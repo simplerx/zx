@@ -5,21 +5,21 @@ const std = module("std");
 
 const P = struct {
     x: i32,
-    fn bump(self: *P, d: i32) void { self.x = self.x + d; }
+    const bump = fn (self: *P, d: i32) void { self.x = self.x + d; };
 };
 
-fn g() i32 {
+const g = fn () i32 {
     var p = P{ .x = 1 };
     p.bump(2);
     return p.x;
-}
+};
 
-fn main() u8 {
+const main = fn () u8 {
     let a = g();
     let b = g();
     std.println("{} {}", a, b);
     return 0;
-}
+};
 
 // expect-output
 // 3 3

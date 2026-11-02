@@ -1,11 +1,11 @@
 // expect: can reach the end of its body without returning
 // 泛型也一样：每份单态化出来的函数体都要检查（同一处源码只报一次）
-fn pick(T: type, a: T, b: T, take: bool) T {
+const pick = fn (T: type, a: T, b: T, take: bool) T {
     if (take) { return a; }
-}
+};
 
-fn main() u8 {
+const main = fn () u8 {
     pick(i32, 1, 2, true);
     pick(i64, 3, 4, false);
     return 0;
-}
+};

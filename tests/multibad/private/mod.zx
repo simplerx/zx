@@ -1,2 +1,2 @@
-pub fn shown() i32 { return 1; }
-fn hidden() i32 { return 2; }
+pub const shown = fn () i32 { return 1; };
+const hidden = fn () i32 { return 2; };

@@ -24,7 +24,7 @@ const {d0, d1, d2} = tup;        // 解构出来的分量也是编译期常量
 const maybe: ?i32 = 5;
 const p: *const i32 = (*const i32)&maybe;   // &maybe 就是 &payload
 
-fn main() u8 {
+const main = fn () u8 {
     std.println("head={} len={} c1={c}", head, hlen, c1);
     std.println("tail={} a0={} alen={} asize={}", tail, a0, alen, asize);
     std.println("mid.len={} m0={}", mlen, m0);
@@ -32,7 +32,7 @@ fn main() u8 {
     std.println("destructure: {} {} {}", d0, d1, d2);
     std.println("payload via &maybe = {}", p.0);
     return 0;
-}
+};
 
 // expect-output
 // head=he len=2 c1=e

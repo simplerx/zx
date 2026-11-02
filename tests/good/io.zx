@@ -3,7 +3,7 @@
 // ③ 行比缓冲还长时缓冲自己翻倍，不会只给半行。
 const std = module("std");
 
-fn main() u8 {
+const main = fn () u8 {
     const al = std.heap.page;
     const io = std.io;
 
@@ -87,7 +87,7 @@ fn main() u8 {
 
     std.file.remove("io_test.txt");
     return 0;
-}
+};
 
 // expect-output
 // 1: alpha

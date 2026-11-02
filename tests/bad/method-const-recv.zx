@@ -1,11 +1,11 @@
 // expect: cannot call `bump` on a read-only receiver
 const P = struct {
     x: i32,
-    fn bump(self: *Self) void { self.x = 1; }
+    const bump = fn (self: *Self) void { self.x = 1; };
 };
 
-fn main() u8 {
+const main = fn () u8 {
     const c = P{ .x = 0 };
     c.bump();                 // const 的值不该被方法改写
     return 0;
-}
+};

@@ -1,12 +1,12 @@
 (* ============================================================
-   Zx 0.7 — EBNF 文法
+   Zx v0.24 — EBNF 文法
    约定：{ X } 重复 0+ 次；[ X ] 可选；( X ) 分组；
         "x" 终结符；(* * ) 注释
    ============================================================ *)
 
 file        = { top_decl } EOF ;
 
-top_decl    = [ "pub" ] ( const_decl | let_decl | var_decl | fn_decl ) ;
+top_decl    = [ "pub" ] ( const_decl | let_decl | var_decl | extern_decl ) ;
 (* pub 只出现在文件作用域：决定这个声明是否对别的模块可见 *)
 
 (* 没有 import："把名字拿进来"就是 const 绑定模块成员——
@@ -20,7 +20,11 @@ var_decl    = "var"   pattern [ ":" type ] "=" expr ";" ;
 pattern     = IDENT | "{" IDENT { "," IDENT } [ "," ] "}" ;
 (* 解构：let {a, b, c} = t;   也可写 .{a, b, c} *)
 
-fn_decl     = "fn" IDENT "(" [ params ] ")" type block ;
+(* 函数定义（v0.24）：只有一种写法，名字属于绑定
+     const add = fn (a: i32, b: i32) i32 { return a + b; };
+   函数是值，fn 后面直接是参数表。命名只在 extern 声明里出现——
+   那种声明没有函数体，指向的是别人已经编好的符号。 *)
+extern_decl = "extern" [ STRING ] "fn" IDENT "(" [ params ] ")" type ";" ;
 
 params      = param { "," param } ;
 param       = [ "var" ] IDENT ":" type ;
@@ -65,12 +69,13 @@ union_type  = "union" [ "(" "enum" [ "(" type ")" ] ")" ] "{" { union_member } "
 enum_type   = "enum" [ "(" type ")" ] "{" { enum_member } "}" ;
 
 member       = IDENT ":" type [ "=" expr ] ","?    (* 字段，可带默认值 *)
-             | const_decl | let_decl | var_decl | fn_decl ;
+             | const_decl | let_decl | var_decl ;
+(* 方法也是 const 绑定：const add = fn (self: Self, …) … { … }; *)
 
 union_member = IDENT ":" type ","? ;                    (* 普通成员：载荷类型 *)
             | IDENT ":" "{" expr "," type "}" ","? ;    (* 显式标签：{标签值, 载荷类型} *)
 enum_member  = IDENT [ "=" expr ] ","?                 (* 变体，从 0 或上一个+1 *)
-             | const_decl | let_decl | var_decl | fn_decl ;
+             | const_decl | let_decl | var_decl ;
 (* 枚举体是完整作用域：变体之外还能放常量/静态变量/方法（§4.3） *)
 
 (* ---------------- 作用域 / 块 ---------------- *)
@@ -84,7 +89,7 @@ term        = ";" ;
 stmt        = const_decl
             | let_decl
             | var_decl
-            | fn_decl
+            | extern_decl
             | defer_stmt
             | yield_stmt                              (* tag: expr; 收割 *)
             | expr [ ";" ]
@@ -103,12 +108,12 @@ labeled_expr = IDENT ":" ( block | if_expr | for_expr | while_expr | switch_expr
      let x = body: { … body: 1; };
      let sign = s: if (c) { s: 1; } else { s: 0; };
    只有带标签的作用域能被收割 / 交值；无标签块恒为 {}。
-   v0.22 起标签也可以贴在结构后面（块的名字）：
-     if (c) tag: { tag: 1; }
-     while (c) done: { done: 42; }
-     for (0..n) i hit: { hit: i; }
-     switch (s) { .a: r lbl: { lbl: r; } }
-   while / for 的标签挂在循环上（收割要能结束循环）；if 的挂在块上。 *)
+   标签写在**被它离开的结构前面**（v0.24）：
+     块的标签   if (c) tag: { tag: 1; }            标签紧贴块（臂里就是这么写）
+                switch (s) { .a: r lbl: { lbl: r; } }
+     循环的标签 done: while (c) { done: 42; }
+                hit: for (0..n) i { hit: i; }
+   ——循环必须写前缀：写在体前会被读成"体的名字"，而收割结束的是整个循环。 *)
 
 defer_stmt  = "defer" ( expr ";" | block ) ;        (* 离开所在块时执行，LIFO *)
 
@@ -211,17 +216,18 @@ if_arm      = expr                                     (* 表达式臂：糖，�
    块臂里的收割语句穿过 if，命中外面（或 if 自身）的标签作用域。
    没有 else 的 if 也能当值（v0.22）：类型由 then 臂给出，假分支是零值。 *)
 
-while_expr  = "while" "(" expr ")" [ IDENT ] [ IDENT ":" ] block
+while_expr  = "while" "(" expr ")" [ IDENT ] block
               [ "else" ( expr | block ) ] ;
 (* else 只在正常跑完时执行；else 表达式的值就是循环的值（值形式）。
-   [IDENT] 是 ?T / !T 的捕获；[IDENT ":"] 是循环的标签（v0.22），
-   体内 tag: v; 结束循环并交值——没有 break。 *)
+   [IDENT] 是 ?T / !T 的捕获。循环的标签写在关键字**前面**（v0.24）：
+     done: while (c) { done: 42; }
+   条件后不再接受标签——那里是体的位置，收割要离开的是循环。 *)
 
 for_expr    = [ "inline" ] "for" "(" for_seq { "," for_seq } ")"
-              IDENT { "," IDENT } [ IDENT ":" ] block
+              IDENT { "," IDENT } block
               [ "else" ( expr | block ) ] ;
 (* else 只在正常跑完时执行；收割离开时跳过 else。
-   [IDENT ":"] 是循环的标签（v0.22）：for (0..8) k hit: { … hit: k; }。
+   循环的标签同样在关键字前（v0.24）：hit: for (0..8) k { … hit: k; }。
    inline for（v0.9）：序列必须有编译期长度，循环体按长度克隆展开，
    绑定是编译期常量；没有 else，不参与标签/收割。 *)
 for_seq     = expr [ ".." [ expr ] ] ;

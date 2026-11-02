@@ -3,7 +3,7 @@
 const std = module("std");
 const util = module("priv/priv-util.zx");
 
-fn main() u8 {
+const main = fn () u8 {
     std.println("{} {}", util.ok(), util.secret(1));
     return 0;
-}
+};

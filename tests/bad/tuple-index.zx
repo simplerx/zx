@@ -1,7 +1,7 @@
 // expect: tuple has no runtime index
 // 元组是内联值，没有连续存储，只能用编译期下标
-fn main() void {
+const main = fn () void {
     var t = {1, 2};
     var i: usize = 0;
     let x = t[i];
-}
+};

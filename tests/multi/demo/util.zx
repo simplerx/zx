@@ -2,9 +2,9 @@
 pub const name: []const u8 = "util";
 pub const VERSION: u32 = 3;
 
-pub fn add(a: i32, b: i32) i32 { return a + b; }
+pub const add = fn (a: i32, b: i32) i32 { return a + b; };
 
-pub fn twice(n: i32) i32 { return secret(n) * 2; }
+pub const twice = fn (n: i32) i32 { return secret(n) * 2; };
 
 // 私有：别的模块引用会报错
-fn secret(n: i32) i32 { return n + 1; }
+const secret = fn (n: i32) i32 { return n + 1; };

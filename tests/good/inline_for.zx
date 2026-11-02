@@ -6,7 +6,7 @@ const Inner = struct { a: i32, b: i32 };
 const Outer = struct { n: i32, in: Inner, ok: bool };
 
 // 泛型 eql：字段比较代码由 inline for 自动生成
-fn eql(T: type, x: T, y: T) bool {
+const eql = fn (T: type, x: T, y: T) bool {
     const info = @typeInfo(T);
     if (info.kind != std.TypeKind.struct_) {
         return x == y;      // 标量 / bool：直接比
@@ -19,9 +19,9 @@ fn eql(T: type, x: T, y: T) bool {
         }
     }
     return true;
-}
+};
 
-fn main() u8 {
+const main = fn () u8 {
     // ① 普通 unroll：循环变量是编译期常量
     var acc: usize = 0;
     inline for (0..5) i {
@@ -65,7 +65,7 @@ fn main() u8 {
     inline for (0..2) { std.println("ping"); }
 
     return 0;
-}
+};
 
 // expect-output
 // acc=30

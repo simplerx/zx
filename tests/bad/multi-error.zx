@@ -6,10 +6,10 @@
 // 早期版本在第一条就停（BAD 直接返回），用户一轮只能修一个。
 const P = struct { x: i32 };
 
-fn main() void {
+const main = fn () void {
     let p = P{ .x = 1 };
     let a: i32 = p.nope;
     let b: i32 = 1;
     b = 2;
     let c: i32 = "not an int";
-}
+};

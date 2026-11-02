@@ -9,7 +9,7 @@ const GOLDEN = mathx.GOLDEN;
 const Vec2   = mathx.Vec2;
 const dot    = mathx.dot;
 
-fn main() u8 {
+const main = fn () u8 {
     std.println("square {} cube {}", square(4), cube3(3));
     std.println("golden {}", GOLDEN);
     const a = Vec2{ .x = 1, .y = 2 };
@@ -17,7 +17,7 @@ fn main() u8 {
     std.println("dot {} len2 {}", dot(a, b), dot(a, a));
     std.println("namespace {}", mathx.square(5));
     return 0;
-}
+};
 
 // expect-output
 // square 16 cube 27

@@ -7,16 +7,16 @@ const std = module("std");
 var pool: *[256]u8 = undefined;
 var used: usize = 0;
 
-fn bump(n: usize) ?*u8 {
+const bump = fn (n: usize) ?*u8 {
     if (used + n > pool.len) { return null; }
     let p = pool[0..].ptr + used;
     used = used + n;
     return p;
-}
+};
 
-fn noop(p: *u8, n: usize) void { }
+const noop = fn (p: *u8, n: usize) void { };
 
-fn main() i32 {
+const main = fn () i32 {
     let al = std.heap.page;
 
     // ---- std.ArrayList(T)：init / push / get / pop / items ----
@@ -85,7 +85,7 @@ fn main() i32 {
 
     std.println("stdlib ok");
     return 0;
-}
+};
 
 // expect-output
 // list len=10 cap=16

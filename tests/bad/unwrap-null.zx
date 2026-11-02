@@ -3,6 +3,6 @@
 // expect: `.?` needs an optional or an error union, found `null`
 // expect-code: E0301
 // expect-count: 1
-fn main() i32 {
+const main = fn () i32 {
     return null.?;
-}
+};

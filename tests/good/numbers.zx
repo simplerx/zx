@@ -14,7 +14,7 @@
 
 const std = module("std");
 
-fn main() void {
+const main = fn () void {
     // 128 位极值：字面量、打印、取负
     std.println("i128 max/min: {} {}", 170141183460469231731687303715884105727,
                -170141183460469231731687303715884105728);
@@ -59,4 +59,4 @@ fn main() void {
     var p: f64 = 1.0;
     var n: f64 = -1.0;
     std.println("ieee: {} {}", p / z, n / z);
-}
+};

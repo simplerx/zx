@@ -100,7 +100,7 @@ const sub = fn (a: i32, b: i32) i32 { return a - b; };
 
 const apply = fn (op: BinaryOp, a: i32, b: i32) i32 { return op(a, b); };
 
-fn main() u8 {
+const main = fn () u8 {
     // 顶层声明的 var 数组可以写
     inferred.1 = 99;
 
@@ -156,7 +156,7 @@ fn main() u8 {
 
     std.println("types ok, v={}", v);
     return 0;
-}
+};
 
 // ---------- 块作为表达式：值来自收割 ----------
 const clamp = fn (v: i32, lo: i32, hi: i32) i32 {

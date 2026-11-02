@@ -201,8 +201,13 @@ static void ensure_type(Type *t) {
     case TY_ERR: {
         ensure_type(t->elem);
         buf_puts(g_out, "typedef struct { ");
-        ctype(g_out, t->elem);
-        buf_printf(g_out, " payload; uint16_t tag; } %s;\n", n.data);
+        /* `!void` 只有 tag 一个字段：C 里写 `void payload;` 是非法的，而且
+         * 0 字节的 payload 本来也没有意义。 */
+        if (t->elem->kind != TY_VOID) {
+            ctype(g_out, t->elem);
+            buf_puts(g_out, " payload; ");
+        }
+        buf_printf(g_out, "uint16_t tag; } %s;\n", n.data);
         break;
     }
     case TY_TUPLE: {
@@ -397,6 +402,12 @@ static char *cty(Type *t) {
     return b.data;
 }
 
+/* `!void`：payload 是 0 字节，整个值就是一个 u16 标签。成功 = tag 0，
+ * 所以"正常返回"在 C 里是 `{ .tag = 0 }`，不是 `return;`（C 函数返回结构体）。 */
+static bool ret_is_errvoid(Type *t) {
+    return t && t->kind == TY_ERR && t->elem && t->elem->kind == TY_VOID;
+}
+
 /* ======================================================================
  *  符号名
  * ====================================================================== */
@@ -587,6 +598,19 @@ static char *inst_name(Node *g, const char *base);   /* 泛型实例的 C 名 */
 /* 当前函数：生成 return 时要看返回类型 / 是不是 main */
 static Type *g_cur_ret;
 static bool  g_is_main;
+
+/* main 的 C 签名固定是 `int main(...)`，但 Zx 里它可以是 void、u8，
+ * 也可以是 !void / !T / ?T。真值要在这里折成进程退出码：
+ *   !T  → 标签就是错误码，0 = 成功（正好是 shell 的约定）
+ *   ?T  → 有值退出 0，空退出 1
+ * 其余类型原样转 int。expr 为 NULL 表示"没给值"（`return;` / 走到底）。 */
+static void main_exit(const char *expr) {
+    Type *t = g_cur_ret;
+    if (!expr) { line("return 0;"); return; }
+    if (t && t->kind == TY_ERR)       line("return (int)((%s).tag);", expr);
+    else if (t && t->kind == TY_OPT)  line("return ((%s).tag) ? 0 : 1;", expr);
+    else                              line("return (int)(%s);", expr);
+}
 /* 正在发函数体。`orelse` 要把左边存进一个临时量（只求值一次），
  * 临时量只能落在函数里——顶层初始化器里没有"前一行"可插。 */
 static bool  g_in_fn;
@@ -857,13 +881,19 @@ static void coerce(Buf *b, Node *e, Type *to) {
         if (from->kind == TY_ERR) { ex(b, e); return; }
         ensure_type(to);
         Buf n; buf_init(&n); tn(&n, to);
+        bool void_payload = to->elem && to->elem->kind == TY_VOID;
         buf_printf(b, "((%s){ ", n.data);
+        /* 一律用指定初始化：`!void` 没有 payload 字段，位置初始化会多给一个
+         * 初始值（`{ 0, 3 }` 对只有一个字段的结构体 = excess elements）。 */
         if (from->kind == TY_ERROR) {
-            buf_puts(b, "0, ");
+            buf_puts(b, ".tag = ");
             coerce(b, e, ty_error());
+        } else if (void_payload) {
+            buf_puts(b, ".tag = 0");
         } else {
+            buf_puts(b, ".payload = ");
             coerce(b, e, to->elem);
-            buf_puts(b, ", 0");
+            buf_puts(b, ", .tag = 0");
         }
         buf_puts(b, " })");
         return;
@@ -2715,8 +2745,15 @@ static void ex(Buf *b, Node *n) {
         }
         /* 编译期数量 / 大小 */
         if (bt && n->name) {
-            bool is_len = !strcmp(n->name, "len");
-            bool is_size = !strcmp(n->name, "size");
+            /* 聚合体自己有同名字段时，**字段优先**：`.size` 对数组/元组是
+             * 编译期字节数，但对 `struct { size: i32 }` 就是那个字段。
+             * sema 一直是这么判的（结构体走普通字段查找），后端以前无条件
+             * 发 `layout_size`，于是 `h.size` 静默变成 `sizeof(h)`——
+             * 编译过、答案是 8。两边必须用同一条规则判。 */
+            bool shadowed = (bt->kind == TY_STRUCT || bt->kind == TY_UNION) &&
+                            ty_field(bt, n->name) != NULL;
+            bool is_len = !shadowed && !strcmp(n->name, "len");
+            bool is_size = !shadowed && !strcmp(n->name, "size");
             if (is_size) {
                 if (bt->kind == TY_PTR && bt->has_len) {
                     int es = ty_size(bt->elem);
@@ -2877,6 +2914,44 @@ static void ex(Buf *b, Node *n) {
         buf_printf(b, "zx_unwrap_%s(", nm.data);
         ex(b, n->a);
         buf_printf(b, ", %s)", w.data);
+        return;
+    }
+
+    /* `try e`：e 是 !T。先把整个联合体落进临时量（只求值一次），
+     * 然后"出错就带着同一个 tag 返回"。payload 在出错时无意义，
+     * 所以返回值的做法是 `{0}` 起一个干净值、只拷 tag——这样 `!void`
+     * （没有 payload 字段）也走得通。 */
+    case NK_TRY: {
+        Type *t = n->a->ty;
+        if (!t || t->kind != TY_ERR) { ex(b, n->a); return; }
+        Type *ret = g_cur_ret;
+        if (!ret || ret->kind != TY_ERR) { ex(b, n->a); return; }
+
+        static int tn_;
+        char tmp[64], rv[64];
+        snprintf(tmp, sizeof tmp, "_ty%d", tn_);
+        snprintf(rv,  sizeof rv,  "_tyr%d", tn_);
+        tn_++;
+
+        line("%s %s = %s;", cty(t), tmp, cxs(n->a, t));
+        line("if (%s.tag != 0) {", tmp);
+        g_ind++;
+        if (g_is_main) {
+            /* main 交出去的是 int：标签本身就是错误码，原样当退出码用 */
+            run_defers(0);
+            main_exit(tmp);
+        } else {
+            line("%s %s = {0};", cty(ret), rv);
+            line("%s.tag = %s.tag;", rv, tmp);
+            run_defers(0);
+            line("return %s;", rv);
+        }
+        g_ind--;
+        line("}");
+        /* `try g()` 作语句时（`!void`），载荷没有值可读——发个 `(void)0`
+         * 让表达式语句合法，别留下 `_ty1.payload;` 这种无用值警告。 */
+        if (t->elem && t->elem->kind == TY_VOID) buf_puts(b, "(void)0");
+        else buf_printf(b, "%s.payload", tmp);
         return;
     }
 
@@ -3254,7 +3329,13 @@ static void gen_stmt(Node *n) {
 
     case NK_RETURN: {
         Type *want = g_cur_ret ? g_cur_ret : (n->a ? n->a->ty : ty_void());
-        if (!n->a) { run_defers(0); line("return;"); return; }
+        if (!n->a) {
+            run_defers(0);
+            if (g_is_main) main_exit(NULL);
+            else if (ret_is_errvoid(g_cur_ret)) line("return (%s){ .tag = 0 };", cty(g_cur_ret));
+            else line("return;");
+            return;
+        }
 
         /* 返回的是控制流表达式：先算进临时量，再统一收尾 */
         if (is_ctl(n->a)) {
@@ -3264,13 +3345,13 @@ static void gen_stmt(Node *n) {
             line("%s %s = {0};", cty(want), tmp);
             gen_value(n->a, tmp, want);
             run_defers(0);
-            line(g_is_main ? "return (int)(%s);" : "return %s;", tmp);
+            if (g_is_main) main_exit(tmp); else line("return %s;", tmp);
             return;
         }
 
         char *v = cxs(n->a, want);
         run_defers(0);
-        line(g_is_main ? "return (int)(%s);" : "return %s;", v);
+        if (g_is_main) main_exit(v); else line("return %s;", v);
         return;
     }
 
@@ -3533,7 +3614,9 @@ static void gen_if_body(Node *n, const char *slot, Type *slot_ty) {
     bool is_opt = c && c->kind == TY_OPT;
     bool is_err = c && c->kind == TY_ERR;
 
-    if ((is_opt || is_err) && n->name) {
+    /* `?T` / `!T` 作条件：判的是 tag（`if (x)` 对 `!void` 也要走这条，
+     * 那时没有载荷可捕获，只有 tag 可判）。 */
+    if (is_opt || is_err) {
         static int cn;
         char tmp[64];
         snprintf(tmp, sizeof tmp, "_c%d", cn++);
@@ -3542,7 +3625,10 @@ static void gen_if_body(Node *n, const char *slot, Type *slot_ty) {
         else        line("if (%s.tag == 0) {", tmp);
         g_ind++;
         CScope s; cscope_push(&s);
-        line("%s %s = %s.payload;", cty(c->elem), cnames(n->name), tmp);
+        /* `!void` 的载荷是 0 字节，没有可声明的变量（语义层已就此报错，
+         * 这里只是不让坏代码变成 `void v = …` 这种非法 C）。 */
+        if (n->name && c->elem->kind != TY_VOID)
+            line("%s %s = %s.payload;", cty(c->elem), cnames(n->name), tmp);
         gen_arm(n->b, slot, slot_ty);
         cscope_pop();
         g_ind--;
@@ -3589,7 +3675,7 @@ static void gen_loop_value(Node *n, const char *slot, Type *slot_ty) {
         Type *c = n->a->ty;
         bool is_opt = c && c->kind == TY_OPT;
         bool is_err = c && c->kind == TY_ERR;
-        if ((is_opt || is_err) && n->name) {
+        if (is_opt || is_err) {
             line("for (;;) {");
             g_ind++;
             static int cn;
@@ -3599,7 +3685,8 @@ static void gen_loop_value(Node *n, const char *slot, Type *slot_ty) {
             if (is_opt) line("if (!%s.tag) break;", tmp);
             else        line("if (%s.tag != 0) break;", tmp);
             CScope s; cscope_push(&s);
-            line("%s %s = %s.payload;", cty(c->elem), cnames(n->name), tmp);
+            if (n->name && c->elem->kind != TY_VOID)
+                line("%s %s = %s.payload;", cty(c->elem), cnames(n->name), tmp);
             gen_block_stmts(n->b);
             line("Lcont%d: ;", id);
             cscope_leave();
@@ -3825,7 +3912,10 @@ static void gen_switch(Node *n, const char *slot, Type *slot_ty) {
                 cap = st;
                 src = tmp;
             }
-            if (cap && src) line("%s %s = %s;", cty(cap), cnames(arm->name), src);
+            /* 0 字节的载荷（`!void` 的 `.ok`）没有可声明的 C 变量；
+             * 语义层已经就此报错，这里只是别生成 `void v = …`。 */
+            if (cap && src && cap->kind != TY_VOID)
+                line("%s %s = %s;", cty(cap), cnames(arm->name), src);
         }
         if (arm->label) {
             CLab *l = &g_labs[g_nlabs++];
@@ -3963,6 +4053,7 @@ static void gen_fn(Node *fn, const char *name, bool is_main, bool exported) {
 
     if (ret->kind == TY_VOID || ret->kind == TY_NORETURN || is_main)
         line("return%s;", is_main ? " 0" : "");
+    else if (ret_is_errvoid(ret)) line("return (%s){ .tag = 0 };", cty(ret));
     g_ind--;
     line("}");
     buf_putc(g_out, '\n');
@@ -4077,12 +4168,18 @@ static bool is_const_init(Node *n) {
     case NK_IDENT:
         /* 标量常量是 C 常量表达式；切片/聚合是"读一块内存"，不是 */
         return n->ty && n->ty->kind != TY_SLICE && !ty_is_agg(n->ty);
-    case NK_FIELD:
+    case NK_FIELD: {
         if (!n->name) return false;
+        /* 同 ex()：聚合体自己的同名字段优先，那不是编译期常量 */
+        Type *bt = n->a ? n->a->ty : NULL;
+        if (bt && (bt->kind == TY_STRUCT || bt->kind == TY_UNION) &&
+            ty_field(bt, n->name))
+            return false;
         if (!strcmp(n->name, "size")) return true;             /* comptime */
         if (!strcmp(n->name, "len"))                            /* 切片自己存了 len */
-            return !(n->a && n->a->ty && n->a->ty->kind == TY_SLICE);
+            return !(bt && bt->kind == TY_SLICE);
         return false;
+    }
     default:
         return false;
     }

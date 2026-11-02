@@ -4,6 +4,6 @@
 // 那条是级联消息，属正常。去重单独在 div-zero-dedup.zx 里断。
 const bad: i32 = 10 / 0;
 
-fn main() void {
+const main = fn () void {
     let x = bad;
-}
+};

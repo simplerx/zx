@@ -1,0 +1,4 @@
+// 函数是值：定义只有 `const name = fn (…) … { … };` 一种写法。
+fn main() i32 { return 0; }
+
+// expect-error: functions are values

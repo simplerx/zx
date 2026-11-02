@@ -1,12 +1,12 @@
 // expect: unreachable code: the `continue` above never falls through
 // 不可达代码：循环体里 `continue` 之后
-fn sum(n: i32) i32 {
+const sum = fn (n: i32) i32 {
     var s = 0;
     for (0..n) i {
         continue;
         s = s + (i32)i;
     }
     return s;
-}
+};
 
-fn main() u8 { return 0; }
+const main = fn () u8 { return 0; };

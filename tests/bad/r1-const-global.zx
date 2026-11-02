@@ -5,7 +5,7 @@ var counter: i32 = 0;
 
 const derived = counter * 2;   // 顶层 var 是运行时存储 → 报错
 
-fn main() u8 {
+const main = fn () u8 {
     std.println("{}", derived);
     return 0;
-}
+};

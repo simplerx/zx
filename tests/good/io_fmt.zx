@@ -5,7 +5,7 @@ const std = module("std");
 
 const P = struct { x: i32, y: i32 };
 
-fn main() u8 {
+const main = fn () u8 {
     const io = std.io;
 
     // ① 写进文件：全部动词 + {{}} 转义 + {N} 索引
@@ -40,7 +40,7 @@ fn main() u8 {
     var f: []const u8 = "rt {}";
     io.println(io.stdout(), f, 9);
     return 0;
-}
+};
 
 // expect-output
 // [n=42 hex=ff bin=101

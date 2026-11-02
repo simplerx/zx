@@ -9,7 +9,7 @@ const mid = nums[0..].ptr + 1;          // 视图偏移 +1 个元素
 const midVal = mid.0;                   // 20
 const dist = (nums[0..].ptr + 2) - nums[0..].ptr;   // 2（元素个数）
 
-fn main() u8 {
+const main = fn () u8 {
     var buf = std.stackAlloc(u8, 16);
     var s = buf[0..];
     for (0..5) i { s[i] = (u8)(65 + i); }
@@ -40,7 +40,7 @@ fn main() u8 {
 
     std.println("ct: {s} {} {} {}", tail, t0, midVal, dist);
     return 0;
-}
+};
 
 // expect-output
 // head=ABCDE

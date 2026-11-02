@@ -24,39 +24,39 @@ const Cmd = struct {
     p: *[BUFCAP]u8,
     n: usize,
 
-    fn init() Cmd {
+    const init = fn () Cmd {
         /* 必须走堆：stackAlloc 分配在**当前函数帧**里，在 init() 里申请
          * 再返回指针就是悬空指针（命令字符串会变成垃圾）。 */
         return .{ .p = std.heapAlloc(std.heap.page, u8, BUFCAP), .n = 0 };
-    }
-    fn add(self: *Cmd, s: []const u8) void {
+    };
+    const add = fn (self: *Cmd, s: []const u8) void {
         var i: usize = 0;
         while (i < s.len && self.n + 1 < BUFCAP) {
             self.p[self.n] = s[i];
             self.n = self.n + 1;
             i = i + 1;
         }
-    }
-    fn addc(self: *Cmd, ch: u8) void {
+    };
+    const addc = fn (self: *Cmd, ch: u8) void {
         if (self.n + 1 < BUFCAP) { self.p[self.n] = ch; self.n = self.n + 1; }
-    }
+    };
     // system() 走 cmd.exe：正斜杠路径它不认（`./bin/zxc.exe` 会被当成命令名），
     // 所以拼命令时统一转成反斜杠。
-    fn addpath(self: *Cmd, s: []const u8) void {
+    const addpath = fn (self: *Cmd, s: []const u8) void {
         var i: usize = 0;
         while (i < s.len) {
             let ch = s[i];
             if (ch == '/') { self.addc('\\'); } else { self.addc(ch); }
             i = i + 1;
         }
-    }
-    fn cstr(self: *Cmd) *const u8 {
+    };
+    const cstr = fn (self: *Cmd) *const u8 {
         self.p[self.n] = 0;
         return self.p;
-    }
+    };
 };
 
-fn run(cmd: *Cmd) i32 {
+const run = fn (cmd: *Cmd) i32 {
     /* system() 在 Windows 上是 `cmd /c <整串>`，而 cmd 对引号有条古怪规则：
      * 只要命令以 " 开头、且引号总数不是「恰好两个」，它就剥掉最外层的一对。
      * 于是 `"E:\..\a.exe" > "E:\..\out" 2>&1` 会被糟蹋成
@@ -74,17 +74,17 @@ fn run(cmd: *Cmd) i32 {
         std.io.print(std.io.stderr(), "cmd: {s}\n", cmd.p[0..cmd.n]);
     } }
     return system(cmd.cstr());
-}
+};
 
-fn slurp(al: std.Allocator, path: []const u8) []const u8 {
+const slurp = fn (al: std.Allocator, path: []const u8) []const u8 {
     let r = std.file.read(al, path);
     if (r) t { return t; }
     return "";
-}
+};
 
 /* 重定向出来的 stdout 是 CRLF，而 `// expect-output` 里写的是 LF。
  * 比对前把 \r 全去掉，免得每个用例都因为行尾差异假失败。 */
-fn no_cr(al: std.Allocator, s: []const u8) []const u8 {
+const no_cr = fn (al: std.Allocator, s: []const u8) []const u8 {
     var sb = std.ArrayList(u8).init(al);
     var i: usize = 0;
     while (i < s.len) {
@@ -94,26 +94,26 @@ fn no_cr(al: std.Allocator, s: []const u8) []const u8 {
         i = i + 1;
     }
     return sb.items();
-}
+};
 
 // 前缀判断：路径属于哪一类
-fn is_err_test(path: []const u8) bool {
+const is_err_test = fn (path: []const u8) bool {
     return std.str.startsWith(path, "tests/bad/") ||
            std.str.startsWith(path, "tests/multibad/");
-}
+};
 
 // 取第一条 `// key` 注释后面的内容（key 含 "// " 前缀，比如 "// expect: "）
-fn directive(parts: [][]const u8, key: []const u8) ?[]const u8 {
+const directive = fn (parts: [][]const u8, key: []const u8) ?[]const u8 {
     for (parts) p {
         let line = std.str.trimEnd(p);
         if (std.str.startsWith(line, key)) return line[key.len..];
     }
     return null;
-}
+};
 
 // 取 `// expect-output` 之后所有 `// ` 行，拼成期望的 stdout（行间 \n，末尾不带）。
 // 没有这一段就返回空串（调用方用 len 判断）。
-fn expect_output(al: std.Allocator, parts: [][]const u8) []const u8 {
+const expect_output = fn (al: std.Allocator, parts: [][]const u8) []const u8 {
     var sb = std.ArrayList(u8).init(al);
     var on = false;
     var n: usize = 0;
@@ -138,27 +138,30 @@ fn expect_output(al: std.Allocator, parts: [][]const u8) []const u8 {
     }
     if (n == 0) { sb.deinit(); return ""; }
     return sb.items();
-}
+};
 
-fn has_main(src: []const u8) bool {
-    return std.str.contains(src, "fn main(");
-}
+/* 入口有两种写法都算有 main：旧式 `fn main(`，和 v0.24 起的
+ * `const main = fn (…)`。判错了不会报错——只会静默跳过运行，
+ * 让 47 个 expect-output 用例退化成纯类型检查。 */
+const has_main = fn (src: []const u8) bool {
+    return std.str.contains(src, "fn main(") || std.str.contains(src, "main = fn");
+};
 
 /* concat 返回 ?[]u8；OOM 在这里当成空串——runner 自己的失败不该伪装成测试失败 */
-fn cat(al: std.Allocator, a: []const u8, b: []const u8) []const u8 {
+const cat = fn (al: std.Allocator, a: []const u8, b: []const u8) []const u8 {
     let r = std.str.concat(al, a, b);
     if (r) v { return v; }
     return "";
-}
+};
 
-fn report(ok: bool, path: []const u8, why: []const u8) void {
+const report = fn (ok: bool, path: []const u8, why: []const u8) void {
     if (ok) std.println("  ok   {}", path)
     else    std.println("  FAIL {} — {}", path, why);
-}
+};
 
 /* 数一数 stderr 里有几条诊断（`error[Exxxx]` 的出现次数）。
  * 用来断 R? "多错误恢复"——一次该报几条就是几条。 */
-fn count_errors(log: []const u8) usize {
+const count_errors = fn (log: []const u8) usize {
     var n: usize = 0;
     var i: usize = 0;
     while (i < log.len) {
@@ -166,11 +169,11 @@ fn count_errors(log: []const u8) usize {
         if (at) k { n = n + 1; i = k + 7; } else { i = log.len; }
     }
     return n;
-}
+};
 
 /* 反例的三条断言：expect / expect-code / expect-count。
  * 任何一条不满足就算失败，一次把所有问题都报出来（不要修一个才看见下一个）。 */
-fn verify_err(al: std.Allocator, f: []const u8, ps: [][]const u8, log: []const u8) bool {
+const verify_err = fn (al: std.Allocator, f: []const u8, ps: [][]const u8, log: []const u8) bool {
     var ok = true;
 
     if (directive(ps, "// expect: ")) want {
@@ -211,9 +214,9 @@ fn verify_err(al: std.Allocator, f: []const u8, ps: [][]const u8, log: []const u
     }
 
     return ok;
-}
+};
 
-fn main() i32 {
+const main = fn () i32 {
     let al = std.heap.page;
     let args = std.process.args();
     if (args.len < 3) {
@@ -278,19 +281,22 @@ fn main() i32 {
                         } else {
                             var rr = Cmd.init();
                             rr.add("\""); rr.addpath(b); rr.add("\" > \""); rr.addpath(o2); rr.add("\" 2>&1");
-                            var ignored = run(&rr);
+                            let status = run(&rr);
                             /* Windows 上刚执行过的 exe 还会被映像占用；不删的话
                              * 下一个用例链接到同名文件会被拒绝（AccessDenied） */
                             std.file.remove(b);
                             let got = std.str.trimEnd(no_cr(al, slurp(al, o2)));
-                            if (std.str.eq(got, std.str.trimEnd(no_cr(al, want)))) {
-                                pass = pass + 1;
-                                report(true, f, "");
-                            } else {
+                            if (!std.str.eq(got, std.str.trimEnd(no_cr(al, want)))) {
                                 std.println("  FAIL {} -- stdout mismatch", f);
                                 std.println("    want: {}", std.str.trimEnd(want));
                                 std.println("    got:  {}", got);
                                 fail = fail + 1;
+                            } else if (!exit_ok(ps, status)) {
+                                std.println("  FAIL {} -- exit {}", f, status);
+                                fail = fail + 1;
+                            } else {
+                                pass = pass + 1;
+                                report(true, f, "");
                             }
                         }
                     }
@@ -310,4 +316,4 @@ fn main() i32 {
     std.println("passed {}, failed {}", pass, fail);
     if (fail != 0) { return 1; }
     return 0;
-}
+};

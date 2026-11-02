@@ -3,14 +3,14 @@ const std = module("std");
 const debug = true;
 const level = if (debug) 2 else 0;
 
-fn pick(flag: bool) i32 {
+const pick = fn (flag: bool) i32 {
     return switch (flag) {
         true: 1,
         false: 0,
     };
-}
+};
 
-fn main() u8 {
+const main = fn () u8 {
     var b: bool = true;
     b = !b;
     b = b || debug;
@@ -18,7 +18,7 @@ fn main() u8 {
     let f: f32 = if (b) 1.5 else 0.5;
     std.println("{} {} {} {}", b, f, level, pick(debug));
     return 0;
-}
+};
 
 // expect-output
 // false 0.5 2 1

@@ -1,12 +1,12 @@
 // expect: is not exhaustive: missing `.blue`
 const Color = enum { red, green, blue };
 
-fn report(c: Color) void {
+const report = fn (c: Color) void {
     // 纯语句形式的 switch：值没人要，但漏变体照样是错误
     switch (c) {
         .red:   { std_test(); },
         .green: { std_test(); },
     }
-}
+};
 
-fn std_test() void {}
+const std_test = fn () void {};

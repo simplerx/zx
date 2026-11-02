@@ -1617,10 +1617,17 @@ static Type *check_binary(Node *n, Type *expect) {
             return BAD(n, "`&&` / `||` need bool, found `%s` and `%s`", ty_str(a), ty_str(b));
         return type_of(n, ty_bool());
 
-    case TOK_EQ: case TOK_NE:
-        if (!ty_eq(a, b) && !can_coerce(a, b) && !can_coerce(b, a))
+    case TOK_EQ: case TOK_NE: {
+        /* `e == Err.read`：错误码和枚举本来就同源（都是整型码，Tag 是 error，
+         * 枚举底层是整型）。要求先写 `(Err)e` 只是给读代码的人添噪音——
+         * 放宽比较，但**不放宽赋值**（那还是 R4 要显式转换的地盘）。 */
+        bool same_code_domain =
+            (a->kind == TY_ERROR && b->kind == TY_ENUM) ||
+            (a->kind == TY_ENUM  && b->kind == TY_ERROR);
+        if (!ty_eq(a, b) && !same_code_domain && !can_coerce(a, b) && !can_coerce(b, a))
             return BAD(n, "cannot compare `%s` with `%s`", ty_str(a), ty_str(b));
         return type_of(n, ty_bool());
+    }
 
     case TOK_LT: case TOK_LE: case TOK_GT: case TOK_GE: {
         Type *c = check_num_operands(n, a, b);
@@ -1743,12 +1750,46 @@ static bool castable(Type *from, Type *to) {
     return false;
 }
 
+/* 枚举成员在编译期的值：显式写了的取 tag，没写的取下标（与布局规则一致）。
+ * `(error)Err.x` 的成员访问节点上没有折叠值，得这样反查一次。 */
+static bool enum_member_value(Node *e, int64_t *out) {
+    if (!e || e->kind != NK_FIELD || !e->name) return false;
+    if (!e->a || e->a->kind != NK_TYPE_IDENT) return false;
+    Type *tv = e->a->type_val;
+    if (!tv || tv->kind != TY_ENUM) return false;
+    for (int i = 0; i < tv->nfields; i++) {
+        if (!tv->fields[i].name || strcmp(tv->fields[i].name, e->name)) continue;
+        *out = (int64_t)(tv->fields[i].has_tag ? tv->fields[i].tag : (uint64_t)i);
+        return true;
+    }
+    return false;
+}
+
 static Type *check_cast(Node *n) {
     Type *to = resolve_type(n->a);
     if (to->kind == TY_INVALID) return type_of(n, to);
+
     /* 别把目标类型当期待类型传下去：`(u8)(i + 1)` 里 i 是 usize，
      * 一旦把 u8 传给二元表达式，`1` 会变成 u8，加法就成了 u64 + u8。 */
     Type *from = check_expr(n->b, NULL);
+
+    /* 错误码 0 就是"没有错误"。`(error)X` 里 X 在编译期能算出 0 的，
+     * 等于把"出错了"写成"成功了"——而 `!T` 的成功分支还会去读一段
+     * 未初始化的 payload。这类错编译过、跑起来答案错，必须在编译期拦下。
+     * 命名错误码请从 1 起（`enum { open = 1, … }`），别用 0。 */
+    if (to->kind == TY_ERROR) {
+        int64_t cv = 0;
+        bool known = false;
+        Value *v = n->b->ct;
+        if (!v) v = ct_eval(n->b);
+        if (v && v->kind == V_INT) { cv = val_i64(v); known = true; }
+        else if (enum_member_value(n->b, &cv)) known = true;
+        if (known && cv == 0)
+            return BAD_CODE("E0508", n, "error code 0 means \"no error\": this would be read as "
+                                        "success and hand back an uninitialized payload — "
+                                        "number your error codes from 1");
+    }
+
     if ((from->kind == TY_COMPTIME_INT || from->kind == TY_COMPTIME_FLOAT) &&
         (ty_is_int(to) || ty_is_float(to) || to->kind == TY_ENUM)) {
         n->b->ty = to;                     /* 字面量直接定型 */
@@ -2592,6 +2633,29 @@ static Type *check_expr_raw(Node *n, Type *expect) {
         return type_of(n, t->elem);
     }
 
+    /* `try e` —— 出错就带着同一个码往上返回，成功取载荷。
+     * 它是明式的：调用点写着 `try`，读者就知道这个函数在这里可能退出；
+     * 没有栈展开、没有 catch 块、类型也不变（还是那个 `!T`）。 */
+    case NK_TRY: {
+        Type *t = check_expr(n->a, NULL);
+        if (!t || t->kind == TY_INVALID) return ty_invalid();
+        /* `defer` 体里不能往外抛：defer 是在返回路径上执行的，它自己再
+         * "提前返回"没有意义（会把正在返回的值覆盖掉）。就地处理掉。 */
+        if (g_in_defer)
+            return BAD(n, "`try` is not allowed inside `defer` — a defer body cannot "
+                          "propagate; handle the error there (`if` capture / `orelse`)");
+        if (t->kind != TY_ERR)
+            return BAD(n, "`try` needs an error union, found `%s` — "
+                          "for `?T` the " "empty case is not an error; use `orelse` or `if` capture",
+                       ty_str(t));
+        /* 往外抛要有地方抛：所在函数必须能返回错误（`!U`）。 */
+        if (!g_ret || g_ret->kind != TY_ERR)
+            return BAD(n, "`try` inside a function that cannot return an error — "
+                          "declare it `!%s` or handle the error here (`if` capture / `orelse`)",
+                       ty_str(t->elem));
+        return type_of(n, t->elem);
+    }
+
     /* `a orelse b` —— 有值取载荷，空/错取 b。b 只在真的空/错时求值。 */
     case NK_ORELSE: {
         Type *t = check_expr(n->a, NULL);
@@ -3308,7 +3372,9 @@ static Type *check_fn_body(Node *fn) {
     }
 
     Type *save_ret = g_ret;
+    bool  save_defer = g_in_defer;      /* 进了函数体：defer 上下文不再适用 */
     g_ret = ret;
+    g_in_defer = false;
     g_fn_depth++;
     Label *fl = label_push(NULL, false);
     fl->is_fn = true;
@@ -3319,6 +3385,7 @@ static Type *check_fn_body(Node *fn) {
     g_nlabels--;               /* 函数的标签作用域 */
     g_fn_depth--;
     g_ret = save_ret;
+    g_in_defer = save_defer;
     scope_pop(&sc);
     return ft;
 }
@@ -3360,7 +3427,12 @@ static void check_stmt(Node *n) {
         if (g_in_defer) { err_at(n->line, n->col, "`return` is not allowed inside `defer`"); }
         Type *want = g_ret ? g_ret : ty_void();
         if (!n->a) {
-            if (want->kind != TY_VOID && want->kind != TY_INVALID)
+            /* `!void` 的 `return;` 是"成功且没有 payload"：tag 置 0 就是全部值。
+             * 没有这条，`!void` 的三条成功路径（走到底、`return;`、`return {}`）
+             * 全被堵死，等于这种函数根本不能正常返回。 */
+            bool ok_void = want->kind == TY_VOID ||
+                           (want->kind == TY_ERR && want->elem && want->elem->kind == TY_VOID);
+            if (!ok_void && want->kind != TY_INVALID)
                 err_at(n->line, n->col, "function returns `%s`, but this `return` has no value",
                        ty_str(want));
             n->ty = ty_void();
@@ -3465,6 +3537,16 @@ static Type *check_if(Node *n, Type *expect) {
                "`if` condition must be bool, or ?T / !T with a capture name; found `%s`",
                ty_str(c));
     Type *cap_ty = (is_opt || is_err) ? c->elem : NULL;
+
+    /* `!void` / `?void` 没有载荷：`if (x) v { … }` 里的 `v` 无所指。
+     * 这种写法一定是误会——想要"成功就做事"写 `if (x) { … }`，
+     * 想要错误码写 `else e`。放过去会让后端生成 `void v = x.payload;`。 */
+    if ((is_opt || is_err) && cap_ty && cap_ty->kind == TY_VOID && n->name) {
+        err_at(n->line, n->col,
+               "`%s` has no payload to capture — write `if (x) { … }` for the success "
+               "branch, or `else e` for the error code", ty_str(c));
+        cap_ty = NULL;
+    }
 
     /* 条件是编译期常量时，只检查真的会走到的那一支：另一支可能只对
      * 某些类型成立（`if (@sizeOf(T) > 8) @compileError(…)`）。
@@ -3935,6 +4017,14 @@ static Type *check_switch(Node *n, Type *expect) {
             if (!cap_ty || cap_ty->kind == TY_INVALID)
                 err_at(arm->line, arm->col,
                        "cannot capture in this arm (subject `%s`)", ty_str(s));
+            /* `!void` / `?void` 的 `.ok` / `.some` 没有载荷可捕获——
+             * 和 `if (x) v { … }` 同一条规则，否则后端会发 `void v = …`。 */
+            else if (cap_ty->kind == TY_VOID) {
+                err_at(arm->line, arm->col,
+                       "this arm has no payload to capture (`%s` carries no value) — "
+                       "drop the capture and match the pattern alone", ty_str(s));
+                cap_ty = NULL;
+            }
         }
 
         {
@@ -4098,10 +4188,15 @@ static bool ret_diag_dup(Node *fn) {
 static void check_return_paths(Node *fn, Type *ret) {
     if (!fn->b || !ret) return;
     if (ret->kind == TY_VOID || ret->kind == TY_INVALID) return;
+    /* `!void`：payload 是 void，成功就是"走到底、什么都不带"。它和 `void` 一样
+     * 允许落到末尾，只是要多置一次 tag = 0（后端负责）。 */
+    if (ret->kind == TY_ERR && ret->elem && ret->elem->kind == TY_VOID) return;
     if (!falls_through(fn->b)) return;          /* 每条路径都拦住了 */
     if (ret_diag_dup(fn)) return;
 
-    const char *nm = fn->name ? fn->name : "fn";
+    /* 定义是 `const name = fn …`，名字挂在绑定的符号上，不在 NK_FN 上。 */
+    const char *nm = fn->name ? fn->name
+                   : (fn->sym && fn->sym->name ? fn->sym->name : "fn");
 
     if (ret->kind == TY_NORETURN) {
         err_at(fn->line, fn->col,
@@ -4109,7 +4204,7 @@ static void check_return_paths(Node *fn, Type *ret) {
         return;
     }
     /* 入口例外：main 掉出末尾就是 `return 0`（后端本来就这么发） */
-    if (fn->name && !strcmp(fn->name, "main")) return;
+    if (!strcmp(nm, "main")) return;
     err_at(fn->line, fn->col,
            "function '%s' can reach the end of its body without returning a value of "
            "type `%s`", nm, ty_str(ret));
@@ -4298,8 +4393,14 @@ static bool ct_view_len(Value *v, Type *t, int64_t *len) {
 }
 
 static Value *ct_field(Node *n) {
-    /* .len / .size —— 编译器字段 */
-    if (n->name && (!strcmp(n->name, "len") || !strcmp(n->name, "size"))) {
+    /* .len / .size —— 编译器字段。但聚合体自己有同名字段时按字段走
+     * （`struct { size: i32 }` 的 `s.size` 就是那个字段，不是字节数）——
+     * 这条规则必须和 check_field / 后端 ex() 完全一致，否则
+     * 常量折叠和运行期会给出两个不同的答案。 */
+    Type *at = n->a ? n->a->ty : NULL;
+    bool shadowed = at && n->name && (at->kind == TY_STRUCT || at->kind == TY_UNION) &&
+                    ty_field(at, n->name) != NULL;
+    if (!shadowed && n->name && (!strcmp(n->name, "len") || !strcmp(n->name, "size"))) {
         bool is_len = !strcmp(n->name, "len");
         Type *t = n->a ? n->a->ty : NULL;
         if (!t) return NULL;
@@ -4539,12 +4640,28 @@ static Value *ct_call(Node *n) {
         if (!args[i]) return NULL;
     }
 
+    /* 体的检查与求值都在函数**定义处**的模块里做：callee 可能是别的
+     * 模块的函数（`a.api`），它认识的私有辅助函数只有那边有。跳过这一步
+     * 会按调用方的作用域解释体——私有名字全变 unknown。 */
+    Module *save_m = g_mod;
+    Scope  *save_sc = g_scope;
+    const char *save_sp = g_srcpath;
+    if (callee->fn->sym && callee->fn->sym->mod && callee->fn->sym->mod != g_mod) {
+        g_mod = callee->fn->sym->mod;
+        g_scope = &g_mod->scope;
+        g_srcpath = g_mod->path;
+    }
+
     Node   *g = clone_tree(callee->fn);
     Scope   sc;
     scope_push(&sc);
 
     Type *ft = resolve_fn_type(g);
-    if (!ft || ft->kind != TY_FN) { scope_pop(&sc); return NULL; }
+    if (!ft || ft->kind != TY_FN) {
+        scope_pop(&sc);
+        g_mod = save_m; g_scope = save_sc; g_srcpath = save_sp;
+        return NULL;
+    }
 
     for (int i = 0; i < g->nitems && i < n->nitems; i++) {
         Node *pm = g->items[i];
@@ -4560,7 +4677,9 @@ static Value *ct_call(Node *n) {
     }
 
     Type *save_ret = g_ret;
+    bool  save_defer = g_in_defer;
     g_ret = ft->ret ? ft->ret : ty_void();
+    g_in_defer = false;
     g_fn_depth++;
 
     g_ct_stack[g_ct_nstack++] = callee->fn;
@@ -4575,9 +4694,11 @@ static Value *ct_call(Node *n) {
     g_ct_nstack--;
     g_fn_depth--;
     g_ret = save_ret;
+    g_in_defer = save_defer;
     if (g_ct_flow.kind == CT_RETURN) f = g_ct_flow;
     g_ct_flow = ct_normal();
     scope_pop(&sc);
+    g_mod = save_m; g_scope = save_sc; g_srcpath = save_sp;
 
     if (g_ct_stuck) return NULL;
     if (f.kind == CT_RETURN) return f.val ? f.val : val_void();

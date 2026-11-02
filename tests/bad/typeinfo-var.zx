@@ -1,7 +1,7 @@
 // expect: exists only at compile time
 const std = module("std");
 
-fn main() u8 {
+const main = fn () u8 {
     var info: std.TypeInfo = undefined;
     return 0;
-}
+};

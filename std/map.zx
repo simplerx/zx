@@ -10,7 +10,7 @@
 const str = module("str.zx");
 
 // FNV-1a 64 位。溢出是 u64 回绕（C 里定义良好的那种），不是错误。
-pub fn fnv1a(s: []const u8) u64 {
+pub const fnv1a = fn (s: []const u8) u64 {
     var h: u64 = 14695981039346656037;
     var i: usize = 0;
     while (i < s.len) {
@@ -19,7 +19,7 @@ pub fn fnv1a(s: []const u8) u64 {
         i = i + 1;
     }
     return h;
-}
+};
 
 pub const HashMap = fn (V: type) type {
     return struct {
@@ -31,11 +31,11 @@ pub const HashMap = fn (V: type) type {
 
         // ---- 构造 / 释放 ----
 
-        fn init(alloc: Allocator) Self {
+        const init = fn (alloc: Allocator) Self {
             return Self{ .keys = undefined, .vals = undefined, .n = 0, .cap = 0, .alloc = alloc };
-        }
+        };
 
-        fn deinit(self: *Self) void {
+        const deinit = fn (self: *Self) void {
             if (self.cap > 0) {
                 self.alloc.free((*u8)self.keys, self.cap * @sizeOf(?[]const u8));
                 self.alloc.free((*u8)self.vals, self.cap * @sizeOf(V));
@@ -44,18 +44,18 @@ pub const HashMap = fn (V: type) type {
             self.vals = undefined;
             self.n = 0;
             self.cap = 0;
-        }
+        };
 
         // ---- 规模 ----
 
-        fn count(self: *Self) usize { return self.n; }
-        fn capacity(self: *Self) usize { return self.cap; }
-        fn empty(self: *Self) bool { return self.n == 0; }
+        const count = fn (self: *Self) usize { return self.n; };
+        const capacity = fn (self: *Self) usize { return self.cap; };
+        const empty = fn (self: *Self) bool { return self.n == 0; };
 
         // ---- 查找 ----
 
         // 命中返回它的下标；没命中返回第一个空槽——也就是插入点。
-        fn slotFor(self: *Self, key: []const u8, h: u64) usize {
+        const slotFor = fn (self: *Self, key: []const u8, h: u64) usize {
             let mask = self.cap - 1;
             var i = (usize)h & mask;
             var probes: usize = 0;
@@ -70,9 +70,9 @@ pub const HashMap = fn (V: type) type {
                 probes = probes + 1;
             }
             return i;               /* 表满（不会发生：负载上限 3/4） */
-        }
+        };
 
-        fn get(self: *Self, key: []const u8) ?V {
+        const get = fn (self: *Self, key: []const u8) ?V {
             if (self.cap == 0) { return null; }
             let i = self.slotFor(key, fnv1a(key));
             let cur = (self.keys + i).0;
@@ -80,9 +80,9 @@ pub const HashMap = fn (V: type) type {
                 if (str.eq(k, key)) { return (self.vals + i).0; }
             }
             return null;
-        }
+        };
 
-        fn contains(self: *Self, key: []const u8) bool {
+        const contains = fn (self: *Self, key: []const u8) bool {
             if (self.cap == 0) { return false; }
             let i = self.slotFor(key, fnv1a(key));
             let cur = (self.keys + i).0;
@@ -90,10 +90,10 @@ pub const HashMap = fn (V: type) type {
                 if (str.eq(k, key)) { return true; }
             }
             return false;
-        }
+        };
 
         // 取指针：已经存在就直接改它，省一次查找。
-        fn getPtr(self: *Self, key: []const u8) ?*V {
+        const getPtr = fn (self: *Self, key: []const u8) ?*V {
             if (self.cap == 0) { return null; }
             let i = self.slotFor(key, fnv1a(key));
             let cur = (self.keys + i).0;
@@ -101,11 +101,11 @@ pub const HashMap = fn (V: type) type {
                 if (str.eq(k, key)) { return self.vals + i; }
             }
             return null;
-        }
+        };
 
         // ---- 写入 ----
 
-        fn put(self: *Self, key: []const u8, val: V) bool {
+        const put = fn (self: *Self, key: []const u8, val: V) bool {
             if (self.cap == 0 || (self.n + 1) * 4 > self.cap * 3) {
                 if (!self.grow()) { return false; }
             }
@@ -121,44 +121,44 @@ pub const HashMap = fn (V: type) type {
             (self.vals + i).0 = val;
             self.n = self.n + 1;
             return true;
-        }
+        };
 
         // 只在键不存在时写入；已存在就返回它原来的值。
-        fn putNew(self: *Self, key: []const u8, val: V) ?V {
+        const putNew = fn (self: *Self, key: []const u8, val: V) ?V {
             if (self.cap != 0) {
                 let old = self.get(key);
                 if (old) v { return v; }
             }
             if (!self.put(key, val)) { return val; }
             return null;
-        }
+        };
 
-        fn clear(self: *Self) void {
+        const clear = fn (self: *Self) void {
             var i: usize = 0;
             while (i < self.cap) {
                 (self.keys + i).0 = null;
                 i = i + 1;
             }
             self.n = 0;
-        }
+        };
 
         // ---- 遍历 ----
 
         // 槽下标从 0 到 capacity()-1；空槽返回 null，跳过即可。
-        fn keyAt(self: *Self, i: usize) ?[]const u8 {
+        const keyAt = fn (self: *Self, i: usize) ?[]const u8 {
             if (i >= self.cap) { return null; }
             return (self.keys + i).0;
-        }
+        };
 
-        fn valueAt(self: *Self, i: usize) ?V {
+        const valueAt = fn (self: *Self, i: usize) ?V {
             if (i >= self.cap) { return null; }
             if ((self.keys + i).0) k { return (self.vals + i).0; }
             return null;
-        }
+        };
 
         // ---- 扩容 ----
 
-        fn grow(self: *Self) bool {
+        const grow = fn (self: *Self) bool {
             let ncap: usize = if (self.cap == 0) 8 else self.cap * 2;
             let kb = ncap * @sizeOf(?[]const u8);
             let nk = self.alloc.alloc(kb);
@@ -209,6 +209,6 @@ pub const HashMap = fn (V: type) type {
                 self.alloc.free(nkp, kb);
             }
             return false;
-        }
+        };
     };
 };

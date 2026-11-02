@@ -20,7 +20,7 @@ const mk = fn (x: i32, y: i32) Point {
     return Point{ .x = x, .y = y };
 };
 
-fn main() u8 {
+const main = fn () u8 {
     const alloc = std.heap.page;
 
     // 1. 聚合值默认就打结构：{} 与 {any} 对结构体是一回事
@@ -81,7 +81,7 @@ fn main() u8 {
         alloc.free(str.ptr, str.len);
     }
     return 0;
-}
+};
 
 // expect-output
 // Point{x: 1, y: 2}

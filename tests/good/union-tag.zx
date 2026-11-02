@@ -13,23 +13,23 @@ const U = union {
     three: {Tag.three, i32},
 };
 
-fn name(u: U) []const u8 {
+const name = fn (u: U) []const u8 {
     return switch (u.tag) {
         .one:   "one",
         .two:   "two",
         .three: "three",
     };
-}
+};
 
-fn payload(u: U) i32 {
+const payload = fn (u: U) i32 {
     return switch (u.tag) {
         .one:   u.one,
         .two:   u.two,
         .three: u.three,
     };
-}
+};
 
-fn main() i32 {
+const main = fn () i32 {
     let a = U{ .one = 1 };
     let b = U{ .two = 2 };
     let c = U{ .three = 3 };
@@ -38,7 +38,7 @@ fn main() i32 {
     std.println("{} {} {}", payload(a), payload(b), payload(c));
     std.println("{} {} {}", (i32)a.tag, (i32)b.tag, (i32)c.tag);
     return 0;
-}
+};
 
 // expect-output
 // one two three

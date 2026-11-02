@@ -208,7 +208,7 @@ const deferred = fn () i32 {
     return x;
 };
 
-fn main() u8 {
+const main = fn () u8 {
     let xs: *const [5]i32 = &.{1, 250, 3, 400, 5};
 
     std.println("{}", abs(-9));
@@ -231,7 +231,7 @@ fn main() u8 {
     var it = Iter{ .data = xs[0..], .idx = 0 };
     std.println("{}", drain(&it));
 
-    report((error)0);
+    report((error)1);
     report((error)42);
 
     enumNames();
@@ -244,7 +244,7 @@ fn main() u8 {
     zeros(scratch[0..]);
 
     return 0;
-}
+};
 
 // expect-output
 // 9
@@ -260,7 +260,7 @@ fn main() u8 {
 // 2
 // dot = 32
 // 659
-// ok: 0
+// error code: 1
 // error code: 42
 // 0
 // 1

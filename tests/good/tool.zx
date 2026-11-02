@@ -2,7 +2,7 @@
 // 只用标准库，不需要手搓容器和字符串处理。
 const std = module("std");
 
-fn main() i32 {
+const main = fn () i32 {
     let al = std.heap.page;
     let path = "tests_csv.tmp";
 
@@ -59,7 +59,7 @@ fn main() i32 {
 
     std.println("remove {}", std.file.remove(path));
     return 0;
-}
+};
 
 // expect-output
 // input  [12, 7, 30, 7, 41, x, 5]

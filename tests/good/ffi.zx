@@ -16,7 +16,7 @@ extern fn strlen(s: *const u8) usize;
 extern fn malloc(n: usize) *u8;
 extern fn free(p: *u8) void;
 
-fn main() void {
+const main = fn () void {
     let s = "hello from libc";
     puts(s.ptr);
     std.println("strlen = {}", strlen(s.ptr));
@@ -30,4 +30,4 @@ fn main() void {
     std.println("malloc ok");
     free(p);
     std.println("freed");
-}
+};

@@ -13,7 +13,7 @@ const dot3 = fn (a: *const [3]i32, b: *const [3]i32) i32 {
     return acc;
 };
 
-fn main() u8 {
+const main = fn () u8 {
     var buf: *[3]i32 = &.{1, 2, 3};
     let s = buf[0..];
     let p = s.ptr;
@@ -23,7 +23,7 @@ fn main() u8 {
     std.println("{}", dot3(buf, b));
     std.println("{} {}", buf.len, buf.size);
     return 0;
-}
+};
 
 // expect-output
 // 3 1 1

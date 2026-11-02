@@ -6,16 +6,16 @@
 const std = module("std");
 
 // ① 两条臂各自收割，标签加在 if 上
-fn sign(x: i32) i32 {
+const sign = fn (x: i32) i32 {
     return s: if (x > 0) {
         s: 1;
     } else {
         s: 0;
     };
-}
+};
 
 // ② 三分支（else if 链）共用同一个标签
-fn grade(x: i32) i32 {
+const grade = fn (x: i32) i32 {
     return g: if (x >= 90) {
         g: 3;
     } else if (x >= 60) {
@@ -23,23 +23,23 @@ fn grade(x: i32) i32 {
     } else {
         g: 1;
     };
-}
+};
 
 // ③ 捕获 + 标签：可选解包的一种写法（没有 `.?`）
-fn or_neg(o: ?i32) i32 {
+const or_neg = fn (o: ?i32) i32 {
     return r: if (o) v {
         r: v;
     } else {
         r: -1;
     };
-}
+};
 
-fn main() i32 {
+const main = fn () i32 {
     std.println("{} {}", sign(5), sign(-5));
     std.println("{} {} {}", grade(95), grade(70), grade(10));
     std.println("{} {}", or_neg(7), or_neg(null));
     return 0;
-}
+};
 
 // expect-output
 // 1 0

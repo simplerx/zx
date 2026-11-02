@@ -8,7 +8,7 @@ const WORDS = &.{
     "pi", "rho", "sigma", "tau", "upsilon",
 };
 
-fn main() i32 {
+const main = fn () i32 {
     let al = std.heap.page;
 
     // ---- 基本操作 ----
@@ -62,7 +62,7 @@ fn main() i32 {
     m.deinit();
     std.println("done");
     return 0;
-}
+};
 
 // expect-output
 // count 3

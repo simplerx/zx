@@ -38,6 +38,7 @@ static const KwEntry g_keywords[] = {
     {"enum", TOK_KW_ENUM},     {"error", TOK_KW_ERROR},
     {"pub", TOK_KW_PUB},       {"extern", TOK_KW_EXTERN},
     {"orelse", TOK_KW_ORELSE},
+    {"try", TOK_KW_TRY},
 };
 
 static TokKind ident_kind(const char *s, int len) {

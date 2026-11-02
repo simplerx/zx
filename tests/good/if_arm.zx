@@ -4,53 +4,53 @@
 // 语义和写块完全一样（解析时就是包一层单语句块）。
 const std = module("std");
 
-fn grade(n: i32) []const u8 {
+const grade = fn (n: i32) []const u8 {
     if (n >= 90) return "A";
     if (n >= 60) return "B";
     return "C";
-}
+};
 
-fn countOver(xs: []const i32, limit: i32) i32 {
+const countOver = fn (xs: []const i32, limit: i32) i32 {
     var n: i32 = 0;
     for (xs) x {
         if (x <= limit) continue;
         n = n + 1;
     }
     return n;
-}
+};
 
 // 捕获名 + 单条语句
-fn doubled(o: ?i32) i32 {
+const doubled = fn (o: ?i32) i32 {
     if (o) v return v * 2;
     return -1;
-}
+};
 
 // 表达式语句臂：分号属于臂，不再逼着写花括号（M20）
-fn shout(c: bool) void {
+const shout = fn (c: bool) void {
     if (c) std.println("shout yes"); else std.println("shout no");
-}
+};
 
 // 赋值语句臂（赋值在 Zx 里也是表达式，同样吃这套糖）
-fn label(c: bool) []const u8 {
+const label = fn (c: bool) []const u8 {
     var out: []const u8 = "?";
     if (c) out = "yes"; else out = "no";
     return out;
-}
+};
 
 // else-if 链，每一臂都是语句
-fn chain(n: i32) void {
+const chain = fn (n: i32) void {
     if (n == 1) std.println("one");
     else if (n == 2) std.println("two");
     else std.println("many");
-}
+};
 
 // else-if 链在**值位置**：`else if` 本身就是一个 if 表达式，
 // 所以臂上不用再套标签，逐层往下传就行
-fn tier(x: i32) i32 {
+const tier = fn (x: i32) i32 {
     return if (x > 10) 100 else if (x > 5) 50 else 0;
-}
+};
 
-fn main() u8 {
+const main = fn () u8 {
     std.println("{} {} {}", grade(95), grade(75), grade(20));
 
     let xs = &.{ 1, 5, 9, 12 };
@@ -71,7 +71,7 @@ fn main() u8 {
 
     std.println("tier {} {} {}", tier(50), tier(7), tier(1));
     return 0;
-}
+};
 
 // expect-output
 // A B C

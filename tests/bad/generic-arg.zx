@@ -3,6 +3,6 @@
 const List = fn (T: type) type {
     return struct { data: []T };
 };
-fn main() void {
+const main = fn () void {
     var x: List(0) = undefined;
-}
+};

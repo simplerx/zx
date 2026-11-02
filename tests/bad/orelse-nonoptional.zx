@@ -2,7 +2,7 @@
 // 右边的值永远不会被取到——这是写错了，不是默认值。
 // expect: `orelse` needs an optional or an error union, found `i32`
 // expect-code: E0301
-fn main() i32 {
+const main = fn () i32 {
     let x: i32 = 5;
     return x orelse 1;
-}
+};

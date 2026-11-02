@@ -1,4 +1,4 @@
 // expect: negative literal does not fit in unsigned type `u8`
-fn main() void {
+const main = fn () void {
     let b: u8 = -1;
-}
+};

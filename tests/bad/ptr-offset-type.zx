@@ -1,9 +1,9 @@
 // expect: pointer arithmetic needs a `usize` offset
 // 偏移量不做隐式数值转换（R4）
-fn main() u8 {
+const main = fn () u8 {
     var buf: *[8]i32 = undefined;
     let p: *i32 = buf;
     let i: i32 = 2;
     let q = p + i;
     return 0;
-}
+};

@@ -1,0 +1,12 @@
+// 循环的标签写在关键字**前面**：`while (true) done: { … }` 读起来像"体的名字"，
+// 但 `done: v;` 要跳出的是循环，不是体。
+const main = fn () i32 {
+    var n: i32 = 0;
+    const w = while (true) done: {
+        n = n + 1;
+        if (n > 3) { done: n; }
+    };
+    return 0;
+};
+
+// expect-error: the label of a loop goes before the keyword

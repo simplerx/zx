@@ -2,10 +2,10 @@
 const Counter = struct {
     n: i32,
 
-    fn total() i32 { return 1; }        // 没有接收者：挂在类型上的普通函数
+    const total = fn () i32 { return 1; };        // 没有接收者：挂在类型上的普通函数
 };
 
-fn main() u8 {
+const main = fn () u8 {
     var c = Counter{ .n = 1 };
     return (u8)c.total();               // …于是不能当方法调
-}
+};

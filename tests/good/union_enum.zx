@@ -12,21 +12,21 @@ const Shape = union(enum) {
     rect: { f64, f64 },
     labeled: struct { x: i32, y: i32 },
 
-    fn describe(self: *const Self) []const u8 {
+    const describe = fn (self: *const Self) []const u8 {
         switch (self.tag) {
             .circle:  { return "circle"; },
             .rect:    { return "rect"; },
             .labeled: { return "labeled"; },
         }
-    }
+    };
 
-    fn value(self: *const Self) f64 {
+    const value = fn (self: *const Self) f64 {
         switch (self.tag) {
             .circle:  { return self.circle; },
             .rect:    { return self.rect.0 * self.rect.1; },
             .labeled: { return (f64)(self.labeled.x + self.labeled.y); },
         }
-    }
+    };
 };
 
 // 指定底层类型：标签宽度是 u8
@@ -35,7 +35,7 @@ const Small = union(enum(u8)) {
     b: f64,
 };
 
-fn main() u8 {
+const main = fn () u8 {
     const c = Shape{ .circle = 2.0 };
     const r = Shape{ .rect = { 3.0, 4.0 } };
     const l = Shape{ .labeled = .{ .x = 20, .y = 22 } };
@@ -61,7 +61,7 @@ fn main() u8 {
     }
     std.println("total={}", total);
     return 0;
-}
+};
 
 // expect-output
 // circle rect labeled

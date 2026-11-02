@@ -2,12 +2,12 @@
 // 不可达代码：枚举的 switch 已经覆盖了每个变体，每条臂都 return
 const Color = enum { red, green };
 
-fn name(c: Color) i32 {
+const name = fn (c: Color) i32 {
     switch (c) {
         .red:   { return 1; },
         .green: { return 2; },
     }
     return 0;
-}
+};
 
-fn main() u8 { return 0; }
+const main = fn () u8 { return 0; };

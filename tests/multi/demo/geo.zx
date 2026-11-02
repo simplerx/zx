@@ -5,13 +5,13 @@ pub const Point = struct {
     tag: []const u8 = "pt",
 };
 
-pub fn len2(p: Point) i32 { return p.x * p.x + p.y * p.y; }
+pub const len2 = fn (p: Point) i32 { return p.x * p.x + p.y * p.y; };
 
-pub fn scale(p: Point, k: i32) Point {
+pub const scale = fn (p: Point, k: i32) Point {
     return Point{ .x = p.x * k, .y = p.y * k };
-}
+};
 
 // 私有辅助，geo 内部随便用
-fn zero() Point { return Point{ .x = 0, .y = 0 }; }
+const zero = fn () Point { return Point{ .x = 0, .y = 0 }; };
 
 pub const origin: Point = zero();

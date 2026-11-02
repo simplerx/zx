@@ -4,61 +4,61 @@ const std = module("std");
 const Color = enum { red, green, blue };
 
 // 1. if 后面补一条 return：三条路径都收口
-fn sign(n: i32) i32 {
+const sign = fn (n: i32) i32 {
     if (n < 0) { return -1; }
     if (n > 0) { return 1; }
     return 0;
-}
+};
 
 // 2. 条件是编译期常量：另一支是死代码，不参与分析
-fn always() i32 {
+const always = fn () i32 {
     if (true) { return 7; }
-}
+};
 
 // 3. while (true)：没有正常出口
-fn firstOver(xs: []const i32, t: i32) i32 {
+const firstOver = fn (xs: []const i32, t: i32) i32 {
     var i: usize = 0;
     while (true) {
         if (xs[i] > t) { return xs[i]; }
         i = i + 1;
     }
-}
+};
 
 // 4. while (true) + continue：两条路都回不到末尾
-fn spin() i32 {
+const spin = fn () i32 {
     var n: i32 = 0;
     while (true) {
         n = n + 1;
         if (n > 100) { return n; }
         continue;
     }
-}
+};
 
 // 5. 枚举 switch 列全了，不需要 else
-fn name(c: Color) []const u8 {
+const name = fn (c: Color) []const u8 {
     return switch (c) {
         .red:   "red",
         .green: "green",
         .blue:  "blue",
     };
-}
+};
 
 // 6. 语句形式的 switch：每个臂都 return，也就没有 else
-fn weight(c: Color) i32 {
+const weight = fn (c: Color) i32 {
     switch (c) {
         .red:   { return 1; },
         .green: { return 2; },
         .blue:  { return 3; },
     }
-}
+};
 
 // 7. bool 的两个值也是穷尽的
-fn flagValue(b: bool) i32 {
+const flagValue = fn (b: bool) i32 {
     switch (b) {
         true:  { return 1; },
         false: { return 0; },
     }
-}
+};
 
 // 8. 带标签联合体按 .tag 分派：枚举列全即可
 const ShapeTag = enum { circle, rect };
@@ -68,52 +68,52 @@ const Shape = union {
     rect:   {ShapeTag.rect,   {f64, f64}},
 };
 
-fn kindOf(s: Shape) usize {
+const kindOf = fn (s: Shape) usize {
     return switch (s.tag) {
         .circle: 1,
         .rect:   2,
     };
-}
+};
 
 // 9. noreturn：声明了不返回，函数体也必须不落到末尾
-fn die(msg: []const u8) noreturn {
+const die = fn (msg: []const u8) noreturn {
     std.println("fatal: {s}", msg);
     @trap();
-}
+};
 
 // 10. 末尾是一条 noreturn 表达式，等价于"回不来"
-fn boom() i32 {
+const boom = fn () i32 {
     @trap();
-}
+};
 
 // 11. 块与 defer 都不改变流向：块的最后一条 return 说了算
-fn withLog(n: i32) i32 {
+const withLog = fn (n: i32) i32 {
     defer std.println("leave");
     {
         if (n == 0) { return 100; }
         return 200;
     }
-}
+};
 
 // 12. 标签块收完值就接着往下走：块后面的语句必须算可达（不可达检测不能误报）
-fn pick(n: i32) i32 {
+const pick = fn (n: i32) i32 {
     const v = out: {
         if (n > 0) { out: 1; }
         out: 2;
     };
     return v;
-}
+};
 
 // 13. 整数 switch 不要求穷尽：后面的 return 是可达的
-fn digit(n: i32) i32 {
+const digit = fn (n: i32) i32 {
     switch (n) {
         0: { return 0; },
         1: { return 1; },
     }
     return 9;
-}
+};
 
-fn main() u8 {
+const main = fn () u8 {
     const xs: *const [3]i32 = &.{ 1, 5, 9 };
     std.println("{} {} {} {}", sign(-5), always(), name(Color.blue), weight(Color.green));
     std.println("{} {} {} {}", firstOver(xs[0..], 4), spin(), flagValue(true), withLog(0));
@@ -121,7 +121,7 @@ fn main() u8 {
     std.println("kind={}", kindOf(s));
     std.println("{} {}", pick(1), digit(7));
     // main 是唯一的例外：掉出末尾等价于 `return 0`，这里故意不写 return
-}
+};
 
 // expect-output
 // -1 7 blue 2

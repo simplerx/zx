@@ -1,8 +1,8 @@
 // mathx.zx —— 被别的模块引用的普通模块（`pub` 决定哪些名字能出去）
-pub fn square(n: i32) i32 { return n * n; }
-pub fn cube(n: i32) i32 { return n * n * n; }
+pub const square = fn (n: i32) i32 { return n * n; };
+pub const cube = fn (n: i32) i32 { return n * n * n; };
 pub const GOLDEN: f64 = 1.618;
 pub const Vec2 = struct { x: i32, y: i32 };
-pub fn dot(a: Vec2, b: Vec2) i32 { return a.x * b.x + a.y * b.y; }
+pub const dot = fn (a: Vec2, b: Vec2) i32 { return a.x * b.x + a.y * b.y; };
 
-fn helper(n: i32) i32 { return n * 10; }     // 私有：外面看不见
+const helper = fn (n: i32) i32 { return n * 10; };     // 私有：外面看不见

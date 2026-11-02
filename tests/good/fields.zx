@@ -6,7 +6,7 @@ const P = struct { x: i32, y: u64, tag: bool };
 
 const Color = enum { red, green, blue };
 
-fn describe(T: type) u8 {
+const describe = fn (T: type) u8 {
     const info = @typeInfo(T);
     std.println("type {s} fields={d}", info.name, info.fields.len);
     inline for (0..info.fields.len) i {
@@ -14,9 +14,9 @@ fn describe(T: type) u8 {
         std.println("  {d}: {s} : {s}", i, f.name, @typeName(f.ty));
     }
     return 0;
-}
+};
 
-fn main() u8 {
+const main = fn () u8 {
     describe(P);
     describe(Color);
 
@@ -34,7 +34,7 @@ fn main() u8 {
     std.println("u64 sum={d}", sum);
 
     return 0;
-}
+};
 // expect-output
 // type P fields=3
 //   0: x : i32

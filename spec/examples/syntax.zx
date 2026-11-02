@@ -72,11 +72,11 @@ const Buffer = fn (T: type, n: usize) type {
     };
 };
 
-fn main() u8 {
+const main = fn () u8 {
     var scratch: *[4]u8 = undefined;
     var b: Buffer(u8, 4) = Buffer(u8, 4){ .data = scratch, .len = 0 };
     b.len = 1;
     return 0;
-}
+};
 
 // expect-output

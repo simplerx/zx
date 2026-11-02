@@ -12,18 +12,18 @@ const List = fn (T: type, cap: usize) type {
     return struct {
         buf: *[cap]T,
         len: usize,
-        fn full(self: *const Self) bool { return self.len == cap; }
+        const full = fn (self: *const Self) bool { return self.len == cap; };
     };
 };
 
 const IPair = Pair(i32);            // 顶层别名
 const IL2 = List(i32, 2);           // 带数值参数的别名
 
-fn sum(p: IPair) i32 { return p.a + p.b; }
+const sum = fn (p: IPair) i32 { return p.a + p.b; };
 
-fn show(T: type, v: T) void { std.println("show {}", v); }
+const show = fn (T: type, v: T) void { std.println("show {}", v); };
 
-fn main() u8 {
+const main = fn () u8 {
     const P = Pair(i32);            // 函数内别名
     const p = P{ .a = 3, .b = 4 };
     std.println("{} sum={}", p, sum(p));
@@ -48,7 +48,7 @@ fn main() u8 {
     var l2: IL2 = .{ .buf = buf, .len = 1 };
     std.println("anon full={} len={}", l2.full(), l2.len);
     return 0;
-}
+};
 
 // expect-output
 // Pair(i32){a: 3, b: 4} sum=7

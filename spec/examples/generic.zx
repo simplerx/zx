@@ -78,7 +78,7 @@ const zero = fn (T: type) T {
     return (T)0;
 };
 
-fn main() u8 {
+const main = fn () u8 {
     // 栈上后备存储：var + *[N]T 才是"分配 N 个元素"
     var backing: *[4]i32 = &.{0, 0, 0, 0};
 
@@ -121,7 +121,7 @@ fn main() u8 {
 
     std.println("generic ok, p3={}, sum={}", p3, TABLE_SUM);
     return 0;
-}
+};
 
 // expect-output
 // head = 11

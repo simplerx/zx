@@ -1,7 +1,7 @@
 // jumps.zx —— defer / continue / 嵌套标签 的交互
 const std = module("std");
 
-fn main() u8 {
+const main = fn () u8 {
     // continue 前必须先跑本轮 defer
     var log: i32 = 0;
     var i: usize = 0;
@@ -33,15 +33,15 @@ fn main() u8 {
     std.println("ret={}", through());
 
     return 0;
-}
+};
 
-fn through() i32 {
+const through = fn () i32 {
     defer std.print("D1 ");
     {
         defer std.print("D2 ");
         return 7;
     }
-}
+};
 
 // expect-output
 // log=32

@@ -1,7 +1,7 @@
 // expect: method 'bad' must take the struct as its first parameter
 const P = struct {
     x: i32,
-    fn bad(self: i32) i32 { return 1; }
+    const bad = fn (self: i32) i32 { return 1; };
 };
 
-fn main() u8 { return 0; }
+const main = fn () u8 { return 0; };

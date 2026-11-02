@@ -38,7 +38,7 @@ const numsSize = nums.size;        // 12，comptime
 const pairBytes = @sizeOf(@typeOf(pair));   // 16
 const numsBytes = @sizeOf(@typeOf(nums));   // 8 —— 只有一个地址
 
-fn main() u8 {
+const main = fn () u8 {
     // ---------- 元素访问：同一套语法 ----------
     let a = pair.0;                // 1
     let b = nums.0;                // 10
@@ -99,7 +99,7 @@ fn main() u8 {
 
     std.println("literals ok, found={}", found);
     return 0;
-}
+};
 
 // 数量写进签名，比"传指针 + 传长度"少一个参数、少一次出错机会
 const dot = fn (a: *const [3]f32, b: *const [3]f32) f32 {

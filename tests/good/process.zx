@@ -2,13 +2,13 @@
 // exit 是 noreturn——它之后的代码编译器直接拒收。
 const std = module("std");
 
-fn eqlStr(a: []const u8, b: []const u8) bool {
+const eqlStr = fn (a: []const u8, b: []const u8) bool {
     if (a.len != b.len) { return false; }
     for (0..a.len) i { if (a[i] != b[i]) { return false; } }
     return true;
-}
+};
 
-fn main() u8 {
+const main = fn () u8 {
     var args = std.process.args();          // [][]const u8，argv[0] 不算
     std.println("argc={d}", args.len);
     for (0..args.len) i { std.println("arg {d}: {s}", i, args[i]); }
@@ -27,7 +27,7 @@ fn main() u8 {
     if (again) v { std.println("after: {s}", v); }
 
     return 0;
-}
+};
 // expect-output
 // argc=0
 // <unset>

@@ -1,8 +1,8 @@
 // expect: without an upper bound needs another sequence
 // `0..` 不是"无限范围"，只是跟着别的序列走的下标（spec §8.3）
-fn main() u8 {
+const main = fn () u8 {
     for (0..) i {
         if (i > 3) { return 0; }
     }
     return 0;
-}
+};

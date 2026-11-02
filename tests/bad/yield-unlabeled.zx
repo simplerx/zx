@@ -1,5 +1,5 @@
 // expect: no enclosing scope labeled 'tag'
 // 只有带标签的作用域能收割
-fn main() void {
+const main = fn () void {
     tag: 1;
-}
+};

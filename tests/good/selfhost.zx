@@ -24,15 +24,15 @@ const Tok = union {
     sym: {TokTag.sym, u8},
 };
 
-fn tok_is_op(t: Tok) bool {
+const tok_is_op = fn (t: Tok) bool {
     return switch (t.tag) {
         .num: false,
         .sym: t.sym == '+' || t.sym == '-' || t.sym == '*' || t.sym == '/' || t.sym == '(' || t.sym == ')',
     };
-}
+};
 
 // ③ 词法：按字节扫，switch 分派——`break` 不存在，用标志位收尾
-fn count_digits(src: []const u8) usize {
+const count_digits = fn (src: []const u8) usize {
     var n: usize = 0;
     var i: usize = 0;
     while (i < src.len) {
@@ -43,10 +43,10 @@ fn count_digits(src: []const u8) usize {
         i = i + 1;
     }
     return n;
-}
+};
 
 // ④ 关键字表：HashMap 是自举时查关键字的唯一现实选择
-fn keyword_lookup(al: std.Allocator) i32 {
+const keyword_lookup = fn (al: std.Allocator) i32 {
     var kw = std.HashMap(i32).init(al);
     var code: i32 = 0;
     if (kw.put("fn", 1)) { code = code + 1; }
@@ -56,7 +56,7 @@ fn keyword_lookup(al: std.Allocator) i32 {
     if (kw.get("nope")) nothere { code = code + 100; }
     kw.deinit();
     return code;                       // 2 + 2 = 4
-}
+};
 
 // ⑤ 递归下降：expr / term / atom 互相调用（前向引用必须成立）
 const Parser = struct {
@@ -66,14 +66,14 @@ const Parser = struct {
     nodes: std.ArrayList(*Node),
     al: std.Allocator,
 
-    fn init(al: std.Allocator, src: []const u8) Parser {
+    const init = fn (al: std.Allocator, src: []const u8) Parser {
         return Parser{
             .src = src, .i = 0, .depth = 0,
             .nodes = std.ArrayList(*Node).init(al), .al = al,
         };
-    }
+    };
 
-    fn new_node(self: *Parser, k: Kind) *Node {
+    const new_node = fn (self: *Parser, k: Kind) *Node {
         var n: *Node = std.heapAlloc(self.al, Node, 1);
         n.kind = k;
         n.lhs = null;
@@ -81,14 +81,14 @@ const Parser = struct {
         n.val = 0;
         var ignored = self.nodes.push(n);
         return n;
-    }
+    };
 
-    fn peek(self: *Parser) u8 {
+    const peek = fn (self: *Parser) u8 {
         if (self.i >= self.src.len) { return 0; }
         return self.src[self.i];
-    }
+    };
 
-    fn expr(self: *Parser) *Node {
+    const expr = fn (self: *Parser) *Node {
         var n = self.term();
         var more = true;
         while (more) {
@@ -106,9 +106,9 @@ const Parser = struct {
             }
         }
         return n;
-    }
+    };
 
-    fn term(self: *Parser) *Node {
+    const term = fn (self: *Parser) *Node {
         var n = self.atom();
         var more = true;
         while (more) {
@@ -126,9 +126,9 @@ const Parser = struct {
             }
         }
         return n;
-    }
+    };
 
-    fn atom(self: *Parser) *Node {
+    const atom = fn (self: *Parser) *Node {
         let c = self.peek();
         if (c == '(') {
             self.i = self.i + 1;
@@ -149,17 +149,17 @@ const Parser = struct {
         let n = self.new_node(Kind.num);
         n.val = v;
         return n;
-    }
+    };
 };
 
 /* 没有 `.?`：拆可空指针只能 if 捕获。放在这里是为了量化这个缺口有多贵——
  * 每个子节点访问都要绕一次函数调用。 */
-fn kid(o: ?*Node) i32 {
+const kid = fn (o: ?*Node) i32 {
     if (o) n { return eval(n); }
     return 0;
-}
+};
 
-fn eval(n: *Node) i32 {
+const eval = fn (n: *Node) i32 {
     return switch (n.kind) {
         .num: n.val,
         .add: kid(n.lhs) + kid(n.rhs),
@@ -167,9 +167,9 @@ fn eval(n: *Node) i32 {
         .mul: kid(n.lhs) * kid(n.rhs),
         .div: kid(n.lhs) / kid(n.rhs),
     };
-}
+};
 
-fn main() i32 {
+const main = fn () i32 {
     let al = std.heap.page;
 
     // 词法
@@ -203,4 +203,4 @@ fn main() i32 {
     std.println("list={s}", list.items());
 
     return 0;
-}
+};
