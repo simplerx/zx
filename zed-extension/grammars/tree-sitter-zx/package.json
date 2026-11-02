@@ -1,0 +1,7 @@
+{
+  "name": "tree-sitter-zx",
+  "version": "0.1.0",
+  "main": "bindings/node",
+  "keywords": ["parser", "zx"],
+  "license": "MIT"
+}

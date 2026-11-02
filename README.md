@@ -1634,3 +1634,40 @@ zxc 用自己的 Zx 前端解析 zxfe.zx、序列化、装载、编译出**新 z
 
 结果：位置对拍 **61/61 全等**；`sh test.sh` **200 项全过**。
 取舍见 decisions **§71**。
+
+## M39：Zed 编辑器扩展——零代码语言插件 + 语法 wasm 的链接模型
+
+给 Zed 写 Zx 语言支持（`zed-extension/`），全程不带一行 Rust：
+
+- **`grammars/tree-sitter-zx/grammar.js`**——从零写的 tree-sitter 语法，
+  以 65 个真实文件（tests/good + bench + spec/examples + std）回归到
+  **100% 无 ERROR/MISSING**。Zx 语法难写的点全在这里：
+  - 关键字提取走 `word: $.identifier`，基元类型（`u8` 等）会被 identifier
+    同长压掉，必须 `prec(1, ...)` 提权；
+  - 后缀链（`.foo()`、`?` 解包）挂在 `_postfix_base` 上，故意排除
+    if/while/block——否则 `if…;` 之后下一行的调用会串进条件表达式；
+  - 捕获臂拆 `capture_block`（块体，静态高优）与 `capture_expr`
+    （表达式体，`prec(-2)` 兜底），双序绑定（`.circle a:` / `.circle: r`）
+    才能各走各的 GLR 路径；
+  - `expression_statement` 的可选分号要靠自冲突
+    `[$.expression_statement]` 交给 GLR 运行时挑无错路径——`prec.right`
+    会让臂体确定性吞掉 `let` 的分号，产出 MISSING。
+- **`languages/zx/`**——`config.toml` + `highlights.scm`（关键字/类型/
+  函数定义/捕获绑定/运算符全套捕获）+ `outline.scm`（顶层 const/extern/
+  字段/枚举成员），查询文件都过 `tree-sitter query` 编译校验。
+- **`grammars/build-wasm.sh`**——语法 wasm 的构建脚本，本次最大的坑：
+  Zed 的 tree-sitter WasmStore 让**所有语法共享一块线性内存**，语法模块
+  必须是 wasi **reactor / 动态链接**产物——导入 `env.memory` /
+  `__memory_base` / `__indirect_function_table` / `__table_base`，导出
+  `tree_sitter_zx` / `_initialize` / `__wasm_apply_data_relocs`。
+  用 freestanding + 自带 memory 的静态模型编译，模块本身合法、导出符号
+  齐全，但装载后一解析文件 Zed 就**静默崩溃**（无 panic、无转储）。
+  修法：`zig cc --target=wasm32-wasi -nostdlib -shared -fPIC` + 自带
+  `_initialize`（转调 `__wasm_call_ctors` 初始化被动数据段），libc 头
+  用三个 stub（parser.c 只用 NULL/bool/stdint）绕过。产物与官方
+  zig.wasm 逐段对齐后恢复正常。
+- **注册**：dev 扩展 = `extension.toml`（`languages` 必须是**数组**；
+  `[grammars.zx]` 三字段 `repository/rev/path` 必填）+ index.json 条目
+  （manifest 里**不能有 `lib` 字段**——那是 Rust 编译扩展的标志，写了
+  Zed 就会去找 `extension.wasm`）。改 index.json 前先杀 Zed——它启动
+  时会重建索引，非法条目直接删除。
