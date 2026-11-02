@@ -252,7 +252,11 @@ arm_body    = expr                                   (* 表达式臂：值即臂
    捕获的是"匹配到的东西"（联合体载荷 / ?T 载荷 / !T 载荷或错误值 /
    枚举与标量主语本身），只读、作用域限臂、仅限单模式臂。 *)
 case_label  = "." IDENT                                (* 联合体成员 / 枚举变体 *)
-            | INT | CHAR | IDENT ;
+            | INT | CHAR | IDENT | "-" INT ;           (* 整数 / 字符 / true/false / 负数 *)
+(* 多模式的逗号判据（v0.25）：逗号后面能开一个新模式才继续——
+   `'a', 'b': 1` 是一条臂，`'a': 1, 'b': 2` 是两条臂。
+   char 模式按落点定型：subject 是 i32 就按 i32 比，没有落点才是 u8；
+   码位超出落点范围是编译错误（不截断）。 *)
 
 continue_expr = "continue" [ ":" IDENT ] ";" ;   (* 进入下一轮；:tag 直接进入外层标签循环 *)
 return_expr = "return" [ expr ] ";" ;        (* 函数体不用标签，离开函数只靠 return *)

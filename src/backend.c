@@ -2697,7 +2697,11 @@ static void ex(Buf *b, Node *n) {
         return;
     }
     case NK_CHAR:
-        buf_printf(b, "((uint8_t)%llu)", (unsigned long long)n->ival);
+        /* 类型由 sema 定（落点 i32 就是 i32）。硬写 uint8_t 会把 `'中'`
+         * 这种多字节字符截成低位字节。 */
+        buf_puts(b, "((");
+        ctype(b, (n->ty && n->ty->kind == TY_INT) ? n->ty : ty_u8());
+        buf_printf(b, ")%llu)", (unsigned long long)n->ival);
         return;
     case NK_BOOL:
         buf_puts(b, n->ival ? "true" : "false");
@@ -3832,10 +3836,18 @@ static void gen_switch(Node *n, const char *slot, Type *slot_ty) {
         line("%s %s = %s;", cty(st), tmp, cxs(n->a, st));
         hdr = subj_agg ? tagref(tmp, st) : tmp;
         buf_putc(g_out, '\n');
-        line("switch (%s) {", hdr);
+        if (st && st->kind == TY_BOOL)
+            line("switch ((int)%s) {", hdr);
+        else
+            line("switch (%s) {", hdr);
     } else {
         buf_putc(g_out, '\n');
-        line("switch %s {", exs_cond(n->a));   /* exs_cond 自带括号 */
+        /* C 的 `switch (a_bool)` 会触发 -Wswitch-bool：主语是 bool 时先转 int，
+         * 臂里的 `case true:` / `case false:` 本来就是 1 / 0。 */
+        if (st && st->kind == TY_BOOL)
+            line("switch ((int)%s) {", exs_cond(n->a));
+        else
+            line("switch %s {", exs_cond(n->a));   /* exs_cond 自带括号 */
     }
 
     int end = ++g_labid;

@@ -1,0 +1,7 @@
+// expect: char literal does not fit
+// char 字面量按落点定型：`'中'` 是码位 0x4E2D，装不进 u8。
+// 静默截断成 0x2D 就是 R10 要禁止的那类错误。
+const main = fn () i32 {
+    let c: u8 = '中';
+    return 0;
+};

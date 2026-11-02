@@ -111,6 +111,23 @@ static bool is_bool_word(Token *t) {
            (t->len == 5 && !memcmp(t->start, "false", 5));
 }
 
+/* 这个 token 能不能作为一个 switch 模式的**开头**（用来判断模式列表里的
+ * 逗号是"还有一个模式"还是别的）。
+ *
+ * 能开头的不多：`.成员`、整数字面量、char 字面量（v0.25）、`true`/`false`
+ * （它们在 lexer 里是标识符）、负号、以及 `(` 开头的转换式模式 `(error)Err.x`。
+ * 只认这几种，别的一律当成"模式列表结束"——报错落在 expect(TOK_COLON) 上，
+ * 信息比"expected a pattern"更贴近实际写错的地方。 */
+static bool starts_pattern(Token *t) {
+    if (!t) return false;
+    switch (t->kind) {
+    case TOK_DOT: case TOK_INT: case TOK_CHAR: case TOK_MINUS: case TOK_LPAREN:
+        return true;
+    default:
+        return is_bool_word(t);
+    }
+}
+
 /* Is the `{` at index i a block (true) or a tuple literal (false)? */
 static bool brace_is_block(P *p, size_t i) {
     int depth = 0;
@@ -1270,7 +1287,7 @@ static Node *parse_switch(P *p, const char *label) {
             arm->flag = true;                 /* else arm */
         } else {
             for (;;) {
-                /* pattern: .name | int | (error)Err.x | … */
+                /* pattern: .name | int | char | (error)Err.x | … */
                 if (at(p, TOK_DOT) && peek(p, 1)->kind == TOK_IDENT) {
                     Token *dot = advance(p);
                     Token *id = advance(p);
@@ -1280,8 +1297,10 @@ static Node *parse_switch(P *p, const char *label) {
                 } else {
                     push(arm, parse_unary(p));
                 }
-                if (at(p, TOK_COMMA) && peek(p, 1)->kind != TOK_RBRACE &&
-                    (peek(p, 1)->kind == TOK_INT || peek(p, 1)->kind == TOK_DOT))
+                /* 逗号后面能开一个新模式才继续：`'a', 'b':`、`true, false:` 都要，
+                 * 而 `1: {}, 2: {}` 里的逗号是臂分隔符，此时下一个 token 是臂的
+                 * 模式——也满足 starts_pattern，由下一轮循环重新开一条臂。 */
+                if (at(p, TOK_COMMA) && starts_pattern(peek(p, 1)))
                     advance(p);
                 else
                     break;
