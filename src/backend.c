@@ -3159,6 +3159,13 @@ static void gen_decl_inner(Node *d) {
      * 引用处直接落到被指向的那份上 */
     if (!sema_sym_has_storage(d->sym)) return;
 
+    /* `void` 没有存储：编译期已知为假、又没有 `else` 的 `if` 就是这种类型。
+     * 绑定只是给"没有值"起个名字，初始化器的副作用照发，C 里不建变量。 */
+    if (t->kind == TY_VOID) {
+        if (d->b) gen_value(d->b, NULL, NULL);
+        return;
+    }
+
     const char *nm = sym_cname(d);
     char *cn = cnames(nm);
 

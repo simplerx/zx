@@ -1,0 +1,68 @@
+// label_block.zx —— 标签块（v0.22）：标签写在条件 / 模式之后、块之前。
+//
+// 一条规则区分两个名字：紧跟 `{` 的是**捕获**（绑定的就是匹配到的东西），
+// 紧跟 `:` 的是**标签**（块内 `lbl: v;` 交出值）。两者可以同时出现，捕获在前。
+//
+// 这条规则在四处一样：switch 臂、if 臂、while、for。
+const std = module("std");
+
+const Shape = union(enum) {
+    circle: f64,
+    rect:   { f64, f64 },
+};
+
+// ① 标签块臂：只交值，不捕获
+const kind = fn (s: Shape) i32 {
+    return switch (s) {
+        .circle: a: { a: 1; },
+        .rect:   a: { a: 2; },
+    };
+};
+
+// ② 捕获 + 标签：先捕获载荷 `r`，再给块贴标签 `a`
+const measure = fn (s: Shape) f64 {
+    return switch (s) {
+        .circle: r  a: { a: r * 2.0; },
+        .rect:   wh a: { a: wh.0 + wh.1; },
+    };
+};
+
+// ③ 枚举臂：捕获主语值本身，标签块再加工
+const Color = enum { red, green };
+const weight = fn (c: Color) i32 {
+    return switch (c) {
+        .red:   v r: { r: (i32)v + 10; },
+        .green: v g: { g: (i32)v + 20; },
+    };
+};
+
+fn main() i32 {
+    const c = Shape{ .circle = 1.5 };
+    const r = Shape{ .rect = { 3.0, 4.0 } };
+
+    // ④ if 臂的标签块；没有 else 时，条件为假就是零值
+    const i = if (true) tag: { tag: 5; };
+    const j = if (false) tag: { tag: 5; } else 0;
+
+    // ⑤ while：没有 break，`done: v;` 就是带值的出口
+    var n: i32 = 0;
+    const w = while (true) done: {
+        n = n + 1;
+        if (n == 7) { done: n * 10; }
+    };
+
+    // ⑥ for：标签挂在循环上，直接从体内结束剩下的迭代
+    const f = for (0..8) k hit: {
+        if (k == 3) { hit: (i32)k; }
+    } else -1;
+
+    std.println("{} {} {} {}", kind(c), kind(r), measure(c), measure(r));
+    std.println("{} {} {} {}", i, j, w, f);
+    std.println("{} {}", weight(Color.red), weight(Color.green));
+    return 0;
+}
+
+// expect-output
+// 1 2 3 7
+// 5 0 70 3
+// 10 21

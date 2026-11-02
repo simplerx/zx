@@ -102,7 +102,13 @@ labeled_expr = IDENT ":" ( block | if_expr | for_expr | while_expr | switch_expr
      done: for (0..n) i { … done: v; … }
      let x = body: { … body: 1; };
      let sign = s: if (c) { s: 1; } else { s: 0; };
-   只有带标签的作用域能被收割 / 交值；无标签块恒为 {}。 *)
+   只有带标签的作用域能被收割 / 交值；无标签块恒为 {}。
+   v0.22 起标签也可以贴在结构后面（块的名字）：
+     if (c) tag: { tag: 1; }
+     while (c) done: { done: 42; }
+     for (0..n) i hit: { hit: i; }
+     switch (s) { .a: r lbl: { lbl: r; } }
+   while / for 的标签挂在循环上（收割要能结束循环）；if 的挂在块上。 *)
 
 defer_stmt  = "defer" ( expr ";" | block ) ;        (* 离开所在块时执行，LIFO *)
 
@@ -190,10 +196,11 @@ ctrl_expr   = if_expr | while_expr | for_expr | switch_expr
 (* 没有 break（v0.5 删除）：离开作用域用收割语句 yield_stmt。
    defer 是语句，不是表达式，见 stmt。 *)
 
-if_expr     = "if" "(" expr ")" [ IDENT ] if_arm
-              [ "else" ( if_expr | [ IDENT ] if_arm ) ] ;
+if_expr     = "if" "(" expr ")" if_arm
+              [ "else" ( if_expr | if_arm ) ] ;
 if_arm      = expr                                     (* 表达式臂：糖，值即 if 的值 *)
-            | [ IDENT ] block                          (* [标签] 块臂：值来自臂内收割 *)
+            | [ IDENT ] [ IDENT ":" ] block            (* [捕获] [标签:] 块臂：
+                                                          名字后跟 { 是捕获，跟 : 是标签 *)
             | [ IDENT ] ( return_expr | continue_expr | defer_stmt )
                                                        (* 单语句臂（v0.13）：不用写花括号 *)
             | [ IDENT ] expr ";" ;                     (* 单语句臂（v0.15）：一条表达式语句。
@@ -201,15 +208,20 @@ if_arm      = expr                                     (* 表达式臂：糖，�
                                                           没有 else 时分号归外层语句。 *)
 (* 捕获名直接写，不带 | |。
    表达式臂 if (c) a else b 是"匿名标签块 + 收割"的糖。
-   块臂里的收割语句穿过 if，命中外面（或 if 自身）的标签作用域。 *)
+   块臂里的收割语句穿过 if，命中外面（或 if 自身）的标签作用域。
+   没有 else 的 if 也能当值（v0.22）：类型由 then 臂给出，假分支是零值。 *)
 
-while_expr  = "while" "(" expr ")" [ IDENT ] block
+while_expr  = "while" "(" expr ")" [ IDENT ] [ IDENT ":" ] block
               [ "else" ( expr | block ) ] ;
-(* else 只在正常跑完时执行；else 表达式的值就是循环的值（值形式） *)
+(* else 只在正常跑完时执行；else 表达式的值就是循环的值（值形式）。
+   [IDENT] 是 ?T / !T 的捕获；[IDENT ":"] 是循环的标签（v0.22），
+   体内 tag: v; 结束循环并交值——没有 break。 *)
 
-for_expr    = [ "inline" ] "for" "(" for_seq { "," for_seq } ")" IDENT { "," IDENT } block
+for_expr    = [ "inline" ] "for" "(" for_seq { "," for_seq } ")"
+              IDENT { "," IDENT } [ IDENT ":" ] block
               [ "else" ( expr | block ) ] ;
 (* else 只在正常跑完时执行；收割离开时跳过 else。
+   [IDENT ":"] 是循环的标签（v0.22）：for (0..8) k hit: { … hit: k; }。
    inline for（v0.9）：序列必须有编译期长度，循环体按长度克隆展开，
    绑定是编译期常量；没有 else，不参与标签/收割。 *)
 for_seq     = expr [ ".." [ expr ] ] ;
@@ -224,13 +236,14 @@ for_seq     = expr [ ".." [ expr ] ] ;
 switch_expr = "switch" "(" expr ")" "{"
               [ arm { "," arm } [ "," ] ]
               "}" ;
-arm         = pattern_list [ IDENT ] ":" [ IDENT ] arm_body ;
+arm         = pattern_list ":" [ IDENT ] [ IDENT ":" ] arm_body ;
 pattern_list = case_label { "," case_label } | "else" ;
 arm_body    = expr                                   (* 表达式臂：值即臂值 *)
             | block ;                                (* 块臂：无值；带标签则由收割交值 *)
-(* 模式与臂体之间用 ":" 分隔；模式后可写臂标签（给块臂交值用）。
-   臂体前的 [IDENT] 是捕获（v0.20）：判据是名字后面紧跟 "{"——
-   被捕获的是"匹配到的东西"（联合体载荷 / ?T 载荷 / !T 载荷或错误值 /
+(* 模式与臂体之间用 ":" 分隔；臂与臂之间用 "," 分隔（v0.22：标签从模式后
+   移到冒号后）。冒号后的名字，后面跟 "{" 是捕获（v0.20），跟 ":" 是标签；
+   两者可同时出现，捕获在前：`.circle: r a: { a: r * 2.0; }`。
+   捕获的是"匹配到的东西"（联合体载荷 / ?T 载荷 / !T 载荷或错误值 /
    枚举与标量主语本身），只读、作用域限臂、仅限单模式臂。 *)
 case_label  = "." IDENT                                (* 联合体成员 / 枚举变体 *)
             | INT | CHAR | IDENT ;

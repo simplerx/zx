@@ -1,0 +1,12 @@
+// switch 臂标签的位置：v0.22 起标签是块的名字，写在冒号**之后**。
+// `1 lbl: { … }` 是旧写法（标签在模式后），现在会得到一条指路的错误。
+const main = fn () u8 {
+    const x = 1;
+    switch (x) {
+        1 lbl: { lbl: 10; },
+        else { },
+    }
+    return 0;
+};
+
+// expect-error: the arm label goes after the `:`

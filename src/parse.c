@@ -1011,6 +1011,17 @@ static Node *parse_if_arm(P *p, const char **capture) {
         *capture = take_ident(p);
         return parse_block(p);
     }
+    /* 捕获 + 标签块：`if (o) v lbl: { … }`——和 switch 臂同一套写法：
+     * 名字后紧跟 `{` 是捕获，跟 `:` 的是标签。 */
+    if (at(p, TOK_IDENT) && !is_bool_word(cur(p)) &&
+        peek(p, 1)->kind == TOK_IDENT && peek(p, 2)->kind == TOK_COLON) {
+        *capture = take_ident(p);
+        const char *lb = dup_tok(advance(p));
+        advance(p);                       /* ':' */
+        Node *b = parse_block(p);
+        b->label = lb;
+        return b;
+    }
     if (at(p, TOK_LBRACE)) return parse_block(p);
 
     /* 单条语句臂（语法糖，M19）：`if (c) return x;` / `continue;` / `defer f();`
@@ -1115,7 +1126,14 @@ static Node *parse_while(P *p, const char *label) {
     expect(p, TOK_LPAREN);
     n->a = parse_expr(p);
     expect(p, TOK_RPAREN);
+    /* `while (c) v { … }` 捕获；`while (c) lbl: { … }` 标签块——循环体里
+     * `lbl: v;` 结束循环并交出值。没有 `break`，这就是带值的出口。 */
     if (at(p, TOK_IDENT) && peek(p, 1)->kind == TOK_LBRACE) n->name = take_ident(p);
+    if (at(p, TOK_IDENT) && !is_bool_word(cur(p)) && peek(p, 1)->kind == TOK_COLON) {
+        if (n->label) perr(p, "`while` already has a label before the keyword");
+        n->label = take_ident(p);
+        advance(p);                       /* ':' */
+    }
     n->b = parse_block(p);
     if (accept(p, TOK_KW_ELSE)) n->c = at(p, TOK_LBRACE) ? parse_block(p) : parse_expr(p);
     return n;
@@ -1152,6 +1170,13 @@ static Node *parse_for(P *p, const char *label, bool allow_nobind) {
     }
     for (int i = 0; i < nseq; i++) push(n, seqs[i]);
     for (int i = 0; i < nbind; i++) push(n, binds[i]);
+    /* 绑定之后可以给循环体贴标签：`for (xs) x lbl: { …; lbl: v; }`。
+     * 标签挂在循环上（不是块上），`lbl: v;` 才能跳出循环。 */
+    if (at(p, TOK_IDENT) && !is_bool_word(cur(p)) && peek(p, 1)->kind == TOK_COLON) {
+        if (n->label) perr(p, "`for` already has a label before the keyword");
+        n->label = take_ident(p);
+        advance(p);                       /* ':' */
+    }
     n->a = node_new(NK_TUPLE, t->line, t->col);   /* arity markers */
     n->a->ival = (uint64_t)nseq;
     n->a->fval = (double)nbind;
@@ -1192,14 +1217,36 @@ static Node *parse_switch(P *p, const char *label) {
                     break;
             }
         }
+        /* v0.22 起标签写在冒号后面（`模式: 标签: {…}`），和捕获名同一位置。
+         * 旧的 `模式 标签:` 写法在这里点一下，省得报一句没头没脑的
+         * "expected ':'"。 */
         if (at(p, TOK_IDENT) && peek(p, 1)->kind == TOK_COLON && !is_bool_word(cur(p)))
-            arm->label = take_ident(p);        /* arm label */
+            perr(p, "the arm label goes after the `:` — write `pattern: [cap] lbl: { … }`");
         expect(p, TOK_COLON);
-        /* 捕获（M28）：`pattern: cap { … }`——IDENT 后面紧跟 `{` 才算捕获名，
-         * 否则它是表达式臂的开头（`.x: foo` 是值 foo）。捕获只配块臂，
-         * `cap 值` 和 `值` 没法区分，索性不允许。 */
-        if (at(p, TOK_IDENT) && peek(p, 1)->kind == TOK_LBRACE && !is_bool_word(cur(p)))
-            arm->name = take_ident(p);
+        /* 冒号后面、臂体前面最多两个名字（v0.22）：
+         *   cap { … }        捕获：名字后紧跟 `{`——绑定的就是"匹配到的东西"
+         *   lbl: { … }       标签块臂：名字后跟 `:`，块里 `lbl: v;` 交出臂的值
+         *   cap lbl: { … }   两者都要：先捕获，再给块贴标签
+         * 名字后面既不是 `{` 也不是 `:` 时，它就是表达式臂的开头（`.x: foo`）。
+         * 捕获只配块臂：`cap 值` 和裸 `值` 没法区分，索性不允许。 */
+        if (at(p, TOK_IDENT) && !is_bool_word(cur(p))) {
+            if (peek(p, 1)->kind == TOK_LBRACE) {
+                arm->name = take_ident(p);
+                if (at(p, TOK_IDENT) && peek(p, 1)->kind == TOK_COLON) {
+                    arm->label = take_ident(p);
+                    advance(p);                /* ':' */
+                }
+            } else if (peek(p, 1)->kind == TOK_COLON) {
+                arm->label = take_ident(p);
+                advance(p);                     /* ':' */
+            } else if (peek(p, 1)->kind == TOK_IDENT && peek(p, 2)->kind == TOK_COLON) {
+                arm->name = take_ident(p);      /* cap lbl: { … } */
+                arm->label = take_ident(p);
+                advance(p);                     /* ':' */
+            }
+        }
+        if (arm->label && !at(p, TOK_LBRACE))
+            perr(p, "a labeled arm needs a block: the label is the scope its `lbl: v;` yields to");
         arm->a = at(p, TOK_LBRACE) ? parse_block(p) : parse_expr(p);
         push(n, arm);
         if (!accept(p, TOK_COMMA)) {

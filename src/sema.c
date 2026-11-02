@@ -3512,7 +3512,9 @@ static Type *check_if(Node *n, Type *expect) {
     if (lb)                        r = lb->has ? lb->ty : ty_void();
     else if (known)                r = cv->bval ? tt : (et ? et : ty_void());
     else if (et)                   r = unify(n, tt, et);
-    else                           r = ty_void();
+    /* 没有 `else` 的 `if` 也能当值：条件为假时没有臂执行，值就是零值
+     * （和"块没被收割"是 `{}` 同一条规则）。类型只能由 then 臂给出。 */
+    else                           r = tt;
     if (lb) label_pop();
     n->ty = r;
     return r;
