@@ -1,0 +1,43 @@
+// pool.zx —— std.Pool 分配/释放。
+// 维持 1024 个活块的环形：每步 alloc 一个新块写一字节，再释放 1024 步前
+// 的旧块。环形是为了对上 malloc/free 成对消除（clang 会把"分配立刻释放"
+// 整个删掉，对照组测出来就是假的快）。轮转 4 个尺寸档（16/64/96/192）。
+// 10,000,000 步。
+const std = module("std");
+
+const RING: usize = 1024;
+
+const main = fn () u8 {
+    var p = std.Pool.init(std.heap.page);
+    if (p) pv {
+        var pp = pv;
+        var ring = std.stackAlloc(?*u8, RING);
+        var sink: u64 = 0;
+        var r: usize = 0;
+        var i: usize = 0;
+        while (i < 10000000) {
+            // 先释放旧块（池的 free 不需要尺寸，块头里有）
+            if (i >= RING) {
+                let old = ring[r];
+                if (old) ob {
+                    if (!pp.free(ob)) { return 1; }
+                } else { return 1; }
+            }
+            var size: usize = 16;
+            let m = i & 3;
+            if (m == 1) { size = 64; } else if (m == 2) { size = 96; } else if (m == 3) { size = 192; }
+            let b = pp.alloc(size);
+            if (b) bv {
+                bv.0 = 7;
+                sink = sink + (u64)(i64)bv.0;
+            } else { return 1; }
+            ring[r] = b;
+            r = (r + 1) & (RING - 1);
+            i = i + 1;
+        }
+        std.println("pool sink={}", sink);
+        pp.deinit();
+        return 0;
+    }
+    return 1;
+};

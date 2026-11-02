@@ -158,6 +158,33 @@ static void tn(Buf *b, Type *t) {
 }
 
 static void ctype(Buf *b, Type *t);
+static void ensure_type(Type *t);
+
+/* 只要"名字"不要"定义"：`?*Node` / `[]Node` 的 typedef 里写的是
+ * `Node *payload`——指针指向不完整类型在 C 里是合法的，所以这里
+ * 只落 `typedef struct Node Node;`，完整定义留给后续的 ensure_type
+ * （state=3 表示"名字已落，身体待补"）。
+ *
+ * 为什么需要它：自引用的 optional 会把顺序打环——
+ *   ensure(?*Region) → ensure(Region) → Region 的字段又是 ?*Region
+ *   （state=1，跳过）→ Region 的 body 引用还没发射的 Opt typedef。
+ * 先把名字落下来，环就断了。 */
+static void ensure_fwd(Type *t) {
+    if (!t) return;
+    if (t->kind == TY_PTR) { ensure_fwd(t->elem); return; }
+    if (t->kind != TY_STRUCT && t->kind != TY_UNION) { ensure_type(t); return; }
+    int i = tslot(t);
+    if (g_ts[i].state) return;          /* 1/2/3：名字都已经在（或正在） */
+    g_ts[i].state = 3;
+    Buf *save = g_out;
+    g_out = &g_btypes;
+    Buf n; buf_init(&n);
+    tn(&n, t);
+    buf_printf(g_out, t->kind == TY_STRUCT ? "typedef struct %s %s;\n"
+                                           : "typedef union %s %s;\n",
+               n.data, n.data);
+    g_out = save;
+}
 
 static void ensure_type(Type *t) {
     if (!t) return;
@@ -171,7 +198,9 @@ static void ensure_type(Type *t) {
     default: return;
     }
     int i = tslot(t);
-    if (g_ts[i].state) return;
+    /* state=3（ensure_fwd 只落过前向声明）要继续把身体补完 */
+    if (g_ts[i].state == 1 || g_ts[i].state == 2) return;
+    bool need_fwd = (g_ts[i].state == 0);
     g_ts[i].state = 1;
 
     Buf *save = g_out;
@@ -190,17 +219,43 @@ static void ensure_type(Type *t) {
 
     switch (t->kind) {
     case TY_SLICE: {
-        ensure_type(t->elem);
-        buf_puts(g_out, "typedef struct { ");
-        ctype(g_out, t->elem);
-        buf_printf(g_out, " *ptr; size_t len; } %s;\n", n.data);
+        if (t->elem->kind == TY_STRUCT || t->elem->kind == TY_UNION) {
+            /* 元素按指针存：名字先落，typedef 随后，完整定义最后补。
+             * 载荷类型名直接用 tn（ctype 会对结构体顺手 ensure_type，
+             * 把身体插进这行 typedef 中间）。 */
+            ensure_fwd(t->elem);
+            Buf pn; buf_init(&pn);
+            tn(&pn, t->elem);
+            buf_printf(g_out, "typedef struct { %s *ptr; size_t len; } %s;\n",
+                       pn.data, n.data);
+            ensure_type(t->elem);
+        } else {
+            ensure_type(t->elem);
+            buf_puts(g_out, "typedef struct { ");
+            ctype(g_out, t->elem);
+            buf_printf(g_out, " *ptr; size_t len; } %s;\n", n.data);
+        }
         break;
     }
     case TY_OPT: {
-        ensure_type(t->elem);
-        buf_puts(g_out, "typedef struct { ");
-        ctype(g_out, t->elem);
-        buf_printf(g_out, " payload; bool tag; } %s;\n", n.data);
+        if (t->elem->kind == TY_PTR &&
+            (t->elem->elem->kind == TY_STRUCT || t->elem->elem->kind == TY_UNION)) {
+            /* 同 SLICE：`?*T` 的载荷是 `T *`，只要名字。
+             * 不先落名字的话，`?*Region` 嵌在 Region 自己的字段里时
+             * （Region 的 body 引用 Opt 的名字），Opt 的 typedef 会
+             * 被排到 body 之后，C 编译器直接报 unknown type。 */
+            ensure_fwd(t->elem->elem);
+            Buf pn; buf_init(&pn);
+            tn(&pn, t->elem->elem);
+            buf_printf(g_out, "typedef struct { %s * payload; bool tag; } %s;\n",
+                       pn.data, n.data);
+            ensure_type(t->elem);   /* 完整定义照常补上 */
+        } else {
+            ensure_type(t->elem);
+            buf_puts(g_out, "typedef struct { ");
+            ctype(g_out, t->elem);
+            buf_printf(g_out, " payload; bool tag; } %s;\n", n.data);
+        }
         break;
     }
     case TY_ERR: {
@@ -242,11 +297,14 @@ static void ensure_type(Type *t) {
     case TY_STRUCT: case TY_UNION: {
         /* 前向声明**先**落地，再处理字段类型：
          * 字段可能是 `*Node`（指向自己），也可能是 `?*Node` 这种"引用自己的
-         * 另一个 typedef"——两种都要求名字在别人引用它之前就存在。 */
+         * 另一个 typedef"——两种都要求名字在别人引用它之前就存在。
+         * state=3 进来的（ensure_fwd 已落过名字）就不重复发了。 */
         bool tagged_u = (t->kind == TY_UNION && t->is_tagged && t->tag_ty);
-        buf_printf(g_out, t->kind == TY_STRUCT || tagged_u
-                              ? "typedef struct %s %s;\n" : "typedef union %s %s;\n",
-                   n.data, n.data);
+        if (need_fwd) {
+            buf_printf(g_out, t->kind == TY_STRUCT || tagged_u
+                                  ? "typedef struct %s %s;\n" : "typedef union %s %s;\n",
+                       n.data, n.data);
+        }
         for (int k = 0; k < t->nfields; k++)
             if (!t->fields[k].is_static) ensure_type(t->fields[k].ty);
 
@@ -2989,7 +3047,7 @@ static void ex(Buf *b, Node *n) {
      * （没有 payload 字段）也走得通。 */
     case NK_TRY: {
         Type *t = n->a->ty;
-        if (!t || t->kind != TY_ERR) { ex(b, n->a); return; }
+        if (!t || (t->kind != TY_ERR && t->kind != TY_OPT)) { ex(b, n->a); return; }
         Type *ret = g_cur_ret;
         if (!ret || ret->kind != TY_ERR) { ex(b, n->a); return; }
 
@@ -2998,6 +3056,29 @@ static void ex(Buf *b, Node *n) {
         snprintf(tmp, sizeof tmp, "_ty%d", tn_);
         snprintf(rv,  sizeof rv,  "_tyr%d", tn_);
         tn_++;
+
+        if (t->kind == TY_OPT) {
+            /* `?T` 的 try（v0.26）：tag 是 bool，true=有值。空（null）抛
+             * 保留错误码 error.null ≡ 65535（§5），沿同一条传播路上行。 */
+            line("%s %s = %s;", cty(t), tmp, cxs(n->a, t));
+            line("if (!%s.tag) {", tmp);
+            g_ind++;
+            if (g_is_main) {
+                run_defers(0);
+                /* main 交出去的是 int：error.null 的退出码就是 65535（OS 截 8 位） */
+                line("return (int)(65535);");
+            } else {
+                line("%s %s = {0};", cty(ret), rv);
+                line("%s.tag = 65535;", rv);
+                run_defers(0);
+                line("return %s;", rv);
+            }
+            g_ind--;
+            line("}");
+            if (t->elem && t->elem->kind == TY_VOID) buf_puts(b, "(void)0");
+            else buf_printf(b, "%s.payload", tmp);
+            return;
+        }
 
         line("%s %s = %s;", cty(t), tmp, cxs(n->a, t));
         line("if (%s.tag != 0) {", tmp);
@@ -3707,6 +3788,8 @@ static void gen_if_body(Node *n, const char *slot, Type *slot_ty) {
         if (n->c) {
             CScope s2; cscope_push(&s2);
             if (n->d && n->d->kind == NK_IDENT) {
+                /* else 捕获只属于 `!T`（`?T` + else 捕获已被 sema 拒掉）。
+                 * is_opt 分支只是防御：tag 是 bool。 */
                 Type *et = is_err ? ty_error() : ty_bool();
                 line("%s %s = %s.tag;", cty(et), cnames(n->d->name), tmp);
             }

@@ -1,0 +1,255 @@
+// pool.zx —— 尺寸分级内存池（移植自 ecs/src/pool.zig，去掉 ECS 依赖）。
+//
+// 分级：16…128 每 16B 一档（8 档），256B…256KiB 每档 ×2（11 档），共 19 档；
+// 更大的请求绕过池直接向分配器要（块头格式一致，free 是同一条路径）。
+//
+// 每个块的布局（负载 16 字节对齐：槽区基址来自 malloc，本身 16 对齐，
+// 槽尺寸是 16 的倍数，于是每个槽都对齐）：
+//
+//     [ 16B Header ][ payload …… ]
+//
+// 块头记着申请字节数 / 世代号 / 状态，所以 free 只要裸指针，不必记住
+// 这块内存来自哪一档。释放已释放的块能被认出来（flags=FREED，返回
+// false），不会写坏空闲链——这是裸 malloc/free 给不了的安全网。
+//
+// 空闲链内联在被释放块的负载里（前 8 字节存下一块的块头地址），
+// 不需要额外分配。Zig 版用 ECS 的 Memory 槽位表管世代；这里槽位
+// 管理自包含：每个档位一条「整批槽区」链，用完开新批，槽位从不搬动。
+//
+// 用法（完整例子见 tests/good/std-pool.zx）：
+//     var p = std.Pool.init(std.heap.page);
+//     let q = p.alloc(64);              // ?*u8
+//     if (q) b { p.free(b); }           // false = 拒绝（已释放/非法块）
+//     let n = p.create(Node);           // ?*Node，按 @sizeOf(Node) 归档
+
+// 块状态：LIVE=在用，FREED=在空闲链上，EXTERNAL=绕过池的大块。
+const F_LIVE: u32 = 1;
+const F_FREED: u32 = 2;
+const F_EXTERNAL: u32 = 3;
+
+// 块头大小 = 负载对齐。
+const HDR: usize = 16;
+
+// 档位数：8 个线性档（16/32/…/128，共 8 个，别数成 7）+
+// 11 个 2 的幂档（256B…256KiB）。init 里就是按这两个循环铺的，
+// 两个循环的迭代次数之和必须正好等于它——错了就是堆越界。
+pub const classCount: usize = 19;
+
+// 超过这档就走大块路径。
+pub const maxClass: usize = 256 * 1024;
+
+// 16 向上取整。不用 ~（位反）：`x & 15` 恰好就是 x%16，减掉即得下取整。
+const align16 = fn (n: usize) usize {
+    let a = n + 15;
+    return a - (a & 15);
+};
+
+// 块头。len 是申请时的字节数（free 靠它重新找到档位）。
+const Header = struct {
+    len: u32,
+    gen: u32,
+    flags: u32,
+    reserved: u32,
+};
+
+// 一批槽区。槽位从不搬动（发出去的指针因此始终有效），
+// 用完就再开一批（批量翻倍，封顶 4096）；deinit 沿链整批归还。
+const Region = struct {
+    next: ?*Region,
+    base: *u8,      // 第一个块头
+    nslots: usize,
+    bytes: usize,   // 整批字节数（deinit 归还时要用）
+};
+
+// 单个档位。
+const Class = struct {
+    payload: usize,   // 负载容量（字节）
+    slotSize: usize,  // HDR + align16(payload)
+    head: usize,      // 空闲链头（块头地址；0 = 空）
+    count: usize,     // 在用块数
+    region: ?*Region, // 槽区链
+    batch: usize,     // 下一批开多少槽
+};
+
+// 空闲链入栈：下一块地址写进负载前 8 字节（最小档 16B，装得下）。
+const classPush = fn (c: *Class, hdrAddr: usize) void {
+    let np = (*usize)(hdrAddr + HDR);
+    np.0 = c.head;
+    c.head = hdrAddr;
+};
+
+// 空闲链出栈，返回块头地址；链空返回 0。
+const classPop = fn (c: *Class) usize {
+    let a = c.head;
+    if (a != 0) {
+        let np = (*usize)(a + HDR);
+        c.head = np.0;
+    }
+    return a;
+};
+
+// 再开一批槽，逐个铺块头、入空闲链（都是 FREED 状态：没被 alloc 领走之前
+// 就是"空闲"，free 到它们会被当作重复释放拦下）。
+const classGrow = fn (c: *Class, gpa: Allocator) bool {
+    let n = c.batch;
+    if (n < 4096) { c.batch = n * 2; }
+    let bytes = n * c.slotSize;
+
+    if (gpa.alloc(bytes)) base {
+        if (gpa.alloc(@sizeOf(Region))) rraw {
+            let r = (*Region)rraw;
+            r.next = c.region;
+            r.base = base;
+            r.nslots = n;
+            r.bytes = bytes;
+            c.region = r;
+            var j: usize = 0;
+            while (j < n) {
+                let a = (usize)base + j * c.slotSize;
+                let hp = (*Header)a;
+                hp.len = (u32)c.payload;
+                hp.gen = 0;
+                hp.flags = F_FREED;
+                hp.reserved = 0;
+                classPush(c, a);
+                j = j + 1;
+            }
+            return true;
+        }
+        // Region 结构分配失败：把刚要来的槽区还回去
+        gpa.free(base, bytes);
+    }
+    return false;
+};
+
+pub const Pool = struct {
+    gpa: Allocator,
+    classes: *Class,  // classCount 个连续的 Class
+
+    // 档位表运行期铺出来（线性段 + 2 的幂段）。
+    const init = fn (gpa: Allocator) ?Pool {
+        if (gpa.alloc(classCount * @sizeOf(Class))) p {
+            let cs = (*Class)p;
+            var idx: usize = 0;
+            var s: usize = 16;
+            while (s <= 128) {
+                let c = cs + idx;
+                c.payload = s;
+                c.slotSize = HDR + align16(s);
+                c.head = 0;
+                c.count = 0;
+                c.region = null;
+                c.batch = 64;
+                idx = idx + 1;
+                s = s + 16;
+            }
+            s = 256;
+            while (s <= maxClass) {
+                let c = cs + idx;
+                c.payload = s;
+                c.slotSize = HDR + align16(s);
+                c.head = 0;
+                c.count = 0;
+                c.region = null;
+                c.batch = 64;
+                idx = idx + 1;
+                s = s * 2;
+            }
+            return Pool{ .gpa = gpa, .classes = cs };
+        }
+        return null;
+    };
+
+    // 整池归还：沿档位 → 槽区链逐批 free。在用的块也一并还给系统，
+    // 调用方要保证此后不再解引用任何从这里拿出去的指针。
+    const deinit = fn (self: *Pool) void {
+        for (0..classCount) i {
+            let c = self.classes + i;
+            var r = c.region;
+            var running = true;
+            while (running) {
+                if (r) rr {
+                    let nxt = rr.next;
+                    self.gpa.free(rr.base, rr.bytes);
+                    self.gpa.free((*u8)rr, @sizeOf(Region));
+                    r = nxt;
+                } else {
+                    running = false;
+                }
+            }
+        }
+        self.gpa.free((*u8)self.classes, classCount * @sizeOf(Class));
+        self.classes = undefined;
+    };
+
+    // 能装下 size 的档位下标；等于 classCount 表示超出池范围。
+    const classOf = fn (self: *Pool, size: usize) usize {
+        var lo: usize = 0;
+        var hi: usize = classCount;
+        while (lo < hi) {
+            let mid = (lo + hi) / 2;
+            let c = self.classes + mid;
+            if (c.payload < size) { lo = mid + 1; } else { hi = mid; }
+        }
+        return lo;
+    };
+
+    // 按字节分配。失败返回 null。
+    const alloc = fn (self: *Pool, size: usize) ?*u8 {
+        let ci = self.classOf(size);
+        if (ci == classCount) {
+            // 大块：直接向分配器要 [头][负载]，格式与池内块一致
+            let total = HDR + size;
+            if (self.gpa.alloc(total)) b {
+                let hp = (*Header)b;
+                hp.len = (u32)size;
+                hp.gen = 0;
+                hp.flags = F_EXTERNAL;
+                hp.reserved = 0;
+                return b + HDR;
+            }
+            return null;
+        }
+        let c = self.classes + ci;
+        var a = classPop(c);
+        if (a == 0) {
+            if (!classGrow(c, self.gpa)) { return null; }
+            a = classPop(c);
+            if (a == 0) { return null; }
+        }
+        let hp = (*Header)a;
+        hp.flags = F_LIVE;
+        c.count = c.count + 1;
+        return (*u8)(a + HDR);
+    };
+
+    // 释放。返回 false = 拒绝：重复释放、或不像本池的块。
+    // 拒绝时不做任何写入——空闲链不会被踩坏。
+    const free = fn (self: *Pool, p: *u8) bool {
+        let a = (usize)p;
+        if (a < HDR) { return false; }
+        let ha = a - HDR;
+        let hp = (*Header)ha;
+        if (hp.flags == F_EXTERNAL) {
+            self.gpa.free((*u8)ha, HDR + (usize)hp.len);
+            return true;
+        }
+        if (hp.flags != F_LIVE) { return false; }  // FREED / 未知状态
+        let ci = self.classOf((usize)hp.len);
+        if (ci == classCount) { return false; }    // 长度不像池内块
+        let c = self.classes + ci;
+        hp.gen = hp.gen + 1;
+        hp.flags = F_FREED;
+        classPush(c, ha);
+        c.count = c.count - 1;
+        return true;
+    };
+
+    // 某一档当前在用块数（测试与诊断用）。
+    const used = fn (self: *Pool, size: usize) usize {
+        let ci = self.classOf(size);
+        if (ci == classCount) { return 0; }
+        let c = self.classes + ci;
+        return c.count;
+    };
+};

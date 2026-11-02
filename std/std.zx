@@ -14,6 +14,11 @@ pub const str = module("str.zx");
 pub const map = module("map.zx");
 pub const HashMap = map.HashMap;
 
+// 内存池（pool.zx）。`var p = std.Pool.init(std.heap.page)` 之后
+// `p.alloc(n)` / `p.free(ptr)` / `p.create(T)`；重复释放会被拦下。
+pub const pool = module("pool.zx");
+pub const Pool = pool.Pool;
+
 // 可增长数组。`T` 是元素类型；容量不够时按倍数向分配器要内存、搬过去、释放旧的。
 pub const ArrayList = fn (T: type) type {
     return struct {

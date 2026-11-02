@@ -1529,3 +1529,31 @@ removeAt / append 原先全是逐元素循环——泛型 T 的性能靠"编译�
 先量后改：`bench/containers.zx` 五个负载各打一个 FNV 校验和，优化前后
 **逐位一致**才算数；交替实测整体 171 → 131 ms（约 -23%）。单项噪声
 ±20 ms，结论只从新旧交替对比里出。取舍见 decisions **§66**。
+
+## M36：std.Pool——分级内存池进标准库；顺带修 `?*T` 的 C 排序环
+
+**std.Pool**（移植自 ecs/src/pool.zig，去掉对 ECS `Memory` 的依赖）：
+16B…128B 每 16B 一档（8 档）、256B…256KiB 每档 ×2（11 档），更大的请求
+绕过池直接向分配器要（块头格式一致，`free` 同一条路径）。每块头部 16 字节
+记申请尺寸 / 世代号 / 状态，所以释放只要裸指针；**重复释放会被认出来**
+（返回 false，不写坏空闲链）——这是裸 malloc/free 给不了的安全网。与
+Zig 版的差异：槽位管理自包含（"整批槽区 + 内联空闲链"，空闲链住在被释放
+块的负载前 8 字节里），不再借用 ECS 的世代槽位表。落进 `std/pool.zx`，
+`std.Pool.init(std.heap.page)` 即用；回归 `tests/good/std-pool.zx`。
+
+实现时踩了一个必须写下来的坑：线性段是 **8 档**（16/32/…/128），不是
+看着像的 7 档；档位常数写小一档就是每次 init 都越界写堆（崩溃还延迟到
+退出时才爆发）。两个铺档循环的迭代次数之和必须正好等于 `classCount`。
+
+**顺带修 C 后端一处排序环**（backend.c `ensure_type`）：`?*T` 的 typedef
+只含 `T *payload`，只需要被指向类型的**前向声明**；原来的发射顺序会把
+`Region { next: ?*Region }` 的身体排到 `?*Region` 的 typedef 之前
+（ensure(Opt) 递归进 ensure(Region)，Region 的身体引用还没发射的 Opt
+名字），C 编译器报 unknown type。加 `ensure_fwd`（只落名字，state=3，
+身体稍后补齐）断环；`[]T` 同理。
+
+**先量后收**：`bench/pool.zx` / `bench/poolraw.zx`（1 千万步，维持 1024
+活块环形、轮转 4 个尺寸档）。维持活块是必须的——"分配立刻释放"会被 C
+编译器整对删除（死分配消除），对照组测出来是假的快。环形实测
+**池 177 ms vs 裸 malloc 332 ms**（各含 ~65 ms 进程启动；折算每对
+alloc+free ≈11 ns vs ≈27 ns，约 **2.4x**）。取舍见 decisions **§69**。

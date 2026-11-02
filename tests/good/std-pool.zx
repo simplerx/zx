@@ -1,0 +1,94 @@
+// std-pool.zx —— std.Pool（尺寸分级内存池）回归：
+// 分级、对齐、复用、重复释放拦截、大块路径、按类型分配。
+const std = module("std");
+
+const Node = struct { value: i32, next: ?*Node };
+
+const run = fn (pp: *std.Pool) u8 {
+    // ① 基本分配：20 字节落 32B 档，16 字节对齐，可写可读
+    var araw: *u8 = undefined;
+    let a = pp.alloc(20);
+    if (a) av {
+        araw = av;
+        let w = (*u64)av;
+        w.0 = 305419896;                       // 0x12345678
+        std.println("a val {}", w.0);
+        std.println("a align16 {}", ((usize)av & 15) == 0);
+    } else { return 1; }
+
+    // ② 复用：b 释放后，同档位再要应拿到同一块
+    var braw: *u8 = undefined;
+    var baddr: usize = 0;
+    let b = pp.alloc(20);
+    if (b) bv {
+        braw = bv;
+        baddr = (usize)bv;
+        if (!pp.free(bv)) { return 1; }
+    } else { return 1; }
+    let c = pp.alloc(20);
+    if (c) cv {
+        std.println("reuse {}", (usize)cv == baddr);
+        if (!pp.free(cv)) { return 1; }
+    } else { return 1; }
+
+    // ③ 重复释放必须被拦下，且不写坏空闲链
+    std.println("double free rejected {}", !pp.free(braw));
+    let c2 = pp.alloc(20);
+    if (c2) cv2 {
+        std.println("chain intact {}", (usize)cv2 == baddr);
+        if (!pp.free(cv2)) { return 1; }
+    } else { return 1; }
+
+    // ④ 按大小分配再当结构体用（方法不能带类型参数，类型转型交给调用方）
+    let n = pp.alloc(@sizeOf(Node));
+    if (n) nv {
+        let nd = (*Node)nv;
+        nd.value = 42;
+        nd.next = null;
+        std.println("node {}", nd.value);
+        if (!pp.free(nv)) { return 1; }
+    } else { return 1; }
+
+    // ⑤ 大块绕过池（超过 256KiB）：整块可写，free 一次，二次拒绝
+    let big = pp.alloc(600000);
+    if (big) bv2 {
+        var q = bv2;
+        var i: usize = 0;
+        while (i < 600000) {
+            q.0 = 7;
+            q = q + 1;
+            i = i + 1;
+        }
+        std.println("big tail {}", (bv2 + 599999).0);
+        std.println("big free {}", pp.free(bv2));
+        std.println("big double free rejected {}", !pp.free(bv2));
+    } else { return 1; }
+
+    // ⑥ 档位计数归零（①的块最后释放）
+    if (!pp.free(araw)) { return 1; }
+    std.println("count32 {}", pp.used(20));
+    std.println("done");
+    return 0;
+};
+
+// expect-output
+// a val 305419896
+// a align16 true
+// reuse true
+// double free rejected true
+// chain intact true
+// node 42
+// big tail 7
+// big free true
+// big double free rejected true
+// count32 0
+// done
+
+const main = fn () u8 {
+    let p = std.Pool.init(std.heap.page);
+    if (p) pv {
+        var pp = pv;
+        return run(&pp);
+    }
+    return 1;
+};

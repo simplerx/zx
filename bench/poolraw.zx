@@ -1,0 +1,36 @@
+// poolraw.zx —— pool.zx 的对照组：同样的环形分配，直接 malloc/free
+// （std.heap.page）。裸 malloc 的 free 需要尺寸，所以多一条尺寸环。
+const std = module("std");
+
+const RING: usize = 1024;
+
+const main = fn () u8 {
+    let g = std.heap.page;
+    var ring = std.stackAlloc(?*u8, RING);
+    var sizes = std.stackAlloc(usize, RING);
+    var sink: u64 = 0;
+    var r: usize = 0;
+    var i: usize = 0;
+    while (i < 10000000) {
+        if (i >= RING) {
+            let old = ring[r];
+            if (old) ob {
+                g.free(ob, sizes[r]);
+            } else { return 1; }
+        }
+        var size: usize = 16;
+        let m = i & 3;
+        if (m == 1) { size = 64; } else if (m == 2) { size = 96; } else if (m == 3) { size = 192; }
+        let b = g.alloc(size);
+        if (b) bv {
+            bv.0 = 7;
+            sink = sink + (u64)(i64)bv.0;
+        } else { return 1; }
+        ring[r] = b;
+        sizes[r] = size;
+        r = (r + 1) & (RING - 1);
+        i = i + 1;
+    }
+    std.println("raw sink={}", sink);
+    return 0;
+};

@@ -39,3 +39,5 @@ run mandel bench/mandel.zx
 run mmat   bench/mmat.zx
 run str    bench/str.zx
 run cont   bench/containers.zx
+run pool    bench/pool.zx
+run poolraw bench/poolraw.zx
