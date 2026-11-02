@@ -34,6 +34,11 @@ static Buf  g_bbody;       /* 函数体 */
 static Buf *g_out;
 static int  g_ind;
 
+static void cname(Buf *b, const char *s);   /* 成员名转义（定义在下方），ensure_type 先用到 */
+static void mname(Buf *b, const char *s);
+static void dotname(Buf *b, const char *s);
+static void arrowname(Buf *b, const char *s);
+
 static void vfmt(Buf *b, const char *fmt, va_list ap) {
     va_list ap2;
     va_copy(ap2, ap);
@@ -252,7 +257,9 @@ static void ensure_type(Type *t) {
                 if (f->is_static) continue;
                 buf_puts(g_out, "    ");
                 ctype(g_out, f->ty);
-                buf_printf(g_out, " %s;\n", f->name ? f->name : "?");
+                buf_putc(g_out, ' ');
+                mname(g_out, f->name);
+                buf_puts(g_out, ";\n");
             }
             buf_puts(g_out, "};\n");
 
@@ -263,7 +270,8 @@ static void ensure_type(Type *t) {
                 Buf s; buf_init(&s);
                 buf_puts(&s, "static ");
                 ctype(&s, f->ty);
-                buf_printf(&s, " %s_%s", n.data, f->name ? f->name : "?");
+                buf_printf(&s, " %s_", n.data);
+                mname(&s, f->name);
                 if (f->dflt) {
                     buf_puts(&s, " = ");
                     ex(&s, f->dflt);
@@ -282,7 +290,9 @@ static void ensure_type(Type *t) {
                 if (f->is_static) continue;
                 buf_puts(g_out, "        ");
                 ctype(g_out, f->ty);
-                buf_printf(g_out, " %s;\n", f->name ? f->name : "?");
+                buf_putc(g_out, ' ');
+                mname(g_out, f->name);
+                buf_puts(g_out, ";\n");
             }
             buf_puts(g_out, "    } u;\n");
             buf_puts(g_out, "    ");
@@ -296,7 +306,9 @@ static void ensure_type(Type *t) {
                 if (f->is_static) continue;
                 buf_puts(g_out, "    ");
                 ctype(g_out, f->ty);
-                buf_printf(g_out, " %s;\n", f->name ? f->name : "?");
+                buf_putc(g_out, ' ');
+                mname(g_out, f->name);
+                buf_puts(g_out, ";\n");
             }
             buf_puts(g_out, "};\n");
         }
@@ -310,8 +322,9 @@ static void ensure_type(Type *t) {
         buf_printf(g_out, "enum {\n");
         for (int k = 0; k < t->nfields; k++) {
             Field *f = &t->fields[k];
-            buf_printf(g_out, "    %s_%s = %llu,\n", n.data,
-                       f->name ? f->name : "?",
+            buf_printf(g_out, "    %s_", n.data);
+            mname(g_out, f->name);
+            buf_printf(g_out, " = %llu,\n",
                        (unsigned long long)(f->has_tag ? f->tag : (uint64_t)k));
         }
         buf_puts(g_out, "};\n");
@@ -323,7 +336,8 @@ static void ensure_type(Type *t) {
             Buf s; buf_init(&s);
             buf_puts(&s, "static ");
             ctype(&s, f->ty);
-            buf_printf(&s, " %s_%s", n.data, f->name ? f->name : "?");
+            buf_printf(&s, " %s_", n.data);
+            mname(&s, f->name);
             if (f->dflt) {
                 buf_puts(&s, " = ");
                 ex(&s, f->dflt);
@@ -455,6 +469,27 @@ static void cname(Buf *b, const char *s) {
     if (!s) { buf_puts(b, "_"); return; }
     if (c_keyword(s)) buf_printf(b, "%s_", s);
     else buf_puts(b, s);
+}
+
+/* 成员名发射：与访问路径（lvalue 等处的 cname）同一套关键字转义。
+ * 类型定义和访问点必须拼出同一个 C 名——zx 结构体/枚举成员可以叫
+ * `int`、`float`（它们不是 zx 关键字），定义侧不转义就会生成非法 C，
+ * 而访问侧转义成 `int_`，两边对不上（自举 lex.zx 的 Kind 枚举首次踩中）。 */
+static void mname(Buf *b, const char *s) {
+    cname(b, s && *s ? s : "?");
+}
+
+/* 字段访问点。定义侧走 mname 转义了，访问侧也必须走同一套，否则
+ * `alloc.free` 这种名字会出现"结构体里叫 free_、访问却写 free"的裂口
+ * （C 编译器直接报 no member named 'free'）。 */
+static void dotname(Buf *b, const char *s) {
+    buf_putc(b, '.');
+    mname(b, s && *s ? s : "?");
+}
+
+static void arrowname(Buf *b, const char *s) {
+    buf_puts(b, "->");
+    mname(b, s && *s ? s : "?");
 }
 
 /* 符号的 C 名字：非入口模块的顶层名字已经带了模块前缀（见 sema） */
@@ -769,10 +804,12 @@ static void lvalue(Buf *b, Node *n) {
             if (bt->elem && (bt->elem->kind == TY_STRUCT || bt->elem->kind == TY_UNION)) {
                 Type *e = bt->elem;
                 ex(b, n->a);
-                if (e->kind == TY_UNION && n->name && strcmp(n->name, "tag"))
-                    buf_printf(b, e->is_tagged ? "->u.%s" : "->%s", n->name);
-                else
-                    buf_printf(b, "->%s", n->name);
+                if (e->kind == TY_UNION && n->name && strcmp(n->name, "tag")) {
+                    if (e->is_tagged) { buf_puts(b, "->u."); mname(b, n->name); }
+                    else arrowname(b, n->name);
+                } else {
+                    arrowname(b, n->name);
+                }
                 return;
             }
         }
@@ -783,11 +820,12 @@ static void lvalue(Buf *b, Node *n) {
         }
         if (bt && bt->kind == TY_UNION && n->name && strcmp(n->name, "tag")) {
             ex(b, n->a);
-            buf_printf(b, bt->is_tagged ? ".u.%s" : ".%s", n->name);
+            if (bt->is_tagged) buf_puts(b, ".u");
+            dotname(b, n->name);
             return;
         }
         ex(b, n->a);
-        buf_printf(b, ".%s", n->name);
+        dotname(b, n->name);
         return;
     }
     case NK_INDEX: {
@@ -1335,8 +1373,9 @@ static int any_desc(Type *t) {
                 int child = any_desc(f->ty);
                 buf_puts(&fld, "{ ");
                 qname(&fld, f->name);
-                buf_printf(&fld, ", offsetof(%s, u.%s), %d },\n", cn.data,
-                           f->name ? f->name : "?", child);
+                buf_printf(&fld, ", offsetof(%s, u", cn.data);
+                dotname(&fld, f->name ? f->name : "?");
+                buf_printf(&fld, "), %d },\n", child);
                 buf_printf(&tags, "%lld, ", (long long)f->tag);
                 qname(&tns, f->name); buf_puts(&tns, ", ");
                 nf++; nt++;
@@ -2839,19 +2878,22 @@ static void ex(Buf *b, Node *n) {
         if (bt && bt->kind == TY_PTR) {
             Type *e = bt->elem;
             ex(b, n->a);
-            if (e && e->kind == TY_UNION && n->name && strcmp(n->name, "tag"))
-                buf_printf(b, e->is_tagged ? "->u.%s" : "->%s", n->name);
-            else
-                buf_printf(b, "->%s", n->name ? n->name : "?");
+            if (e && e->kind == TY_UNION && n->name && strcmp(n->name, "tag")) {
+                if (e->is_tagged) { buf_puts(b, "->u."); mname(b, n->name); }
+                else arrowname(b, n->name);
+            } else {
+                arrowname(b, n->name);
+            }
             return;
         }
         if (bt && bt->kind == TY_UNION && n->name && strcmp(n->name, "tag")) {
             ex(b, n->a);
-            buf_printf(b, bt->is_tagged ? ".u.%s" : ".%s", n->name);
+            if (bt->is_tagged) buf_puts(b, ".u");
+            dotname(b, n->name);
             return;
         }
         ex(b, n->a);
-        buf_printf(b, ".%s", n->name ? n->name : "?");
+        dotname(b, n->name);
         return;
     }
 
@@ -3180,7 +3222,9 @@ static void ex(Buf *b, Node *n) {
                                pair->name ? pair->name : "?", pair->name ? pair->name : "?");
                     buf_printf(b, ".tag = %llu, ", (unsigned long long)f->tag);
                 }
-                buf_printf(b, t->is_tagged ? ".u.%s = " : ".%s = ", pair->name);
+                if (t->is_tagged) buf_puts(b, ".u");
+                dotname(b, pair->name);
+                buf_puts(b, " = ");
                 coerce(b, pair->a, f->ty);
             }
             buf_puts(b, " })");
@@ -3192,7 +3236,8 @@ static void ex(Buf *b, Node *n) {
             Node *pair = n->items[i];
             if (pair->kind != NK_PAIR) continue;
             if (written++) buf_puts(b, ", ");
-            buf_printf(b, ".%s = ", pair->name ? pair->name : "?");
+            dotname(b, pair->name ? pair->name : "?");
+            buf_puts(b, " = ");
             Field *f = ty_field(t, pair->name);
             if (f) coerce(b, pair->a, f->ty);
             else   ex(b, pair->a);
@@ -3206,7 +3251,8 @@ static void ex(Buf *b, Node *n) {
                     !strcmp(n->items[k]->name, f->name)) { given = true; break; }
             if (given) continue;
             if (written++) buf_puts(b, ", ");
-            buf_printf(b, ".%s = ", f->name);
+            dotname(b, f->name);
+            buf_puts(b, " = ");
             coerce(b, f->dflt, f->ty);
         }
         buf_puts(b, " })");
@@ -3887,7 +3933,8 @@ static void gen_switch(Node *n, const char *slot, Type *slot_ty) {
                     /* 枚举变体 / ?T / !T / 带标签联合体的模式 */
                     if (st && st->kind == TY_ENUM) {
                         Buf nm; buf_init(&nm); tn(&nm, st);
-                        buf_printf(&pb, "%s_%s", nm.data, p->name);
+                        buf_printf(&pb, "%s_", nm.data);
+                        mname(&pb, p->name);
                     } else if (st && st->kind == TY_OPT) {
                         buf_puts(&pb, !strcmp(p->name, "some") ? "true" : "false");
                     } else if (st && st->kind == TY_ERR) {
@@ -3902,7 +3949,8 @@ static void gen_switch(Node *n, const char *slot, Type *slot_ty) {
                         if (f && st->tag_ty && st->tag_ty->kind == TY_ENUM) {
                             ensure_type(st->tag_ty);
                             Buf nm; buf_init(&nm); tn(&nm, st->tag_ty);
-                            buf_printf(&pb, "%s_%s", nm.data, p->name);
+                            buf_printf(&pb, "%s_", nm.data);
+                            mname(&pb, p->name);
                         } else if (f) {
                             buf_printf(&pb, "%llu", (unsigned long long)f->tag);
                         } else {
@@ -3932,7 +3980,7 @@ static void gen_switch(Node *n, const char *slot, Type *slot_ty) {
                 for (int q = 0; q < st->nfields; q++)
                     if (st->fields[q].name && vname && !strcmp(st->fields[q].name, vname))
                         cap = st->fields[q].ty;
-                if (cap) { Buf nb; buf_init(&nb); buf_printf(&nb, "%s.u.%s", tmp, vname); src = nb.data; }
+                if (cap) { Buf nb; buf_init(&nb); buf_printf(&nb, "%s.u.", tmp); mname(&nb, vname); src = nb.data; }
             } else if (st && st->kind == TY_OPT) {
                 cap = st->elem;
                 Buf nb; buf_init(&nb); buf_printf(&nb, "%s.payload", tmp); src = nb.data;
@@ -4486,8 +4534,11 @@ int backend_emit_split(Node *root, Buf *header, BUnit *units, int maxunits) {
                 if (!fn || !fn->b || fn_is_generic(fn)) continue;
                 const char *nm = sym_cname(it);
                 bool is_main = (mi == 0) && nm && !strcmp(nm, "main");
-                /* 模块导出的东西别的单元要能链到：去掉 static，原型进头文件 */
-                bool exported = (mi != 0) && it->is_pub && !is_main && nm && strcmp(nm, "main");
+                /* 模块导出的东西别的单元要能链到：去掉 static，原型进头文件。
+                 * 非 pub 的也得导出：结构体方法体是发射到**使用方**单元的，
+                 * 方法里引用本模块的私有自由函数时，static 符号跨单元断链
+                 * （自举 lex.zx 首次暴露）。模块符号带 stem 前缀，不会撞名。 */
+                bool exported = (mi != 0) && !is_main && nm && strcmp(nm, "main");
                 gen_fn(fn, nm, is_main, exported);
             }
             /* 全局数据 */
@@ -4498,7 +4549,8 @@ int backend_emit_split(Node *root, Buf *header, BUnit *units, int maxunits) {
                 if (!it->b) continue;
                 if (it->b->kind == NK_FN || it->b->kind == NK_MODULE) continue;
                 if (it->b->ty && it->b->ty->kind == TY_TYPE) continue;
-                bool exported = (mi != 0) && it->is_pub;
+                /* 同函数：模块全局也要能被（发射到别处的）方法体引用 */
+                bool exported = (mi != 0);
                 gen_global(it, exported);
             }
         }
@@ -4512,14 +4564,17 @@ int backend_emit_split(Node *root, Buf *header, BUnit *units, int maxunits) {
     }
 
     /* 泛型实例：上面任何一处引用过它们，这里统一下饺子。
-     * 名字是全局唯一的（_i<n>），所以全部放进入口单元即可。 */
+     * 名字是全局唯一的（_i<n>），所以全部放进入口单元即可。
+     * 链接必须是**外部**的：多个单元会实例化同一个签名（比如模块里
+     * 也用了 ArrayList(u8)），而原型进共享头——写成 static 就是
+     * "内部链接却无定义"，用到它的单元直接编译失败。 */
     if (g_nitab) {
         buf_init(&g_bproto);
         buf_init(&g_bbody);
         g_out = &g_bbody;
         g_ind = 0;
         for (int i = 0; i < g_nitab; i++)
-            gen_fn(g_itab[i].fn, g_itab[i].name, false, false);
+            gen_fn(g_itab[i].fn, g_itab[i].name, false, true);
         buf_puts(&units[0].src, "\n");
         buf_puts(&units[0].src, g_bproto.data ? g_bproto.data : "");
         buf_putc(&units[0].src, '\n');
