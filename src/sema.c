@@ -42,10 +42,23 @@ struct Symbol {
     Symbol     *next;
 };
 
+/* 哈希桶里的一个挂件。不能把链接存在 Symbol 上：snap_scope 会让两个作用域
+ * **共享同一批 Symbol**，各自 rehash 时就会互相改坏对方的链。 */
+typedef struct HBucket {
+    Symbol         *sym;
+    struct HBucket *next;
+} HBucket;
+
 typedef struct Scope {
     struct Scope *parent;
     Symbol       *first;
     bool          is_module;   /* 文件级作用域：活得和模块一样久，快照时直接引用 */
+    /* 名字 → 符号的哈希索引。之前是纯链表，于是"N 个顶层声明"要付 O(N²)：
+     * 8000 个函数编 437 ms，16000 个 1.8 s（每翻一倍耗时约 4.3 倍）。
+     * 链表仍是唯一权威（顺序、遍历、快照都看它），这张表只回答"这个名字在不在"。 */
+    HBucket      **tab;
+    int           ntab;        /* 桶数，2 的幂 */
+    int           cnt;
 } Scope;
 
 static Scope *g_scope;
@@ -77,25 +90,80 @@ bool sema_sym_is_extern(Symbol *s) {
 bool sema_sym_has_storage(Symbol *s) { return !(s && s->ct_bind); }
 Value *sema_sym_ct(Symbol *s) { return s ? s->ct : NULL; }
 
-static void scope_push(Scope *s) { s->parent = g_scope; s->first = NULL; g_scope = s; }
+static void scope_push(Scope *s) {
+    s->parent = g_scope;
+    s->first = NULL;
+    /* 这几个必须一起清：Scope 大量是**栈上**的（`Scope sc; scope_push(&sc);`），
+     * 不清的话 is_module 读到的就是上一个人用剩的栈字节 —— snap_scope 会把它
+     * 当成模块作用域直接存进待检查队列，等这个栈帧没了就是悬空指针。 */
+    s->is_module = false;
+    s->tab = NULL;
+    s->ntab = 0;
+    s->cnt = 0;
+    g_scope = s;
+}
 static void scope_pop(Scope *s)  { g_scope = s->parent; }
 
-static Symbol *scope_add(Scope *sc, const char *name, int kind) {
+static unsigned hash_name(const char *s) {
+    unsigned h = 2166136261u;                    /* FNV-1a */
+    while (*s) { h ^= (unsigned char)*s++; h *= 16777619u; }
+    return h;
+}
+
+/* 按链表重建索引。链表才是权威，所以这里不看 cnt，只认它。 */
+static void scope_rehash(Scope *sc, int n) {
+    HBucket **t = calloc((size_t)n, sizeof *t);
+    if (!t) return;
+    for (Symbol *s = sc->first; s; s = s->next) {
+        unsigned b = hash_name(s->name ? s->name : "") & (unsigned)(n - 1);
+        HBucket *h = calloc(1, sizeof *h);
+        if (!h) continue;
+        h->sym = s;
+        h->next = t[b];
+        t[b] = h;
+    }
+    free(sc->tab);
+    sc->tab = t;
+    sc->ntab = n;
+}
+
+/* 只在本层找（不往上走）。有索引就走索引。 */
+static Symbol *scope_find_here(Scope *sc, const char *name) {
+    if (sc->ntab > 0) {
+        unsigned b = hash_name(name) & (unsigned)(sc->ntab - 1);
+        for (HBucket *h = sc->tab[b]; h; h = h->next)
+            if (h->sym->name && strcmp(h->sym->name, name) == 0) return h->sym;
+        return NULL;
+    }
     for (Symbol *s = sc->first; s; s = s->next)
-        if (s->name && strcmp(s->name, name) == 0) return NULL;   /* 重复声明 */
+        if (s->name && strcmp(s->name, name) == 0) return s;
+    return NULL;
+}
+
+static Symbol *scope_add(Scope *sc, const char *name, int kind) {
+    if (scope_find_here(sc, name)) return NULL;   /* 重复声明 */
     Symbol *s = calloc(1, sizeof(Symbol));
     s->name = name;
     s->kind = kind;
     s->index = -1;
     s->next = sc->first;
     sc->first = s;
+    sc->cnt++;
+    if (sc->ntab == 0 || sc->cnt * 4 > sc->ntab * 3) {
+        scope_rehash(sc, sc->ntab ? sc->ntab * 2 : 16);   /* 重建时会把 s 一起收进去 */
+    } else {
+        unsigned b = hash_name(name) & (unsigned)(sc->ntab - 1);
+        HBucket *h = calloc(1, sizeof *h);
+        if (h) { h->sym = s; h->next = sc->tab[b]; sc->tab[b] = h; }
+    }
     return s;
 }
 
 static Symbol *lookup(const char *name) {
-    for (Scope *sc = g_scope; sc; sc = sc->parent)
-        for (Symbol *s = sc->first; s; s = s->next)
-            if (s->name && strcmp(s->name, name) == 0) return s;
+    for (Scope *sc = g_scope; sc; sc = sc->parent) {
+        Symbol *s = scope_find_here(sc, name);
+        if (s) return s;
+    }
     return NULL;
 }
 
@@ -855,6 +923,8 @@ static bool lit_value(Node *e, uint64_t *v, bool *neg, const char **text) {
     *text = NULL;
     if (!e) return false;
     if (e->kind == NK_INT) { *v = e->ival; *text = e->flag ? e->str : NULL; return true; }
+    /* char 字面量也是字面量：`let c: u8 = '中';` 该报"装不下"，不是静默截断 */
+    if (e->kind == NK_CHAR) { *v = e->ival; return true; }
     if (e->kind == NK_UN && e->op == TOK_MINUS && e->a && e->a->kind == NK_INT) {
         *neg = true;
         *v = e->a->ival;
@@ -2565,6 +2635,15 @@ static Type *check_expr_raw(Node *n, Type *expect) {
         return type_of(n, ty_comptime_float());
 
     case NK_CHAR:
+        /* char 字面量比整数字面量多一层含义：它既是"字节"（u8），也是
+         * "这个字符的码位"。落点是整数类型时按落点定型——`switch (code)`
+         * 的 subject 是 i32，`'a'` 就该是 i32；没有落点才是 u8。
+         * 装不进去要报错，不能静默截断（R10，和整数字面量同一条规则）。 */
+        if (expect && ty_is_int(expect)) {
+            if (!lit_fits_expr(n, expect))
+                return BAD(n, "char literal does not fit in `%s`", ty_str(expect));
+            return type_of(n, expect);
+        }
         return type_of(n, ty_u8());
 
     case NK_STR:

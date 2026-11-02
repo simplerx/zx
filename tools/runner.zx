@@ -4,8 +4,13 @@
 // 拼命令、起进程、比对输出。任何一处能力缺口都会在这里暴露（之前是 extern C
 // 与 fmt 的细节），比再写十个 hello world 有用。
 //
-// 用法（由 test.sh 调用）：
+// 用法（原由 test.sh 调用）：
 //   runner <zxc> <tmpprefix> <file.zx>...
+//
+// **状态：保留，但不再参与 CI。**
+// 它有两个位置不对的问题：用 system() 拼 cmd 行时自己重定向的 stdout 会整块
+// 丢失（实测 1/6），而且不计量耗时。CI 现在走 tools/runner.c（同样的判定协议）。
+// 这个文件留下是因为 spec/bootstrap.md 拿它当自举的迁移试验目标。
 //
 // 判定规则与旧 test.sh 一致：
 //   1. tests/bad / tests/multibad：必须编译失败，且 stderr 里有 `// expect:` 的文本
@@ -156,6 +161,16 @@ const has_main = fn (src: []const u8) bool {
     return std.str.contains(src, "fn main(") || std.str.contains(src, "main = fn");
 };
 
+/* `// expect-output` 有没有写，和它后面写了几个期望行是两件事。
+ * 裸写一个标记 = "这个程序什么都不打印"，也是一条断言——不能用
+ * "期望行数为 0" 当"没写"（`spec/examples/syntax.zx` 正是这种）。 */
+const has_output = fn (parts: [][]const u8) bool {
+    for (parts) p {
+        if (std.str.eq(std.str.trimEnd(p), "// expect-output")) return true;
+    }
+    return false;
+};
+
 /* concat 返回 ?[]u8；OOM 在这里当成空串——runner 自己的失败不该伪装成测试失败 */
 const cat = fn (al: std.Allocator, a: []const u8, b: []const u8) []const u8 {
     let r = std.str.concat(al, a, b);
@@ -279,7 +294,7 @@ const main = fn () i32 {
 
                     // 有 expect-output 就跑一遍真二进制
                     let want = expect_output(al, ps);
-                    if (has_main(src) && want.len > 0) {
+                    if (has_main(src) && has_output(ps)) {
                         var cb = Cmd.init();
                         cb.addpath(zxc); cb.add(" \""); cb.addpath(f); cb.add("\" -o \""); cb.addpath(b);
                         cb.add("\" > \""); cb.addpath(o1); cb.add("\" 2>&1");
@@ -323,6 +338,10 @@ const main = fn () i32 {
     std.file.remove(b);
 
     std.println("passed {}, failed {}", pass, fail);
+    /* 报告必须落盘：stdout 被重定向时是整块缓冲，而 runner 一路在起子进程
+     * （system()），退出时的隐式刷新有时不可靠——实测 1/6 的概率整份报告丢失。
+     * 显式刷一次，别让"全过"只留在内存里。 */
+    std.io.flush(std.io.stdout());
     if (fail != 0) { return 1; }
     return 0;
 };
