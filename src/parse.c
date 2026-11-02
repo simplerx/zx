@@ -1059,7 +1059,8 @@ static bool starts_stmt_kw(TokKind k) {
  *   if (c) return x;      if (o) v return v;      if (c) defer f();
  * 它们不像 if/while/for 那样会引出"第二个分支体 vs 兄弟语句"的歧义。 */
 static bool arm_stmt_only(TokKind k) {
-    return k == TOK_KW_RETURN || k == TOK_KW_CONTINUE || k == TOK_KW_DEFER;
+    return k == TOK_KW_RETURN || k == TOK_KW_CONTINUE || k == TOK_KW_DEFER ||
+           k == TOK_KW_ERRDEFER;
 }
 
 /* 能开始一个表达式、且不是二元运算符的 token。
@@ -1446,11 +1447,16 @@ static Node *parse_stmt(P *p) {
         return f;
     }
 
-    case TOK_KW_DEFER: {
+    case TOK_KW_DEFER:
+    case TOK_KW_ERRDEFER: {
         advance(p);
-        Node *n = node_new(NK_DEFER, t->line, t->col);
-        n->a = at(p, TOK_LBRACE) ? parse_block(p) : parse_expr(p);
-        if (!at(p, TOK_RBRACE)) expect(p, TOK_SEMI);
+        Node *n = node_new(t->kind == TOK_KW_ERRDEFER ? NK_ERRDEFER : NK_DEFER,
+                           t->line, t->col);
+        /* 块形式不要尾分号（与普通块一致）；表达式形式才收 ';'。
+         * rbrace 例外是 if 单臂糖：`if (c) defer f()` 后面直接是 `}`。 */
+        bool body_block = at(p, TOK_LBRACE);
+        n->a = body_block ? parse_block(p) : parse_expr(p);
+        if (!body_block && !at(p, TOK_RBRACE)) expect(p, TOK_SEMI);
         return n;
     }
 
@@ -1630,6 +1636,7 @@ static const char *nk_name(NodeKind k) {
     case NK_CONTINUE: return "continue";
     case NK_YIELD: return "yield";
     case NK_DEFER: return "defer";
+    case NK_ERRDEFER: return "errdefer";
     case NK_BUILTIN: return "builtin";
     case NK_MODULE: return "module";
     case NK_DECL: return "decl";

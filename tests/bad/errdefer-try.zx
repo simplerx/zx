@@ -1,0 +1,17 @@
+// `errdefer` 体与 defer 体同一条规则：不能往外抛——errdefer 本身就在
+// 错误返回路径上执行，它自己再"提前返回"没有意义。
+//
+// expect-count: 2
+// expect: `return` is not allowed inside `defer`/`errdefer`
+// expect: try` is not allowed inside `defer`/`errdefer`
+
+const other = fn () !i32 {
+    return 2;
+};
+
+const work = fn () !i32 {
+    errdefer {
+        return try other();
+    }
+    return 1;
+};

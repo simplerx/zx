@@ -2748,11 +2748,11 @@ static Type *check_expr_raw(Node *n, Type *expect) {
     case NK_TRY: {
         Type *t = check_expr(n->a, NULL);
         if (!t || t->kind == TY_INVALID) return ty_invalid();
-        /* `defer` 体里不能往外抛：defer 是在返回路径上执行的，它自己再
-         * "提前返回"没有意义（会把正在返回的值覆盖掉）。就地处理掉。 */
+        /* `defer` / `errdefer` 体里不能往外抛：两者都在返回路径上执行，
+         * 自己再"提前返回"没有意义（会把正在返回的值覆盖掉）。就地处理掉。 */
         if (g_in_defer)
-            return BAD(n, "`try` is not allowed inside `defer` — a defer body cannot "
-                          "propagate; handle the error there (`if` capture / `orelse`)");
+            return BAD(n, "`try` is not allowed inside `defer`/`errdefer` — a defer body "
+                          "cannot propagate; handle the error there (`if` capture / `orelse`)");
         /* `?T` 也行（v0.26）：空值当错误——null 抛保留错误码 error.null（65535）。
          * "可能没有"和"可能出错"不靠嵌套表达（?!T 非法），靠同一条传播路。 */
         if (t->kind != TY_ERR && t->kind != TY_OPT)
@@ -2883,6 +2883,7 @@ static Type *check_expr_raw(Node *n, Type *expect) {
         return BAD(n, "a range `lo..hi` is only valid inside `for (…)`");
 
     case NK_DEFER:
+    case NK_ERRDEFER:
     case NK_RETURN:
     case NK_CONTINUE:
     case NK_YIELD:
@@ -3540,7 +3541,7 @@ static void check_stmt(Node *n) {
 
     case NK_RETURN: {
         if (!g_fn_depth) { err_at(n->line, n->col, "`return` outside a function"); return; }
-        if (g_in_defer) { err_at(n->line, n->col, "`return` is not allowed inside `defer`"); }
+        if (g_in_defer) { err_at(n->line, n->col, "`return` is not allowed inside `defer`/`errdefer`"); }
         Type *want = g_ret ? g_ret : ty_void();
         if (!n->a) {
             /* `!void` 的 `return;` 是"成功且没有 payload"：tag 置 0 就是全部值。
@@ -3595,7 +3596,15 @@ static void check_stmt(Node *n) {
         return;
     }
 
-    case NK_DEFER: {
+    case NK_DEFER:
+    case NK_ERRDEFER: {
+        /* errdefer 只在错误返回路径上执行——不返回错误的函数里它永远
+         * 不会触发，几乎肯定是写错了（Zig 同样拒绝）。 */
+        if (n->kind == NK_ERRDEFER && (!g_ret || g_ret->kind != TY_ERR))
+            err_at(n->line, n->col,
+                   "`errdefer` requires the enclosing function to return an "
+                   "error union `!T`, found `%s`",
+                   g_ret ? ty_str(g_ret) : "void");
         bool save = g_in_defer;
         g_in_defer = true;
         if (n->a->kind == NK_BLOCK) check_block(n->a);
@@ -3631,6 +3640,7 @@ static bool ct_pure(Node *n) {
         return false;                /* 调用可能有运行时副作用/参数依赖 */
     case NK_BLOCK: case NK_IF: case NK_WHILE: case NK_FOR: case NK_SWITCH:
     case NK_DECL: case NK_RETURN: case NK_YIELD: case NK_DEFER:
+    case NK_ERRDEFER:
         return false;
     default:
         break;
@@ -4269,6 +4279,7 @@ static bool stmt_ends(Node *s) {
     case NK_FOR:    return false;               /* 序列一定有限，循环总能结束 */
     case NK_SWITCH: return switch_ends(s);
     case NK_DEFER:  return false;               /* defer 是"离开时再做"，不改变流向 */
+    case NK_ERRDEFER: return false;             /* 同上（且只在错误路径跑） */
     default:
         return s->ty && s->ty->kind == TY_NORETURN;
     }
@@ -5142,6 +5153,7 @@ static CtFlow ct_run_arm(Node *n) {
     if (n->kind == NK_BLOCK) return ct_run_block(n);
     if (n->kind == NK_DECL || n->kind == NK_RETURN || n->kind == NK_YIELD ||
         n->kind == NK_CONTINUE || n->kind == NK_DEFER ||
+        n->kind == NK_ERRDEFER ||
         n->kind == NK_IF || n->kind == NK_WHILE || n->kind == NK_FOR ||
         n->kind == NK_SWITCH)
         return ct_run(n);

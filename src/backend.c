@@ -654,7 +654,7 @@ static char *inst_name(Node *g, const char *base) {
 
 typedef struct CScope {
     struct CScope *parent;
-    Node          *defer[MAX_CDEFER];
+    Node          *defer[MAX_CDEFER];   /* 外层节点（NK_DEFER / NK_ERRDEFER），体在 ->a */
     int            ndefer;
 } CScope;
 
@@ -691,6 +691,7 @@ static char *inst_name(Node *g, const char *base);   /* 泛型实例的 C 名 */
 /* 当前函数：生成 return 时要看返回类型 / 是不是 main */
 static Type *g_cur_ret;
 static bool  g_is_main;
+static bool  g_saw_errdefer;   /* 函数体里登记过 errdefer：return 要做 tag 检查 */
 
 /* main 的 C 签名固定是 `int main(...)`，但 Zx 里它可以是 void、u8，
  * 也可以是 !void / !T / ?T。真值要在这里折成进程退出码：
@@ -727,19 +728,36 @@ static CLab *lab_find_loop(const char *tag) {
     return NULL;
 }
 
-/* 把 depth-1 .. down_to 这些作用域的 defer 逆序展开 */
-static void run_defers(int down_to) {
+/* 把 depth-1 .. down_to 这些作用域的 defer 逆序展开。
+ * mode 0 = 普通离开（块尾/循环/yield/隐式 return）：只跑 NK_DEFER——
+ *        errdefer 只属于"函数以错误返回"这一条路。
+ * mode 1 = 错误返回路径：NK_DEFER 照跑；NK_ERRDEFER 在 errcond 非 NULL 时
+ *        包一层 `if (errcond) { … }`（返回值 tag 运行时才知道），NULL 表示
+ *        错误已注定（try 传播），直接跑。两种条目按登记逆序交织——
+ *        defer 和 errdefer 相邻登记时，清理顺序仍然正确。 */
+static void run_defers_m(int down_to, int mode, const char *errcond) {
     for (int d = g_depth - 1; d >= down_to; d--) {
         CScope *s = g_csc;
         for (int k = 0; k < g_depth - 1 - d && s; k++) s = s->parent;
         if (!s) continue;
         for (int k = s->ndefer - 1; k >= 0; k--) {
-            Node *e = s->defer[k];
-            if (e->kind == NK_BLOCK) gen_stmt(e);
-            else                     gen_stmt(e);
+            Node *dn = s->defer[k];
+            bool iserr = dn->kind == NK_ERRDEFER;
+            if (iserr && mode == 0) continue;
+            if (iserr && errcond) {
+                line("if (%s) {", errcond);
+                g_ind++;
+                gen_stmt(dn->a);
+                g_ind--;
+                line("}");
+            } else {
+                gen_stmt(dn->a);
+            }
         }
     }
 }
+
+static void run_defers(int down_to) { run_defers_m(down_to, 0, NULL); }
 
 /* ======================================================================
  *  表达式
@@ -3064,13 +3082,13 @@ static void ex(Buf *b, Node *n) {
             line("if (!%s.tag) {", tmp);
             g_ind++;
             if (g_is_main) {
-                run_defers(0);
+                run_defers_m(0, 1, NULL);
                 /* main 交出去的是 int：error.null 的退出码就是 65535（OS 截 8 位） */
                 line("return (int)(65535);");
             } else {
                 line("%s %s = {0};", cty(ret), rv);
                 line("%s.tag = 65535;", rv);
-                run_defers(0);
+                run_defers_m(0, 1, NULL);
                 line("return %s;", rv);
             }
             g_ind--;
@@ -3085,12 +3103,12 @@ static void ex(Buf *b, Node *n) {
         g_ind++;
         if (g_is_main) {
             /* main 交出去的是 int：标签本身就是错误码，原样当退出码用 */
-            run_defers(0);
+            run_defers_m(0, 1, NULL);
             main_exit(tmp);
         } else {
             line("%s %s = {0};", cty(ret), rv);
             line("%s.tag = %s.tag;", rv, tmp);
-            run_defers(0);
+            run_defers_m(0, 1, NULL);
             line("return %s;", rv);
         }
         g_ind--;
@@ -3488,19 +3506,38 @@ static void gen_stmt(Node *n) {
             return;
         }
 
+        /* errdefer 在场且返回错误联合：值先进临时量，defer/errdefer 按
+         * 登记逆序交织展开（errdefer 包 if (tag != 0)——是不是错误只有
+         * 运行时知道），最后返回临时量。 */
+        bool errcheck = g_saw_errdefer && want && want->kind == TY_ERR;
+
         /* 返回的是控制流表达式：先算进临时量，再统一收尾 */
         if (is_ctl(n->a)) {
             static int rn;
-            char tmp[32];
+            char tmp[32], cond[80];
             snprintf(tmp, sizeof tmp, "_ret%d", rn++);
             line("%s %s = {0};", cty(want), tmp);
             gen_value(n->a, tmp, want);
-            run_defers(0);
+            if (errcheck) {
+                snprintf(cond, sizeof cond, "(%s).tag != 0", tmp);
+                run_defers_m(0, 1, cond);
+            } else run_defers(0);
             if (g_is_main) main_exit(tmp); else line("return %s;", tmp);
             return;
         }
 
         char *v = cxs(n->a, want);
+        if (errcheck) {
+            static int rvn;
+            char tmp[32], cond[80];
+            snprintf(tmp, sizeof tmp, "_rv%d", rvn++);
+            line("{ %s %s = %s;", cty(want), tmp, v);
+            snprintf(cond, sizeof cond, "(%s).tag != 0", tmp);
+            run_defers_m(0, 1, cond);
+            if (g_is_main) main_exit(tmp); else line("return %s;", tmp);
+            line("}");
+            return;
+        }
         run_defers(0);
         if (g_is_main) main_exit(v); else line("return %s;", v);
         return;
@@ -3534,9 +3571,11 @@ static void gen_stmt(Node *n) {
         return;
     }
 
-    case NK_DEFER: {
+    case NK_DEFER:
+    case NK_ERRDEFER: {
         if (!g_csc) return;
-        if (g_csc->ndefer < MAX_CDEFER) g_csc->defer[g_csc->ndefer++] = n->a;
+        if (n->kind == NK_ERRDEFER) g_saw_errdefer = true;
+        if (g_csc->ndefer < MAX_CDEFER) g_csc->defer[g_csc->ndefer++] = n;
         return;
     }
 
@@ -4204,6 +4243,7 @@ static void gen_fn(Node *fn, const char *name, bool is_main, bool exported) {
 
     g_cur_ret = ret;
     g_is_main = is_main;
+    g_saw_errdefer = false;
 
     g_depth = 0;
     g_csc = NULL;

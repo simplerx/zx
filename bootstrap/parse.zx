@@ -47,6 +47,7 @@ pub const kname = fn (k: lex.Kind) []const u8 {
         .kw_continue: "'continue'",
         .kw_return: "'return'",
         .kw_defer: "'defer'",
+        .kw_errdefer: "'errdefer'",
         .kw_struct: "'struct'",
         .kw_union: "'union'",
         .kw_enum: "'enum'",
@@ -119,7 +120,7 @@ pub const NK = enum {
     index, slice, field, call,
     tuple, anon_struct, struct_lit, array_lit, pair,
     block, if_, while_, for_, switch_, arm,
-    return_, continue_, yield, defer_,
+    return_, continue_, yield, defer_, errdefer_,
     builtin, module_, decl, fn_, param,
     t_ident, ptr, sliceT, tupleT, struct_, union_, enum_, opt, err,
     root,
@@ -186,6 +187,7 @@ const nk_name = fn (k: NK) []const u8 {
         .continue_: "continue",
         .yield: "yield",
         .defer_: "defer",
+        .errdefer_: "errdefer",
         .builtin: "builtin",
         .module_: "module",
         .decl: "decl",
@@ -626,6 +628,7 @@ pub const Parser = struct {
             } else if (k == lex.Kind.kw_const || k == lex.Kind.kw_let ||
                        k == lex.Kind.kw_var || k == lex.Kind.kw_fn ||
                        k == lex.Kind.kw_pub || k == lex.Kind.kw_defer ||
+                       k == lex.Kind.kw_errdefer ||
                        k == lex.Kind.kw_return || k == lex.Kind.kw_continue ||
                        k == lex.Kind.kw_if || k == lex.Kind.kw_while ||
                        k == lex.Kind.kw_for || k == lex.Kind.kw_switch) {
@@ -1566,13 +1569,15 @@ pub const Parser = struct {
     const starts_stmt_kw = fn (self: *Parser, k: lex.Kind) bool {
         return k == lex.Kind.kw_if || k == lex.Kind.kw_while || k == lex.Kind.kw_for ||
                k == lex.Kind.kw_switch || k == lex.Kind.kw_return || k == lex.Kind.kw_continue ||
-               k == lex.Kind.kw_defer || k == lex.Kind.kw_const || k == lex.Kind.kw_let ||
+               k == lex.Kind.kw_defer || k == lex.Kind.kw_errdefer ||
+               k == lex.Kind.kw_const || k == lex.Kind.kw_let ||
                k == lex.Kind.kw_var;
     };
 
     // 单条语句就能当 if 臂的关键字（M19 语法糖）。
     const arm_stmt_only = fn (self: *Parser, k: lex.Kind) bool {
-        return k == lex.Kind.kw_return || k == lex.Kind.kw_continue || k == lex.Kind.kw_defer;
+        return k == lex.Kind.kw_return || k == lex.Kind.kw_continue ||
+               k == lex.Kind.kw_defer || k == lex.Kind.kw_errdefer;
     };
 
     // 能开始一个值、且不是二元运算符的 token。
@@ -1982,15 +1987,22 @@ pub const Parser = struct {
             return f;
         }
 
-        if (t.kind == lex.Kind.kw_defer) {
+        if (t.kind == lex.Kind.kw_defer || t.kind == lex.Kind.kw_errdefer) {
             self.advance();
-            let n = self.new_at(NK.defer_, t);
-            if (self.at(lex.Kind.lbrace)) {
+            var n: *Node = undefined;
+            if (t.kind == lex.Kind.kw_errdefer) {
+                n = self.new_at(NK.errdefer_, t);
+            } else {
+                n = self.new_at(NK.defer_, t);
+            }
+            // 块形式不要尾分号（与普通块一致）；表达式形式才收 ';'。
+            let body_block = self.at(lex.Kind.lbrace);
+            if (body_block) {
                 n.a = try self.parse_block();
             } else {
                 n.a = try self.parse_expr();
             }
-            if (!self.at(lex.Kind.rbrace)) {
+            if (!body_block && !self.at(lex.Kind.rbrace)) {
                 try self.expect(lex.Kind.semi);
             }
             return n;

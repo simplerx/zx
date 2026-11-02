@@ -34,6 +34,7 @@ typedef enum {
     NK_CONTINUE,        /* label = tag? */
     NK_YIELD,           /* label = tag, a = value (NULL → {}) */
     NK_DEFER,           /* a */
+    NK_ERRDEFER,        /* a —— errdefer：仅当函数以错误返回（.tag != 0，含 try 传播）时触发 */
     NK_BUILTIN,         /* @name(args) */
     NK_MODULE,          /* module("str") */
     NK_DECL,            /* const/let/var name [: T] = init  (flag: 0=const,1=let,2=var) */

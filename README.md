@@ -651,6 +651,10 @@ zx_init_<stem>(void)  每模块一个初始化函数，main 按依赖倒序调�
       sema 编译期折叠加**负缓存**（`ct_no`，只记检查阶段的"折不动"），
       8000 项长链 631 ms → 4 ms；parse cast 消歧加**括号配对预检**
       （O(n) 建表 + O(1) 必要条件），8000 层嵌套 222 ms → 3 ms。
+- [x] M41 **errdefer（v0.27）**：与 `defer` 同栈登记、LIFO 交织，仅当
+      函数以**错误返回**时触发——`return` 按运行时 `.tag != 0` 判，
+      `try` 传播路径无条件触发；要求所在函数返回 `!T`。顺带放宽
+      `defer { … }` 块形式的尾分号。取舍见 decisions **§73**。
       C/Zx 两侧镜像同修；`sh test.sh` **200 项全过**、对拍 **61/61**。
       取舍见 decisions **§72**
 
@@ -1702,3 +1706,25 @@ decisions **§72**。
 
 结果：`sh test.sh` **200 项全过**；`sh bootstrap/diff_ast.sh` **61/61**
 逐字节全等（含位置）。
+
+## M41：errdefer——错误返回路径上的延迟执行（v0.27）
+
+资源清理的最后一块拼图：`defer` 管所有离开路径，`errdefer` 只管
+**错误返回**——`return <错误值>`（运行时 `.tag != 0`）和 `try` 传播
+（无条件）两条路触发，成功路径不触发。与 `defer` 同栈登记、按 LIFO
+**交织展开**，`defer a; errdefer b;` 的清理顺序与两个 defer 一致。
+
+- **触发判定在运行时**：`!T` 的 tag 静态判不了；return 发射处把值存进
+  临时量，errdefer 条目包 `if ((tmp).tag != 0)`。函数体里没有 errdefer
+  时生成的 C 与从前逐字节相同（`g_saw_errdefer` 门控）。
+- **所在函数必须返回 `!T`**（E0301），体内 `try` / `return` 与 `defer`
+  同禁（E0405 / 措辞更新为 `defer`/`errdefer`）。
+- **顺带修的语法坑**：`defer { … }` 块形式不再要尾分号（旧文法在块后
+  强制 `;`，`errdefer { … }` 后写 `return` 直接解析错误）。
+- **自举鸡蛋第二次**：NodeKind 插入 NK_ERRDEFER 后旧 zfte 编号全错位
+  （NK_MODULE → NK_ERRDEFER，11 个 module 报 E0601）——枚举一变，
+  在役前端二进制立即作废，走 `--fe=c` 种子重建。
+
+C / Zx 两侧镜像同修。结果：`sh test.sh` **203 项全过**（新增
+`tests/good/errdefer.zx` + 2 个反例）；`diff_ast.sh` **62/62**、
+`diff_lex.sh` **73/73** 全等。规格 v0.27（§8.6.1）、decisions **§73**。

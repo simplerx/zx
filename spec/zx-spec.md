@@ -1,6 +1,13 @@
-# Zx 语言规格 v0.26
+# Zx 语言规格 v0.27
 
 > 依据 `plan` + 五轮修订意见。语言名 **Zx**，源文件 `.zx`。后端先出 C。
+
+## v0.26 → v0.27 的改动
+
+| # | 改动 | 影响 |
+|---|---|---|
+| 60 | **新增 `errdefer`**：仅当所在函数以**错误返回**（返回值 `.tag != 0`，含 `try` 传播路径）时触发的延迟执行；成功路径不触发。与 `defer` 同栈登记、逆序交织展开。要求所在函数返回 `!T`。`try` / `return` 在体内的禁令与 `defer` 相同 | §8.6 |
+| 61 | **`defer` / `errdefer` 块形式不再要尾分号**：`defer { … }` 与普通块一致；表达式形式 `defer expr;` 仍要 `;` | §8.6 |
 
 ## v0.25 → v0.26 的改动
 
@@ -97,7 +104,7 @@ R10 的动机很简单：这些行为一旦发布就改不动了。趁现在只�
 
 | # | 改动 | 影响 |
 |---|---|---|
-| 35 | **`if` 的单语句臂**：臂里只有一条语句时不必写花括号——`if (c) return x;` / `if (c) continue;` / `if (o) v return v;`（`return` / `continue` / `defer` 三个关键字，它们是"单条语句"且不会引出嵌套控制流） | §8.1 |
+| 35 | **`if` 的单语句臂**：臂里只有一条语句时不必写花括号——`if (c) return x;` / `if (c) continue;` / `if (o) v return v;`（`return` / `continue` / `defer` / `errdefer` 四个关键字，它们是"单条语句"且不会引出嵌套控制流） | §8.1 |
 | 36 | **`std.ArrayList` 补全**：`first` / `last` / `insertAt` / `removeAt` / `reverse` / `resize` / `swap` | §13.1 |
 
 ## v0.11 → v0.12 的改动
@@ -233,7 +240,7 @@ R10 的动机很简单：这些行为一旦发布就改不动了。趁现在只�
 ```
 const  let  var  fn  module  type  null  undefined
 if  else  while  for  inline  switch  continue  return
-defer  struct  union  enum  error  pub  extern  orelse  try
+defer  errdefer  struct  union  enum  error  pub  extern  orelse  try
 ```
 
 `pub` 只出现在文件作用域的声明前面，决定这个声明是否对外可见（§11）。
@@ -882,7 +889,7 @@ if (r) fd { … } else e { return e; }
   （§5）。要就地分辨"没有"和"真错误"，用 `if` 捕获或 `orelse`，别 `try`。
 - **所在函数必须能返回错误**（`!U`，U 可以不同）。否则报错：错误没地方去。
 - **`defer` 体里不能用**：defer 在返回路径上执行，它自己再"提前返回"会把正在
-  返回的值覆盖掉。就地处理掉。
+  返回的值覆盖掉。就地处理掉。（`errdefer` 体同一条规则。）
 - **不是左值**，不能 `try x = 1`。
 - **前向传播时 `defer` 照常执行**（和普通 `return` 一样）。
 
@@ -1162,7 +1169,7 @@ if (u) v       e1 else e2                // 捕获 + 单个返回值
   同时出现，捕获在前：`if (u) v t: { …; t: v; }`。
 - **单语句臂（v0.13/v0.15）**：臂里只有一条语句时，花括号可以省掉。
   解析时就是包一层单语句块，语义与写块完全一致。
-  - `return` / `continue` / `defer`（v0.13）：`if (c) return x;`、`if (o) v return v;`
+  - `return` / `continue` / `defer` / `errdefer`（v0.13；errdefer v0.27）：`if (c) return x;`、`if (o) v return v;`
   - **一条表达式语句**（v0.15）：`if (c) call(); else other();`、
     `if (c) x = 1; else x = 2;`、`if (n) v use(v); else report();`。
     这里的**分号属于臂**，不是外层语句的结束符——判据是分号后面紧跟 `else`。
@@ -1506,6 +1513,36 @@ var x: i32 = 0;
     defer x = x + 100;                   // 块退出时才跑
     x = 1;
 }                                        // 到这里 x == 101
+```
+
+`defer` 的块形式与普通块一致，**不写尾分号**；表达式形式必须以 `;` 结束。
+（v0.27 前 `defer { … }` 也要 `;`，已放宽。）
+
+#### 8.6.1 errdefer：错误返回时执行
+
+```
+errdefer expr;     // 语句形式
+errdefer { … }     // 块形式
+```
+
+- `errdefer` 与 `defer` 同一条登记栈、同一个 LIFO 序列；区别只在**触发条件**：
+  仅当所在函数以**错误返回**时执行。两条错误返回路都算——
+  `return <错误值>`（运行时看返回值的 `.tag != 0`，错误只有运行时知道）
+  和 `try` 的传播路径（错误已注定，无条件执行）。
+- 成功路径（返回正常值、正常走到底）**不触发**。
+- **所在函数必须返回 `!T`**（errdefer 没有错误可等，几乎肯定是写错了）。
+- 体内的禁令与 `defer` 完全相同：不能 `try` / `return` / 收割 / `continue`。
+- 与相邻登记的 `defer` **按登记逆序交织展开**——`defer a; errdefer b;` 在
+  错误路径上先 `b` 后 `a`，与两个都是 `defer` 时一致。
+
+```zx
+const open_config = fn (path: []const u8) !Config {
+    const f = try open(path);            // 失败直接传播
+    defer f.close();                     // 任何路径都关
+    errdefer log("config failed");       // 只有失败路径跑
+    const c = try parse(f);
+    return c;                            // 成功：errdefer 不触发
+};
 ```
 
 **陷阱**：`return` 的表达式先算出来，`defer` 才跑。所以

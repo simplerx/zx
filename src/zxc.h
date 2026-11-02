@@ -74,6 +74,7 @@ void   buf_free(Buf *b);
     X(KW_CONTINUE,"'continue'")                                                \
     X(KW_RETURN,  "'return'")                                                  \
     X(KW_DEFER,   "'defer'")                                                   \
+    X(KW_ERRDEFER,"'errdefer'")                                                \
     X(KW_STRUCT,  "'struct'")                                                  \
     X(KW_UNION,   "'union'")                                                   \
     X(KW_ENUM,    "'enum'")                                                    \

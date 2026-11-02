@@ -1,0 +1,65 @@
+// errdefer：仅当函数以错误返回（.tag != 0，含 try 传播）时触发的延迟执行。
+//
+// expect-output:
+// work ok: 7
+// ----
+// E1
+// work err: 3
+// E1
+// E2
+// D1
+// chain err: 3
+// D1
+// chain ok: 7
+// E9
+// D-first
+// both err: 9
+// D-first
+// both ok: 1
+// expect-exit: 0
+
+const std = module("std");
+
+const work = fn (ok: bool) !i32 {
+    errdefer std.println("E1");
+    if (ok) {
+        return 7;
+    }
+    return (error)3;
+};
+
+// try 传播也是"错误返回"：errdefer 触发；defer 照常。
+// 登记序 D1 → E2，错误路径逆序交织：E2 先于 D1。
+const chain = fn (ok: bool) !i32 {
+    defer std.println("D1");
+    errdefer std.println("E2");
+    return try work(ok);
+};
+
+// defer 与 errdefer 相邻登记：错误路径逆序 E9 → D-first；成功路径只有 D-first。
+const both = fn (ok: bool) !i32 {
+    defer std.println("D-first");
+    errdefer std.println("E9");
+    if (ok) {
+        return 1;
+    }
+    return (error)9;
+};
+
+const show = fn (r: !i32, tag: []const u8) void {
+    if (r) v {
+        std.println("{s} ok: {d}", tag, v);
+    } else e {
+        std.println("{s} err: {d}", tag, e);
+    }
+};
+
+const main = fn () !void {
+    show(work(true), "work");
+    std.println("----");
+    show(work(false), "work");
+    show(chain(false), "chain");
+    show(chain(true), "chain");
+    show(both(false), "both");
+    show(both(true), "both");
+};
