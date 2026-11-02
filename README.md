@@ -587,6 +587,11 @@ zx_init_<stem>(void)  每模块一个初始化函数，main 按依赖倒序调�
 - [x] M25 **自举评估**：`tests/good/selfhost.zx` 实测前端所需能力，
       结论与路线写在 `spec/bootstrap.md`；顺带挖出并修掉两个静默错误
       （联合体标签不填、标签 `if` 的收割被丢）——`sh test.sh` **158 项全过**
+- [x] M26 benchmark 基线：`fib`/`mandel`/`mmat`/`str` 四个程序，宿主侧计时 + 校验和锚点
+- [x] M27 `union(enum)` 语法糖：变体名即隐式枚举，布局统一为载荷在前、标签在后
+- [x] M28 **`orelse` 与 `.?`**（自举缺口 G1）：`a orelse b` 惰性取默认值，
+      `a.?` 空/错即 trap（与除零同一处置）；编译期能定就折
+      —— `sh test.sh` **160 项全过**
 
 ### M13：四件"语言设计上的回头路"
 
@@ -1058,3 +1063,52 @@ switch (s.tag) {
 
 测试：`tests/good/union_enum.zx`（三种载荷形态 + 方法 + u8 标签布局 +
 指针遍历）。`switch (s)` 直接分派（带载荷捕获）留作独立一轮。
+
+## M28：`orelse` 与 `.?`——给可选值两个出口
+
+自举评估把"没有 `.?` / `orelse`"排在缺口第一位。理由不是"Zig 有所以我们也要有"，
+而是**写 AST 遍历时每个子节点都是 `?*Node`**：
+
+```zx
+// 以前：每个子节点都要 if 捕获 + 标签块，三行变十行
+fn lhs(nd: *Node) *Node {
+    return r: if (nd.lhs) l { r: l; } else { r: nd; };
+}
+
+// 现在：必须有值就 `.?`，给默认值就 `orelse`
+fn lhs(nd: *Node) *Node { return nd.lhs.?; }
+fn lhs_or(nd: *Node, dflt: *Node) *Node { return nd.lhs orelse dflt; }
+```
+
+两条规则分开是有意的：`orelse` 管"没有就用这个"，`.?` 管"这里不可能没有"。混成
+一条，读代码的人就分不清"作者想过没有值的情况"还是"作者赌它不会空"。
+
+**`orelse` 是关键字而不是运算符符号。** 它只有一个优先级——高于赋值、低于 `||`，
+右结合。写成运算符就得在优先级表里给它找个位置，而它的语义是"取个值回来"，
+和布尔/算术都不该比黏度。解析上它占二元运算的位置，但造自己的节点（要短路，
+不能当普通二元运算发）。
+
+**右边必须惰性。** `x orelse expensive()` 在 `x` 有值时一次也不该算，所以后端
+不能摊成 C 三元式（那会把两边都算掉）——左边先落进临时量，再写
+`(tmp.tag ? tmp.payload : (右边))`。
+
+**`.?` 是"我知道它有值"，不是可恢复错误。** Zx 没有异常，错误值就在返回值里：
+想处理就用 `if` 捕获（§8.1）或 `orelse`（§5.1），三条路各管一段，不需要第四种。
+空值解包按整数除零那一套处置——`fflush(stdout)` → stderr 一行
+`zx: unwrap of a null optional at 文件:行` → `abort()`。
+
+**这一轮抓到两个"跑得出答案、答案是错的"**：
+
+1. `null orelse x` 被当成"左值不是可选类型"整段略过，发出去的是那个 `null`
+   字面量（`0`）。`null` 的类型是 `TY_NULL`，压根没有 payload 可取——正确做法
+   是直接发右边。
+2. `null orelse 42` 写在 `{}` 格式参数里时没有期望类型，语义层判不出结果类型就
+   报错，可右边明明有类型。改成"期望类型缺失就取右边的类型"。
+
+顺带把编译期折叠接上：`const FALLBACK = null orelse 42;` 折成 `42`，
+`const N: i32 = SomeConst orelse 0;` 也折得出来；但 `null.?` **不**折——
+把本该系统崩的地方悄悄变成 `0`，和 §54 那两个静默错误是同一类病。
+
+测试：`tests/good/optional.zx`（基本语义 / 右结合与优先级 / 惰性 / 链式解包 /
+const 折叠）、`tests/bad/unwrap-nonoptional.zx`、`tests/bad/orelse-nonoptional.zx`；
+`tests/good/if_arm.zx` 补了值位置的 `else if` 链。

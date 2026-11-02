@@ -5,7 +5,8 @@
  *   - `.` followed by a digit is an index (t.0.0), NOT a float:
  *     floats must have an integer part (0.5 ok, .5 invalid).
  *   - `..` is the range token; `1..2` lexes as INT DOTDOT INT.
- *   - `//` line comments; `/* ... *​/` block comments.
+ *   - line comments with two slashes; block comments open slash-star
+ *     and close star-slash (no nesting).
  *   - INT suffixes: u8 u16 u32 u64 i8 i16 i32 i64 usize isize
  *     FLOAT suffixes: f16 f32 f64 f128
  *   - CHAR: 'a' '\n' '\xHH' — decoded to 1..4 UTF-8 bytes.
@@ -36,6 +37,7 @@ static const KwEntry g_keywords[] = {
     {"struct", TOK_KW_STRUCT}, {"union", TOK_KW_UNION},
     {"enum", TOK_KW_ENUM},     {"error", TOK_KW_ERROR},
     {"pub", TOK_KW_PUB},       {"extern", TOK_KW_EXTERN},
+    {"orelse", TOK_KW_ORELSE},
 };
 
 static TokKind ident_kind(const char *s, int len) {

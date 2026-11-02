@@ -587,6 +587,9 @@ static char *inst_name(Node *g, const char *base);   /* 泛型实例的 C 名 */
 /* 当前函数：生成 return 时要看返回类型 / 是不是 main */
 static Type *g_cur_ret;
 static bool  g_is_main;
+/* 正在发函数体。`orelse` 要把左边存进一个临时量（只求值一次），
+ * 临时量只能落在函数里——顶层初始化器里没有"前一行"可插。 */
+static bool  g_in_fn;
 
 /* 正常离开作用域：先把这一层的 defer 逆序展开，再弹栈 */
 static void run_defers(int down_to);
@@ -2474,7 +2477,61 @@ static bool num_bin_c(Buf *b, Type *ty, int op, const char *lhs, const char *rhs
     return false;
 }
 
-/* 除零 trap 辅助（M19）：按用到的位宽/符号惰性发射 */
+/* ---- `.?' 的解包辅助（G1）----
+ *
+ * 每个用到的可选/错误联合体类型配一个静态函数：单次求值、失败即 trap。
+ * 不写成宏是因为 `?T` 是结构体，宏要拆两次求值；不写成全局函数是因为
+ * payload 的类型每处不同。名字按类型名的规则生成，天然唯一。
+ *
+ * 它们进共享头（各单元各得一份 static 副本，链接时互不干扰）。 */
+static Type **g_unw;
+static int    g_nuw, g_cuw;
+
+static void unwrap_need(Type *t) {
+    if (!t) return;
+    Buf mine; buf_init(&mine);
+    tn(&mine, t);
+    for (int i = 0; i < g_nuw; i++) {
+        Buf o; buf_init(&o);
+        tn(&o, g_unw[i]);
+        if (!strcmp(o.data, mine.data)) return;   /* 同一个 C 类型只要一份 */
+    }
+    if (g_nuw == g_cuw) {
+        g_cuw = g_cuw ? g_cuw * 2 : 8;
+        g_unw = realloc(g_unw, sizeof(Type *) * (size_t)g_cuw);
+    }
+    g_unw[g_nuw++] = t;
+}
+
+static void emit_unwrap_runtime(void) {
+    for (int i = 0; i < g_nuw; i++) {
+        Type *t = g_unw[i];
+        Buf nm; buf_init(&nm); tn(&nm, t);
+        Buf ct; buf_init(&ct); ctype(&ct, t->elem);
+        if (t->kind == TY_OPT) {
+            buf_printf(g_out,
+                "static %s zx_unwrap_%s(%s o, const char *w) {\n"
+                "    if (!o.tag) { fflush(stdout); fprintf(stderr, \"zx: unwrap of a null optional at %%s\\n\", w); abort(); }\n"
+                "    return o.payload;\n"
+                "}\n\n", ct.data, nm.data, nm.data);
+        } else {
+            buf_printf(g_out,
+                "static %s zx_unwrap_%s(%s o, const char *w) {\n"
+                "    if (o.tag) { fflush(stdout); fprintf(stderr, \"zx: unwrap of error %%u at %%s\\n\", (unsigned)o.tag, w); abort(); }\n"
+                "    return o.payload;\n"
+                "}\n\n", ct.data, nm.data, nm.data);
+        }
+    }
+}
+
+/* 把 "文件:行" 变成一个可嵌入 C 的字符串字面量 */
+static void where_lit(Buf *b, int line) {
+    char pos[512];
+    snprintf(pos, sizeof pos, "%s:%d", g_srcpath ? g_srcpath : "?", line);
+    cstr(b, pos, (int)strlen(pos));
+}
+
+
 static void emit_div_runtime(void) {
     bline(&g_bproto, "static void zx_div0(void);");
     buf_puts(g_out,
@@ -2809,6 +2866,48 @@ static void ex(Buf *b, Node *n) {
         case TOK_TILDE: buf_puts(b, "(~"); ex(b, n->a); buf_puts(b, ")"); return;
         default:        buf_puts(b, "(");  ex(b, n->a); buf_puts(b, ")"); return;
         }
+    }
+
+    case NK_UNWRAP: {
+        Type *t = n->a->ty;
+        if (!t || (t->kind != TY_OPT && t->kind != TY_ERR)) { ex(b, n->a); return; }
+        unwrap_need(t);
+        Buf nm; buf_init(&nm); tn(&nm, t);
+        Buf w;  buf_init(&w);  where_lit(&w, n->line);
+        buf_printf(b, "zx_unwrap_%s(", nm.data);
+        ex(b, n->a);
+        buf_printf(b, ", %s)", w.data);
+        return;
+    }
+
+    /* `a orelse b`：右边只在左边空/错时才求值，所以不能摊成一个 C 三元式
+     * （那会把 b 提前算掉）。左边先落进临时量，保证只求值一次。 */
+    case NK_ORELSE: {
+        Type *t = n->a->ty;
+        /* `null orelse x`：左边是多态字面量 null，类型里只有"空"这一种可能，
+         * 没有 payload 可取——直接发右边。少这条会被当成"不是可选类型"整段
+         * 略过，最终发出去的是那个 0 字节的 null。 */
+        if (t && t->kind == TY_NULL) { ex(b, n->b); return; }
+        if (!t || (t->kind != TY_OPT && t->kind != TY_ERR)) { ex(b, n->a); return; }
+        const char *has = (t->kind == TY_OPT) ? ".tag" : ".tag == 0";
+        if (!g_in_fn) {                    /* 顶层初始化器：只能老老实实写三元式 */
+            buf_puts(b, "((");
+            ex(b, n->a);
+            buf_printf(b, ")%s ? (", has);
+            ex(b, n->a);
+            buf_puts(b, ").payload : (");
+            ex(b, n->b);
+            buf_puts(b, "))");
+            return;
+        }
+        static int on;
+        char tmp[64];
+        snprintf(tmp, sizeof tmp, "_or%d", on++);
+        line("%s %s = %s;", cty(t), tmp, cxs(n->a, t));
+        buf_printf(b, "((%s)%s ? %s.payload : (", tmp, has, tmp);
+        ex(b, n->b);
+        buf_puts(b, "))");
+        return;
     }
 
     case NK_BIN: {
@@ -3612,10 +3711,40 @@ static void gen_for_body(Node *n, int id) {
 
 /* ---- switch ---- */
 
+/* 聚合主语（?T / !T / 带标签联合体）的 switch 头部：C 的 switch 吃不了
+ * 结构体，得换成判别值。返回静态轮换缓冲，嵌套 switch 也安全。 */
+static const char *tagref(const char *tmp, Type *st) {
+    static char bufs[4][64];
+    static int rot;
+    char *b = bufs[rot++ & 3];
+    (void)st;
+    snprintf(b, 64, "%s.tag", tmp);
+    return b;
+}
+
 static void gen_switch(Node *n, const char *slot, Type *slot_ty) {
     Type *st = n->a->ty;
+    bool subj_agg = st && (st->kind == TY_OPT || st->kind == TY_ERR ||
+                           (st->kind == TY_UNION && st->is_tagged));
+    /* 有捕获臂、或者主语是聚合（C 的 switch 吃不了结构体）：
+     * 先把主语落进临时量，头部用判别值，臂里用临时量取载荷。 */
+    bool hoist = subj_agg;
+    for (int i = 0; i < n->nitems && !hoist; i++)
+        if (n->items[i]->name) hoist = true;
+
+    const char *hdr;
+    static int swn;
+    char tmp[32];
+    if (hoist) {
+        snprintf(tmp, sizeof tmp, "_sw%d", swn++);
+        line("%s %s = %s;", cty(st), tmp, cxs(n->a, st));
+        hdr = subj_agg ? tagref(tmp, st) : tmp;
+    } else {
+        hdr = exs_cond(n->a);
+    }
+
     buf_putc(g_out, '\n');
-    line("switch %s {", exs_cond(n->a));
+    line("switch %s {", hdr);
 
     int end = ++g_labid;
     int narm = n->nitems;
@@ -3631,7 +3760,7 @@ static void gen_switch(Node *n, const char *slot, Type *slot_ty) {
                 Node *p = arm->items[k];
                 Buf pb; buf_init(&pb);
                 if (p->kind == NK_FIELD && !p->a && p->name) {
-                    /* 枚举变体 / ?T / !T 的模式 */
+                    /* 枚举变体 / ?T / !T / 带标签联合体的模式 */
                     if (st && st->kind == TY_ENUM) {
                         Buf nm; buf_init(&nm); tn(&nm, st);
                         buf_printf(&pb, "%s_%s", nm.data, p->name);
@@ -3639,6 +3768,22 @@ static void gen_switch(Node *n, const char *slot, Type *slot_ty) {
                         buf_puts(&pb, !strcmp(p->name, "some") ? "true" : "false");
                     } else if (st && st->kind == TY_ERR) {
                         buf_puts(&pb, !strcmp(p->name, "ok") ? "0" : "*");
+                    } else if (st && st->kind == TY_UNION && st->is_tagged) {
+                        /* 模式 → 标签判别值：标签是枚举就发枚举变体名，
+                         * 是整数就发字面量（显式标签联合体允许自定义数值） */
+                        Field *f = NULL;
+                        for (int q = 0; q < st->nfields; q++)
+                            if (st->fields[q].name && !strcmp(st->fields[q].name, p->name))
+                                { f = &st->fields[q]; break; }
+                        if (f && st->tag_ty && st->tag_ty->kind == TY_ENUM) {
+                            ensure_type(st->tag_ty);
+                            Buf nm; buf_init(&nm); tn(&nm, st->tag_ty);
+                            buf_printf(&pb, "%s_%s", nm.data, p->name);
+                        } else if (f) {
+                            buf_printf(&pb, "%llu", (unsigned long long)f->tag);
+                        } else {
+                            ex(&pb, p);
+                        }
                     } else {
                         ex(&pb, p);
                     }
@@ -3652,6 +3797,30 @@ static void gen_switch(Node *n, const char *slot, Type *slot_ty) {
         }
         g_ind++;
         CScope s; cscope_push(&s);
+        /* 捕获声明（M28）：联合体 → 变体载荷，?T/.some → payload，
+         * !T 的 .err → 错误值，枚举 / 整数 / bool → 主语本身 */
+        if (arm->name && !arm->flag) {
+            Type *cap = NULL;
+            const char *src = NULL;
+            if (st && st->kind == TY_UNION && st->is_tagged) {
+                for (int q = 0; q < st->nfields; q++)
+                    if (st->fields[q].name && !strcmp(st->fields[q].name, arm->name))
+                        cap = st->fields[q].ty;
+                if (cap) { Buf nb; buf_init(&nb); buf_printf(&nb, "%s.u.%s", tmp, arm->name); src = nb.data; }
+            } else if (st && st->kind == TY_OPT) {
+                cap = st->elem;
+                Buf nb; buf_init(&nb); buf_printf(&nb, "%s.payload", tmp); src = nb.data;
+            } else if (st && st->kind == TY_ERR) {
+                Node *p = arm->nitems ? arm->items[0] : NULL;
+                bool is_err_pat = p && p->kind == NK_FIELD && p->name && !strcmp(p->name, "err");
+                if (is_err_pat) { cap = ty_error();  Buf nb; buf_init(&nb); buf_printf(&nb, "%s.tag", tmp); src = nb.data; }
+                else            { cap = st->elem;    Buf nb; buf_init(&nb); buf_printf(&nb, "%s.payload", tmp); src = nb.data; }
+            } else if (st) {
+                cap = st;
+                src = tmp;
+            }
+            if (cap && src) line("%s %s = %s;", cty(cap), cnames(arm->name), src);
+        }
         if (arm->label) {
             CLab *l = &g_labs[g_nlabs++];
             l->tag = arm->label; l->slot = slot; l->slot_ty = slot_ty;
@@ -3779,6 +3948,7 @@ static void gen_fn(Node *fn, const char *name, bool is_main, bool exported) {
 
     g_depth = 0;
     g_csc = NULL;
+    g_in_fn = true;
     CScope s; cscope_push(&s);
     if (fn->b) gen_block_stmts(fn->b);
     /* 函数末尾：展开 defer，补上隐式 return */
@@ -3792,6 +3962,7 @@ static void gen_fn(Node *fn, const char *name, bool is_main, bool exported) {
     buf_putc(g_out, '\n');
     g_cur_ret = NULL;
     g_is_main = false;
+    g_in_fn = false;
 }
 
 /* ======================================================================
@@ -4245,6 +4416,7 @@ int backend_emit_split(Node *root, Buf *header, BUnit *units, int maxunits) {
     if (g_need_proc) emit_proc_runtime();
     if (g_need_heapalloc) emit_heapalloc_runtime();
     if (g_need_div) emit_div_runtime();
+    if (g_nuw) emit_unwrap_runtime();
     /* 128 位转十进制：编译期 printf 路径（g_need_i128）与 zx_fmt 的
      * kind 9/10 分支（fmt 运行时一存在就可能碰到）都要有。 */
     if (g_need_i128 || g_need_fmt || g_need_allocfmt || g_need_page || g_need_any)

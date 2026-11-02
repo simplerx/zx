@@ -2566,6 +2566,41 @@ static Type *check_expr_raw(Node *n, Type *expect) {
 
     case NK_BIN:      return check_binary(n, expect);
     case NK_UN:       return check_unary(n, expect);
+
+    /* `e.?` —— 解包。空（?T 的 none）/ 出错（!T 的 err）在运行时 trap，
+     * 与整数除零同一个处置方式：先 flush，再打一行说明，然后 abort。
+     * 它只给值，不是左值——`x.? = 1` 会被 check_assign 拦掉。 */
+    case NK_UNWRAP: {
+        Type *t = check_expr(n->a, NULL);
+        if (!t || t->kind == TY_INVALID) return ty_invalid();
+        if (t->kind != TY_OPT && t->kind != TY_ERR)
+            return BAD(n, "`.?` needs an optional or an error union, found `%s`", ty_str(t));
+        return type_of(n, t->elem);
+    }
+
+    /* `a orelse b` —— 有值取载荷，空/错取 b。b 只在真的空/错时求值。 */
+    case NK_ORELSE: {
+        Type *t = check_expr(n->a, NULL);
+        if (!t || t->kind == TY_INVALID) {
+            check_expr(n->b, expect);      /* 右边照样检查，别把错漏过去 */
+            return ty_invalid();
+        }
+        Type *elem = NULL;
+        if (t->kind == TY_OPT || t->kind == TY_ERR) elem = t->elem;
+        else if (t->kind == TY_NULL) elem = expect;   /* `null orelse x`：靠期望类型 */
+        if (!elem) {
+            /* 没有期望类型（比如直接喂给 `{}` 格式参数）：右边的类型就是答案。
+             * `null orelse 42` 是 i32，不需要谁告诉它。 */
+            if (t->kind != TY_NULL)
+                return BAD(n, "`orelse` needs an optional or an error union, found `%s`", ty_str(t));
+            Type *alt = check_expr(n->b, NULL);
+            if (!alt || alt->kind == TY_INVALID) return ty_invalid();
+            return type_of(n, alt);
+        }
+        Type *alt = check_expr(n->b, elem);
+        coerce_node(n->b, alt, elem, "`orelse` alternative");
+        return type_of(n, elem);
+    }
     case NK_CAST:     return check_cast(n);
     case NK_FIELD:    return check_field(n);
     case NK_INDEX:    return check_index(n);
@@ -3736,6 +3771,9 @@ static void check_pattern(Node *p, Type *s) {
             return;
         }
         if (s->kind == TY_UNION) {
+            if (!s->is_tagged)
+                err_at(p->line, p->col,
+                       "cannot switch on a plain union (no tag to match); use union(enum)");
             if (!ty_field(s, p->name))
                 err_at(p->line, p->col, "`%s` has no member '%s'", ty_str(s), p->name);
             p->ty = s;
@@ -3837,6 +3875,25 @@ static void check_switch_exhaustive(Node *n, Type *s) {
            ty_str(s), list.data);
 }
 
+/* 捕获的类型：被捕获的就是"匹配到的东西"（M28）。联合体臂捕获变体载荷，
+ * `?T` 的 .some 捕获载荷（.none 没有载荷，拒绝），`!T` 的 .ok 捕获载荷、
+ * .err 捕获错误值；枚举 / 整数 / bool 的臂捕获主语值本身。 */
+static Type *switch_cap_ty(Node *pat, Type *s) {
+    if (s->kind == TY_UNION && s->is_tagged) {
+        if (pat->kind != NK_FIELD || !pat->name) return NULL;
+        Field *f = ty_field(s, pat->name);
+        return f ? f->ty : NULL;
+    }
+    if (s->kind == TY_OPT) {
+        if (!strcmp(pat->name, "none"))
+            err_at(pat->line, pat->col, "`.none` has no payload to capture");
+        return s->elem;
+    }
+    if (s->kind == TY_ERR)
+        return !strcmp(pat->name, "err") ? ty_error() : s->elem;
+    return s;
+}
+
 static Type *check_switch(Node *n, Type *expect) {
     Label *lb = n->label ? label_push(n->label, false) : NULL;
     Type *s = check_expr(n->a, NULL);
@@ -3852,11 +3909,36 @@ static Type *check_switch(Node *n, Type *expect) {
             for (int k = 0; k < arm->nitems; k++) check_pattern(arm->items[k], s);
         }
 
-        Type *at = check_arm(arm->a, expect);
-        if (al) { at = al->has ? al->ty : ty_void(); label_pop(); }
+        /* 捕获（M28）：`pattern: cap { … }`。捕获只允许单模式臂；
+         * else 臂没有"匹配到的东西"，也拒绝。 */
+        Type *cap_ty = NULL;
+        if (arm->name) {
+            if (arm->flag)
+                err_at(arm->line, arm->col, "`else` arm has nothing to capture");
+            if (arm->nitems != 1)
+                err_at(arm->line, arm->col,
+                       "a capture needs exactly one pattern; split the arm instead");
+            cap_ty = switch_cap_ty(arm->items[0], s);
+            if (!cap_ty || cap_ty->kind == TY_INVALID)
+                err_at(arm->line, arm->col,
+                       "cannot capture in this arm (subject `%s`)", ty_str(s));
+        }
 
-        if (!result) result = at;
-        else         result = unify(arm, result, at);
+        {
+            Scope sc;
+            scope_push(&sc);
+            if (arm->name && cap_ty) {
+                Symbol *cs = scope_add(&sc, arm->name, SK_CAPTURE);
+                if (cs) { cs->ty = cap_ty; cs->state = 2; }
+            }
+            Type *at = check_arm(arm->a, expect);
+            scope_pop(&sc);
+
+            if (al) { at = al->has ? al->ty : ty_void(); label_pop(); }
+
+            if (!result) result = at;
+            else         result = unify(arm, result, at);
+        }
     }
 
     check_switch_exhaustive(n, s);
@@ -4491,6 +4573,16 @@ static Value *ct_call(Node *n) {
 
 /* ---------------- 表达式 ---------------- */
 
+/* 只换类型、不动值：`?T` / `!T` 的载荷在编译期值里就是载荷本身
+ * （标签只存在于运行时表示），所以取载荷 = 改一下类型。 */
+static Value *with_ty(Value *v, Type *t) {
+    if (!v || !t) return v;
+    Value *r = val_new(v->kind, t);
+    *r = *v;
+    r->ty = t;
+    return r;
+}
+
 static Value *ct_eval(Node *n) {
     if (!n) return val_void();
     /* 标识符不缓存：var 的槽位随时会变，每次都得重新读 */
@@ -4540,6 +4632,29 @@ static Value *ct_eval(Node *n) {
             break;
         }
         v = val_un(n->op, a, n->line, n->col);
+        break;
+    }
+
+    /* `a orelse b`：编译期能判断空不空就折出来，判不了就留给运行时。
+     * 左边是字面量 `null` 时永远是空——这一支最常用（`const X = null orelse 42;`）。 */
+    case NK_ORELSE: {
+        Value *a = ct_eval(n->a);
+        if (!a) {
+            if (n->a->kind == NK_NULL) v = ct_eval(n->b);
+            break;
+        }
+        if (a->kind == V_NULL || a->kind == V_UNDEF) v = ct_eval(n->b);
+        else v = with_ty(a, n->ty);        /* 有值：取载荷 */
+        break;
+    }
+
+    /* `.?' 同理：编译期就知道是空的，不在这里"算出个值"——那等于把
+     * 运行时 trap 悄悄变成编译期的 0。让它折不动，交给后端发 trap。 */
+    case NK_UNWRAP: {
+        if (n->a->kind == NK_NULL) break;
+        Value *a = ct_eval(n->a);
+        if (!a || a->kind == V_NULL || a->kind == V_UNDEF) break;
+        v = with_ty(a, n->ty);
         break;
     }
 

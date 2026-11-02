@@ -1,6 +1,12 @@
-# Zx 语言规格 v0.18
+# Zx 语言规格 v0.19
 
 > 依据 `plan` + 五轮修订意见。语言名 **Zx**，源文件 `.zx`。后端先出 C。
+
+## v0.18 → v0.19 的改动
+
+| # | 改动 | 影响 |
+|---|---|---|
+| 45 | **新增 `orelse` 与 `.?`**：`a orelse b` 空/错取 b（惰性、右结合、优先级仅高于赋值）；`a.?` 空/错即 trap（与除零同一处置）。两者都不是左值，编译期能定就折 | §5.1 |
 
 ## v0.17 → v0.18 的改动
 
@@ -173,12 +179,12 @@ R10 的动机很简单：这些行为一旦发布就改不动了。趁现在只�
 
 ---
 
-### 1.1 关键字（23 个）
+### 1.1 关键字（24 个）
 
 ```
 const  let  var  fn  module  type  null  undefined
 if  else  while  for  inline  switch  continue  return
-defer  struct  union  enum  error  pub  extern
+defer  struct  union  enum  error  pub  extern  orelse
 ```
 
 `pub` 只出现在文件作用域的声明前面，决定这个声明是否对外可见（§11）。
@@ -752,7 +758,56 @@ const p: *const i32 = &a;     // 与 &a.payload 同一地址，零偏移
 const q: *const i32 = &c;     // 同上
 ```
 
-对 `?T` / `!T` 取字段时，`.0` 是 payload，`.tag` 是标签（`?T` 上还有 `?`/`!` 特例语法见 §8.1）。
+对 `?T` / `!T` 取字段时，`.0` 是 payload，`.tag` 是标签。
+
+### 5.1 取值：`orelse` 与 `.?`
+
+三种退出方式，各有各的用途：`if` 捕获（§8.1）管"分支里做事"，`orelse` 管
+"给个默认值"，`.?` 管"这里必须得有值"。
+
+```
+a orelse b        // 有值取 payload；空 / 出错取 b（b 只在需要时求值）
+a.?               // 有值取 payload；空 / 出错 → 运行时 trap
+```
+
+| | 左值 | 结果类型 | 空 / 出错时 |
+|---|---|---|---|
+| `a orelse b` | `?T` / `!T` | `T` | 取 `b`（`b` 的类型必须是 `T`） |
+| `a.?` | `?T` / `!T` | `T` | 打一行说明后 `abort()` |
+
+- **`orelse` 是关键字，不是运算符**，优先级只比赋值高一层：`a orelse 0 + 1` 读作
+  `a orelse (0 + 1)`，`a orelse b == c` 读作 `(a orelse b) == c`。它是"取个值回来"，
+  不该比四则运算还黏。
+- **`orelse` 右结合**：`a orelse b orelse 42` 是 `a orelse (b orelse 42)`，逐个往下退。
+- **`b` 是惰性的**：左边有值就完全不求值——`x orelse expensive()` 在 `x` 有值时
+  不会付那次调用。实现上左边先落进一个临时量，保证只求值一次。
+- **`a.?` 是"我知道它有值"**：空 / 出错是程序 bug，不是可恢复错误。处置方式与整数
+  除零一致（§7.R10）：`fflush(stdout)` → stderr 打 `zx: unwrap of a null optional at
+  文件:行` → `abort()`。**不做 `try`/`catch` 那套**——Zx 没有异常，错误值就在返回值里，
+  想处理就用 `if` 捕获或 `orelse`。
+- **都不是左值**：`x.? = 1`、`(a orelse b) = 1` 是编译错误。要写就写进原变量。
+- **`null orelse x` 恒为 `x`**：`null` 是多态字面量，类型里只有"空"这一种可能。
+  没有期望类型时（例如直接喂给 `{}` 格式参数），结果类型取 `x` 的类型。
+- **编译期能定就定**：`const FALLBACK = null orelse 42;` 折成 `42`；
+  `const N: i32 = SomeConst orelse 0;` 也折得出来。`.?` 在编译期遇到空值**不折**——
+  那是把本该系统崩的地方悄悄变成 0。
+
+```zx
+const Node = struct { v: i32, next: ?*Node };
+
+fn second(n: ?*Node) i32 {
+    let p = n.?;                 // 这里必须真有节点
+    return p.next.?.v;           // 第二层也一样
+}
+
+fn port(cfg: Config) u16 {
+    return cfg.port orelse 8080; // 没配就用默认值
+}
+
+fn name(user: *User) []const u8 {
+    return user.name.?;          // 这里必须有，缺了就该炸
+}
+```
 
 ---
 
@@ -839,6 +894,7 @@ let c = { 1 };                   // 一元组 {i32}，不是块
 
 ```
 =  +=  -=  *=  /=  %=  &=  |=  ^=  <<=  >>=    右结合
+orelse                                        右结合（关键字形式，不是运算符）
 ||
 &&
 ==  !=
@@ -850,7 +906,7 @@ let c = { 1 };                   // 一元组 {i32}，不是块
 +  -
 *  /  %
 前缀： &  -  !  ~  (T)                          右结合
-后缀： .name  .N  .len  .size  [i]  [a..b]  (args)
+后缀： .name  .N  .len  .size  .?  [i]  [a..b]  (args)
 ```
 
 - `&x` 取地址；中缀 `&` 是位与。

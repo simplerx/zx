@@ -181,12 +181,28 @@ static void usage(void) {
         "usage: zxc file.zx [--check|--tokens|--ast|--emit-c] [-o prog]\n");
 }
 
+/* 默认工具链（`.toolchain/zig.exe cc`）钉在仓库根，而不是当前目录：
+ * `zxc` 装在 bin/ 里，工具链在它的上一级。用 cwd 相对路径的话，
+ * 只有"恰好站在仓库根"才能编译——在子目录里跑任何程序都会得到
+ * cmd 的"系统找不到指定的路径"。 */
+static char g_ccbuf[2048];
+
+static const char *default_cc(const char *argv0) {
+    char dir[1600];
+    snprintf(dir, sizeof dir, "%s", argv0 ? argv0 : "");
+    for (char *p = dir; *p; p++) if (*p == '/') *p = '\\';   /* cmd 只认反斜杠 */
+    char *slash = strrchr(dir, '\\');
+    if (!slash) return ".toolchain\\zig.exe cc";             /* 走 PATH 调的，只能靠 cwd */
+    *slash = 0;
+    snprintf(g_ccbuf, sizeof g_ccbuf, "%s\\..\\.toolchain\\zig.exe cc", dir);
+    return g_ccbuf;
+}
+
 int main(int argc, char **argv) {
     sema_set_argv0(argv[0]);
 
     g_cc = getenv("ZX_CC");
-    /* system() 走 cmd.exe：正斜杠的相对路径不认，得用反斜杠 */
-    if (!g_cc || !*g_cc) g_cc = ".toolchain\\zig.exe cc";
+    if (!g_cc || !*g_cc) g_cc = default_cc(argv[0]);
 
     const char *file = NULL, *out = NULL;
     bool dump_tokens = false, dump_ast = false, emit_c = false, check = true;

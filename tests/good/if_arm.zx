@@ -44,6 +44,12 @@ fn chain(n: i32) void {
     else std.println("many");
 }
 
+// else-if 链在**值位置**：`else if` 本身就是一个 if 表达式，
+// 所以臂上不用再套标签，逐层往下传就行
+fn tier(x: i32) i32 {
+    return if (x > 10) 100 else if (x > 5) 50 else 0;
+}
+
 fn main() u8 {
     std.println("{} {} {}", grade(95), grade(75), grade(20));
 
@@ -62,6 +68,8 @@ fn main() u8 {
     // 值形态不受影响：`else` 前面没有分号，照旧是表达式臂
     let pick = if (xs[0] > 0) 10 else 20;
     std.println("pick {}", pick);
+
+    std.println("tier {} {} {}", tier(50), tier(7), tier(1));
     return 0;
 }
 
@@ -76,3 +84,4 @@ fn main() u8 {
 // two
 // many
 // pick 10
+// tier 100 50 0

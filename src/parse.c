@@ -433,18 +433,22 @@ static Node *parse_type(P *p) {
 
 /* ---------------- expressions ---------------- */
 
+/* 优先级：数字越大绑得越紧。`orelse` 只比赋值高一层——`a orelse b + 1`
+ * 读作 `a orelse (b + 1)`，`a orelse b == c` 读作 `(a orelse b) == c`。
+ * 与 Zig 一致：它是"取个值回来"，不该比四则运算还黏。 */
 static int bin_prec(TokKind k) {
     switch (k) {
-    case TOK_OROR: return 1;
-    case TOK_ANDAND: return 2;
-    case TOK_EQ: case TOK_NE: return 3;
-    case TOK_LT: case TOK_LE: case TOK_GT: case TOK_GE: return 4;
-    case TOK_PIPE: return 5;
-    case TOK_CARET: return 6;
-    case TOK_AMP: return 7;
-    case TOK_SHL: case TOK_SHR: return 8;
-    case TOK_PLUS: case TOK_MINUS: return 9;
-    case TOK_STAR: case TOK_SLASH: case TOK_PERCENT: return 10;
+    case TOK_KW_ORELSE: return 1;
+    case TOK_OROR: return 2;
+    case TOK_ANDAND: return 3;
+    case TOK_EQ: case TOK_NE: return 4;
+    case TOK_LT: case TOK_LE: case TOK_GT: case TOK_GE: return 5;
+    case TOK_PIPE: return 6;
+    case TOK_CARET: return 7;
+    case TOK_AMP: return 8;
+    case TOK_SHL: case TOK_SHR: return 9;
+    case TOK_PLUS: case TOK_MINUS: return 10;
+    case TOK_STAR: case TOK_SLASH: case TOK_PERCENT: return 11;
     default: return 0;
     }
 }
@@ -469,7 +473,9 @@ static Node *parse_binary_rest(P *p, Node *lhs, int min_prec) {
         if (prec == 0 || prec < min_prec) break;
         advance(p);
         Node *rhs = parse_binary_rest(p, parse_unary(p), prec + 1);
-        Node *n = node_new(NK_BIN, lhs->line, lhs->col);
+        /* orelse 不是算术：它自带一个节点（语义是"空则取右边"，
+         * 后端要短路，不能当普通二元运算发） */
+        Node *n = node_new(k == TOK_KW_ORELSE ? NK_ORELSE : NK_BIN, lhs->line, lhs->col);
         n->op = (int)k;
         n->a = lhs;
         n->b = rhs;
@@ -515,6 +521,16 @@ static Node *parse_postfix(P *p, Node *base) {
     for (;;) {
         Token *t = cur(p);
         if (t->kind == TOK_DOT) {
+            /* `.?` —— 解包；空/错则运行时 trap。`.` 后面只可能是名字、下标
+             * 或 `?`，三者不冲突，所以紧跟 `?` 就是解包。 */
+            if (peek(p, 1)->kind == TOK_QUESTION) {
+                advance(p);
+                advance(p);
+                Node *u = node_new(NK_UNWRAP, t->line, t->col);
+                u->a = base;
+                base = u;
+                continue;
+            }
             advance(p);
             if (at(p, TOK_IDENT)) {
                 Token *id = advance(p);
@@ -1179,6 +1195,11 @@ static Node *parse_switch(P *p, const char *label) {
         if (at(p, TOK_IDENT) && peek(p, 1)->kind == TOK_COLON && !is_bool_word(cur(p)))
             arm->label = take_ident(p);        /* arm label */
         expect(p, TOK_COLON);
+        /* 捕获（M28）：`pattern: cap { … }`——IDENT 后面紧跟 `{` 才算捕获名，
+         * 否则它是表达式臂的开头（`.x: foo` 是值 foo）。捕获只配块臂，
+         * `cap 值` 和 `值` 没法区分，索性不允许。 */
+        if (at(p, TOK_IDENT) && peek(p, 1)->kind == TOK_LBRACE && !is_bool_word(cur(p)))
+            arm->name = take_ident(p);
         arm->a = at(p, TOK_LBRACE) ? parse_block(p) : parse_expr(p);
         push(n, arm);
         if (!accept(p, TOK_COMMA)) {
@@ -1410,6 +1431,8 @@ static const char *nk_name(NodeKind k) {
     case NK_FOR: return "for";
     case NK_SWITCH: return "switch";
     case NK_ARM: return "arm";
+    case NK_UNWRAP: return "unwrap";
+    case NK_ORELSE: return "orelse";
     case NK_RETURN: return "return";
     case NK_CONTINUE: return "continue";
     case NK_YIELD: return "yield";

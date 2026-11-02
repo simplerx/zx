@@ -1,0 +1,8 @@
+// `.?` 只对 `?T` / `!T` 有意义。在普通整数上用它是想当然，
+// 报错要比"发一个读 payload 的表达式"好。
+// expect: `.?` needs an optional or an error union, found `i32`
+// expect-code: E0301
+fn main() i32 {
+    let x: i32 = 5;
+    return x.?;
+}

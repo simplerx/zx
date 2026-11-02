@@ -11,6 +11,8 @@ typedef enum {
     NK_BIN,             /* a op b (op = TokKind) */
     NK_RANGE,           /* lo .. [hi]  (hi==NULL → open, for/multi-bind only) */
     NK_UN,              /* op a  — -, +, !, ~, & (addr) */
+    NK_UNWRAP,          /* a.? — 可选/错误联合体解包；空则 trap（G1） */
+    NK_ORELSE,          /* a orelse b — 空/错则取 b（G1） */
     NK_CAST,            /* (T)e — a=type, b=expr */
     NK_INDEX,           /* base[idx] */
     NK_SLICE,           /* base[lo..hi] (hi NULL → open) */
