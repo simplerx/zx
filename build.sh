@@ -14,9 +14,13 @@ mkdir -p bin .zc-cache/local .zc-cache/global
     src/fe.c src/astload.c
 echo "built bin/zxc.exe"
 
-# 自举阶段 3：Zx 前端驱动（zxc --fe=zx 的供货方）。用刚编好的 zxc 编它——
-# 但必须踩 --fe=c 过河：zxc 默认连模块加载都走 zxfe，而此刻手上的 zxfe
-# 还是上一版（新 char 语义它还没吃进去），拿旧前端编新前端会自噬。
-# （阶段 4 之后 zxc 可自举出新 zxfe，这一脚才能拆。）
-./bin/zxc.exe bootstrap/zxfe.zx -o bin/zxfe.exe --fe=c
+# 自举阶段 4：zxc 用**自己的 Zx 前端**编 zxfe——闭环。阶段 3 的 --fe=c
+# 脚手架拆了，只留一个种子回退：全新 checkout 没有 bin/zxfe.exe 时，
+# zxc 没有前端可用，第一步仍踩 --fe=c 过河（之后每次构建都是 Zx 编 Zx）。
+ZFE_FLAG=""
+if [ ! -f bin/zxfe.exe ]; then
+    ZFE_FLAG="--fe=c"
+    echo "seed: bin/zxfe.exe 不存在，首次构建走 C 前端（--fe=c）"
+fi
+./bin/zxc.exe bootstrap/zxfe.zx -o bin/zxfe.exe $ZFE_FLAG
 echo "built bin/zxfe.exe"

@@ -636,6 +636,14 @@ zx_init_<stem>(void)  每模块一个初始化函数，main 按依赖倒序调�
       顺带还掉阶段 1 的债——Zx 词法器补上 char 字面量码点。
       `sh test.sh` **200 项全过**（默认全链路 Zx 前端），
       `sh bootstrap/diff_ast.sh` **61 个文件 0 差异**。取舍见 decisions **§70**
+- [x] M38 **自举阶段 4——位置进对拍 + 自举闭环**：
+      dump 格式加节点位置 `@L:C`，C/Zx 双前端全量对拍
+      **61 个文件逐字节全等（含位置）**——Zx 解析器的节点位置从
+      `cur()` 近似改为与 C 逐点同语义（引导 token、bin 用左操作数、
+      struct 体字段共用 kw 位置、for 绑定用名字后一个 token……见
+      decisions **§71**）。`build.sh` 拆掉 `--fe=c` 脚手架——zxc 用
+      **自己的 Zx 前端**编 zxfe（闭环）；全新 checkout 无 zxfe.exe 时
+      回退 `--fe=c` 当种子。`sh test.sh` **200 项全过**
 
 ### M13：四件"语言设计上的回头路"
 
@@ -1595,3 +1603,34 @@ C 前端过河：build.sh / test.sh 编 zxfe 一律 `--fe=c`，阶段 4 zxc 能
 结果：`sh test.sh` **200 项全过**（默认全链路走 Zx 前端——正例、
 反例、多文件、增量编译全在内）；`sh bootstrap/diff_ast.sh` 在
 `--fe=c` 交叉验证下 **61 个文件 0 差异**。
+
+## M38：自举阶段 4——位置进对拍；zxc 自己编 zxfe
+
+两件事收掉自举的尾巴。
+
+**① 节点位置逐字节对齐。** dump 格式在节点头加 ` @L:C`（紧随 kind 名），
+AST 对拍从"结构相等"升级为"结构 + 位置相等"。这暴露了两个问题：
+
+- **默认开关翻转后，验证命令的含义会悄悄变。** 阶段 3 之后 `zxc --ast`
+  默认走 Zx 前端——不加 `--fe=c` 就跑 diff_ast.sh，比的是"Zx 对 Zx"
+  （同一个解析器 dump 两次），交叉验证名存实亡。第一批位置实验就是这么
+  被假象骗过的：先看到 61/61 全等，以为是"cur() 近似恰好精确"，
+  实则是没比到 C。现在 diff_ast.sh 显式 `--fe=c`。
+- **C 的位置语义是逐调用点的，没有统一规则。** 对齐清单：
+  普通节点 = 构造的引导 token（先存 t 再消费）；bin/un/orelse/赋值 =
+  左操作数；类型点路径的 field = **基标识符**（不是点）；struct/union
+  体的字段 = **kw_struct/kw_union 自己的位置**（整组共用）；enum 成员 =
+  成员名；for 绑定 = 名字**后**一个 token（先 take_ident 再 cur）；
+  if 臂语句包装块 = **臂值节点**的位置；else 捕获 id = if 关键字；
+  解构 pattern 元组 = decl 关键字；root 钉死 (1,1)。Zx 侧加
+  `new_at(k, t)` 辅助，逐点替换；60/61 分歧收敛到 0。
+
+**② 自举闭环。** `build.sh` / `test.sh` 编 zxfe 不再带 `--fe=c`——
+zxc 用自己的 Zx 前端解析 zxfe.zx、序列化、装载、编译出**新 zxfe**，
+实测与现役 zfte 的 `--ast` 输出逐字节一致、全链路编译运行正常。
+阶段 3 的"踩 C 前端过河"脚手架拆掉，只留一个种子回退：全新 checkout
+没有 `bin/zfte.exe` 时，zxc 没有前端可用，首次构建仍走 `--fe=c`
+（此后每次构建都是 Zx 编 Zx）。
+
+结果：位置对拍 **61/61 全等**；`sh test.sh` **200 项全过**。
+取舍见 decisions **§71**。

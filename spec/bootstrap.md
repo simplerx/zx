@@ -239,6 +239,10 @@ return _ret0;               // 永远是 0
 > `sh test.sh` **200 项全过**（默认全链路走 Zx 前端），
 > `sh bootstrap/diff_ast.sh` **61 个文件 0 差异**（`--fe=c` 下对拍）。
 > 架构取舍与坑见 decisions **§70**、README **M37**。
+>
+> **阶段 4（M38）**：节点位置进对拍（dump 头加 `@L:C`，C/Zx 逐字节
+> 全等）；`--fe=c` 脚手架拆除——zxc 用自己的 Zx 前端编 zxfe（闭环），
+> 全新 checkout 无 zxfe.exe 时回退 `--fe=c` 当种子。见 decisions **§71**。
 
 **风险点**（按严重度）：
 

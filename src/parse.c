@@ -1602,6 +1602,7 @@ void ast_dump(const Node *n, int depth) {
     if (!n) return;
     for (int i = 0; i < depth; i++) fputs("  ", stdout);
     printf("(%s", nk_name(n->kind));
+    printf(" @%d:%d", n->line, n->col);   /* 阶段 4：位置进对拍 */
     if (n->name) printf(" %s", n->name);
     if (n->label) printf(" :%s", n->label);
     if (n->kind == NK_INT) printf(" %llu", (unsigned long long)n->ival);

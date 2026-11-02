@@ -48,8 +48,10 @@ fi
 
 # 2. 文件类用例
 printf "\n== 构建 Zx 前端（bootstrap/zxfe.zx，由 zxc 自己编译——自举）\n"
-# 自举鸡蛋：编 zxfe 必须走 --fe=c（旧 zxfe 吃不进新 char 语义，见 build.sh）
-if ! $ZXC bootstrap/zxfe.zx -o bin/zxfe.exe --fe=c > "$TMP.zxfe.log" 2>&1; then
+# 自举阶段 4：zxfe 由 zxc 的 Zx 前端自己编（闭环）；无 zxfe.exe 时回退 --fe=c
+ZFE_FLAG=""
+if [ ! -f bin/zxfe.exe ]; then ZFE_FLAG="--fe=c"; fi
+if ! $ZXC bootstrap/zxfe.zx -o bin/zxfe.exe $ZFE_FLAG > "$TMP.zxfe.log" 2>&1; then
     printf "  FAIL zxfe 编译失败\n"
     cat "$TMP.zxfe.log"
     exit 1
