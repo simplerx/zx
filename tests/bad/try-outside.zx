@@ -1,0 +1,13 @@
+// `try` 要往外抛，函数就得能返回错误。声明成 `!T`，或者就地处理掉。
+// expect: `try` inside a function that cannot return an error
+// expect-code: E0300
+// expect-count: 1
+const g = fn () !i32 { return 1; };
+
+const f = fn () i32 {
+    return try g();
+};
+
+const main = fn () i32 {
+    return 0;
+};

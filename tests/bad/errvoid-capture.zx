@@ -1,0 +1,13 @@
+// `!void` 没有载荷，`if (x) v { … }` 里的 `v` 无所指。
+// 成功分支写 `if (x) { … }`，错误码写 `else e`。
+// expect: has no payload to capture
+// expect-code: E0300
+// expect-count: 1
+const check = fn () !void { return; };
+
+const main = fn () i32 {
+    if (check()) v {
+        return 0;
+    }
+    return 1;
+};

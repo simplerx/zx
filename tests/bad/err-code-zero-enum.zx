@@ -1,0 +1,13 @@
+// 枚举首成员不给值时是 0，拿它当错误码一样会被当成"成功"。
+// expect: error code 0 means "no error"
+// expect-code: E0508
+// expect-count: 1
+const Err = enum { open, read };
+
+const f = fn () !i32 {
+    return (error)Err.open;
+};
+
+const main = fn () i32 {
+    return 0;
+};

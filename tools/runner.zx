@@ -111,6 +111,15 @@ const directive = fn (parts: [][]const u8, key: []const u8) ?[]const u8 {
     return null;
 };
 
+/* 进程退出码断言：`// expect-exit: 7`。没写就只看 stdout。
+ * 错误处理最后靠的就是退出码——`main() !void` 出错时码就是错误码。 */
+const exit_ok = fn (ps: [][]const u8, status: i32) bool {
+    if (directive(ps, "// expect-exit: ")) want {
+        if (std.str.parseInt(want)) n { return n == (i64)status; }
+    }
+    return true;
+};
+
 // 取 `// expect-output` 之后所有 `// ` 行，拼成期望的 stdout（行间 \n，末尾不带）。
 // 没有这一段就返回空串（调用方用 len 判断）。
 const expect_output = fn (al: std.Allocator, parts: [][]const u8) []const u8 {

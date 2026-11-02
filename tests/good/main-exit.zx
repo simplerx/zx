@@ -1,0 +1,29 @@
+// main-exit.zx —— 错误从 main 出去时，退出码就是错误码
+//
+// main 的 C 签名固定是 `int main(...)`，而 Zx 里它可以写 `!void`。
+// 两者之间必须有个折叠：成功 → 0，出错 → 错误码本身（不是笼统的 1）。
+// 钉住三件事：
+//   ① `main() !void` 能编过（曾经生成 `return (int)(联合体)`，C 直接报错）
+//   ② `try` 在 main 里传播，后面的语句不再执行
+//   ③ 退出码 = 错误码，能对上 shell 的 `if prog; then` 约定
+// expect-exit: 7
+// expect-output
+// start
+// step 1
+// step 2
+
+const std = module("std");
+
+const Err = enum(u16) { warn = 3, boom = 7 };
+
+const step = fn (n: i32) !void {
+    std.println("step {}", n);
+    if (n == 2) { return (error)Err.boom; }
+};
+
+const main = fn () !void {
+    std.println("start");
+    try step(1);
+    try step(2);
+    std.println("unreachable");
+};

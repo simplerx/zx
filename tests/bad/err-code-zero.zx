@@ -1,0 +1,10 @@
+// 错误码 0 就是"无错误"——把它当错误码写出去，等于把"出错了"写成"成功了"，
+// 而 `!T` 的成功分支还会去读一段未初始化的 payload。
+// 这类错编译能过、跑起来答案错，所以在编译期就拦：命名错误码从 1 起。
+// expect: error code 0 means "no error"
+// expect-code: E0508
+// expect-count: 1
+const main = fn () i32 {
+    let e: error = (error)0;
+    return (i32)e;
+};

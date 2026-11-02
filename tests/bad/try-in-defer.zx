@@ -1,0 +1,15 @@
+// `defer` 是在返回路径上执行的，它自己再"提前返回"会把正在返回的值覆盖掉。
+// defer 体里出错要就地处理（`if` 捕获 / `orelse`）。
+// expect: `try` is not allowed inside `defer`
+// expect-code: E0405
+// expect-count: 1
+const g = fn () !i32 { return 1; };
+
+const f = fn () !i32 {
+    defer try g();
+    return 2;
+};
+
+const main = fn () i32 {
+    return 0;
+};

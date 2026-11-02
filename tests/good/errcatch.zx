@@ -1,0 +1,133 @@
+// errcatch.zx —— 错误的四种出口
+//
+// `!T` 不是异常，值就在返回值里。四种出口各有各的分工，互不重叠：
+//   try e        出错就带着同一个码往上返回（调用点写着 try，读者知道这里会退出）
+//   if (u) v {}  就地处理：成功分支拿载荷，else 分支拿错误码
+//   orelse d     就地给默认值（错误码丢掉）
+//   .?           这里不该出错，出错即 abort
+//
+// 钉住六件事：
+//   ① `try` 三层传递，错误码原样到达最外层
+//   ② `try` 与 `defer` 交互：提前返回时 defer 照常执行
+//   ③ `!void`：无载荷的错误联合体（`return;` / 走到底 / `try x();`）
+//   ④ `e == Err.x` 直接比较，不用先转枚举
+//   ⑤ `try` 在表达式中间（`f(try g(), 10)`）可用
+//   ⑥ `!T` 的 payload 是结构体时也正常
+const std = module("std");
+
+const Err = enum(u16) {
+    open = 1,
+    read = 2,
+    short = 3,
+    bad = 4,
+};
+
+const Head = struct { fd: i32, bytes: i32 };
+
+// ---------- ① 三层传播：错误码一路原样返回 ----------
+const open_file = fn (p: []const u8) !i32 {
+    if (p.len == 0) { return (error)Err.open; }
+    return 100;
+};
+
+const read_head = fn (p: []const u8) !i32 {
+    let fd = try open_file(p);          // 出错就在这里返回，一行
+    if (fd < 0) { return (error)Err.read; }
+    return fd + 1;
+};
+
+// ---------- ② try 与 defer：提前返回也要跑清理 ----------
+const traced = fn (p: []const u8) !i32 {
+    std.println("enter {}", p.len);
+    defer std.println("leave {}", p.len);
+    let v = try read_head(p);
+    std.println("got {}", v);
+    return v;
+};
+
+// ---------- ③ !void：只报错、没有返回值 ----------
+const check = fn (n: i32) !void {
+    if (n < 0) { return (error)Err.bad; }
+};
+
+// 走到底就是成功（成功路径不写 return 也行，同 void）
+const quiet = fn (n: i32) !void {
+    if (n > 99) { return (error)Err.bad; }
+};
+
+const wrapper = fn (n: i32) !void {
+    try check(n);                       // 当作语句用
+    try quiet(n);
+    std.println("wrapper done {}", n);
+};
+
+// ---------- ⑤ try 在表达式中间 ----------
+const double = fn (n: i32) !i32 {
+    if (n < 0) { return (error)Err.bad; }
+    return n * 2;
+};
+
+const add = fn (a: i32, b: i32) i32 { return a + b; };
+
+const mixed = fn (n: i32) !i32 {
+    return add(try double(n), 10);
+};
+
+// ---------- ⑥ payload 是结构体 ----------
+const head = fn (p: []const u8) !Head {
+    let fd = try open_file(p);
+    return Head{ .fd = fd, .bytes = fd * 2 };
+};
+
+const main = fn () i32 {
+    // ①
+    if (read_head("x")) v { std.println("read ok {}", v); } else e { std.println("read err {}", e); }
+    if (read_head("")) v { std.println("read ok {}", v); } else e { std.println("read err {}", e); }
+
+    // ②
+    if (traced("ab")) v { std.println("traced ok {}", v); } else e { std.println("traced err {}", e); }
+    if (traced("")) v { std.println("traced ok {}", v); } else e { std.println("traced err {}", e); }
+
+    // ③
+    if (wrapper(5)) { std.println("wrapper ok"); } else e { std.println("wrapper err {}", e); }
+    if (wrapper(-1)) { std.println("wrapper ok"); } else e { std.println("wrapper err {}", e); }
+    if (wrapper(200)) { std.println("wrapper ok"); } else e { std.println("wrapper err {}", e); }
+
+    // ④ 错误码直接和枚举比
+    let r = read_head("");
+    if (r) v { std.println("?? {}", v); } else e {
+        std.println("is_open={} is_read={}", e == Err.open, e == Err.read);
+    }
+
+    // ⑤
+    if (mixed(3)) v { std.println("mixed {}", v); } else e { std.println("mixed err {}", e); }
+    if (mixed(-1)) v { std.println("mixed {}", v); } else e { std.println("mixed err {}", e); }
+
+    // ⑥
+    if (head("z")) h { std.println("head {} {}", h.fd, h.bytes); } else e { std.println("head err {}", e); }
+
+    // 三种出口放在一起：同一件事，不同的处置
+    let d = read_head("") orelse -1;
+    std.println("orelse {}", d);
+    return 0;
+};
+
+// expect-output
+// read ok 101
+// read err 1
+// enter 2
+// got 101
+// leave 2
+// traced ok 101
+// enter 0
+// leave 0
+// traced err 1
+// wrapper done 5
+// wrapper ok
+// wrapper err 4
+// wrapper err 4
+// is_open=true is_read=false
+// mixed 16
+// mixed err 4
+// head 100 200
+// orelse -1
