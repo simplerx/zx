@@ -281,6 +281,17 @@ static Node *parse_type_primary(P *p) {
     case TOK_KW_UNION: {
         advance(p);
         Node *n = node_new(NK_UNION_TYPE, t->line, t->col);
+        /* union(enum) / union(enum(u8))：Zig 式带标签联合体（M22）。
+         * 变体名即隐式枚举，标签值按声明顺序 0..n-1。op=1 是糖标记。 */
+        if (accept(p, TOK_LPAREN)) {
+            expect(p, TOK_KW_ENUM);
+            if (accept(p, TOK_LPAREN)) {
+                n->b = parse_type(p);
+                expect(p, TOK_RPAREN);
+            }
+            expect(p, TOK_RPAREN);
+            n->op = 1;
+        }
         expect(p, TOK_LBRACE);
         while (!at(p, TOK_RBRACE) && !at(p, TOK_EOF_)) {
             if (at(p, TOK_KW_FN)) { push(n, parse_fn(p, true)); continue; }

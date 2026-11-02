@@ -62,6 +62,7 @@ bin/zxc.exe file.zx -o prog       # 生成 C 并调 zig cc 编成可执行文件
 | `tests/good/if_arm.zx` | `if` 单语句臂：`return` / `continue` / 捕获 + `return`；表达式语句臂 `if (c) f(); else g();`（含赋值臂、else-if 链） |
 | `tests/good/arraylist.zx` | `ArrayList` 补全：insertAt / removeAt / first / last / reverse / resize / swap |
 | `tests/good/method_fold.zx` | 折叠函数体里的方法调用（`ct_call` 复检幂等回归） |
+| `tests/good/union_enum.zx` | `union(enum)` 糖：三种载荷形态、隐式枚举标签、`union(enum(u8))` 布局、方法 |
 | `std/std.zx` | 标准库主体（普通 Zx 代码）：`ArrayList`、`BufReader`、`BufWriter`、`map` / `str` 子模块 |
 | `std/str.zx` | 字符串工具：比较/查找/trim/parseInt/split/concat |
 | `std/map.zx` | `HashMap(V)`：FNV-1a + 线性探测的开放寻址表 |
@@ -578,6 +579,14 @@ zx_init_<stem>(void)  每模块一个初始化函数，main 按依赖倒序调�
       —— `sh test.sh` **153 项全过**
 - [x] M22 **诊断规范化**：稳定错误码（`error[E0403]`）+ 解析器声明边界恢复
       + 打印上限 30 条 —— 一次编译尽量把错报全
+- [x] M23 `extern "C"` 最小 FFI：`extern fn` 声明、原始符号名、`*u8` ↔ `char*`
+      —— `sh test.sh` **155 项全过**
+- [x] M24 **测试脚本换成 Zx 自己写的 runner**（`tools/runner.zx`）：
+      读源码 / 切字符串 / 拼命令 / 起进程 / 比对 stdout 全在语言里完成；
+      `test.sh` 退化成 60 行包装 —— `sh test.sh` **158 项全过**
+- [x] M25 **自举评估**：`tests/good/selfhost.zx` 实测前端所需能力，
+      结论与路线写在 `spec/bootstrap.md`；顺带挖出并修掉两个静默错误
+      （联合体标签不填、标签 `if` 的收割被丢）——`sh test.sh` **158 项全过**
 
 ### M13：四件"语言设计上的回头路"
 
@@ -928,32 +937,124 @@ fn main() void {
 一样是规格的一部分。测试 `tests/good/ffi.zx` 走 `puts` + `strlen` + `malloc`
 往返，`sh test.sh` **155 项全过**。
 
-## M23：extern "C"——标准库从"自己写"变成"能借"
+## M24：测试脚本也用 Zx 写——顺便给语言做一次真实压力测试
+
+`test.sh` 原本是 200 行 shell：遍历文件、判正反例、比对 `// expect`、跑二进制、
+比 stdout。这类活 shell 能做，但每加一条断言就要动一次引号转义，而且 Windows 上
+`sh`、路径、编码三件事轮流出问题。换成 `tools/runner.zx`（约 270 行）之后，
+测试脚本本身也进了类型检查——写错一个字编不过，而不是跑到一半才炸。
+
+**这不是"为了自举而自举"**：runner 恰好覆盖了语言最常被使用的那条路，
+每一处能力缺口都会在这里当场暴露，比再写十个 hello world 有用：
+
+| 需要的能力 | runner 里的用法 |
+|---|---|
+| 读文件 | `std.file.read` 读源码、读捕获的 stdout |
+| 切字符串 | `std.str.split` 按行切开找指令注释 |
+| 拼字符串 | `std.str.concat` + `ArrayList` 拼命令、拼期望输出 |
+| 起进程 | `extern fn system` 调 `cmd`，把 stdout/stderr 收进临时文件 |
+| 格式化 | `std.println("{}", ...)` 打报告 |
+| 显式转换 | `@intCast(usize, n)` |
+
+**跑出来的三个真 bug**（都是"写 hello world 永远碰不到"的那种）：
+
+1. **`stackAlloc` 和 `heapAlloc` 不是一个东西。** `Cmd.init()` 里用
+   `stackAlloc` 申请 4KB 缓冲再返回指针——缓冲分配在 `init()` 的栈帧里，
+   返回即悬空，命令串变成垃圾。Zx 没有借用检查，所以它照样编过；
+   现在有 149 个用例在替它兜底。
+2. **Windows 上 `system()` 的引号规则。** `system()` 实际是 `cmd /c <整串>`，
+   而 cmd 有个古怪规则：命令以 `"` 开头、且引号总数不是「恰好两个」时，
+   它剥掉最外层的一对。于是 `"E:\..\a.exe" > "E:\..\out" 2>&1` 被糟蹋成
+   `E:\..\a.exe" > "E:\..\out 2>&1`，报「文件名、目录名或卷标语法不正确」。
+   对策是自己先包一层引号，让它剥掉的正好是那一层。
+3. **诊断会重复。** 加上 `// expect-count:` 之后立刻抓到：`1 / 0` 报了两遍——
+   语义检查对同一表达式求值两次（定型一次、折叠一次），而求值带副作用。
+   修在诊断的唯一出口：按「位置 + 码 + 文字」去重，用户看到的条数
+   永远等于摘要里的数字。
+
+**顺带修正的两处测试布局**：`tests/bad/priv-util.zx` 是 `private.zx` 的配套模块、
+不是独立反例，挪进 `tests/bad/priv/`，让 `tests/bad/*.zx` 通配只命中根文件；
+反例的三条断言（`// expect:` / `// expect-code:` / `// expect-count:`）
+一次全查、全报，不用修一个才看见下一个。
+
+`test.sh` 现在只剩 60 行：编 runner、把文件清单交出去、跑"增量编译"那一项
+（它要看编译器的 `ZX_VERBOSE` 输出，属驱动层行为，不适合塞进 runner）。
+`sh test.sh` **158 项全过**，连跑多次稳定。
+
+## M25：自举评估——先让语言挨一遍真打
+
+"自举"在这里有个具体的意思：**把前端（词法 + 语法 + AST + 诊断，约 2400 行 C）
+换成 Zx 写的**。后端发射 C 这件事永远该由 C 写，语义层是第二阶段。
+完整评估在 `spec/bootstrap.md`，这里只放结论。
+
+**表达力够用，有实测。** `tests/good/selfhost.zx` 是一个真跑起来的小型词法器 +
+递归下降求值器：递归类型（`?*Node`）、带标签联合体、方法互递归、按字节扫字符串、
+`HashMap` 关键字表、`ArrayList(*Node)`、20 层嵌套括号求值——全部通过。
+没有一条是"Zx 根本写不出来"。
+
+**两个缺口值得改语言**：
+
+1. **没有 `orelse` / `.?`**。每访问一个可选子节点都要写一个 helper 函数
+   （因为它不能出现在表达式位置），AST 遍历代码会翻倍。这是唯一真正疼的地方。
+2. **char 字面量不能做 switch 模式**。词法主循环只能写
+   `switch ((i32)c) { 48, 49, … }`，能跑，但难看。
+
+**一个缺口不改**：没有 `break`。前端 37 处 `break` 换成
+`label: while (…) { … label: v; … }` 就行——而且收割能带值出去，
+比 `break` 再补一条赋值更短。
+
+**这轮最实在的产出不是结论，是两个 bug。** 都是按"编译器的形状"写代码才会踩到、
+编译不报错、答案错的类型：
+
+- 带标签联合体 `U{ .b = 7 }` 只写载荷不写 `.tag`，C 的指定初始化把标签零填成
+  第一个成员——`switch (u.tag)` 永远走第一个分支。token/AST 分派全靠它。
+- 规格 §8.1 标为**推荐**的 `s: if (x > 0) { s: 1; } else { s: 0; }`，
+  生成的 C 是**两个空臂**加 `return 0`：后端漏给 `if` 自己那层建标签作用域，
+  而找不到目标的收割被静默丢弃。Zx 删掉了 `break`，收割是唯一的值出口——
+  出口坏了等于地基裂了。
+
+现在找不到收割目标会报内部错误，不再静默丢。回归：`union-tag.zx`、`label-if.zx`。
+
+**顺序建议：先补语言缺口，再搬前端。** `orelse` 和 char 模式的收益是全局的
+（所有 Zx 代码都变短、变能读），自举只是其中一项；反过来先搬 3000 行、
+再发现"每天都想写 `orelse`"，成本就高得多。
+
+## M26：benchmark 基线
+
+性能工作没有标尺就是盲走。`bench/` 四个负载覆盖四种典型压力：
+`fib`（调用开销 + i64）、`mandel`（f64 内层循环 + 分支预测）、
+`mmat`（256×256 矩阵乘，内存带宽）、`str`（格式化 + 分配器）。
+宿主侧计时、每程序 3 次取最好；**每个负载都打印校验和**——那既是正确性
+锚点（跨后端必须逐字节一致），也防止优化器把计算折叠掉。
+
+基线（zig cc -O1）：fib 83ms / mandel 196ms / mmat 149ms / str 79ms，
+记录在 `bench/BASELINE.md`。以后动后端先跑 `sh bench/run.sh`，校验和不齐
+或耗时回退超过 5% 就地停下。
+
+## M27：union(enum)——变体名即枚举
+
+联合体终于有了 Zig 式写法，不用再手写标签枚举：
 
 ```zx
-extern fn puts(s: *const u8) i32;
-extern fn malloc(n: usize) *u8;
+const Shape = union(enum) {
+    circle: f64,
+    rect:   { f64, f64 },
+};
 
-fn main() void {
-    puts("hello from libc".ptr);
-    let p = malloc(8);
-    free(p);
+let s = Shape{ .circle = 2.0 };
+switch (s.tag) {
+    .circle: std.println("r={}", s.circle),
+    .rect:   std.println("area={}", s.rect.0 * s.rect.1),
 }
 ```
 
-语义层只认签名，后端只发一条 `extern` 原型，不生成函数体。三个坑都是"看着能做、
-一编就炸"的那种：
+- 变体名即隐式枚举，标签值按声明顺序 `0..n-1`；`union(enum(u8))` 指定
+  标签底层宽度。
+- **布局统一为载荷在前、标签在后**——和 `?T` 的 `{值, ok}` 同向，
+  §5 的承诺现在覆盖所有带标签联合体。访问器都是编译器生成的，
+  现有用例输出逐字节不变。
+- 实现是纯糖：sema 合成隐式枚举、变体打 tag，之后全走显式标签联合体
+  已有的机制，后端零感知（decisions §56）。
 
-1. **名字不能转义。** 后端给 C 关键字/头文件公共名加下划线（`puts` → `puts_`）
-   是为了避免和 include 进来的 stdio 撞车，但 extern 要的正是那个外部符号。
-   现在 extern 走独立的名字发射路径，原样发。
-2. **标准头已经声明过的名字不能再声明。** C 里 `void* malloc(size_t)` 和我们
-   按 Zx 类型发的 `char* malloc(uint64_t)` 是冲突类型。这些名字直接跳过原型，
-   用头里的声明。
-3. **`*u8` 在边界要写成 `char*`。** Zx 没有 `char`，但 libc 的字符串函数收
-   `const char*`。只在 extern 原型里映射，调用点显式转型，`-Wpointer-sign` 清零。
-
-能调 libc 之后，写长命程序不必再自己搓 arena：`malloc`/`free` 就是现成的。
-不做的部分（变参、C 宏、回调约定）写在规格 §18——"不能做什么"和"能做什么"
-一样是规格的一部分。测试 `tests/good/ffi.zx` 走 `puts` + `strlen` + `malloc`
-往返，`sh test.sh` **155 项全过**。
+测试：`tests/good/union_enum.zx`（三种载荷形态 + 方法 + u8 标签布局 +
+指针遍历）。`switch (s)` 直接分派（带载荷捕获）留作独立一轮。

@@ -1,0 +1,47 @@
+// label-if.zx —— 标签加在 `if` 上（规格 §8.1 的推荐写法），两条臂共用一个标签。
+//
+// 曾经这里出过一次静默错误：后端只为"臂上的标签"建作用域，忘了给 `if`
+// 自己那一层建，于是 `s: 1;` 找不到收割目标、被直接丢掉——生成一对空臂，
+// 函数返回 0。不报错，答案错。这条用例把三种形态都钉住。
+const std = module("std");
+
+// ① 两条臂各自收割，标签加在 if 上
+fn sign(x: i32) i32 {
+    return s: if (x > 0) {
+        s: 1;
+    } else {
+        s: 0;
+    };
+}
+
+// ② 三分支（else if 链）共用同一个标签
+fn grade(x: i32) i32 {
+    return g: if (x >= 90) {
+        g: 3;
+    } else if (x >= 60) {
+        g: 2;
+    } else {
+        g: 1;
+    };
+}
+
+// ③ 捕获 + 标签：可选解包的一种写法（没有 `.?`）
+fn or_neg(o: ?i32) i32 {
+    return r: if (o) v {
+        r: v;
+    } else {
+        r: -1;
+    };
+}
+
+fn main() i32 {
+    std.println("{} {}", sign(5), sign(-5));
+    std.println("{} {} {}", grade(95), grade(70), grade(10));
+    std.println("{} {}", or_neg(7), or_neg(null));
+    return 0;
+}
+
+// expect-output
+// 1 0
+// 3 2 1
+// 7 -1

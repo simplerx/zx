@@ -1,0 +1,74 @@
+// union_enum.zx —— union(enum)：Zig 式带标签联合体糖（M22）。
+//
+//   const Shape = union(enum) { circle: f64, rect: { f64, f64 } };
+//
+// 变体名即隐式枚举（按声明顺序取值 0..n-1，union(enum(u8)) 可指定底层），
+// 载荷在前、标签在后（和 ?T 的 {值, ok} 同一布局方向）。
+// 访问、构造、switch、方法全部复用显式标签联合体那套机制。
+const std = module("std");
+
+const Shape = union(enum) {
+    circle: f64,
+    rect: { f64, f64 },
+    labeled: struct { x: i32, y: i32 },
+
+    fn describe(self: *const Self) []const u8 {
+        switch (self.tag) {
+            .circle:  { return "circle"; },
+            .rect:    { return "rect"; },
+            .labeled: { return "labeled"; },
+        }
+    }
+
+    fn value(self: *const Self) f64 {
+        switch (self.tag) {
+            .circle:  { return self.circle; },
+            .rect:    { return self.rect.0 * self.rect.1; },
+            .labeled: { return (f64)(self.labeled.x + self.labeled.y); },
+        }
+    }
+};
+
+// 指定底层类型：标签宽度是 u8
+const Small = union(enum(u8)) {
+    a: i32,
+    b: f64,
+};
+
+fn main() u8 {
+    const c = Shape{ .circle = 2.0 };
+    const r = Shape{ .rect = { 3.0, 4.0 } };
+    const l = Shape{ .labeled = .{ .x = 20, .y = 22 } };
+
+    std.println("{} {} {}", c.describe(), r.describe(), l.describe());
+    std.println("{} {} {}", c.value(), r.value(), l.value());
+
+    // 载荷直取；标签可打印
+    std.println("c.circle={}", c.circle);
+    std.println("r.rect={}", r.rect.1);
+    std.println("tag={}", r.tag);
+
+    // 布局：载荷在前、标签在后；u8 底层时标签只占 1 字节
+    std.println("sizeof Small={}", @sizeOf(Small));
+    const s = Small{ .b = 1.5 };
+    std.println("s.b={}", s.b);
+
+    // 函数间传递（值语义）+ 指针访问
+    let xs: *[3]Shape = &.{ c, r, l };
+    var total: f64 = 0.0;
+    for (0..3) i {
+        total = total + (xs + i).0.value();
+    }
+    std.println("total={}", total);
+    return 0;
+}
+
+// expect-output
+// circle rect labeled
+// 2 12 42
+// c.circle=2
+// r.rect=4
+// tag=1
+// sizeof Small=16
+// s.b=1.5
+// total=56

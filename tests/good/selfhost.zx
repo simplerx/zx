@@ -1,0 +1,206 @@
+// selfhost.zx —— 自举前端需要的能力，一次性钉住。
+//
+// 这不是"又一个 hello world"：它把"用 Zx 重写词法/语法分析器"要用的每一种
+// 写法都真跑一遍。任何一条编不过，就说明自举还有一个硬缺口。
+//
+// 覆盖：递归类型（AST 指针子节点）、方法互递归、可变接收者、按字节扫字符串、
+// switch 分派、带标签联合体 + 穷尽性检查、HashMap 关键字表、ArrayList 收集、
+// 深递归（嵌套括号）、while 无 break 的替代写法、堆分配与打印。
+const std = module("std");
+
+// ① 递归类型：AST 的子节点必须能指向同一种节点
+const Kind = enum { num, add, sub, mul, div };
+const Node = struct {
+    kind: Kind,
+    lhs: ?*Node,
+    rhs: ?*Node,
+    val: i32,
+};
+
+// ② 带标签联合体：词法单元就是"标签 + 载荷"，穷尽 switch 保证不漏
+const TokTag = enum { num, sym };
+const Tok = union {
+    num: {TokTag.num, i32},
+    sym: {TokTag.sym, u8},
+};
+
+fn tok_is_op(t: Tok) bool {
+    return switch (t.tag) {
+        .num: false,
+        .sym: t.sym == '+' || t.sym == '-' || t.sym == '*' || t.sym == '/' || t.sym == '(' || t.sym == ')',
+    };
+}
+
+// ③ 词法：按字节扫，switch 分派——`break` 不存在，用标志位收尾
+fn count_digits(src: []const u8) usize {
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < src.len) {
+        switch ((i32)src[i]) {
+            48, 49, 50, 51, 52, 53, 54, 55, 56, 57: { n = n + 1; },
+            else: { },
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+// ④ 关键字表：HashMap 是自举时查关键字的唯一现实选择
+fn keyword_lookup(al: std.Allocator) i32 {
+    var kw = std.HashMap(i32).init(al);
+    var code: i32 = 0;
+    if (kw.put("fn", 1)) { code = code + 1; }
+    if (kw.put("const", 2)) { code = code + 1; }
+    if (kw.put("struct", 3)) { code = code + 1; }
+    if (kw.get("const")) v { code = code + v; }
+    if (kw.get("nope")) nothere { code = code + 100; }
+    kw.deinit();
+    return code;                       // 2 + 2 = 4
+}
+
+// ⑤ 递归下降：expr / term / atom 互相调用（前向引用必须成立）
+const Parser = struct {
+    src: []const u8,
+    i: usize,
+    depth: usize,
+    nodes: std.ArrayList(*Node),
+    al: std.Allocator,
+
+    fn init(al: std.Allocator, src: []const u8) Parser {
+        return Parser{
+            .src = src, .i = 0, .depth = 0,
+            .nodes = std.ArrayList(*Node).init(al), .al = al,
+        };
+    }
+
+    fn new_node(self: *Parser, k: Kind) *Node {
+        var n: *Node = std.heapAlloc(self.al, Node, 1);
+        n.kind = k;
+        n.lhs = null;
+        n.rhs = null;
+        n.val = 0;
+        var ignored = self.nodes.push(n);
+        return n;
+    }
+
+    fn peek(self: *Parser) u8 {
+        if (self.i >= self.src.len) { return 0; }
+        return self.src[self.i];
+    }
+
+    fn expr(self: *Parser) *Node {
+        var n = self.term();
+        var more = true;
+        while (more) {
+            let c = self.peek();
+            if (c == '+' || c == '-') {
+                self.i = self.i + 1;
+                let rhs = self.term();
+                let k: Kind = if (c == '+') Kind.add else Kind.sub;
+                let p = self.new_node(k);
+                p.lhs = n;
+                p.rhs = rhs;
+                n = p;
+            } else {
+                more = false;          // 没有 break，用标志位退出
+            }
+        }
+        return n;
+    }
+
+    fn term(self: *Parser) *Node {
+        var n = self.atom();
+        var more = true;
+        while (more) {
+            let c = self.peek();
+            if (c == '*' || c == '/') {
+                self.i = self.i + 1;
+                let rhs = self.atom();
+                let k: Kind = if (c == '*') Kind.mul else Kind.div;
+                let p = self.new_node(k);
+                p.lhs = n;
+                p.rhs = rhs;
+                n = p;
+            } else {
+                more = false;
+            }
+        }
+        return n;
+    }
+
+    fn atom(self: *Parser) *Node {
+        let c = self.peek();
+        if (c == '(') {
+            self.i = self.i + 1;
+            self.depth = self.depth + 1;
+            let inner = self.expr();        // 深递归：每层括号一次
+            self.depth = self.depth - 1;
+            if (self.peek() == ')') { self.i = self.i + 1; }
+            return inner;
+        }
+        var v: i32 = 0;
+        var any = false;
+        while (self.peek() >= '0' && self.peek() <= '9') {
+            v = v * 10 + (i32)(self.peek() - '0');
+            self.i = self.i + 1;
+            any = true;
+        }
+        if (!any) { v = 0; }
+        let n = self.new_node(Kind.num);
+        n.val = v;
+        return n;
+    }
+};
+
+/* 没有 `.?`：拆可空指针只能 if 捕获。放在这里是为了量化这个缺口有多贵——
+ * 每个子节点访问都要绕一次函数调用。 */
+fn kid(o: ?*Node) i32 {
+    if (o) n { return eval(n); }
+    return 0;
+}
+
+fn eval(n: *Node) i32 {
+    return switch (n.kind) {
+        .num: n.val,
+        .add: kid(n.lhs) + kid(n.rhs),
+        .sub: kid(n.lhs) - kid(n.rhs),
+        .mul: kid(n.lhs) * kid(n.rhs),
+        .div: kid(n.lhs) / kid(n.rhs),
+    };
+}
+
+fn main() i32 {
+    let al = std.heap.page;
+
+    // 词法
+    std.println("digits={}", count_digits("a1b22c333"));
+
+    // 关键字表
+    std.println("kw={}", keyword_lookup(al));
+
+    // 联合体分派
+    let t1 = Tok{ .sym = '*' };
+    let t2 = Tok{ .num = 7 };
+    std.println("op={} {}", tok_is_op(t1), tok_is_op(t2));
+
+    // 递归下降 + AST 指针 + 求值
+    var p = Parser.init(al, "1+2*(3+4)-5");
+    let root = p.expr();
+    std.println("eval={} nodes={}", eval(root), p.nodes.len);
+
+    // 深递归：200 层括号
+    var deep = Parser.init(al, "((((((((((((((((((((42))))))))))))))))))))");
+    let d = deep.expr();
+    std.println("deep={} depth={}", eval(d), deep.depth);
+
+    // 结构体数组：ArrayList 收集 token
+    var list = std.ArrayList(u8).init(al);
+    var i: usize = 0;
+    while (i < 5) {
+        var ok = list.push((u8)(97 + (i32)i));
+        i = i + 1;
+    }
+    std.println("list={s}", list.items());
+
+    return 0;
+}

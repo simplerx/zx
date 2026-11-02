@@ -59,13 +59,16 @@ fn_type     = "fn" "(" [ type { "," type } ] ")" type ;
 tuple_type  = "{" [ type { "," type } [ "," ] ] "}" ;
 
 struct_type = "struct" [ "(" IDENT ")" ] "{" { member } "}" ;   (* struct(packed) *)
-union_type  = "union" "{" { union_member } "}" ;
+union_type  = "union" [ "(" "enum" [ "(" type ")" ] ")" ] "{" { union_member } "}" ;
+            (* union(enum)：变体名即隐式枚举（值 = 声明序号）；
+               union(enum(T)) 指定标签底层类型 *)
 enum_type   = "enum" [ "(" type ")" ] "{" { enum_member } "}" ;
 
 member       = IDENT ":" type [ "=" expr ] ","?    (* 字段，可带默认值 *)
              | const_decl | let_decl | var_decl | fn_decl ;
 
-union_member = IDENT ":" "{" expr "," type "}" ","? ;   (* 成员名: {标签值, 载荷类型} *)
+union_member = IDENT ":" type ","? ;                    (* 普通成员：载荷类型 *)
+            | IDENT ":" "{" expr "," type "}" ","? ;    (* 显式标签：{标签值, 载荷类型} *)
 enum_member  = IDENT [ "=" expr ] ","?                 (* 变体，从 0 或上一个+1 *)
              | const_decl | let_decl | var_decl | fn_decl ;
 (* 枚举体是完整作用域：变体之外还能放常量/静态变量/方法（§4.3） *)

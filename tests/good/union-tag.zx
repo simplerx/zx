@@ -1,0 +1,46 @@
+// union-tag.zx —— 带标签联合体的隐式标签必须真的写进去。
+//
+// 曾经这里出过一次静默错误：字面量 `.b = 7` 只写了载荷、没写 `.tag`，
+// 于是 C 的指定初始化把标签零填成第一个成员——`switch (u.tag)` 永远走
+// 第一个分支，`.b` / `.c` 的分支形同虚设，而且编译不报任何错。
+const std = module("std");
+
+const Tag = enum { one, two, three };
+
+const U = union {
+    one:   {Tag.one,   i32},
+    two:   {Tag.two,   i32},
+    three: {Tag.three, i32},
+};
+
+fn name(u: U) []const u8 {
+    return switch (u.tag) {
+        .one:   "one",
+        .two:   "two",
+        .three: "three",
+    };
+}
+
+fn payload(u: U) i32 {
+    return switch (u.tag) {
+        .one:   u.one,
+        .two:   u.two,
+        .three: u.three,
+    };
+}
+
+fn main() i32 {
+    let a = U{ .one = 1 };
+    let b = U{ .two = 2 };
+    let c = U{ .three = 3 };
+
+    std.println("{} {} {}", name(a), name(b), name(c));
+    std.println("{} {} {}", payload(a), payload(b), payload(c));
+    std.println("{} {} {}", (i32)a.tag, (i32)b.tag, (i32)c.tag);
+    return 0;
+}
+
+// expect-output
+// one two three
+// 1 2 3
+// 0 1 2

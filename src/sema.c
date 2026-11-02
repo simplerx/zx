@@ -1199,6 +1199,24 @@ static Type *resolve_struct_body(Node *n, Type *agg, bool is_union) {
     bool tagged = false;
     Type *tag_ty = NULL;
 
+    /* union(enum) / union(enum(u8)) 糖（M22）：变体名即隐式枚举。
+     * 合成一个 TY_ENUM 当标签类型（变体按声明顺序取值 0..n-1，底层类型
+     * 可用 union(enum(u8)) 指定），每个变体的载荷就是成员类型本身——
+     * 之后 is_tagged / tag_ty / .tag / .u.成员 / 构造写标签全部复用
+     * 显式标签联合体那套机制。 */
+    bool sugar = is_union && n->op == 1;
+    int vidx = 0;
+    if (sugar) {
+        Type *et = ty_agg(TY_ENUM, n, NULL);
+        et->elem = n->b ? resolve_type(n->b) : ty_int(32, false);
+        int cnt = 0;
+        for (int i = 0; i < n->nitems; i++)
+            if (n->items[i]->kind == NK_PAIR) cnt++;
+        et->fields = calloc((size_t)(cnt ? cnt : 1), sizeof(Field));
+        et->nfields = cnt;
+        tag_ty = et;
+    }
+
     for (int i = 0; i < n->nitems; i++) {
         Node *it = n->items[i];
 
@@ -1217,7 +1235,22 @@ static Type *resolve_struct_body(Node *n, Type *agg, bool is_union) {
 
         const char *fname = it->name;
         Type *ft = NULL;
-        if (is_union && it->a && it->a->kind == NK_TUPLE_TYPE && it->a->nitems == 2) {
+        if (sugar) {
+            /* union(enum)：成员类型就是载荷。注意这个分支必须优先——
+             * 载荷本身完全可以是元组（`rect: {f64, f64}`），不能让旧式的
+             * "{标签, 载荷}" 元组检测抢先把它当成标签元组。 */
+            ft = it->a ? resolve_type(it->a) : ty_invalid();
+            fs[k].has_tag = true;
+            fs[k].tag = (uint64_t)vidx;
+            tagged = true;
+            /* 隐式枚举的变体同步登记（switch 模式 / 打印 / 比较 都查它） */
+            Field *ef = &tag_ty->fields[vidx];
+            ef->name = fname;
+            ef->ty = tag_ty;
+            ef->has_tag = true;
+            ef->tag = (uint64_t)vidx;
+            vidx++;
+        } else if (is_union && it->a && it->a->kind == NK_TUPLE_TYPE && it->a->nitems == 2) {
             Node *t0 = it->a->items[0];
             if (t0->kind == NK_FIELD || t0->kind == NK_INT) {
                 Type *tt = check_expr(t0, NULL);

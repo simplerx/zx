@@ -267,12 +267,10 @@ static void ensure_type(Type *t) {
                 buf_puts(g_out, s.data);      /* 跟类型定义一起进头文件 */
             }
         } else if (t->is_tagged && t->tag_ty) {
-            /* 带标签联合体：{ 标签, 载荷 }，标签在前（规格 §3.4） */
+            /* 带标签联合体：{ 载荷, 标签 }，载荷在前、标签在后（规格 §3.4，
+             * 和 ?T 的 {值, ok} 同一个布局方向；union(enum) 糖共用此布局） */
             ensure_type(t->tag_ty);
             buf_printf(g_out, "struct %s {\n", n.data);
-            buf_puts(g_out, "    ");
-            ctype(g_out, t->tag_ty);
-            buf_printf(g_out, " tag;\n");
             buf_puts(g_out, "    union {\n");
             for (int k = 0; k < t->nfields; k++) {
                 Field *f = &t->fields[k];
@@ -282,6 +280,9 @@ static void ensure_type(Type *t) {
                 buf_printf(g_out, " %s;\n", f->name ? f->name : "?");
             }
             buf_puts(g_out, "    } u;\n");
+            buf_puts(g_out, "    ");
+            ctype(g_out, t->tag_ty);
+            buf_printf(g_out, " tag;\n");
             buf_puts(g_out, "};\n");
         } else {
             buf_printf(g_out, "union %s {\n", n.data);
@@ -570,6 +571,7 @@ typedef struct {
 } CLab;
 
 static CLab g_labs[128];
+#define MAX_CLABS 128
 static int  g_nlabs;
 static int  g_labid;
 
@@ -2972,9 +2974,15 @@ static void ex(Buf *b, Node *n) {
             Node *pair = n->nitems ? n->items[0] : NULL;
             Field *f = pair ? ty_field(t, pair->name) : NULL;
             if (f && pair) {
-                if (t->is_tagged && t->tag_ty && f->ty && f->ty->kind == TY_TUPLE &&
-                    f->ty->nfields >= 1) {
-                    buf_printf(b, ".tag = %llu, ", (unsigned long long)(f->has_tag ? f->tag : 0));
+                /* 带标签联合体必须把标签写出来：省略初始化器里的 `.tag`
+                 * 就等于把每一个成员都当成第一个成员（C 的指定初始化会零填）。
+                 * 注意载荷类型早就被 sema 解析成纯载荷了，不是 `{tag, T}` 元组。 */
+                if (t->is_tagged && t->tag_ty) {
+                    if (!f->has_tag)
+                        err_at(pair->line, pair->col,
+                               "member '%s' of a tagged union needs a tag: `%s: {SomeTag, T}`",
+                               pair->name ? pair->name : "?", pair->name ? pair->name : "?");
+                    buf_printf(b, ".tag = %llu, ", (unsigned long long)f->tag);
                 }
                 buf_printf(b, t->is_tagged ? ".u.%s = " : ".%s = ", pair->name);
                 coerce(b, pair->a, f->ty);
@@ -3172,7 +3180,15 @@ static void gen_stmt(Node *n) {
 
     case NK_YIELD: {
         CLab *l = lab_find(n->label);
-        if (!l) return;
+        /* 没人接的收割不是合法程序：语义层本该拦住，走到这里说明标签作用域
+         * 漏建了（M25 的 bug ② 就是这么发生的）。宁可报内部错误，也不要
+         * 静默丢一条赋值——那会生成"能跑、答案错"的程序。 */
+        if (!l) {
+            err_at(n->line, n->col,
+                   "internal: yield target '%s' has no enclosing label scope",
+                   n->label ? n->label : "?");
+            return;
+        }
         if (l->slot) {
             if (n->a) line("%s = %s;", l->slot, cxs(n->a, l->slot_ty));
             else      line("%s = (%s){0};", l->slot, cty(l->slot_ty));
@@ -3359,7 +3375,10 @@ static void gen_arm(Node *arm, const char *slot, Type *slot_ty) {
             gen_block_stmts(arm);
         }
     } else if (slot) {
-        line("%s = %s;", slot, cxs(arm, slot_ty));
+        /* 臂本身是控制流（`else if (…)` 就是这种形状）：值由内层的
+         * gen_value 写进 slot，不能当成普通表达式 `slot = <expr>` 发。 */
+        if (is_ctl(arm)) gen_value(arm, slot, slot_ty);
+        else             line("%s = %s;", slot, cxs(arm, slot_ty));
     } else {
         gen_stmt(arm);
     }
@@ -3371,7 +3390,31 @@ static void gen_if_stmt(Node *n) {
 }
 
 /* 把 if 的值写进 slot（slot == NULL 表示当语句用） */
+static void gen_if_body(Node *n, const char *slot, Type *slot_ty);
+
+/* 标签加在 `if` 上时，两条臂共用同一个标签作用域——收割从任意一条臂
+ * 直接跳到 if 之后（规格 §8.1 的"推荐写法"）：
+ *
+ *     let sign = s: if (x > 0) { s: 1; } else { s: 0; };
+ *
+ * 臂上的标签由 gen_arm 自己管；这里管的是 if 本身那一层。漏了它，臂里的
+ * `s: 1;` 在 lab_find 里找不到目标，会被静默丢弃——生成空臂、返回 0。
+ */
 static void gen_if_value(Node *n, const char *slot, Type *slot_ty) {
+    if (n->label && g_nlabs < MAX_CLABS) {
+        int id = ++g_labid;
+        CLab *l = &g_labs[g_nlabs++];
+        l->tag = n->label; l->slot = slot; l->slot_ty = slot_ty;
+        l->end = id; l->cont = 0; l->depth = g_depth;
+        gen_if_body(n, slot, slot_ty);
+        g_nlabs--;
+        line("Lend%d: ;", id);
+        return;
+    }
+    gen_if_body(n, slot, slot_ty);
+}
+
+static void gen_if_body(Node *n, const char *slot, Type *slot_ty) {
     /* 语义层打了标（条件是编译期常量且纯净，见 check_if）：只发会走的那条臂。
      * 语义层剪分支时另一条根本没检查——发出来多半是合法的 C 编不过的。
      * 只看 n->flag 而不是 cond->ct：编译期执行循环会在真实节点上留下
