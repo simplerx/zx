@@ -3739,12 +3739,12 @@ static void gen_switch(Node *n, const char *slot, Type *slot_ty) {
         snprintf(tmp, sizeof tmp, "_sw%d", swn++);
         line("%s %s = %s;", cty(st), tmp, cxs(n->a, st));
         hdr = subj_agg ? tagref(tmp, st) : tmp;
+        buf_putc(g_out, '\n');
+        line("switch (%s) {", hdr);
     } else {
-        hdr = exs_cond(n->a);
+        buf_putc(g_out, '\n');
+        line("switch %s {", exs_cond(n->a));   /* exs_cond 自带括号 */
     }
-
-    buf_putc(g_out, '\n');
-    line("switch %s {", hdr);
 
     int end = ++g_labid;
     int narm = n->nitems;
@@ -3800,19 +3800,20 @@ static void gen_switch(Node *n, const char *slot, Type *slot_ty) {
         /* 捕获声明（M28）：联合体 → 变体载荷，?T/.some → payload，
          * !T 的 .err → 错误值，枚举 / 整数 / bool → 主语本身 */
         if (arm->name && !arm->flag) {
+            Node *pat = arm->nitems ? arm->items[0] : NULL;
+            const char *vname = pat && pat->kind == NK_FIELD ? pat->name : NULL;
             Type *cap = NULL;
             const char *src = NULL;
             if (st && st->kind == TY_UNION && st->is_tagged) {
                 for (int q = 0; q < st->nfields; q++)
-                    if (st->fields[q].name && !strcmp(st->fields[q].name, arm->name))
+                    if (st->fields[q].name && vname && !strcmp(st->fields[q].name, vname))
                         cap = st->fields[q].ty;
-                if (cap) { Buf nb; buf_init(&nb); buf_printf(&nb, "%s.u.%s", tmp, arm->name); src = nb.data; }
+                if (cap) { Buf nb; buf_init(&nb); buf_printf(&nb, "%s.u.%s", tmp, vname); src = nb.data; }
             } else if (st && st->kind == TY_OPT) {
                 cap = st->elem;
                 Buf nb; buf_init(&nb); buf_printf(&nb, "%s.payload", tmp); src = nb.data;
             } else if (st && st->kind == TY_ERR) {
-                Node *p = arm->nitems ? arm->items[0] : NULL;
-                bool is_err_pat = p && p->kind == NK_FIELD && p->name && !strcmp(p->name, "err");
+                bool is_err_pat = vname && !strcmp(vname, "err");
                 if (is_err_pat) { cap = ty_error();  Buf nb; buf_init(&nb); buf_printf(&nb, "%s.tag", tmp); src = nb.data; }
                 else            { cap = st->elem;    Buf nb; buf_init(&nb); buf_printf(&nb, "%s.payload", tmp); src = nb.data; }
             } else if (st) {

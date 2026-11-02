@@ -1,0 +1,15 @@
+// .none 没有载荷，捕获直接报错
+const std = module("std");
+
+const f = fn (o: ?i32) i32 {
+    switch (o) {
+        .none: v { return v; },
+        .some: { return 0; },
+    }
+};
+
+const main = fn () u8 {
+    return 0;
+};
+
+// expect-error: `.none` has no payload to capture

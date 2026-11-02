@@ -224,12 +224,14 @@ for_seq     = expr [ ".." [ expr ] ] ;
 switch_expr = "switch" "(" expr ")" "{"
               [ arm { "," arm } [ "," ] ]
               "}" ;
-arm         = pattern_list [ IDENT ] ":" arm_body ;
+arm         = pattern_list [ IDENT ] ":" [ IDENT ] arm_body ;
 pattern_list = case_label { "," case_label } | "else" ;
 arm_body    = expr                                   (* 表达式臂：值即臂值 *)
             | block ;                                (* 块臂：无值；带标签则由收割交值 *)
 (* 模式与臂体之间用 ":" 分隔；模式后可写臂标签（给块臂交值用）。
-   没有 |x| 载荷捕获：联合体载荷用 s.成员 访问。 *)
+   臂体前的 [IDENT] 是捕获（v0.20）：判据是名字后面紧跟 "{"——
+   被捕获的是"匹配到的东西"（联合体载荷 / ?T 载荷 / !T 载荷或错误值 /
+   枚举与标量主语本身），只读、作用域限臂、仅限单模式臂。 *)
 case_label  = "." IDENT                                (* 联合体成员 / 枚举变体 *)
             | INT | CHAR | IDENT ;
 

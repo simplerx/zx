@@ -63,6 +63,7 @@ bin/zxc.exe file.zx -o prog       # 生成 C 并调 zig cc 编成可执行文件
 | `tests/good/arraylist.zx` | `ArrayList` 补全：insertAt / removeAt / first / last / reverse / resize / swap |
 | `tests/good/method_fold.zx` | 折叠函数体里的方法调用（`ct_call` 复检幂等回归） |
 | `tests/good/union_enum.zx` | `union(enum)` 糖：三种载荷形态、隐式枚举标签、`union(enum(u8))` 布局、方法 |
+| `tests/good/switch_cap.zx` | switch 捕获：联合体载荷 / `?T` / `!T` / 枚举主语、单值臂、无捕获臂 |
 | `std/std.zx` | 标准库主体（普通 Zx 代码）：`ArrayList`、`BufReader`、`BufWriter`、`map` / `str` 子模块 |
 | `std/str.zx` | 字符串工具：比较/查找/trim/parseInt/split/concat |
 | `std/map.zx` | `HashMap(V)`：FNV-1a + 线性探测的开放寻址表 |
@@ -1112,3 +1113,32 @@ fn lhs_or(nd: *Node, dflt: *Node) *Node { return nd.lhs orelse dflt; }
 测试：`tests/good/optional.zx`（基本语义 / 右结合与优先级 / 惰性 / 链式解包 /
 const 折叠）、`tests/bad/unwrap-nonoptional.zx`、`tests/bad/orelse-nonoptional.zx`；
 `tests/good/if_arm.zx` 补了值位置的 `else if` 链。
+
+## M28：switch 捕获——模式说是什么，捕获直接拿
+
+M27 的 `union(enum)` 落地后，最扎眼的就是这个组合：`switch (s.tag)` 匹配了
+变体，载荷还得手写 `s.circle`。现在：
+
+```zx
+switch (s) {
+    .circle: r  { return r * 3.14159 * r; },   // r = 载荷
+    .rect:   wh { return wh.0 * wh.1; },       // 每个臂捕获各自的类型
+}
+```
+
+**一条规则覆盖所有主语：被捕获的就是"匹配到的东西"。** 联合体臂捕获变体
+载荷；`?T` 的 `.some` 捕获载荷（`.none` 没有载荷，捕获直接报错）；`!T` 的
+`.ok` 捕获载荷、`.err` 捕获错误值；枚举 / 整数 / bool 臂捕获主语值本身。
+单值臂（`.red: "red"`）和无捕获块臂照旧。
+
+判别凭据是**名字后面紧跟 `{`**：`.circle: r { … }` 是捕获，`.circle a: { … }`
+是臂标签（收割交值用）。捕获是只读绑定，作用域限臂，只允许单模式臂，
+`else` 臂没有东西可捕。捕获只配块臂——`cap 值` 和裸表达式臂语法上无法区分。
+
+实现复用了 `if` 捕获的整套机制（`SK_CAPTURE` 作用域符号 + 臂内一行声明）。
+**顺带修掉一个潜伏 bug**：`?T` / `!T` / 带标签联合体作 switch 主语时后端
+会发 `switch (struct)`（非法 C）——sema 早就放行了这类主语，只是没有测试
+覆盖到后端。现在主语一律先落临时量、头部用判别值。
+
+测试：`tests/good/switch_cap.zx`（五种主语 + 单值臂 + 无捕获臂）+
+`tests/bad/switch-cap-{none,else,multi}.zx`。实现与取舍见 decisions **§58**。

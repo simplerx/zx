@@ -1,0 +1,17 @@
+// else 臂没有"匹配到的东西"，不能捕获
+const std = module("std");
+
+const Color = enum { red, green, blue };
+
+const f = fn (c: Color) i32 {
+    switch (c) {
+        .red:   { return 0; },
+        else:   v { return (i32)v; },
+    }
+};
+
+const main = fn () u8 {
+    return 0;
+};
+
+// expect-error: `else` arm has nothing to capture

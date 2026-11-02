@@ -1,0 +1,83 @@
+// switch 捕获（M28）：`pattern: cap { … }`——被捕获的就是"匹配到的东西"。
+//   联合体臂捕获变体载荷（各臂类型不同）
+//   ?T 的 .some 捕获载荷；!T 的 .ok 捕获载荷、.err 捕获错误值
+//   枚举 / 整数 / bool 的臂捕获主语值本身
+// 单值臂省略 {}、无捕获块臂照旧。
+const std = module("std");
+
+const Color = enum { red, green, blue };
+
+const Shape = union(enum) {
+    circle: f64,
+    rect:   { f64, f64 },
+};
+
+// ① 联合体直配 + 载荷捕获：不用再 switch (s.tag) 然后手取 s.circle
+const shape_area = fn (s: Shape) f64 {
+    switch (s) {
+        .circle: r { return r * 3.14159265358979 * r; },
+        .rect:   wh { return wh.0 * wh.1; },
+    }
+};
+
+// ② 单值臂 + 无捕获：表达式臂照旧
+const shape_show = fn (s: Shape) []const u8 {
+    return switch (s.tag) {
+        .circle: "circle",
+        .rect:   "rect",
+    };
+};
+
+// ③ 枚举臂捕获主语值本身
+const enum_ord = fn (c: Color) i32 {
+    switch (c) {
+        .red:   v { return (i32)v; },
+        .green: { return 1; },
+        .blue:  { return 2; },
+    }
+};
+
+// ④ ?T：.some 捕获载荷，.none 没有载荷（单值臂即可）
+const opt_double = fn (o: ?i32) i32 {
+    switch (o) {
+        .some: v { return v * 2; },
+        .none:  { return 0; },
+    }
+};
+
+// ⑤ !T：.ok 捕获载荷，.err 捕获错误值
+const err_describe = fn (e: !i32) []const u8 {
+    switch (e) {
+        .ok:  v { if (v > 0) return "pos"; return "neg"; },
+        .err: code { if ((u16)code == 1) return "one"; return "other"; },
+    }
+};
+
+// ⑥ 无捕获块臂照旧（穷尽性检查不受影响）
+const kind_of = fn (s: Shape) i32 {
+    switch (s) {
+        .circle: { return 0; },
+        .rect:   { return 1; },
+    }
+};
+
+const main = fn () u8 {
+    const c = Shape{ .circle = 2.0 };
+    const r = Shape{ .rect = { 3.0, 4.0 } };
+
+    std.println("area {} {}", shape_area(c), shape_area(r));
+    std.println("{} {}", shape_show(c), shape_show(r));
+    std.println("{}", enum_ord(Color.red));
+    std.println("{} {}", opt_double(21), opt_double(null));
+    std.println("{} {} {}", err_describe(5), err_describe(-5), err_describe((error)1));
+    std.println("{}", kind_of(r));
+    return 0;
+};
+
+// expect-output
+// area 12.5664 12
+// circle rect
+// 0
+// 42 0
+// pos neg one
+// 1
