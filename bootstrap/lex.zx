@@ -1,0 +1,843 @@
+// bootstrap/lex.zx —— 自举阶段 1：Zx 版词法器。
+//
+// 目标：与 src/lex.c 的词法规则逐条对应（spec v0.5 §1 起）：
+//   - `.{` 是一个 token（DOT_BRACE）；`..` 是范围 token；`.5` 非法（浮点必须有整数部分）
+//   - 行注释 //；块注释 /* */ 不嵌套
+//   - 整数后缀 u8..isize，浮点后缀 f16..f128；数字里可以夹下划线
+//   - 字符串转义 \n \t \r \0 \\ \" \' \a \b \f \v \e \xHH \uXXXX（解码后进 strbuf）
+//   - char 解码 1..4 字节 UTF-8；{} 占位符原样通过（格式化层的事）
+//
+// 与 C 版的一个刻意差异：token 值（int_val / float_val / char_val）只算到
+// "dump 与下一阶段够用"的程度——u64 溢出置 big 标记，浮点用简版 strtod。
+// 对拍协议：bootstrap/lexdump.zx 按 C 侧 `zxc --tokens` 的格式输出，
+// 同一批源文件 diff 必须为空（见 spec/bootstrap.md §4 阶段 1）。
+const std = module("std");
+
+// ---- token 种类：名字与 C 侧 TOKEN_KINDS 一一对应 ----
+
+pub const Kind = enum {
+    eof, ident, int, float, char, string,
+    kw_const, kw_let, kw_var, kw_fn, kw_module, kw_type,
+    kw_null, kw_undefined, kw_if, kw_else, kw_while, kw_for,
+    kw_inline, kw_switch, kw_continue, kw_return, kw_defer,
+    kw_struct, kw_union, kw_enum, kw_error, kw_pub, kw_extern,
+    kw_orelse, kw_try,
+    lparen, rparen, lbracket, rbracket, lbrace, rbrace,
+    comma, semi, colon, at, dot, dot_brace, dotdot, arrow,
+    plus, minus, star, slash, percent, caret, tilde, bang, question,
+    amp, pipe, andand, oror, shl, shr, lt, le, gt, ge, eq, ne, assign,
+    pluseq, minuseq, stareq, slasheq, perceq, ampeq, pipeeq, careteq,
+    shleq, shreq,
+};
+
+// C 侧 tok_kind_spell：dump 用的短名（枚举名去掉 TOK_ 前缀）。
+const spell = fn (k: Kind) []const u8 {
+    return switch (k) {
+        .eof: "EOF_",
+        .ident: "IDENT",
+        .int: "INT",
+        .float: "FLOAT",
+        .char: "CHAR",
+        .string: "STRING",
+        .kw_const: "KW_CONST",
+        .kw_let: "KW_LET",
+        .kw_var: "KW_VAR",
+        .kw_fn: "KW_FN",
+        .kw_module: "KW_MODULE",
+        .kw_type: "KW_TYPE",
+        .kw_null: "KW_NULL",
+        .kw_undefined: "KW_UNDEF",
+        .kw_if: "KW_IF",
+        .kw_else: "KW_ELSE",
+        .kw_while: "KW_WHILE",
+        .kw_for: "KW_FOR",
+        .kw_inline: "KW_INLINE",
+        .kw_switch: "KW_SWITCH",
+        .kw_continue: "KW_CONTINUE",
+        .kw_return: "KW_RETURN",
+        .kw_defer: "KW_DEFER",
+        .kw_struct: "KW_STRUCT",
+        .kw_union: "KW_UNION",
+        .kw_enum: "KW_ENUM",
+        .kw_error: "KW_ERROR",
+        .kw_pub: "KW_PUB",
+        .kw_extern: "KW_EXTERN",
+        .kw_orelse: "KW_ORELSE",
+        .kw_try: "KW_TRY",
+        .lparen: "LPAREN",
+        .rparen: "RPAREN",
+        .lbracket: "LBRACKET",
+        .rbracket: "RBRACKET",
+        .lbrace: "LBRACE",
+        .rbrace: "RBRACE",
+        .comma: "COMMA",
+        .semi: "SEMI",
+        .colon: "COLON",
+        .at: "AT",
+        .dot: "DOT",
+        .dot_brace: "DOT_BRACE",
+        .dotdot: "DOTDOT",
+        .arrow: "ARROW",
+        .plus: "PLUS",
+        .minus: "MINUS",
+        .star: "STAR",
+        .slash: "SLASH",
+        .percent: "PERCENT",
+        .caret: "CARET",
+        .tilde: "TILDE",
+        .bang: "BANG",
+        .question: "QUESTION",
+        .amp: "AMP",
+        .pipe: "PIPE",
+        .andand: "ANDAND",
+        .oror: "OROR",
+        .shl: "SHL",
+        .shr: "SHR",
+        .lt: "LT",
+        .le: "LE",
+        .gt: "GT",
+        .ge: "GE",
+        .eq: "EQ",
+        .ne: "NE",
+        .assign: "ASSIGN",
+        .pluseq: "PLUSEQ",
+        .minuseq: "MINUSEQ",
+        .stareq: "STAREQ",
+        .slasheq: "SLASHEQ",
+        .perceq: "PERCEQ",
+        .ampeq: "AMPEQ",
+        .pipeeq: "PIPEEQ",
+        .careteq: "CARETEQ",
+        .shleq: "SHLEQ",
+        .shreq: "SHREQ",
+    };
+};
+
+// ---- 关键字表（C 侧 g_keywords，25 个）----
+// 线性扫：词法热点在字节扫描，25 次短比较不是瓶颈；先对拍，快不快后面量。
+
+const keyword = fn (s: []const u8) ?Kind {
+    if (std.str.eq(s, "const")) { return Kind.kw_const; }
+    if (std.str.eq(s, "let")) { return Kind.kw_let; }
+    if (std.str.eq(s, "var")) { return Kind.kw_var; }
+    if (std.str.eq(s, "fn")) { return Kind.kw_fn; }
+    if (std.str.eq(s, "module")) { return Kind.kw_module; }
+    if (std.str.eq(s, "type")) { return Kind.kw_type; }
+    if (std.str.eq(s, "null")) { return Kind.kw_null; }
+    if (std.str.eq(s, "undefined")) { return Kind.kw_undefined; }
+    if (std.str.eq(s, "if")) { return Kind.kw_if; }
+    if (std.str.eq(s, "else")) { return Kind.kw_else; }
+    if (std.str.eq(s, "while")) { return Kind.kw_while; }
+    if (std.str.eq(s, "for")) { return Kind.kw_for; }
+    if (std.str.eq(s, "inline")) { return Kind.kw_inline; }
+    if (std.str.eq(s, "switch")) { return Kind.kw_switch; }
+    if (std.str.eq(s, "continue")) { return Kind.kw_continue; }
+    if (std.str.eq(s, "return")) { return Kind.kw_return; }
+    if (std.str.eq(s, "defer")) { return Kind.kw_defer; }
+    if (std.str.eq(s, "struct")) { return Kind.kw_struct; }
+    if (std.str.eq(s, "union")) { return Kind.kw_union; }
+    if (std.str.eq(s, "enum")) { return Kind.kw_enum; }
+    if (std.str.eq(s, "error")) { return Kind.kw_error; }
+    if (std.str.eq(s, "pub")) { return Kind.kw_pub; }
+    if (std.str.eq(s, "extern")) { return Kind.kw_extern; }
+    if (std.str.eq(s, "orelse")) { return Kind.kw_orelse; }
+    if (std.str.eq(s, "try")) { return Kind.kw_try; }
+    return null;
+};
+
+// ---- 字符分类（C 侧同名 helper）----
+
+const is_ident_start = fn (c: u8) bool {
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_';
+};
+const is_ident_char = fn (c: u8) bool {
+    return is_ident_start(c) || (c >= '0' && c <= '9');
+};
+const is_digit = fn (c: u8) bool {
+    return c >= '0' && c <= '9';
+};
+const hexval = fn (c: u8) i32 {
+    if (c >= '0' && c <= '9') { return (i32)(c - '0'); }
+    if (c >= 'a' && c <= 'f') { return (i32)(c - 'a') + 10; }
+    if (c >= 'A' && c <= 'F') { return (i32)(c - 'A') + 10; }
+    return -1;
+};
+const is_hex = fn (c: u8) bool { return hexval(c) >= 0; };
+const alnum_in_base = fn (c: u8, base: u32) bool {
+    let d = hexval(c);
+    return d >= 0 && (u32)d < base;
+};
+
+const is_int_suffix = fn (s: []const u8) bool {
+    return std.str.eq(s, "u8") || std.str.eq(s, "u16") || std.str.eq(s, "u32") ||
+           std.str.eq(s, "u64") || std.str.eq(s, "u128") || std.str.eq(s, "i8") ||
+           std.str.eq(s, "i16") || std.str.eq(s, "i32") || std.str.eq(s, "i64") ||
+           std.str.eq(s, "i128") || std.str.eq(s, "usize") || std.str.eq(s, "isize");
+};
+const is_float_suffix = fn (s: []const u8) bool {
+    return std.str.eq(s, "f16") || std.str.eq(s, "f32") ||
+           std.str.eq(s, "f64") || std.str.eq(s, "f128");
+};
+
+// 简版 strtod：十进制浮点文本 → f64（下划线当不存在）。
+// 自举前端只要把常量文本带进 AST，这里的精度足够；对拍不比值。
+const parse_float = fn (s: []const u8) f64 {
+    var mant: f64 = 0;
+    var i: usize = 0;
+    while (i < s.len && (is_digit(s[i]) || s[i] == '_')) {
+        if (s[i] != '_') { mant = mant * 10.0 + (f64)(s[i] - '0'); }
+        i = i + 1;
+    }
+    if (i < s.len && s[i] == '.') {
+        i = i + 1;
+        var scale: f64 = 0.1;
+        while (i < s.len && (is_digit(s[i]) || s[i] == '_')) {
+            if (s[i] != '_') { mant = mant + (f64)(s[i] - '0') * scale; scale = scale * 0.1; }
+            i = i + 1;
+        }
+    }
+    if (i < s.len && (s[i] == 'e' || s[i] == 'E')) {
+        i = i + 1;
+        var neg = false;
+        if (i < s.len && (s[i] == '+' || s[i] == '-')) {
+            neg = s[i] == '-';
+            i = i + 1;
+        }
+        var e: i32 = 0;
+        while (i < s.len && is_digit(s[i])) {
+            e = e * 10 + (i32)(s[i] - '0');
+            i = i + 1;
+        }
+        var p: f64 = 1.0;
+        var k: i32 = 0;
+        while (k < e) { p = p * 10.0; k = k + 1; }
+        if (neg) { mant = mant / p; } else { mant = mant * p; }
+    }
+    return mant;
+};
+
+// ---- token ----
+
+pub const Tok = struct {
+    kind: Kind,
+    line: u32,
+    col: u32,
+    start: usize,     // 源文本里的字节偏移（raw text = src[start..start+len]）
+    len: usize,
+    int_val: u64,
+    float_val: f64,
+    big: bool,        // 整数超 u64
+    str_off: usize,   // STRING/CHAR：解码字节在 strbuf 里的起点
+    text_len: usize,  // 解码字节数
+};
+
+// ---- 词法器本体 ----
+
+pub const Lexer = struct {
+    src: []const u8,
+    p: usize,          // 当前字节偏移
+    line: u32,
+    col: u32,
+    toks: std.ArrayList(Tok),
+    strbuf: std.ArrayList(u8),
+    al: std.Allocator,
+    n_errors: u32,
+
+    const init = fn (al: std.Allocator, src: []const u8) Lexer {
+        return Lexer{
+            .src = src, .p = 0, .line = 1, .col = 1,
+            .toks = std.ArrayList(Tok).init(al),
+            .strbuf = std.ArrayList(u8).init(al),
+            .al = al,
+            .n_errors = 0,
+        };
+    };
+
+    const deinit = fn (self: *Lexer) void {
+        self.toks.deinit();
+        self.strbuf.deinit();
+    };
+
+    // ---- 基础游标 ----
+
+    const peek = fn (self: *Lexer) u8 {
+        if (self.p >= self.src.len) { return 0; }
+        return self.src[self.p];
+    };
+
+    const peek2 = fn (self: *Lexer) u8 {
+        if (self.p + 1 >= self.src.len) { return 0; }
+        return self.src[self.p + 1];
+    };
+
+    const adv = fn (self: *Lexer) u8 {
+        if (self.p >= self.src.len) { return 0; }   // 越界只在坏输入的恢复路径出现
+        let c = self.src[self.p];
+        self.p = self.p + 1;
+        if (c == '\n') {
+            self.line = self.line + 1;
+            self.col = 1;
+        } else {
+            self.col = self.col + 1;
+        }
+        return c;
+    };
+
+    const fail = fn (self: *Lexer) void {
+        self.n_errors = self.n_errors + 1;
+    };
+
+    // ---- 发射 ----
+    // 列号公式与 C 相同：col 已越过 token，回退 len（token 内不含换行时成立）。
+
+    const emit = fn (self: *Lexer, k: Kind, start: usize) void {
+        let len = self.p - start;
+        let t = Tok{
+            .kind = k, .line = self.line, .col = self.col - (u32)len,
+            .start = start, .len = len,
+            .int_val = 0, .float_val = 0.0, .big = false,
+            .str_off = 0, .text_len = 0,
+        };
+        var ok = self.toks.push(t);
+        if (!ok) { self.fail(); }
+    };
+
+    const emit_int = fn (self: *Lexer, start: usize, v: u64, big: bool) void {
+        let len = self.p - start;
+        let t = Tok{
+            .kind = Kind.int, .line = self.line, .col = self.col - (u32)len,
+            .start = start, .len = len,
+            .int_val = v, .float_val = 0.0, .big = big,
+            .str_off = 0, .text_len = 0,
+        };
+        var ok = self.toks.push(t);
+        if (!ok) { self.fail(); }
+    };
+
+    const emit_float = fn (self: *Lexer, start: usize, v: f64) void {
+        let len = self.p - start;
+        let t = Tok{
+            .kind = Kind.float, .line = self.line, .col = self.col - (u32)len,
+            .start = start, .len = len,
+            .int_val = 0, .float_val = v, .big = false,
+            .str_off = 0, .text_len = 0,
+        };
+        var ok = self.toks.push(t);
+        if (!ok) { self.fail(); }
+    };
+
+    // STRING/CHAR：解码字节已进 strbuf，记下偏移与长度
+    const emit_text = fn (self: *Lexer, k: Kind, start: usize, off: usize) void {
+        let len = self.p - start;
+        let t = Tok{
+            .kind = k, .line = self.line, .col = self.col - (u32)len,
+            .start = start, .len = len,
+            .int_val = 0, .float_val = 0.0, .big = false,
+            .str_off = off, .text_len = self.strbuf.len - off,
+        };
+        var ok = self.toks.push(t);
+        if (!ok) { self.fail(); }
+    };
+
+    // ---- 注释与空白 ----
+
+    const skip_trivia = fn (self: *Lexer) void {
+        var more = true;
+        while (more) {
+            let c = self.peek();
+            if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+                self.adv();
+            } else if (c == '/' && self.peek2() == '/') {
+                var go = self.peek() != 0 && self.peek() != '\n';
+                while (go) {
+                    self.adv();
+                    go = self.peek() != 0 && self.peek() != '\n';
+                }
+            } else if (c == '/' && self.peek2() == '*') {
+                self.adv();
+                self.adv();
+                var closed = false;
+                var scanning = true;
+                while (scanning && self.p < self.src.len) {
+                    if (self.peek() == '*' && self.peek2() == '/') {
+                        self.adv();
+                        self.adv();
+                        closed = true;
+                        scanning = false;
+                    } else {
+                        self.adv();
+                    }
+                }
+                if (!closed) { self.fail(); }   // unterminated block comment
+            } else {
+                more = false;
+            }
+        }
+    };
+
+    // ---- 转义 ----
+    // 读转义字符（调用方已消费反斜杠），把解码字节追加进 strbuf。
+    // 返回写入字节数，出错 -1（与 C 相同：错误时不追加）。
+
+    const decode_escape = fn (self: *Lexer) i32 {
+        let e = self.adv();
+        if (e == 'n') { var ok = self.strbuf.push('\n'); return 1; }
+        if (e == 't') { var ok = self.strbuf.push('\t'); return 1; }
+        if (e == 'r') { var ok = self.strbuf.push('\r'); return 1; }
+        if (e == '0') { var ok = self.strbuf.push(0); return 1; }
+        if (e == '\\') { var ok = self.strbuf.push('\\'); return 1; }
+        if (e == '"') { var ok = self.strbuf.push('"'); return 1; }
+        if (e == '\'') { var ok = self.strbuf.push('\''); return 1; }
+        if (e == 'a') { var ok = self.strbuf.push(7); return 1; }
+        if (e == 'b') { var ok = self.strbuf.push(8); return 1; }
+        if (e == 'f') { var ok = self.strbuf.push(12); return 1; }
+        if (e == 'v') { var ok = self.strbuf.push(11); return 1; }
+        if (e == 'e') { var ok = self.strbuf.push(0x1b); return 1; }
+        if (e == 'x') {
+            let hi = hexval(self.adv());
+            let lo = hexval(self.adv());
+            if (hi < 0 || lo < 0) { self.fail(); return -1; }   // \x needs two hex digits
+            var ok = self.strbuf.push((u8)(hi * 16 + lo));
+            return 1;
+        }
+        if (e == 'u') {
+            var cp: u32 = 0;
+            var i: i32 = 0;
+            while (i < 4) {
+                let d = hexval(self.adv());
+                if (d < 0) { self.fail(); return -1; }          // \u needs four hex digits
+                cp = cp * 16 + (u32)d;
+                i = i + 1;
+            }
+            return self.utf8_encode(cp);
+        }
+        self.fail();                                            // unknown escape
+        return -1;
+    };
+
+    // BMP 码点 → UTF-8（1..4 字节），追加进 strbuf
+    const utf8_encode = fn (self: *Lexer, cp: u32) i32 {
+        if (cp < 0x80) {
+            var ok = self.strbuf.push((u8)cp);
+            return 1;
+        }
+        if (cp < 0x800) {
+            var ok1 = self.strbuf.push((u8)(0xC0 | (cp >> 6)));
+            var ok2 = self.strbuf.push((u8)(0x80 | (cp & 0x3F)));
+            return 2;
+        }
+        if (cp < 0x10000) {
+            var ok1 = self.strbuf.push((u8)(0xE0 | (cp >> 12)));
+            var ok2 = self.strbuf.push((u8)(0x80 | ((cp >> 6) & 0x3F)));
+            var ok3 = self.strbuf.push((u8)(0x80 | (cp & 0x3F)));
+            return 3;
+        }
+        var ok1 = self.strbuf.push((u8)(0xF0 | (cp >> 18)));
+        var ok2 = self.strbuf.push((u8)(0x80 | ((cp >> 12) & 0x3F)));
+        var ok3 = self.strbuf.push((u8)(0x80 | ((cp >> 6) & 0x3F)));
+        var ok4 = self.strbuf.push((u8)(0x80 | (cp & 0x3F)));
+        return 4;
+    };
+
+    // ---- 字符串 ----
+
+    const lex_string = fn (self: *Lexer, start: usize) void {
+        self.adv();                       // 开引号
+        let off = self.strbuf.len;
+        var closed = false;
+        var bad = false;
+        while (!closed && !bad) {
+            let c = self.peek();
+            if (c == 0 || c == '\n') {
+                bad = true;               // unterminated string（C 不吃掉换行，直接 break）
+            } else if (c == '"') {
+                self.adv();
+                closed = true;
+            } else if (c == '\\') {
+                self.adv();
+                let n = self.decode_escape();
+                // n < 0：错误已计数，C 侧同样不追加任何字节
+            } else {
+                // UTF-8 连续字节原样通过
+                let b = self.adv();
+                var ok = self.strbuf.push(b);
+            }
+        }
+        if (bad) { self.fail(); }
+        self.emit_text(Kind.string, start, off);
+    };
+
+    // ---- 字符 ----
+
+    const lex_char = fn (self: *Lexer, start: usize) void {
+        self.adv();                       // 开引号
+        let off = self.strbuf.len;
+        let c = self.peek();
+        if (c == '\'' || c == 0 || c == '\n') {
+            self.fail();                  // empty or unterminated char literal
+            if (c == '\'') { self.adv(); }
+            self.emit_text(Kind.char, start, off);
+            return;
+        }
+        if (c == '\\') {
+            self.adv();
+            let n = self.decode_escape();
+            if (n < 0) {
+                // C 侧：n=1 且填 '?'，解码结果同样进 strbuf
+                var ok = self.strbuf.push('?');
+            }
+        } else {
+            let b = self.adv();
+            var ok = self.strbuf.push(b);
+            // 吸收 UTF-8 连续字节
+            var cont = (self.peek() & 0xC0) == 0x80;
+            while (cont) {
+                let cb = self.adv();
+                var ok2 = self.strbuf.push(cb);
+                cont = (self.peek() & 0xC0) == 0x80;
+            }
+        }
+        if (self.peek() != '\'') {
+            self.fail();                  // must contain exactly one value
+            var go = self.peek() != 0 && self.peek() != '\'' && self.peek() != '\n';
+            while (go) {
+                self.adv();
+                go = self.peek() != 0 && self.peek() != '\'' && self.peek() != '\n';
+            }
+        } else {
+            self.adv();
+        }
+        self.emit_text(Kind.char, start, off);
+    };
+
+    // ---- 数字 ----
+
+    const lex_number = fn (self: *Lexer, start: usize) void {
+        var is_float = false;
+        var base: u32 = 10;
+
+        if (self.peek() == '0' && (self.peek2() == 'x' || self.peek2() == 'X')) {
+            base = 16;
+            self.adv();
+            self.adv();
+            if (!is_hex(self.peek())) { self.fail(); }       // needs digits after 0x
+        } else if (self.peek() == '0' && (self.peek2() == 'b' || self.peek2() == 'B')) {
+            base = 2;
+            self.adv();
+            self.adv();
+            if (self.peek() != '0' && self.peek() != '1') { self.fail(); }
+        } else if (self.peek() == '0' && (self.peek2() == 'o' || self.peek2() == 'O')) {
+            base = 8;
+            self.adv();
+            self.adv();
+            if (self.peek() < '0' || self.peek() > '7') { self.fail(); }
+        }
+
+        var val: u64 = 0;
+        var any = false;
+        var overflow = false;
+
+        if (base != 10) {
+            while (alnum_in_base(self.peek(), base) || self.peek() == '_') {
+                let c = self.adv();
+                if (c == '_') { continue; }
+                any = true;
+                let nv = val * (u64)base + (u64)hexval(c);
+                if (nv < val) { overflow = true; }
+                val = nv;
+            }
+            if (!any) { self.emit(Kind.int, start); return; }  // 错误已报，按空值收尾
+        } else {
+            while (is_digit(self.peek()) || self.peek() == '_') {
+                let c = self.adv();
+                if (c == '_') { continue; }
+                any = true;
+                let nv = val * 10 + (u64)(c - '0');
+                if (nv < val) { overflow = true; }
+                val = nv;
+            }
+            if (!any) { self.emit(Kind.int, start); return; }
+
+            // 浮点：'.' 后必须跟数字（t.0.0 规则）
+            if (self.peek() == '.' && is_digit(self.peek2())) {
+                is_float = true;
+                self.adv();
+                while (is_digit(self.peek()) || self.peek() == '_') { self.adv(); }
+                if (self.peek() == 'e' || self.peek() == 'E') {
+                    let save = self.p;
+                    self.adv();
+                    if (self.peek() == '+' || self.peek() == '-') { self.adv(); }
+                    if (is_digit(self.peek())) {
+                        while (is_digit(self.peek())) { self.adv(); }
+                    } else {
+                        // 刻意与 C 一致：只回退字节不回退列，'e' 留给后缀扫描报错
+                        self.p = save;
+                    }
+                }
+            }
+        }
+
+        if (is_float) {
+            self.emit_float(start, parse_float(self.src[start..self.p]));
+        } else {
+            // if 表达式不能直接当实参（后端 E0300），先落局部量
+            let n = if (overflow) 0 else val;
+            self.emit_int(start, n, overflow);
+        }
+
+        // 后缀
+        let suf_start = self.p;
+        while (is_ident_char(self.peek())) { self.adv(); }
+        let slen = self.p - suf_start;
+        if (slen == 0) { return; }
+        let suf = self.src[suf_start..self.p];
+        if (is_float) {
+            if (!is_float_suffix(suf)) { self.fail(); }      // invalid float suffix
+        } else {
+            if (!is_int_suffix(suf)) { self.fail(); }        // invalid integer suffix
+        }
+    };
+
+    // ---- 主分派 ----
+
+    const lex_token = fn (self: *Lexer) void {
+        let start = self.p;
+        let c = self.adv();
+
+        switch (c) {
+            '(' : { self.emit(Kind.lparen, start); },
+            ')' : { self.emit(Kind.rparen, start); },
+            '[' : { self.emit(Kind.lbracket, start); },
+            ']' : { self.emit(Kind.rbracket, start); },
+            '{' : { self.emit(Kind.lbrace, start); },
+            '}' : { self.emit(Kind.rbrace, start); },
+            ',' : { self.emit(Kind.comma, start); },
+            ';' : { self.emit(Kind.semi, start); },
+            '@' : { self.emit(Kind.at, start); },
+            '~' : { self.emit(Kind.tilde, start); },
+            '?' : { self.emit(Kind.question, start); },
+            ':' : { self.emit(Kind.colon, start); },
+
+            '.' : {
+                if (self.peek() == '{') { self.adv(); self.emit(Kind.dot_brace, start); }
+                else if (self.peek() == '.') { self.adv(); self.emit(Kind.dotdot, start); }
+                else { self.emit(Kind.dot, start); }
+            },
+
+            '+' : {
+                if (self.peek() == '=') { self.adv(); self.emit(Kind.pluseq, start); }
+                else { self.emit(Kind.plus, start); }
+            },
+            '-' : {
+                if (self.peek() == '=') { self.adv(); self.emit(Kind.minuseq, start); }
+                else if (self.peek() == '>') { self.adv(); self.emit(Kind.arrow, start); }
+                else { self.emit(Kind.minus, start); }
+            },
+            '*' : {
+                if (self.peek() == '=') { self.adv(); self.emit(Kind.stareq, start); }
+                else { self.emit(Kind.star, start); }
+            },
+            '/' : {
+                if (self.peek() == '=') { self.adv(); self.emit(Kind.slasheq, start); }
+                else { self.emit(Kind.slash, start); }
+            },
+            '%' : {
+                if (self.peek() == '=') { self.adv(); self.emit(Kind.perceq, start); }
+                else { self.emit(Kind.percent, start); }
+            },
+            '^' : {
+                if (self.peek() == '=') { self.adv(); self.emit(Kind.careteq, start); }
+                else { self.emit(Kind.caret, start); }
+            },
+
+            '&' : {
+                if (self.peek() == '=') { self.adv(); self.emit(Kind.ampeq, start); }
+                else if (self.peek() == '&') { self.adv(); self.emit(Kind.andand, start); }
+                else { self.emit(Kind.amp, start); }
+            },
+            '|' : {
+                if (self.peek() == '=') { self.adv(); self.emit(Kind.pipeeq, start); }
+                else if (self.peek() == '|') { self.adv(); self.emit(Kind.oror, start); }
+                else { self.emit(Kind.pipe, start); }
+            },
+
+            '=' : {
+                if (self.peek() == '=') { self.adv(); self.emit(Kind.eq, start); }
+                else { self.emit(Kind.assign, start); }
+            },
+            '!' : {
+                if (self.peek() == '=') { self.adv(); self.emit(Kind.ne, start); }
+                else { self.emit(Kind.bang, start); }
+            },
+
+            '<' : {
+                if (self.peek() == '<') {
+                    self.adv();
+                    if (self.peek() == '=') { self.adv(); self.emit(Kind.shleq, start); }
+                    else { self.emit(Kind.shl, start); }
+                }
+                else if (self.peek() == '=') { self.adv(); self.emit(Kind.le, start); }
+                else { self.emit(Kind.lt, start); }
+            },
+            '>' : {
+                if (self.peek() == '>') {
+                    self.adv();
+                    if (self.peek() == '=') { self.adv(); self.emit(Kind.shreq, start); }
+                    else { self.emit(Kind.shr, start); }
+                }
+                else if (self.peek() == '=') { self.adv(); self.emit(Kind.ge, start); }
+                else { self.emit(Kind.gt, start); }
+            },
+
+            else : {
+                if (is_digit(c)) {
+                    self.p = start;
+                    self.col = self.col - 1;
+                    self.lex_number(start);
+                } else if (is_ident_start(c)) {
+                    while (is_ident_char(self.peek())) { self.adv(); }
+                    let text = self.src[start..self.p];
+                    var k = keyword(text);
+                    if (k) kk {
+                        self.emit(kk, start);
+                    } else {
+                        self.emit(Kind.ident, start);
+                    }
+                } else if (c == '"') {
+                    self.p = start;
+                    self.col = self.col - 1;
+                    self.lex_string(start);
+                } else if (c == '\'') {
+                    self.p = start;
+                    self.col = self.col - 1;
+                    self.lex_char(start);
+                } else {
+                    self.fail();   // unexpected character
+                }
+            },
+        }
+    };
+
+    // ---- 主循环 ----
+
+    const run = fn (self: *Lexer) void {
+        var done = false;
+        while (!done) {
+            self.skip_trivia();
+            if (self.peek() == 0 && self.p >= self.src.len) {
+                self.emit(Kind.eof, self.p);
+                done = true;
+            } else if (self.peek() == 0) {
+                self.fail();          // unexpected NUL byte in source
+                done = true;
+            } else {
+                self.lex_token();
+                let n = self.toks.len;
+                if (n > 0) {
+                    let last = self.toks.items()[n - 1];
+                    if (last.kind == Kind.eof) { done = true; }
+                }
+            }
+        }
+    };
+};
+
+// ---- dump：与 src/main.c 的 dump_toklist 同一格式 ----
+//   "%4d:%-4d %-14s" + (STRING → "解码内容" | len∈(0,64) → 原文) + "\n"
+
+const put_digit_r = fn (out: *std.ArrayList(u8), v: u32, w: usize) void {
+    // 十进制右对齐
+    var ds: *[12]u8 = &.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    var n: usize = 0;
+    var x = v;
+    if (x == 0) {
+        ds[0] = '0';
+        n = 1;
+    }
+    while (x > 0) {
+        ds[n] = '0' + (u8)(x % 10);
+        n = n + 1;
+        x = x / 10;
+    }
+    var pad = w;
+    if (n > pad) { pad = n; }
+    var i = pad - n;
+    while (i > 0) {
+        var ok = out.push(' ');
+        i = i - 1;
+    }
+    var j = n;
+    while (j > 0) {
+        j = j - 1;
+        var ok = out.push(ds[j]);
+    }
+};
+
+const put_digit_l = fn (out: *std.ArrayList(u8), v: u32, w: usize) void {
+    var ds: *[12]u8 = &.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    var n: usize = 0;
+    var x = v;
+    if (x == 0) {
+        ds[0] = '0';
+        n = 1;
+    }
+    while (x > 0) {
+        ds[n] = '0' + (u8)(x % 10);
+        n = n + 1;
+        x = x / 10;
+    }
+    var i = n;
+    while (i > 0) {
+        i = i - 1;
+        var ok = out.push(ds[i]);
+    }
+    var k = n;
+    while (k < w) {
+        var ok = out.push(' ');
+        k = k + 1;
+    }
+};
+
+const put_str_l = fn (out: *std.ArrayList(u8), s: []const u8, w: usize) void {
+    var i: usize = 0;
+    while (i < s.len) {
+        var ok = out.push(s[i]);
+        i = i + 1;
+    }
+    while (i < w) {
+        var ok = out.push(' ');
+        i = i + 1;
+    }
+};
+
+pub const dump = fn (lx: *Lexer, out: *std.ArrayList(u8)) void {
+    let toks = lx.toks.items();
+    var i: usize = 0;
+    while (i < toks.len) {
+        let t = toks[i];
+        i = i + 1;
+        put_digit_r(out, t.line, 4);
+        var ok1 = out.push(':');
+        put_digit_l(out, t.col, 4);
+        var ok2 = out.push(' ');
+        put_str_l(out, spell(t.kind), 14);
+        if (t.kind == Kind.string) {
+            var ok3 = out.push('"');
+            let decoded = lx.strbuf.items()[t.str_off..t.str_off + t.text_len];
+            var j: usize = 0;
+            while (j < decoded.len) {
+                var ok4 = out.push(decoded[j]);
+                j = j + 1;
+            }
+            var ok5 = out.push('"');
+        } else if (t.len > 0 && t.len < 64) {
+            let raw = lx.src[t.start..t.start + t.len];
+            var j: usize = 0;
+            while (j < raw.len) {
+                var ok6 = out.push(raw[j]);
+                j = j + 1;
+            }
+        }
+        var ok7 = out.push('\n');
+    }
+};

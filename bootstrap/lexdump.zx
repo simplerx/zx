@@ -1,0 +1,30 @@
+// bootstrap/lexdump.zx —— 自举阶段 1 的对拍工具。
+//
+// 用法：lexdump <file.zx>
+// 把一个源文件的 token 流按 C 侧 `zxc --tokens` 的格式打到 stdout，
+// 与 `bin/zxc.exe <file.zx> --tokens` 的输出逐行 diff，必须为空。
+// 对拍脚本：bootstrap/diff_lex.sh。
+const std = module("std");
+const lex = module("lex.zx");
+
+const main = fn () i32 {
+    let al = std.heap.page;
+    let args = std.process.args();
+    if (args.len < 1) {
+        std.println("usage: lexdump <file.zx>");
+        return 2;
+    }
+    let path = args[0];
+    let r = std.file.read(al, path);
+    if (r) src {
+        var lx = lex.Lexer.init(al, src);
+        lx.run();
+        var out = std.ArrayList(u8).init(al);
+        lex.dump(&lx, &out);
+        std.io.print(std.io.stdout(), "{s}", out.items());
+        if (lx.n_errors > 0) { return 1; }
+        return 0;
+    }
+    std.println("lexdump: cannot open {}", path);
+    return 2;
+};
