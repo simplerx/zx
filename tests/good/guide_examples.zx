@@ -1,0 +1,153 @@
+// guide_examples.zx —— docs/guide.md 示例代码的回归用例。
+//
+// 文档里的每段示例都从这里抽验：这段过了，指南就不会教坏新人。
+// 改动指南示例时同步改这里（或反过来）。
+const std = module("std");
+
+const Person = struct {
+    name: []const u8,
+    age: i32 = 0,
+};
+
+const Color = enum {
+    red, green = 5, blue,
+
+    const name = fn (self: Self) []const u8 {
+        return switch (self) {
+            .red: "red",
+            .green: "green",
+            .blue: "blue",
+        };
+    };
+    const count = fn () u32 { return 3; };
+};
+
+const Shape = union(enum) {
+    circle: f64,
+    rect:   { f64, f64 },
+};
+
+const Vec = struct {
+    x: i32,
+    y: i32,
+
+    const add = fn (self: Self, o: Self) Self {
+        return Self{ .x = self.x + o.x, .y = self.y + o.y };
+    };
+    const shift = fn (self: *Self, d: i32) void {
+        self.x = self.x + d;
+    };
+    const len2 = fn (self: *const Self) i32 {
+        return self.x * self.x + self.y * self.y;
+    };
+};
+
+const eql = fn (T: type, x: T, y: T) bool {
+    const info = @typeInfo(T);
+    if (info.kind != std.TypeKind.struct_) {
+        return x == y;
+    }
+    inline for (0..info.fieldCount) i {
+        const FT = @fieldType(T, @fieldName(T, i));
+        if (!eql(FT, @field(x, @fieldName(T, i)), @field(y, @fieldName(T, i)))) {
+            return false;
+        }
+    }
+    return true;
+};
+
+const sum = fn (xs: []const i32) i32 {
+    var s: i32 = 0;
+    for (xs) x { s = s + x; }
+    return s;
+};
+
+const main = fn () u8 {
+    // §4 绑定
+    const MAX: usize = 100;
+    var i: usize = 0;
+    let n: usize = MAX;
+    i = n;
+    std.println("i={}", i);
+
+    // §6.1 元组
+    let t = {1, 2.5, "hi"};
+    std.println("t.0={} t.len={}", t.0, t.len);
+
+    // §6.2 数组/切片
+    var arr: *[4]i32 = &.{1, 2, 3, 4};
+    arr.0 = 10;
+    arr[2] = 30;
+    std.println("arr.len={} sum={}", arr.len, sum(arr[0..]));
+
+    // §6.4 结构体
+    var p: Person = .{ .name = "ann" };
+    std.println("{} age={}", p.name, p.age);
+
+    // §6.5 枚举
+    std.println("{} {} {}", Color.red.name(), Color.count(), (u32)Color.blue);
+
+    // §6.6 联合体
+    let s = Shape{ .circle = 2.0 };
+    let area = switch (s) {
+        .circle: r  a: { a: 3.14159 * r * r; },
+        .rect:   wh a: { a: wh.0 * wh.1; },
+    };
+    std.println("area={}", area);
+
+    // §6.7 方法
+    var a = Vec{ .x = 1, .y = 2 };
+    a.shift(10);
+    let b = a.add(a);
+    std.println("len2={}", b.len2());   // 右值要先绑 let 才能调 *const Self 方法
+
+    // §7.2 while 带值
+    var nn: i32 = 0;
+    const w = done: while (true) {
+        nn = nn + 1;
+        if (nn == 7) { done: nn * 10; }
+    };
+    std.println("w={}", w);
+
+    // §7.3 for + else
+    let xs = &.{3, 9, 4};
+    const idx = hit: for (xs[0..]) x {
+        if (x == 9) { hit: (i32)1; }
+    } else (i32)0;
+    std.println("idx={}", idx);
+
+    // §8 捕获
+    let maybe: ?i32 = 5;
+    if (maybe) v {
+        std.println("v={}", v);
+    } else {
+        std.println("null");
+    }
+    std.println("port={}", maybe orelse 8080);
+
+    // §15 eql
+    std.println("eql={} eql={}", eql(Vec, a, a), eql(Vec, a, Vec{ .x = 1, .y = 2 }));
+
+    // §14 ArrayList
+    var list = std.ArrayList(i32).init(std.heap.page);
+    defer list.deinit();
+    if (!list.push(7)) { return 1; }
+    std.println("list={}", list.items());
+
+    return 0;
+};
+
+// expect-output
+// i=100
+// t.0=1 t.len=3
+// arr.len=4 sum=46
+// ann age=0
+// red 3 6
+// area=12.5664
+// len2=500
+// w=70
+// idx=1
+// v=5
+// port=5
+// eql=true eql=false
+// list=[7]
