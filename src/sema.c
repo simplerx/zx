@@ -2525,6 +2525,32 @@ static Type *check_builtin(Node *n, Type *expect) {
 
     if (!strcmp(nm, "trap")) return type_of(n, ty_noreturn());
 
+    if (!strcmp(nm, "memcpy") || !strcmp(nm, "memmove") || !strcmp(nm, "memset")) {
+        /* @memcpy(dst, src, bytes) / @memmove(dst, src, bytes) /
+         * @memset(dst, byte, bytes)：批量内存操作，库容器（ArrayList 等）
+         * 的增长、搬移不再走逐元素循环。dst 是指针或切片（memcpy/memmove
+         * 的 src 同样），memset 的第二参是填充字节值。返回 void。 */
+        if (n->nitems < 3) return BAD(n, "@%s needs (dest, src, bytes)", nm);
+        Type *d = check_expr(n->items[0], NULL);
+        Type *c = check_expr(n->items[2], ty_usize());
+        bool d_ok = d && (d->kind == TY_PTR || d->kind == TY_SLICE);
+        if (!d_ok)
+            return BAD(n, "@%s: dest must be a pointer or slice, got `%s`", nm, ty_str(d));
+        if (!strcmp(nm, "memset")) {
+            Type *f = check_expr(n->items[1], NULL);
+            if (!f || !numeric_like(f))
+                return BAD(n, "@memset: the fill value must be an integer, got `%s`", ty_str(f));
+        } else {
+            Type *s = check_expr(n->items[1], NULL);
+            bool s_ok = s && (s->kind == TY_PTR || s->kind == TY_SLICE);
+            if (!s_ok)
+                return BAD(n, "@%s: src must be a pointer or slice, got `%s`", nm, ty_str(s));
+        }
+        if (!c || !numeric_like(c))
+            return BAD(n, "@%s: the byte count must be an integer, got `%s`", nm, ty_str(c));
+        return type_of(n, ty_void());
+    }
+
     if (!strcmp(nm, "as")) {
         if (n->nitems < 2) return BAD(n, "@as needs (type, value)");
         Type *to = resolve_type(n->items[0]);

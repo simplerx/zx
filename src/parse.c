@@ -923,8 +923,12 @@ static Node *parse_primary(P *p) {
         n->name = take_ident(p);
         /* @typeOf(e) / @field(v, "name") 收表达式；@sizeOf / @alignOf /
          * @typeName / @fieldName(T, i) 收类型；
-         * @intCast / @ptrCast / @bitCast 是 (类型, 表达式)。 */
-        bool value_first = n->name && (!strcmp(n->name, "typeOf") || !strcmp(n->name, "field"));
+         * @intCast / @ptrCast / @bitCast 是 (类型, 表达式)；
+         * @memcpy / @memmove / @memset 全是运行时值，没有类型参数。 */
+        bool value_first = n->name &&
+            (!strcmp(n->name, "typeOf") || !strcmp(n->name, "field") ||
+             !strcmp(n->name, "memcpy") || !strcmp(n->name, "memmove") ||
+             !strcmp(n->name, "memset"));
         expect(p, TOK_LPAREN);
         if (!at(p, TOK_RPAREN)) {
             int ai = 0;

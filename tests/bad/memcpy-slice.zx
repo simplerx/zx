@@ -1,0 +1,10 @@
+// @memcpy / @memmove 的 dest 和 src 都得是指针或切片；
+// 把一个标量当源传进来是读内存，不是拷贝。
+const main = fn () i32 {
+    var d: *[4]u8 = &.{ 0, 0, 0, 0 };
+    let n: u64 = 7;
+    @memcpy(d, n, 4);
+    return 0;
+};
+
+// expect-error: src must be a pointer or slice

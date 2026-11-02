@@ -1031,6 +1031,26 @@ static void ex_builtin(Buf *b, Node *n) {
         buf_puts(b, "abort()");
         return;
     }
+    if (!strcmp(nm, "memcpy") || !strcmp(nm, "memmove") || !strcmp(nm, "memset")) {
+        /* 直接落 C 的批量内存原语：ArrayList 增长 / 搬移不再逐元素。
+         * 切片实参取 .ptr（C 侧是 ZxSlice_* 结构体，不能直接转 void*）。 */
+        Buf d; buf_init(&d); ex(&d, n->items[0]);
+        Buf s; buf_init(&s); ex(&s, n->items[1]);
+        Buf c; buf_init(&c); ex(&c, n->items[2]);
+        Type *dt = n->items[0]->ty;
+        if (dt && dt->kind == TY_SLICE) { buf_printf(&d, ".ptr"); }
+        if (!strcmp(nm, "memset")) {
+            buf_printf(b, "memset((void*)(%s), (int)(%s), (size_t)(%s))",
+                       d.data, s.data, c.data);
+        } else {
+            Type *st = n->items[1]->ty;
+            if (st && st->kind == TY_SLICE) { buf_printf(&s, ".ptr"); }
+            buf_printf(b, "%s((void*)(%s), (const void*)(%s), (size_t)(%s))",
+                       nm, d.data, s.data, c.data);
+        }
+        buf_free(&d); buf_free(&s); buf_free(&c);
+        return;
+    }
     if (!strcmp(nm, "compileError")) {
         buf_puts(b, "abort()");
         return;
@@ -4544,6 +4564,7 @@ int backend_emit_split(Node *root, Buf *header, BUnit *units, int maxunits) {
     buf_puts(header, "#ifndef ZX_GEN_H\n#define ZX_GEN_H\n\n");
     buf_puts(header, "#include <stdint.h>\n#include <stdbool.h>\n");
     buf_puts(header, "#include <stddef.h>\n#include <stdio.h>\n#include <stdlib.h>\n");
+    buf_puts(header, "#include <string.h>\n");   /* @memcpy / @memmove / @memset */
     buf_puts(header, "#include <string.h>\n\n");
     buf_puts(header, g_btypes.data ? g_btypes.data : "");
     buf_putc(header, '\n');

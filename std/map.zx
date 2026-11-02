@@ -4,6 +4,13 @@
 // 键**不复制**：表里存的是切片本身，所以字符串要比表活得久
 // （字面量、或调用方自己管着的缓冲区都行）。
 //
+// 每个槽额外存一份 64 位哈希（hashes 数组，0 = 空槽）：
+//   - 探测时先比哈希，哈希不同不用碰字符串——热点路径少一次访存
+//     （8 字节的哈希数组 vs 16 字节的切片）和一次 str.eq；
+//   - 扩容重排不重算哈希、也不做键比较——键在旧表里本来就唯一，
+//     新表里找第一个空槽放进去就是正确的线性探测结果；
+//   - clear 是一次 memset，不是逐槽清。
+//
 // 没有 remove：要删就重建一张表。省略它是为了让探测链里没有墓碑——
 // 少一个状态，少一类 bug。
 
@@ -23,7 +30,8 @@ pub const fnv1a = fn (s: []const u8) u64 {
 
 pub const HashMap = fn (V: type) type {
     return struct {
-        keys: *?[]const u8,     // 每格一个可空切片：null = 空槽
+        keys: *[]const u8,      // 每格一个切片；空不空看 hashes
+        hashes: *u64,           // 每格一个哈希：0 = 空槽（FNV 结果为 0 时存 1）
         vals: *V,
         n: usize,               // 已占用的槽数
         cap: usize,             // 总槽数：0 或 2 的幂
@@ -32,15 +40,18 @@ pub const HashMap = fn (V: type) type {
         // ---- 构造 / 释放 ----
 
         const init = fn (alloc: Allocator) Self {
-            return Self{ .keys = undefined, .vals = undefined, .n = 0, .cap = 0, .alloc = alloc };
+            return Self{ .keys = undefined, .hashes = undefined, .vals = undefined,
+                         .n = 0, .cap = 0, .alloc = alloc };
         };
 
         const deinit = fn (self: *Self) void {
             if (self.cap > 0) {
-                self.alloc.free((*u8)self.keys, self.cap * @sizeOf(?[]const u8));
+                self.alloc.free((*u8)self.keys, self.cap * @sizeOf([]const u8));
+                self.alloc.free((*u8)self.hashes, self.cap * @sizeOf(u64));
                 self.alloc.free((*u8)self.vals, self.cap * @sizeOf(V));
             }
             self.keys = undefined;
+            self.hashes = undefined;
             self.vals = undefined;
             self.n = 0;
             self.cap = 0;
@@ -55,51 +66,42 @@ pub const HashMap = fn (V: type) type {
         // ---- 查找 ----
 
         // 命中返回它的下标；没命中返回第一个空槽——也就是插入点。
+        // 探测先比哈希（8 字节，同一缓存行几乎总在），哈希不同不碰字符串。
         const slotFor = fn (self: *Self, key: []const u8, h: u64) usize {
             let mask = self.cap - 1;
             var i = (usize)h & mask;
             var probes: usize = 0;
             while (probes <= mask) {
-                let cur = (self.keys + i).0;
-                if (cur) k {
-                    if (str.eq(k, key)) { return i; }
-                } else {
-                    return i;
-                }
+                let sh = (self.hashes + i).0;
+                if (sh == 0) { return i; }              // 空槽：插入点
+                if (sh == h && str.eq((self.keys + i).0, key)) { return i; }
                 i = (i + 1) & mask;
                 probes = probes + 1;
             }
             return i;               /* 表满（不会发生：负载上限 3/4） */
         };
 
+        // FNV 结果可能是 0，而 0 是"空槽"哨兵——压成 1。
+        const norm = fn (h: u64) u64 { return if (h == 0) 1 else h; };
+
         const get = fn (self: *Self, key: []const u8) ?V {
             if (self.cap == 0) { return null; }
-            let i = self.slotFor(key, fnv1a(key));
-            let cur = (self.keys + i).0;
-            if (cur) k {
-                if (str.eq(k, key)) { return (self.vals + i).0; }
-            }
+            let i = self.slotFor(key, Self.norm(fnv1a(key)));
+            if ((self.hashes + i).0 != 0) { return (self.vals + i).0; }
             return null;
         };
 
         const contains = fn (self: *Self, key: []const u8) bool {
             if (self.cap == 0) { return false; }
-            let i = self.slotFor(key, fnv1a(key));
-            let cur = (self.keys + i).0;
-            if (cur) k {
-                if (str.eq(k, key)) { return true; }
-            }
-            return false;
+            let i = self.slotFor(key, Self.norm(fnv1a(key)));
+            return (self.hashes + i).0 != 0;
         };
 
         // 取指针：已经存在就直接改它，省一次查找。
         const getPtr = fn (self: *Self, key: []const u8) ?*V {
             if (self.cap == 0) { return null; }
-            let i = self.slotFor(key, fnv1a(key));
-            let cur = (self.keys + i).0;
-            if (cur) k {
-                if (str.eq(k, key)) { return self.vals + i; }
-            }
+            let i = self.slotFor(key, Self.norm(fnv1a(key)));
+            if ((self.hashes + i).0 != 0) { return self.vals + i; }
             return null;
         };
 
@@ -109,35 +111,35 @@ pub const HashMap = fn (V: type) type {
             if (self.cap == 0 || (self.n + 1) * 4 > self.cap * 3) {
                 if (!self.grow()) { return false; }
             }
-            let i = self.slotFor(key, fnv1a(key));
-            let cur = (self.keys + i).0;
-            if (cur) k {
-                if (str.eq(k, key)) {
-                    (self.vals + i).0 = val;
-                    return true;
-                }
-            }
+            let h = Self.norm(fnv1a(key));
+            let i = self.slotFor(key, h);
+            let existed = (self.hashes + i).0 != 0;
             (self.keys + i).0 = key;
             (self.vals + i).0 = val;
-            self.n = self.n + 1;
+            (self.hashes + i).0 = h;
+            if (!existed) { self.n = self.n + 1; }
             return true;
         };
 
         // 只在键不存在时写入；已存在就返回它原来的值。
+        // 一次探测同时完成"查旧"和"插入"，不像 get+put 那样哈希两遍。
         const putNew = fn (self: *Self, key: []const u8, val: V) ?V {
-            if (self.cap != 0) {
-                let old = self.get(key);
-                if (old) v { return v; }
+            if (self.cap == 0 || (self.n + 1) * 4 > self.cap * 3) {
+                if (!self.grow()) { return val; }       // 扩容失败：写入没有发生
             }
-            if (!self.put(key, val)) { return val; }
+            let h = Self.norm(fnv1a(key));
+            let i = self.slotFor(key, h);
+            if ((self.hashes + i).0 != 0) { return (self.vals + i).0; }
+            (self.keys + i).0 = key;
+            (self.vals + i).0 = val;
+            (self.hashes + i).0 = h;
+            self.n = self.n + 1;
             return null;
         };
 
         const clear = fn (self: *Self) void {
-            var i: usize = 0;
-            while (i < self.cap) {
-                (self.keys + i).0 = null;
-                i = i + 1;
+            if (self.cap > 0) {
+                @memset((*u8)self.hashes, 0, self.cap * @sizeOf(u64));
             }
             self.n = 0;
         };
@@ -146,67 +148,66 @@ pub const HashMap = fn (V: type) type {
 
         // 槽下标从 0 到 capacity()-1；空槽返回 null，跳过即可。
         const keyAt = fn (self: *Self, i: usize) ?[]const u8 {
-            if (i >= self.cap) { return null; }
+            if (i >= self.cap || (self.hashes + i).0 == 0) { return null; }
             return (self.keys + i).0;
         };
 
         const valueAt = fn (self: *Self, i: usize) ?V {
-            if (i >= self.cap) { return null; }
-            if ((self.keys + i).0) k { return (self.vals + i).0; }
-            return null;
+            if (i >= self.cap || (self.hashes + i).0 == 0) { return null; }
+            return (self.vals + i).0;
         };
 
         // ---- 扩容 ----
 
         const grow = fn (self: *Self) bool {
             let ncap: usize = if (self.cap == 0) 8 else self.cap * 2;
-            let kb = ncap * @sizeOf(?[]const u8);
-            let nk = self.alloc.alloc(kb);
-            if (nk) nkp {
-                let vb = ncap * @sizeOf(V);
-                let nv = self.alloc.alloc(vb);
-                if (nv) nvp {
-                    let nkeys = (*?[]const u8)nkp;
-                    let nvals = (*V)nvp;
+            let hsz = ncap * @sizeOf(u64);
+            let nh = self.alloc.alloc(hsz);
+            if (nh) nhp {
+                let kb = ncap * @sizeOf([]const u8);
+                let nk = self.alloc.alloc(kb);
+                if (nk) nkp {
+                    let vb = ncap * @sizeOf(V);
+                    let nv = self.alloc.alloc(vb);
+                    if (nv) nvp {
+                        let nhashes = (*u64)nhp;
+                        let nkeys = (*[]const u8)nkp;
+                        let nvals = (*V)nvp;
 
-                    var j: usize = 0;
-                    while (j < ncap) {
-                        (nkeys + j).0 = null;
-                        j = j + 1;
-                    }
+                        @memset((*u8)nhashes, 0, hsz);
 
-                    let mask = ncap - 1;
-                    var i: usize = 0;
-                    while (i < self.cap) {
-                        let cur = (self.keys + i).0;
-                        if (cur) k {
-                            var t = (usize)fnv1a(k) & mask;
-                            var done = false;
-                            while (!done) {
-                                let probe = (nkeys + t).0;
-                                if (probe) q {
-                                    if (str.eq(q, k)) { done = true; }
-                                    else { t = (t + 1) & mask; }
-                                } else {
-                                    done = true;
+                        // 键在旧表里本来就唯一：新表里找第一个空槽放进去，
+                        // 就是正确的线性探测结果——不重算哈希、不比字符串。
+                        let mask = ncap - 1;
+                        var i: usize = 0;
+                        while (i < self.cap) {
+                            let h = (self.hashes + i).0;
+                            if (h != 0) {
+                                var t = (usize)h & mask;
+                                while ((nhashes + t).0 != 0) {
+                                    t = (t + 1) & mask;
                                 }
+                                (nhashes + t).0 = h;
+                                (nkeys + t).0 = (self.keys + i).0;
+                                (nvals + t).0 = (self.vals + i).0;
                             }
-                            (nkeys + t).0 = k;
-                            (nvals + t).0 = (self.vals + i).0;
+                            i = i + 1;
                         }
-                        i = i + 1;
-                    }
 
-                    if (self.cap > 0) {
-                        self.alloc.free((*u8)self.keys, self.cap * @sizeOf(?[]const u8));
-                        self.alloc.free((*u8)self.vals, self.cap * @sizeOf(V));
+                        if (self.cap > 0) {
+                            self.alloc.free((*u8)self.keys, self.cap * @sizeOf([]const u8));
+                            self.alloc.free((*u8)self.hashes, self.cap * @sizeOf(u64));
+                            self.alloc.free((*u8)self.vals, self.cap * @sizeOf(V));
+                        }
+                        self.keys = nkeys;
+                        self.hashes = nhashes;
+                        self.vals = nvals;
+                        self.cap = ncap;
+                        return true;
                     }
-                    self.keys = nkeys;
-                    self.vals = nvals;
-                    self.cap = ncap;
-                    return true;
+                    self.alloc.free(nkp, kb);
                 }
-                self.alloc.free(nkp, kb);
+                self.alloc.free(nhp, hsz);
             }
             return false;
         };

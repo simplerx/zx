@@ -1,0 +1,10 @@
+// @memset 的第二参是填充字节值，必须是整数；
+// 传指针就是把"往哪填"和"填什么"搞反了。
+const main = fn () i32 {
+    var d: *[4]u8 = &.{ 0, 0, 0, 0 };
+    let p: *u8 = d;
+    @memset(d, p, 4);
+    return 0;
+};
+
+// expect-error: the fill value must be an integer

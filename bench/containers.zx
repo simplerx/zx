@@ -1,0 +1,184 @@
+// bench/containers.zx —— 标准库容器的性能锚点。
+//
+// 五个负载，各打一个校验和（改动实现时数字必须一致，性能才能比）：
+//   al-push    ArrayList 逐个 push 100 万 i32，再遍历求和
+//   al-append  每次追加 16 个元素的切片，共 6 万次
+//   al-insert  在中点 insertAt 2 万次（固有 O(n²)，规模取小）
+//   map-put    HashMap 插入 20 万个字符串键（含多次扩容）
+//   map-get    命中查找 20 万次 + 未命中 5 万次
+//
+// 校验和用简单的 FNV 混合，避免常量折叠把负载吃掉：种子是上一轮的结果。
+const std = module("std");
+
+const mix = fn (h: u64, v: u64) u64 {
+    var x = h ^ v;
+    x = x * 0x100000001b3;
+    return x ^ (x >> 29);
+};
+
+const N: usize = 1_000_000;
+
+const bench_push = fn (seed: u64) u64 {
+    var h = seed;
+    var al = std.ArrayList(i32).init(std.heap.page);
+    defer al.deinit();
+    var i: usize = 0;
+    while (i < N) {
+        al.push((i32)i);
+        i = i + 1;
+    }
+    let xs = al.items();
+    i = 0;
+    while (i < xs.len) {
+        h = mix(h, (u64)xs[i]);
+        i = i + 1;
+    }
+    return h ^ (u64)al.len;
+};
+
+const CH: usize = 16;
+
+const bench_append = fn (seed: u64) u64 {
+    var h = seed;
+    var al = std.ArrayList(i32).init(std.heap.page);
+    defer al.deinit();
+    var chunk = &.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    var round: usize = 0;
+    while (round < 60_000) {
+        var k: usize = 0;
+        while (k < CH) {
+            chunk[k] = (i32)(round * CH + k);
+            k = k + 1;
+        }
+        if (!al.append(chunk[0..])) { return 0; }
+        round = round + 1;
+    }
+    let xs = al.items();
+    var i: usize = 0;
+    while (i < xs.len) {
+        h = mix(h, (u64)xs[i]);
+        i = i + 3;
+    }
+    return h ^ (u64)al.len;
+};
+
+const M: usize = 20_000;
+
+const bench_insert = fn (seed: u64) u64 {
+    var h = seed;
+    var al = std.ArrayList(i32).init(std.heap.page);
+    defer al.deinit();
+    // 先铺 1 万个底，再往中点插 2 万个
+    var i: usize = 0;
+    while (i < M / 2) {
+        al.push((i32)i);
+        i = i + 1;
+    }
+    i = 0;
+    while (i < M) {
+        if (!al.insertAt(al.len / 2, (i32)i)) { return 0; }
+        i = i + 1;
+    }
+    let xs = al.items();
+    i = 0;
+    while (i < xs.len) {
+        h = mix(h, (u64)xs[i]);
+        i = i + 7;
+    }
+    return h ^ (u64)al.len;
+};
+
+const KN: usize = 200_000;
+
+// 键存储区：每个键自己的持久空间（HashMap 契约：键不复制，切片要比表活得久）。
+// 固定 pattern 的字符串，长度 8~11，模拟真实键分布。
+const KEY_MAX: usize = 16;
+
+const make_key = fn (store: *u8, n: usize) []const u8 {
+    let buf = store + n * KEY_MAX;
+    var x: u64 = (u64)n * 6364136223846793005 + 1442695040888963407;
+    let len = 8 + (usize)(x % 4);
+    x = x >> 3;
+    var i: usize = 0;
+    while (i < len) {
+        (buf + i).0 = ('a' + (u8)(x & 15));
+        x = x >> 4;
+        i = i + 1;
+    }
+    return buf[0..len];
+};
+
+const key_store = fn (n: usize) *u8 {
+    let p = std.heap.page.alloc(n * KEY_MAX);
+    if (p) q { return q; }
+    @trap();
+};
+
+const bench_map_put = fn (seed: u64) u64 {
+    var h = seed;
+    var m = std.HashMap(u64).init(std.heap.page);
+    defer m.deinit();
+    let store = key_store(KN);
+    defer std.heap.page.free(store, KN * KEY_MAX);
+    var i: usize = 0;
+    while (i < KN) {
+        let k = make_key(store, i);
+        if (!m.put(k, (u64)i)) { return 0; }
+        i = i + 1;
+    }
+    // 命中查一遍，混合进校验和
+    i = 0;
+    while (i < KN) {
+        let k = make_key(store, i);
+        if (m.get(k)) v {
+            h = mix(h, v);
+        } else {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return h ^ m.count();
+};
+
+const bench_map_get = fn (seed: u64) u64 {
+    var h = seed;
+    var m = std.HashMap(u64).init(std.heap.page);
+    defer m.deinit();
+    // 存储区多备 65536 个槽：未命中探测键的编号在 KN 之外
+    let store = key_store(KN + 65_536);
+    defer std.heap.page.free(store, (KN + 65_536) * KEY_MAX);
+    var i: usize = 0;
+    while (i < KN) {
+        let k = make_key(store, i);
+        if (!m.put(k, (u64)i)) { return 0; }
+        i = i + 1;
+    }
+    i = 0;
+    var hits: usize = 0;
+    while (i < KN) {
+        let k = make_key(store, (i * 7919) % KN);
+        if (m.get(k)) v {
+            h = mix(h, v);
+            hits = hits + 1;
+        }
+        i = i + 1;
+    }
+    // 未命中 5 万次：换一组必然不存在的键
+    i = 0;
+    while (i < 50_000) {
+        let k = make_key(store, KN + i);
+        if (m.get(k)) v { h = mix(h, v); }
+        i = i + 1;
+    }
+    return h ^ (u64)hits;
+};
+
+const main = fn () i32 {
+    let a = bench_push(0x1234567);
+    let b = bench_append(a);
+    let c = bench_insert(b);
+    let d = bench_map_put(c);
+    let e = bench_map_get(d);
+    std.println("{} {} {} {} {}", a, b, c, d, e);
+    return 0;
+};

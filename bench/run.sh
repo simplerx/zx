@@ -38,3 +38,4 @@ run fib    bench/fib.zx
 run mandel bench/mandel.zx
 run mmat   bench/mmat.zx
 run str    bench/str.zx
+run cont   bench/containers.zx
