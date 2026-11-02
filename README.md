@@ -619,6 +619,15 @@ zx_init_<stem>(void)  每模块一个初始化函数，main 按依赖倒序调�
       顺带修出三个跨模块后端裂口（模块符号链接、成员名转义、泛型实例原型）；
       `docs/guide.md` 新人指南上线，示例由 `tests/good/guide_examples.zx`
       回归钉住——`sh test.sh` **195 项全过**
+- [x] M35 **自举阶段 2——Zx 版语法分析器**：
+      `bootstrap/parse.zx`（约 1200 行）与 `src/parse.c` 等价重写，
+      递归下降 + 两处试探回溯（类型 vs 表达式、cast vs 括号）全部用
+      错误联合 `try` 表达；AST dump 先在 C 侧定死序列化格式
+      （浮点改打原始 token 文本），再逐字节对拍——
+      `sh bootstrap/diff_ast.sh` **56 个文件 0 差异**（tests/good、std、
+      bench、spec 片段、bootstrap 自身）。顺带修出共享出参的嵌套污染：
+      `if` 捕获名从 C 的栈上指针出参改成共享字段后，臂块内的嵌套 `if`
+      会重写它——改为入口保存、读回后恢复
 
 ### M13：四件"语言设计上的回头路"
 

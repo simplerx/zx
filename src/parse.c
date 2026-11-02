@@ -1605,7 +1605,7 @@ void ast_dump(const Node *n, int depth) {
     if (n->name) printf(" %s", n->name);
     if (n->label) printf(" :%s", n->label);
     if (n->kind == NK_INT) printf(" %llu", (unsigned long long)n->ival);
-    if (n->kind == NK_FLOAT) printf(" %g", n->fval);
+    if (n->kind == NK_FLOAT) printf(" %s", n->str ? n->str : "");
     if (n->kind == NK_STR) printf(" \"%.*s\"", n->str_len, n->str ? n->str : "");
     if (n->kind == NK_BUILTIN) printf(" @%s", n->name ? n->name : "");
     if (n->kind == NK_FIELD && !n->name) printf(" .%llu", (unsigned long long)n->ival);

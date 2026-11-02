@@ -31,7 +31,7 @@ pub const Kind = enum {
 };
 
 // C 侧 tok_kind_spell：dump 用的短名（枚举名去掉 TOK_ 前缀）。
-const spell = fn (k: Kind) []const u8 {
+pub const spell = fn (k: Kind) []const u8 {
     return switch (k) {
         .eof: "EOF_",
         .ident: "IDENT",

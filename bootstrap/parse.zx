@@ -1,0 +1,1793 @@
+// parse.zx —— 自举阶段 2：Zx 版语法分析器。
+//
+// 与 src/parse.c 逐条对应（递归下降 + 两处试探回溯 + 词法性块/元组判定）。
+// 回溯实现：C 用 setjmp/longjmp，这里用 !*Node——试探区里的失败带着
+// 错误码一路上传，试探点 `if (r) v {} else { 回退游标 }`。
+// 对拍格式与 `zxc --ast` 的 s 表达式完全一致（见 dump）。
+
+const std = module("std");
+const lex = module("lex.zx");
+
+const Fail = enum(u8) { f = 1 };
+
+// ---- AST 节点 ----
+// 对应 src/ast.h 的 Node：只带解析期字段，sema 期的不进来。
+
+pub const NK = enum {
+    int, float, str, char,
+    id,
+    bool_, null_, undef,
+    bin,
+    range,
+    un,
+    unwrap, or_else, try_,
+    cast,
+    index, slice, field, call,
+    tuple, anon_struct, struct_lit, array_lit, pair,
+    block, if_, while_, for_, switch_, arm,
+    return_, continue_, yield, defer_,
+    builtin, module_, decl, fn_, param,
+    t_ident, ptr, sliceT, tupleT, struct_, union_, enum_, opt, err,
+    root,
+};
+
+pub const Node = struct {
+    kind: NK,
+    name: ?[]const u8,
+    label: ?[]const u8,
+    op: ?lex.Kind,       // bin/un 的运算符；decl 的种类放 op2
+    ival: u64,
+    str: ?[]const u8,    // 字面量文本 / 字符串解码内容
+    flag: bool,
+    is_pub: bool,
+    is_extern: bool,
+    op2: u8,             // decl: 0=const 1=let 2=var；union(enum): 1
+    a: ?*Node,
+    b: ?*Node,
+    c: ?*Node,
+    d: ?*Node,
+    items: std.ArrayList(*Node),
+    al: std.Allocator,
+};
+
+const nk_name = fn (k: NK) []const u8 {
+    return switch (k) {
+        .int: "int",
+        .float: "float",
+        .str: "str",
+        .char: "char",
+        .id: "id",
+        .bool_: "bool",
+        .null_: "null",
+        .undef: "undefined",
+        .bin: "bin",
+        .range: "range",
+        .un: "un",
+        .cast: "cast",
+        .try_: "try",
+        .index: "index",
+        .slice: "slice",
+        .field: "field",
+        .call: "call",
+        .tuple: "tuple",
+        .anon_struct: "anon-struct",
+        .struct_lit: "struct-lit",
+        .array_lit: "array-lit",
+        .pair: "pair",
+        .block: "block",
+        .if_: "if",
+        .while_: "while",
+        .for_: "for",
+        .switch_: "switch",
+        .arm: "arm",
+        .unwrap: "unwrap",
+        .or_else: "orelse",
+        .return_: "return",
+        .continue_: "continue",
+        .yield: "yield",
+        .defer_: "defer",
+        .builtin: "builtin",
+        .module_: "module",
+        .decl: "decl",
+        .fn_: "fn",
+        .param: "param",
+        .t_ident: "T",
+        .ptr: "ptr",
+        .sliceT: "sliceT",
+        .tupleT: "tupleT",
+        .struct_: "struct",
+        .union_: "union",
+        .enum_: "enum",
+        .opt: "opt",
+        .err: "err",
+        .root: "root",
+    };
+};
+
+// ---- dump：与 src/parse.c 的 ast_dump 逐字节同格式 ----
+
+const puts = fn (out: *std.ArrayList(u8), s: []const u8) void {
+    var i: usize = 0;
+    while (i < s.len) {
+        var ok = out.push(s[i]);
+        i = i + 1;
+    }
+};
+
+const put_u64 = fn (out: *std.ArrayList(u8), v: u64) void {
+    var ds: *[20]u8 = &.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    var n: usize = 0;
+    var x = v;
+    if (x == 0) {
+        ds[0] = '0';
+        n = 1;
+    }
+    while (x > 0) {
+        ds[n] = '0' + (u8)(x % 10);
+        n = n + 1;
+        x = x / 10;
+    }
+    while (n > 0) {
+        n = n - 1;
+        var ok = out.push(ds[n]);
+    }
+};
+
+pub const dump = fn (n: *Node, out: *std.ArrayList(u8), depth: u32) void {
+    var i: u32 = 0;
+    while (i < depth) {
+        var ok = out.push(' ');
+        ok = out.push(' ');
+        i = i + 1;
+    }
+    var ok = out.push('(');
+    puts(out, nk_name(n.kind));
+
+    if (n.name) nm {
+        ok = out.push(' ');
+        puts(out, nm);
+    }
+    if (n.label) lb {
+        ok = out.push(' ');
+        ok = out.push(':');
+        puts(out, lb);
+    }
+    if (n.kind == NK.int) {
+        ok = out.push(' ');
+        put_u64(out, n.ival);
+    }
+    if (n.kind == NK.float) {
+        if (n.str) s {
+            ok = out.push(' ');
+            puts(out, s);
+        }
+    }
+    if (n.kind == NK.str) {
+        ok = out.push(' ');
+        ok = out.push('"');
+        if (n.str) s {
+            puts(out, s);
+        }
+        ok = out.push('"');
+    }
+    if (n.kind == NK.builtin) {
+        ok = out.push(' ');
+        ok = out.push('@');
+        if (n.name) nm {
+            puts(out, nm);
+        }
+    }
+    var no_name = true;
+    if (n.name) nmq { no_name = false; }
+    if (n.kind == NK.field && no_name) {
+        ok = out.push(' ');
+        ok = out.push('.');
+        put_u64(out, n.ival);
+    }
+    var is_binun = false;
+    if (n.kind == NK.bin || n.kind == NK.un) { is_binun = true; }
+    if (is_binun) {
+        if (n.op) k {
+            ok = out.push(' ');
+            puts(out, lex.spell(k));
+        }
+    }
+    if (n.is_pub) {
+        ok = out.push(' ');
+        puts(out, "pub");
+    }
+    if (n.kind == NK.decl) {
+        ok = out.push(' ');
+        if (n.op2 == 0) {
+            puts(out, "const");
+        } else if (n.op2 == 1) {
+            puts(out, "let");
+        } else {
+            puts(out, "var");
+        }
+    }
+    if (n.flag && (n.kind == NK.struct_ || n.kind == NK.ptr ||
+                    n.kind == NK.sliceT || n.kind == NK.arm)) {
+        ok = out.push(' ');
+        ok = out.push('!');
+    }
+
+    var items_first = false;
+    if (n.kind == NK.root) { items_first = true; }
+    if (n.kind == NK.block) { items_first = true; }
+    if (n.kind == NK.tuple) { items_first = true; }
+    if (n.kind == NK.for_) { items_first = true; }
+    if (n.kind == NK.switch_) { items_first = true; }
+    if (n.kind == NK.arm) { items_first = true; }
+    if (items_first) {
+        var k: usize = 0;
+        while (k < n.items.len) {
+            ok = out.push('\n');
+            dump(n.items.items()[k], out, depth + 1);
+            k = k + 1;
+        }
+    }
+    if (n.a) ch { ok = out.push('\n'); dump(ch, out, depth + 1); }
+    if (n.b) ch { ok = out.push('\n'); dump(ch, out, depth + 1); }
+    if (n.c) ch { ok = out.push('\n'); dump(ch, out, depth + 1); }
+    if (n.d) ch { ok = out.push('\n'); dump(ch, out, depth + 1); }
+    if (!items_first) {
+        var k: usize = 0;
+        while (k < n.items.len) {
+            ok = out.push('\n');
+            dump(n.items.items()[k], out, depth + 1);
+            k = k + 1;
+        }
+    }
+    ok = out.push(')');
+    if (depth == 0) {
+        ok = out.push('\n');
+    }
+};
+
+// ---- 解析器 ----
+
+pub const Parser = struct {
+    toks: []lex.Tok,
+    i: usize,
+    src: []const u8,
+    strbuf: []const u8,   // lex 完成后的解码文本存储区（STRING/CHAR 取这里）
+    al: std.Allocator,
+    spec_depth: u32,
+    cap: ?[]const u8,     // parse_if_arm 的捕获名出参
+
+    const init = fn (al: std.Allocator, src: []const u8, lx: *lex.Lexer) Parser {
+        return Parser{
+            .toks = lx.toks.items(),
+            .i = 0,
+            .src = src,
+            .strbuf = lx.strbuf.items(),
+            .al = al,
+            .spec_depth = 0,
+            .cap = null,
+        };
+    };
+
+    // ---- 游标 ----
+
+    const cur = fn (self: *Parser) lex.Tok {
+        if (self.i >= self.toks.len) { return self.toks[self.toks.len - 1]; }
+        return self.toks[self.i];
+    };
+
+    const peek_tok = fn (self: *Parser, k: usize) lex.Tok {
+        let j = self.i + k;
+        if (j >= self.toks.len) { return self.toks[self.toks.len - 1]; }
+        return self.toks[j];
+    };
+
+    const at = fn (self: *Parser, k: lex.Kind) bool {
+        return self.cur().kind == k;
+    };
+
+    const accept = fn (self: *Parser, k: lex.Kind) bool {
+        if (self.at(k)) {
+            self.i = self.i + 1;
+            return true;
+        }
+        return false;
+    };
+
+    const advance = fn (self: *Parser) lex.Tok {
+        let t = self.cur();
+        if (self.i + 1 < self.toks.len) { self.i = self.i + 1; }
+        return t;
+    };
+
+    const expect = fn (self: *Parser, k: lex.Kind) !void {
+        if (self.at(k)) {
+            var t = self.advance();
+            return;
+        }
+        return (error)Fail.f;
+    };
+
+    const tok_text = fn (self: *Parser, t: lex.Tok) []const u8 {
+        return self.src[t.start..t.start + t.len];
+    };
+
+    const take_ident = fn (self: *Parser) ![]const u8 {
+        if (self.at(lex.Kind.ident)) {
+            let t = self.advance();
+            return self.tok_text(t);
+        }
+        return (error)Fail.f;
+    };
+
+    // ---- 节点构造 ----
+
+    const new = fn (self: *Parser, k: NK) *Node {
+        let raw = self.al.alloc(@sizeOf(Node));
+        if (raw) p {
+            let n = (*Node)p;
+            n.kind = k;
+            n.name = null;
+            n.label = null;
+            n.op = null;
+            n.ival = 0;
+            n.str = null;
+            n.flag = false;
+            n.is_pub = false;
+            n.is_extern = false;
+            n.op2 = 0;
+            n.a = null;
+            n.b = null;
+            n.c = null;
+            n.d = null;
+            n.items = std.ArrayList(*Node).init(self.al);
+            n.al = self.al;
+            return n;
+        }
+        std.println("bootstrap: out of memory");
+        std.process.exit(1);
+
+    };
+
+    const push_item = fn (self: *Parser, n: *Node, item: *Node) void {
+        var ok = n.items.push(item);
+        if (!ok) {
+            std.println("bootstrap: out of memory");
+            std.process.exit(1);
+        }
+    };
+
+    const type_ident = fn (self: *Parser, name: []const u8) *Node {
+        let n = self.new(NK.t_ident);
+        n.name = name;
+        return n;
+    };
+
+    // ---- lookahead 判据 ----
+
+    // true/false 在 lex 里是标识符，但它们是字面量不是标签。
+    const is_bool_word = fn (self: *Parser, t: lex.Tok) bool {
+        if (t.kind != lex.Kind.ident) { return false; }
+        let s = self.tok_text(t);
+        return std.str.eq(s, "true") || std.str.eq(s, "false");
+    };
+
+    // 这个 token 能不能作为 switch 模式的开头（模式列表逗号判据）。
+    const starts_pattern = fn (self: *Parser, t: lex.Tok) bool {
+        if (t.kind == lex.Kind.dot || t.kind == lex.Kind.int ||
+            t.kind == lex.Kind.char || t.kind == lex.Kind.minus ||
+            t.kind == lex.Kind.lparen) {
+            return true;
+        }
+        return self.is_bool_word(t);
+    };
+
+    // `{` 在 i 处是块（true）还是元组字面量（false）？纯词法判定。
+    const brace_is_block = fn (self: *Parser, i: usize) bool {
+        var depth: i32 = 0;
+        var j = i;
+        while (j < self.toks.len) {
+            let k = self.toks[j].kind;
+            if (k == lex.Kind.lbrace || k == lex.Kind.dot_brace) {
+                depth = depth + 1;
+            } else if (k == lex.Kind.rbrace) {
+                depth = depth - 1;
+                if (depth == 0) { return false; }
+            } else if (k == lex.Kind.semi) {
+                if (depth == 1) { return true; }
+            } else if (k == lex.Kind.kw_const || k == lex.Kind.kw_let ||
+                       k == lex.Kind.kw_var || k == lex.Kind.kw_fn ||
+                       k == lex.Kind.kw_pub || k == lex.Kind.kw_defer ||
+                       k == lex.Kind.kw_return || k == lex.Kind.kw_continue ||
+                       k == lex.Kind.kw_if || k == lex.Kind.kw_while ||
+                       k == lex.Kind.kw_for || k == lex.Kind.kw_switch) {
+                if (depth == 1) { return true; }
+            }
+            j = j + 1;
+        }
+        return false;
+    };
+
+    // `(T)` 之后能接 cast 的 token。
+    const can_follow_cast = fn (self: *Parser, k: lex.Kind) bool {
+        return k == lex.Kind.ident || k == lex.Kind.int ||
+               k == lex.Kind.float || k == lex.Kind.string ||
+               k == lex.Kind.char || k == lex.Kind.lbrace ||
+               k == lex.Kind.dot_brace || k == lex.Kind.amp ||
+               k == lex.Kind.lparen || k == lex.Kind.kw_null ||
+               k == lex.Kind.kw_undefined || k == lex.Kind.bang ||
+               k == lex.Kind.tilde || k == lex.Kind.kw_if ||
+               k == lex.Kind.kw_module;
+    };
+
+    // ---- 类型 ----
+
+    // 试探类型；不是类型就回退按表达式读（联合体标签等编译期常量）。
+    const parse_type_or_const = fn (self: *Parser) !*Node {
+        let save = self.i;
+        self.spec_depth = self.spec_depth + 1;
+        let r = self.parse_type();
+        self.spec_depth = self.spec_depth - 1;
+        if (r) tt {
+            let after = self.cur().kind;
+            var clean = false;
+            if (after == lex.Kind.comma) { clean = true; }
+            if (after == lex.Kind.rparen) { clean = true; }
+            if (after == lex.Kind.rbrace) { clean = true; }
+            if (after == lex.Kind.rbracket) { clean = true; }
+            if (after == lex.Kind.semi) { clean = true; }
+            if (after == lex.Kind.assign) { clean = true; }
+            if (after == lex.Kind.colon) { clean = true; }
+            if (after == lex.Kind.eof) { clean = true; }
+            if (clean) { return tt; }
+        }
+        self.i = save;
+        return self.parse_expr();
+    };
+
+    const parse_type_primary = fn (self: *Parser) !*Node {
+        let t = self.cur();
+
+        if (t.kind == lex.Kind.ident) {
+            self.advance();
+            var base = self.type_ident(self.tok_text(t));
+            var go = true;
+            while (go) {
+                while (self.at(lex.Kind.lparen)) {
+                    self.advance();
+                    let app = self.new(NK.call);
+                    app.a = base;
+                    if (!self.at(lex.Kind.rparen)) {
+                        var go2 = true;
+                        while (go2) {
+                            let arg = try self.parse_type_or_const();
+                            self.push_item(app, arg);
+                            if (!self.accept(lex.Kind.comma)) {
+                                go2 = false;
+                            }
+                        }
+                    }
+                    try self.expect(lex.Kind.rparen);
+                    base = app;
+                }
+                // 点路径：std.HashMap(i32).Entry 也要能写
+                if (!self.at(lex.Kind.dot)) {
+                    go = false;
+                } else {
+                    self.advance();
+                    let nm = try self.take_ident();
+                    let f = self.new(NK.field);
+                    f.a = base;
+                    f.name = nm;
+                    base = f;
+                }
+            }
+            return base;
+        }
+
+        if (t.kind == lex.Kind.kw_error) {
+            self.advance();
+            return self.type_ident("error");
+        }
+
+        if (t.kind == lex.Kind.kw_type) {
+            self.advance();
+            return self.type_ident("type");
+        }
+
+        if (t.kind == lex.Kind.lbrace) {
+            // 元组类型 {T1, T2}，元素也可以是编译期常量（联合体标签）
+            self.advance();
+            let n = self.new(NK.tupleT);
+            if (!self.at(lex.Kind.rbrace)) {
+                var go = true;
+                while (go) {
+                    let el = try self.parse_type_or_const();
+                    self.push_item(n, el);
+                    if (!self.accept(lex.Kind.comma)) {
+                        go = false;
+                    } else {
+                        if (self.at(lex.Kind.rbrace)) { go = false; }
+                    }
+                }
+            }
+            try self.expect(lex.Kind.rbrace);
+            return n;
+        }
+
+        if (t.kind == lex.Kind.kw_struct) {
+            self.advance();
+            let n = self.new(NK.struct_);
+            if (self.accept(lex.Kind.lparen)) {
+                let mode = try self.take_ident();
+                if (std.str.eq(mode, "packed")) { n.flag = true; }
+                try self.expect(lex.Kind.rparen);
+            }
+            // 体：字段、方法、声明
+            try self.expect(lex.Kind.lbrace);
+            while (!self.at(lex.Kind.rbrace) && !self.at(lex.Kind.eof)) {
+                // 方法只有一种写法：`const name = fn (…) R { … };`
+                if (self.at(lex.Kind.kw_const) && self.peek_tok(1).kind == lex.Kind.ident &&
+                    self.peek_tok(2).kind == lex.Kind.assign && self.peek_tok(3).kind == lex.Kind.kw_fn) {
+                    self.advance();
+                    let mname = try self.take_ident();
+                    self.advance();
+                    let f = try self.parse_fn(true);
+                    f.name = mname;
+                    try self.expect(lex.Kind.semi);
+                    self.push_item(n, f);
+                } else {
+                    if (self.at(lex.Kind.kw_const) || self.at(lex.Kind.kw_let) || self.at(lex.Kind.kw_var)) {
+                        let d = try self.parse_decl();
+                        self.push_item(n, d);
+                    } else {
+                        if (self.at(lex.Kind.kw_fn)) {
+                            let f = try self.parse_fn(false);
+                            self.push_item(n, f);
+                        } else {
+                            let fname = try self.take_ident();
+                            try self.expect(lex.Kind.colon);
+                            let ty = try self.parse_type();
+                            let f = self.new(NK.param);
+                            f.name = fname;
+                            f.a = ty;
+                            if (self.accept(lex.Kind.assign)) {
+                                f.b = try self.parse_expr();
+                            }
+                            self.accept(lex.Kind.comma);
+                            self.push_item(n, f);
+                        }
+                    }
+                }
+            }
+            try self.expect(lex.Kind.rbrace);
+            return n;
+        }
+
+        if (t.kind == lex.Kind.kw_union) {
+            self.advance();
+            let n = self.new(NK.union_);
+            // union(enum) / union(enum(u8))：变体名即隐式枚举。op2=1 糖标记。
+            if (self.accept(lex.Kind.lparen)) {
+                try self.expect(lex.Kind.kw_enum);
+                if (self.accept(lex.Kind.lparen)) {
+                    n.b = try self.parse_type();
+                    try self.expect(lex.Kind.rparen);
+                }
+                try self.expect(lex.Kind.rparen);
+                n.op2 = 1;
+            }
+            try self.expect(lex.Kind.lbrace);
+            while (!self.at(lex.Kind.rbrace) && !self.at(lex.Kind.eof)) {
+                if (self.at(lex.Kind.kw_const) && self.peek_tok(1).kind == lex.Kind.ident &&
+                    self.peek_tok(2).kind == lex.Kind.assign && self.peek_tok(3).kind == lex.Kind.kw_fn) {
+                    self.advance();
+                    let mname = try self.take_ident();
+                    self.advance();
+                    let f = try self.parse_fn(true);
+                    f.name = mname;
+                    try self.expect(lex.Kind.semi);
+                    self.push_item(n, f);
+                } else {
+                    if (self.at(lex.Kind.kw_const) || self.at(lex.Kind.kw_let) || self.at(lex.Kind.kw_var)) {
+                        let d = try self.parse_decl();
+                        self.push_item(n, d);
+                    } else {
+                        if (self.at(lex.Kind.kw_fn)) {
+                            let f = try self.parse_fn(false);
+                            self.push_item(n, f);
+                        } else {
+                            let mname = try self.take_ident();
+                            try self.expect(lex.Kind.colon);
+                            let ty = try self.parse_type();
+                            let m = self.new(NK.pair);
+                            m.name = mname;
+                            m.a = ty;
+                            self.accept(lex.Kind.comma);
+                            self.push_item(n, m);
+                        }
+                    }
+                }
+            }
+            try self.expect(lex.Kind.rbrace);
+            return n;
+        }
+
+        if (t.kind == lex.Kind.kw_enum) {
+            self.advance();
+            let n = self.new(NK.enum_);
+            if (self.accept(lex.Kind.lparen)) {
+                n.a = try self.parse_type();
+                try self.expect(lex.Kind.rparen);
+            }
+            try self.expect(lex.Kind.lbrace);
+            while (!self.at(lex.Kind.rbrace) && !self.at(lex.Kind.eof)) {
+                if (self.at(lex.Kind.kw_const) && self.peek_tok(1).kind == lex.Kind.ident &&
+                    self.peek_tok(2).kind == lex.Kind.assign && self.peek_tok(3).kind == lex.Kind.kw_fn) {
+                    self.advance();
+                    let mname = try self.take_ident();
+                    self.advance();
+                    let f = try self.parse_fn(true);
+                    f.name = mname;
+                    try self.expect(lex.Kind.semi);
+                    self.push_item(n, f);
+                } else {
+                    if (self.at(lex.Kind.kw_const) || self.at(lex.Kind.kw_let) || self.at(lex.Kind.kw_var)) {
+                        let d = try self.parse_decl();
+                        self.push_item(n, d);
+                    } else {
+                        if (self.at(lex.Kind.kw_fn)) {
+                            let f = try self.parse_fn(false);
+                            self.push_item(n, f);
+                        } else {
+                            let m = self.new(NK.pair);
+                            m.name = try self.take_ident();
+                            if (self.accept(lex.Kind.assign)) {
+                                m.a = try self.parse_expr();
+                            }
+                            self.accept(lex.Kind.comma);
+                            self.push_item(n, m);
+                        }
+                    }
+                }
+            }
+            try self.expect(lex.Kind.rbrace);
+            return n;
+        }
+
+        if (t.kind == lex.Kind.lparen) {
+            self.advance();
+            let n = try self.parse_type();
+            try self.expect(lex.Kind.rparen);
+            return n;
+        }
+
+        // 非法类型开头：报错（试探区由试探点回溯，顶层直接失败）
+        return (error)Fail.f;
+    };
+
+    const parse_type = fn (self: *Parser) !*Node {
+        let t = self.cur();
+
+        if (t.kind == lex.Kind.star) {
+            self.advance();
+            let n = self.new(NK.ptr);
+            if (self.accept(lex.Kind.kw_const)) { n.flag = true; }
+            // `*[N]T` 指向数组；`*[]T` 指向切片。`[` 后紧跟 `]` 才是空。
+            if (self.at(lex.Kind.lbracket) && self.peek_tok(1).kind != lex.Kind.rbracket) {
+                self.advance();
+                n.b = try self.parse_expr();
+                try self.expect(lex.Kind.rbracket);
+            }
+            n.a = try self.parse_type();
+            return n;
+        }
+
+        if (t.kind == lex.Kind.lbracket) {
+            self.advance();
+            try self.expect(lex.Kind.rbracket);
+            let n = self.new(NK.sliceT);
+            if (self.accept(lex.Kind.kw_const)) { n.flag = true; }
+            n.a = try self.parse_type();
+            return n;
+        }
+
+        if (t.kind == lex.Kind.question) {
+            self.advance();
+            let n = self.new(NK.opt);
+            n.a = try self.parse_type();
+            return n;
+        }
+
+        if (t.kind == lex.Kind.bang) {
+            self.advance();
+            let n = self.new(NK.err);
+            n.a = try self.parse_type();
+            return n;
+        }
+
+        if (t.kind == lex.Kind.kw_fn) {
+            self.advance();
+            let n = self.new(NK.fn_);
+            n.flag = true;   // 先按 fn 类型读；跟了函数体再翻回来
+            try self.expect(lex.Kind.lparen);
+            if (!self.at(lex.Kind.rparen)) {
+                var go = true;
+                while (go) {
+                    let pm = self.new(NK.param);
+                    if (self.at(lex.Kind.ident) && self.peek_tok(1).kind == lex.Kind.colon) {
+                        pm.name = try self.take_ident();
+                        try self.expect(lex.Kind.colon);
+                    }
+                    pm.a = try self.parse_type();
+                    self.push_item(n, pm);
+                    if (!self.accept(lex.Kind.comma)) {
+                        go = false;
+                    }
+                }
+            }
+            try self.expect(lex.Kind.rparen);
+            if (!self.at(lex.Kind.lbrace) && !self.at(lex.Kind.semi) &&
+                !self.at(lex.Kind.comma) && !self.at(lex.Kind.rparen) &&
+                !self.at(lex.Kind.rbracket) && !self.at(lex.Kind.rbrace) &&
+                !self.at(lex.Kind.assign)) {
+                n.a = try self.parse_type();
+            }
+            if (self.at(lex.Kind.lbrace)) {
+                n.flag = false;
+                n.b = try self.parse_block();
+            }
+            return n;
+        }
+
+        return self.parse_type_primary();
+    };
+
+    // ---- 表达式 ----
+
+    // 优先级：数字越大绑得越紧。orelse 只比赋值高一层。
+    const bin_prec = fn (self: *Parser, k: lex.Kind) u32 {
+        if (k == lex.Kind.kw_orelse) { return 1; }
+        if (k == lex.Kind.oror) { return 2; }
+        if (k == lex.Kind.andand) { return 3; }
+        if (k == lex.Kind.eq || k == lex.Kind.ne) { return 4; }
+        if (k == lex.Kind.lt || k == lex.Kind.le || k == lex.Kind.gt || k == lex.Kind.ge) { return 5; }
+        if (k == lex.Kind.pipe) { return 6; }
+        if (k == lex.Kind.caret) { return 7; }
+        if (k == lex.Kind.amp) { return 8; }
+        if (k == lex.Kind.shl || k == lex.Kind.shr) { return 9; }
+        if (k == lex.Kind.plus || k == lex.Kind.minus) { return 10; }
+        if (k == lex.Kind.star || k == lex.Kind.slash || k == lex.Kind.percent) { return 11; }
+        return 0;
+    };
+
+    const is_assign_op = fn (self: *Parser, k: lex.Kind) bool {
+        return k == lex.Kind.assign || k == lex.Kind.pluseq || k == lex.Kind.minuseq ||
+               k == lex.Kind.stareq || k == lex.Kind.slasheq || k == lex.Kind.perceq ||
+               k == lex.Kind.ampeq || k == lex.Kind.pipeeq || k == lex.Kind.careteq ||
+               k == lex.Kind.shleq || k == lex.Kind.shreq;
+    };
+
+    const parse_binary_rest = fn (self: *Parser, lhs0: *Node, min_prec: u32) !*Node {
+        var lhs = lhs0;
+        var go = true;
+        while (go) {
+            let k = self.cur().kind;
+            let prec = self.bin_prec(k);
+            if (prec == 0 || prec < min_prec) {
+                go = false;
+            } else {
+                self.advance();
+                let ur = try self.parse_unary();
+                let rhs = try self.parse_binary_rest(ur, prec + 1);
+                // orelse 不是算术：自带节点（后端要短路，不能当普通二元运算发）
+                var nk = NK.bin;
+                if (k == lex.Kind.kw_orelse) { nk = NK.or_else; }
+                let n = self.new(nk);
+                n.op = k;
+                n.a = lhs;
+                n.b = rhs;
+                lhs = n;
+            }
+        }
+        return lhs;
+    };
+
+    const parse_binary = fn (self: *Parser, min_prec: u32) !*Node {
+        let u = try self.parse_unary();
+        return self.parse_binary_rest(u, min_prec);
+    };
+
+    const parse_expr = fn (self: *Parser) !*Node {
+        let lhs = try self.parse_binary(1);
+        if (self.is_assign_op(self.cur().kind)) {
+            let k = self.cur().kind;
+            self.advance();
+            let rhs = try self.parse_expr();   // 右结合
+            let n = self.new(NK.bin);
+            n.op = k;
+            n.a = lhs;
+            n.b = rhs;
+            return n;
+        }
+        return lhs;
+    };
+
+    // 只有这些形状后面才可能是调用（控制流表达式不可调用）。
+    const callable_shape = fn (self: *Parser, n: *Node) bool {
+        return n.kind == NK.id || n.kind == NK.t_ident || n.kind == NK.field ||
+               n.kind == NK.index || n.kind == NK.call || n.kind == NK.cast ||
+               n.kind == NK.builtin || n.kind == NK.module_;
+    };
+
+    const parse_postfix = fn (self: *Parser, base0: *Node) !*Node {
+        var base = base0;
+        var go = true;
+        while (go) {
+            let t = self.cur();
+            if (t.kind == lex.Kind.dot) {
+                // `.?` 解包
+                if (self.peek_tok(1).kind == lex.Kind.question) {
+                    self.advance();
+                    self.advance();
+                    let u = self.new(NK.unwrap);
+                    u.a = base;
+                    base = u;
+                } else {
+                    self.advance();
+                    if (self.at(lex.Kind.ident)) {
+                        let id = self.advance();
+                        let n = self.new(NK.field);
+                        n.a = base;
+                        n.name = self.tok_text(id);
+                        base = n;
+                    } else {
+                        if (self.at(lex.Kind.int)) {
+                            let ix = self.advance();
+                            let n = self.new(NK.field);
+                            n.a = base;
+                            n.ival = ix.int_val;
+                            base = n;
+                        } else {
+                            return (error)Fail.f;
+                        }
+                    }
+                }
+            } else {
+                if (t.kind == lex.Kind.lbracket) {
+                    self.advance();
+                    let first = try self.parse_expr();
+                    if (self.accept(lex.Kind.dotdot)) {
+                        let n = self.new(NK.slice);
+                        n.a = base;
+                        n.b = first;
+                        if (!self.at(lex.Kind.rbracket)) {
+                            n.c = try self.parse_expr();
+                        }
+                        try self.expect(lex.Kind.rbracket);
+                        base = n;
+                    } else {
+                        let n = self.new(NK.index);
+                        n.a = base;
+                        n.b = first;
+                        try self.expect(lex.Kind.rbracket);
+                        base = n;
+                    }
+                } else {
+                    if (t.kind == lex.Kind.lparen && self.callable_shape(base)) {
+                        self.advance();
+                        let n = self.new(NK.call);
+                        n.a = base;
+                        if (!self.at(lex.Kind.rparen)) {
+                            var go2 = true;
+                            while (go2) {
+                                let arg = try self.parse_expr();
+                                self.push_item(n, arg);
+                                if (!self.accept(lex.Kind.comma)) {
+                                    go2 = false;
+                                }
+                            }
+                        }
+                        try self.expect(lex.Kind.rparen);
+                        base = n;
+                    } else {
+                        // 类型化字面量 Type{ .field = e }：体以 `.name =` 开头才认
+                        var handled = false;
+                        if (t.kind == lex.Kind.lbrace &&
+                            (base.kind == NK.id || base.kind == NK.t_ident ||
+                             base.kind == NK.field || base.kind == NK.struct_ ||
+                             base.kind == NK.call)) {
+                            var is_lit = false;
+                            if (self.peek_tok(1).kind == lex.Kind.rbrace) {
+                                is_lit = true;
+                            } else {
+                                if (self.peek_tok(1).kind == lex.Kind.dot &&
+                                    self.peek_tok(2).kind == lex.Kind.ident &&
+                                    self.peek_tok(3).kind == lex.Kind.assign) {
+                                    is_lit = true;
+                                }
+                            }
+                            if (is_lit) {
+                                handled = true;
+                                self.advance();
+                                let n = self.new(NK.struct_lit);
+                                n.a = base;
+                                var go2 = true;
+                                while (go2 && !self.at(lex.Kind.rbrace) && !self.at(lex.Kind.eof)) {
+                                    let pair = self.new(NK.pair);
+                                    try self.expect(lex.Kind.dot);
+                                    pair.name = try self.take_ident();
+                                    try self.expect(lex.Kind.assign);
+                                    pair.a = try self.parse_expr();
+                                    self.push_item(n, pair);
+                                    if (!self.accept(lex.Kind.comma)) {
+                                        go2 = false;
+                                    }
+                                }
+                                try self.expect(lex.Kind.rbrace);
+                                base = n;
+                            }
+                        }
+                        if (!handled) {
+                            go = false;
+                        }
+                    }
+                }
+            }
+        }
+        return base;
+    };
+
+    // `{ … }` 表达式位置：元组字面量或块
+    const parse_brace_expr = fn (self: *Parser) !*Node {
+        let t = self.cur();
+        if (self.brace_is_block(self.i)) { return self.parse_block(); }
+
+        self.advance();
+        let n = self.new(NK.tuple);
+        if (!self.at(lex.Kind.rbrace)) {
+            var go = true;
+            while (go) {
+                let el = try self.parse_expr();
+                self.push_item(n, el);
+                if (!self.accept(lex.Kind.comma)) {
+                    go = false;
+                } else {
+                    if (self.at(lex.Kind.rbrace)) { go = false; }
+                }
+            }
+        }
+        try self.expect(lex.Kind.rbrace);
+        return n;
+    };
+
+    // `.{ … }` —— 永远是字面量
+    const parse_dot_brace = fn (self: *Parser) !*Node {
+        let t = self.advance();
+        var is_struct = false;
+        if (self.at(lex.Kind.dot) && self.peek_tok(1).kind == lex.Kind.ident &&
+            self.peek_tok(2).kind == lex.Kind.assign) {
+            is_struct = true;
+        }
+
+        if (is_struct) {
+            let n = self.new(NK.anon_struct);
+            var go = true;
+            while (go && !self.at(lex.Kind.rbrace) && !self.at(lex.Kind.eof)) {
+                let pair = self.new(NK.pair);
+                try self.expect(lex.Kind.dot);
+                pair.name = try self.take_ident();
+                try self.expect(lex.Kind.assign);
+                pair.a = try self.parse_expr();
+                self.push_item(n, pair);
+                if (!self.accept(lex.Kind.comma)) {
+                    go = false;
+                }
+            }
+            try self.expect(lex.Kind.rbrace);
+            return n;
+        }
+
+        let n = self.new(NK.tuple);
+        if (!self.at(lex.Kind.rbrace)) {
+            var go = true;
+            while (go) {
+                let el = try self.parse_expr();
+                self.push_item(n, el);
+                if (!self.accept(lex.Kind.comma)) {
+                    go = false;
+                } else {
+                    if (self.at(lex.Kind.rbrace)) { go = false; }
+                }
+            }
+        }
+        try self.expect(lex.Kind.rbrace);
+        return n;
+    };
+
+    const parse_unary = fn (self: *Parser) !*Node {
+        let t = self.cur();
+        if (t.kind == lex.Kind.amp) {
+            self.advance();
+            if (self.at(lex.Kind.dot_brace)) {
+                // &.{ … } —— 数组字面量
+                let lit = try self.parse_dot_brace();
+                let n = self.new(NK.array_lit);
+                n.items = lit.items;
+                return n;
+            }
+            let n = self.new(NK.un);
+            n.op = lex.Kind.amp;
+            n.a = try self.parse_unary();
+            return n;
+        }
+        if (t.kind == lex.Kind.minus || t.kind == lex.Kind.plus ||
+            t.kind == lex.Kind.bang || t.kind == lex.Kind.tilde) {
+            self.advance();
+            let n = self.new(NK.un);
+            n.op = t.kind;
+            n.a = try self.parse_unary();
+            return n;
+        }
+        if (t.kind == lex.Kind.kw_try) {
+            // `try e`：出错带着同一个码返回
+            self.advance();
+            let n = self.new(NK.try_);
+            n.a = try self.parse_unary();
+            return n;
+        }
+        let prim = try self.parse_primary();
+        return self.parse_postfix(prim);
+    };
+
+    const parse_primary = fn (self: *Parser) !*Node {
+        let t = self.cur();
+
+        if (t.kind == lex.Kind.int) {
+            self.advance();
+            let n = self.new(NK.int);
+            n.ival = t.int_val;
+            n.flag = t.big;
+            n.str = self.tok_text(t);
+            return n;
+        }
+        if (t.kind == lex.Kind.float) {
+            self.advance();
+            let n = self.new(NK.float);
+            n.str = self.tok_text(t);
+            return n;
+        }
+        if (t.kind == lex.Kind.string) {
+            self.advance();
+            let n = self.new(NK.str);
+            n.str = self.strbuf[t.str_off..t.str_off + t.text_len];
+            return n;
+        }
+        if (t.kind == lex.Kind.char) {
+            self.advance();
+            let n = self.new(NK.char);
+            n.ival = t.int_val;
+            n.str = self.strbuf[t.str_off..t.str_off + t.text_len];
+            return n;
+        }
+        if (t.kind == lex.Kind.kw_null) {
+            self.advance();
+            return self.new(NK.null_);
+        }
+        if (t.kind == lex.Kind.kw_undefined) {
+            self.advance();
+            return self.new(NK.undef);
+        }
+
+        if (t.kind == lex.Kind.ident) {
+            // 表达式位置的标签：body: { … }（true/false 是字面量不是标签）
+            if (self.peek_tok(1).kind == lex.Kind.colon && !self.is_bool_word(t)) {
+                let after = self.peek_tok(2).kind;
+                if (after == lex.Kind.lbrace || after == lex.Kind.kw_for ||
+                    after == lex.Kind.kw_while || after == lex.Kind.kw_switch ||
+                    after == lex.Kind.kw_if) {
+                    let label = self.advance();
+                    self.advance();
+                    return self.parse_construct(self.tok_text(label));
+                }
+            }
+            self.advance();
+            let s = self.tok_text(t);
+            if (std.str.eq(s, "true")) {
+                let b = self.new(NK.bool_);
+                b.ival = 1;
+                return b;
+            }
+            if (std.str.eq(s, "false")) {
+                return self.new(NK.bool_);
+            }
+            let n = self.new(NK.id);
+            n.name = s;
+            return n;
+        }
+
+        if (t.kind == lex.Kind.lparen) {
+            // cast (T)e 还是括号表达式 (e)？试探。
+            let save = self.i;
+            self.spec_depth = self.spec_depth + 1;
+            self.advance();   // '('
+            let r = self.parse_type();
+            if (r) ty {
+                if (self.at(lex.Kind.rparen) && self.can_follow_cast(self.peek_tok(1).kind)) {
+                    self.advance();
+                    self.spec_depth = self.spec_depth - 1;
+                    let n = self.new(NK.cast);
+                    n.a = ty;
+                    n.b = try self.parse_unary();
+                    return n;
+                }
+            }
+            self.spec_depth = self.spec_depth - 1;
+            self.i = save;
+            self.advance();
+            let e = try self.parse_expr();
+            try self.expect(lex.Kind.rparen);
+            return e;
+        }
+
+        if (t.kind == lex.Kind.lbrace) { return self.parse_brace_expr(); }
+        if (t.kind == lex.Kind.dot_brace) { return self.parse_dot_brace(); }
+
+        if (t.kind == lex.Kind.kw_if || t.kind == lex.Kind.kw_while ||
+            t.kind == lex.Kind.kw_for || t.kind == lex.Kind.kw_switch) {
+            return self.parse_construct(null);
+        }
+
+        if (t.kind == lex.Kind.kw_inline) {
+            if (self.peek_tok(1).kind != lex.Kind.kw_for) {
+                return (error)Fail.f;
+            }
+            self.advance();
+            let n = try self.parse_for(null, true);
+            n.flag = true;
+            return n;
+        }
+
+        // 类型是值：struct/union/enum/?/[]/*/error/type 都能在表达式位置出现
+        if (t.kind == lex.Kind.kw_struct || t.kind == lex.Kind.kw_union ||
+            t.kind == lex.Kind.kw_enum || t.kind == lex.Kind.question ||
+            t.kind == lex.Kind.lbracket || t.kind == lex.Kind.star ||
+            t.kind == lex.Kind.kw_error || t.kind == lex.Kind.kw_type) {
+            return self.parse_type();
+        }
+
+        if (t.kind == lex.Kind.kw_fn) {
+            return self.parse_fn(false);
+        }
+
+        if (t.kind == lex.Kind.kw_module) {
+            self.advance();
+            try self.expect(lex.Kind.lparen);
+            let n = self.new(NK.module_);
+            if (self.at(lex.Kind.string)) {
+                let s = self.advance();
+                n.str = self.strbuf[s.str_off..s.str_off + s.text_len];
+            } else {
+                return (error)Fail.f;
+            }
+            try self.expect(lex.Kind.rparen);
+            return n;
+        }
+
+        if (t.kind == lex.Kind.at) {
+            self.advance();
+            let n = self.new(NK.builtin);
+            n.name = try self.take_ident();
+            // @typeOf/@field/@memcpy/@memmove/@memset 收表达式；其余收类型
+            let nm = n.name orelse "";
+            var value_first = false;
+            if (std.str.eq(nm, "typeOf")) { value_first = true; }
+            if (std.str.eq(nm, "field")) { value_first = true; }
+            if (std.str.eq(nm, "memcpy")) { value_first = true; }
+            if (std.str.eq(nm, "memmove")) { value_first = true; }
+            if (std.str.eq(nm, "memset")) { value_first = true; }
+            try self.expect(lex.Kind.lparen);
+            if (!self.at(lex.Kind.rparen)) {
+                var ai: usize = 0;
+                var go = true;
+                while (go) {
+                    let as_value = value_first || ai > 0;
+                    if (as_value) {
+                        let arg = try self.parse_expr();
+                        self.push_item(n, arg);
+                    } else {
+                        let arg = try self.parse_type_or_const();
+                        self.push_item(n, arg);
+                    }
+                    ai = ai + 1;
+                    if (!self.accept(lex.Kind.comma)) {
+                        go = false;
+                    }
+                }
+            }
+            try self.expect(lex.Kind.rparen);
+            return n;
+        }
+
+        return (error)Fail.f;
+    };
+
+    // ---- 语句 ----
+
+    const parse_decl = fn (self: *Parser) !*Node {
+        let t = self.advance();
+        let n = self.new(NK.decl);
+        if (t.kind == lex.Kind.kw_var) {
+            n.op2 = 2;
+        } else {
+            if (t.kind == lex.Kind.kw_let) { n.op2 = 1; }
+        }
+
+        // 解构：const {a, b} = tup;  /  let .{a, b} = t;
+        if (self.at(lex.Kind.lbrace) || self.at(lex.Kind.dot_brace)) {
+            self.advance();
+            let pat = self.new(NK.tuple);
+            if (!self.at(lex.Kind.rbrace)) {
+                var go = true;
+                while (go) {
+                    let id = self.new(NK.id);
+                    id.name = try self.take_ident();
+                    self.push_item(pat, id);
+                    if (!self.accept(lex.Kind.comma)) {
+                        go = false;
+                    } else {
+                        if (self.at(lex.Kind.rbrace)) { go = false; }
+                    }
+                }
+            }
+            try self.expect(lex.Kind.rbrace);
+            n.c = pat;
+            try self.expect(lex.Kind.assign);
+            n.b = try self.parse_expr();
+            try self.expect(lex.Kind.semi);
+            return n;
+        }
+
+        n.name = try self.take_ident();
+        if (self.accept(lex.Kind.colon)) {
+            n.a = try self.parse_type();
+        }
+        if (self.accept(lex.Kind.assign)) {
+            n.b = try self.parse_expr();
+        }
+        try self.expect(lex.Kind.semi);
+        return n;
+    };
+
+    const parse_fn = fn (self: *Parser, allow_name: bool) !*Node {
+        let t = self.advance();
+        let n = self.new(NK.fn_);
+        if (self.at(lex.Kind.ident) && self.peek_tok(1).kind == lex.Kind.lparen) {
+            // `fn name(…)` 只留给 extern；有体的定义一律是值。
+            // （非 extern 命中这里在 C 版是报错——好文件不会到。）
+            if (!allow_name) { return (error)Fail.f; }
+            n.name = try self.take_ident();
+        }
+        try self.expect(lex.Kind.lparen);
+        if (!self.at(lex.Kind.rparen)) {
+            var go = true;
+            while (go) {
+                let pm = self.new(NK.param);
+                if (self.at(lex.Kind.kw_var)) { self.advance(); pm.flag = true; }
+                if (self.at(lex.Kind.ident) && self.peek_tok(1).kind == lex.Kind.colon) {
+                    pm.name = try self.take_ident();
+                    try self.expect(lex.Kind.colon);
+                }
+                pm.a = try self.parse_type();
+                self.push_item(n, pm);
+                if (!self.accept(lex.Kind.comma)) {
+                    go = false;
+                }
+            }
+        }
+        try self.expect(lex.Kind.rparen);
+        if (!self.at(lex.Kind.lbrace) && !self.at(lex.Kind.semi)) {
+            n.a = try self.parse_type();
+        }
+        if (self.at(lex.Kind.lbrace)) {
+            n.b = try self.parse_block();
+        } else {
+            n.flag = true;   // 没体 → fn 类型值
+        }
+        return n;
+    };
+
+    // 语句关键字：捕获名后面一定是漏了块（报错路径，好文件不触发）。
+    const starts_stmt_kw = fn (self: *Parser, k: lex.Kind) bool {
+        return k == lex.Kind.kw_if || k == lex.Kind.kw_while || k == lex.Kind.kw_for ||
+               k == lex.Kind.kw_switch || k == lex.Kind.kw_return || k == lex.Kind.kw_continue ||
+               k == lex.Kind.kw_defer || k == lex.Kind.kw_const || k == lex.Kind.kw_let ||
+               k == lex.Kind.kw_var;
+    };
+
+    // 单条语句就能当 if 臂的关键字（M19 语法糖）。
+    const arm_stmt_only = fn (self: *Parser, k: lex.Kind) bool {
+        return k == lex.Kind.kw_return || k == lex.Kind.kw_continue || k == lex.Kind.kw_defer;
+    };
+
+    // 能开始一个值、且不是二元运算符的 token。
+    const starts_value = fn (self: *Parser, k: lex.Kind) bool {
+        return k == lex.Kind.int || k == lex.Kind.float || k == lex.Kind.char ||
+               k == lex.Kind.string || k == lex.Kind.ident || k == lex.Kind.kw_null ||
+               k == lex.Kind.kw_undefined;
+    };
+
+    // 只算真正的二元运算符（`.`/`(`/`[` 是后缀，不算）。
+    const starts_binop = fn (self: *Parser, k: lex.Kind) bool {
+        return k == lex.Kind.star || k == lex.Kind.slash || k == lex.Kind.percent ||
+               k == lex.Kind.plus || k == lex.Kind.minus ||
+               k == lex.Kind.lt || k == lex.Kind.le || k == lex.Kind.gt ||
+               k == lex.Kind.ge || k == lex.Kind.eq || k == lex.Kind.ne ||
+               k == lex.Kind.andand || k == lex.Kind.oror ||
+               k == lex.Kind.pipe || k == lex.Kind.caret || k == lex.Kind.amp ||
+               k == lex.Kind.shl || k == lex.Kind.shr;
+    };
+
+    // 一个 if 臂。捕获名放 self.cap 出参。
+    const parse_if_arm = fn (self: *Parser) !*Node {
+        if (self.at(lex.Kind.ident) && self.peek_tok(1).kind == lex.Kind.colon) {
+            let lb = self.advance();
+            self.advance();
+            let b = try self.parse_block();
+            b.label = self.tok_text(lb);
+            return b;
+        }
+        if (self.at(lex.Kind.ident) && self.peek_tok(1).kind == lex.Kind.lbrace) {
+            self.cap = try self.take_ident();
+            return self.parse_block();
+        }
+        // 捕获 + 标签块：`if (o) v lbl: { … }`
+        if (self.at(lex.Kind.ident) && !self.is_bool_word(self.cur()) &&
+            self.peek_tok(1).kind == lex.Kind.ident && self.peek_tok(2).kind == lex.Kind.colon) {
+            self.cap = try self.take_ident();
+            let lb = self.advance();
+            self.advance();
+            let b = try self.parse_block();
+            b.label = self.tok_text(lb);
+            return b;
+        }
+        if (self.at(lex.Kind.lbrace)) { return self.parse_block(); }
+
+        // 单条语句臂（M19 语法糖）：包一层单语句块
+        if (self.arm_stmt_only(self.cur().kind)) {
+            let blk = self.new(NK.block);
+            let st = try self.parse_stmt();
+            self.push_item(blk, st);
+            return blk;
+        }
+
+        // 带捕获的单条语句：`if (o) v return v;`
+        if (self.at(lex.Kind.ident) && self.arm_stmt_only(self.peek_tok(1).kind)) {
+            self.cap = try self.take_ident();
+            let blk = self.new(NK.block);
+            let st = try self.parse_stmt();
+            self.push_item(blk, st);
+            return blk;
+        }
+
+        if (self.at(lex.Kind.ident) && self.starts_stmt_kw(self.peek_tok(1).kind)) {
+            return (error)Fail.f;
+        }
+        // 捕获名 + 单个返回值（语法糖）：`if (o) v v else 0`
+        if (self.at(lex.Kind.ident) && self.starts_value(self.peek_tok(1).kind)) {
+            self.cap = try self.take_ident();
+            return self.parse_expr();
+        }
+        // `if (m) v * 2 else 0`：v 既是捕获名又是表达式的一部分
+        if (self.at(lex.Kind.ident) && self.starts_binop(self.peek_tok(1).kind)) {
+            let id = self.advance();
+            self.cap = self.tok_text(id);
+            let lhs = self.new(NK.id);
+            lhs.name = self.cap;
+            return self.parse_binary_rest(lhs, 1);
+        }
+        return self.parse_expr();
+    };
+
+    const parse_if = fn (self: *Parser, label: ?[]const u8) !*Node {
+        // cap 是共享出参：嵌套 if（在臂块内）会重写它，
+        // 先存下外层未读的值，臂读回后恢复，模拟 C 的栈上局部出参。
+        let saved_cap = self.cap;
+        let t = self.advance();
+        let n = self.new(NK.if_);
+        n.label = label;
+        try self.expect(lex.Kind.lparen);
+        n.a = try self.parse_expr();
+        try self.expect(lex.Kind.rparen);
+
+        self.cap = null;
+        n.b = try self.parse_if_arm();
+        if (self.cap) c { n.name = c; }
+        self.cap = saved_cap;
+
+        // 单表达式语句臂（语法糖）：`; else` 连着时把臂包进块
+        var stmt_arm = false;
+        if (self.at(lex.Kind.semi) && self.peek_tok(1).kind == lex.Kind.kw_else) {
+            self.advance();
+            if (n.b) bb {
+                if (bb.kind != NK.block) {
+                    let blk = self.new(NK.block);
+                    self.push_item(blk, bb);
+                    n.b = blk;
+                }
+            }
+            stmt_arm = true;
+        }
+
+        if (self.accept(lex.Kind.kw_else)) {
+            if (self.at(lex.Kind.kw_if)) {
+                n.c = try self.parse_if(null);
+            } else {
+                self.cap = null;
+                n.c = try self.parse_if_arm();
+                if (self.cap) c2 {
+                    let id = self.new(NK.id);
+                    id.name = c2;
+                    n.d = id;   // 失败分支捕获
+                }
+                self.cap = saved_cap;
+                if (stmt_arm) {
+                    if (n.c) cc {
+                        if (cc.kind != NK.block) {
+                            let blk = self.new(NK.block);
+                            self.push_item(blk, cc);
+                            n.c = blk;
+                        }
+                    }
+                }
+            }
+        }
+        return n;
+    };
+
+    const parse_while = fn (self: *Parser, label: ?[]const u8) !*Node {
+        let t = self.advance();
+        let n = self.new(NK.while_);
+        n.label = label;
+        try self.expect(lex.Kind.lparen);
+        n.a = try self.parse_expr();
+        try self.expect(lex.Kind.rparen);
+        // 标签写在关键字前面，这里不再收（旧写法是报错路径）。
+        if (self.at(lex.Kind.ident) && self.peek_tok(1).kind == lex.Kind.lbrace) {
+            n.name = try self.take_ident();
+        }
+        if (self.at(lex.Kind.ident) && !self.is_bool_word(self.cur()) &&
+            self.peek_tok(1).kind == lex.Kind.colon) {
+            return (error)Fail.f;
+        }
+        n.b = try self.parse_block();
+        if (self.accept(lex.Kind.kw_else)) {
+            if (self.at(lex.Kind.lbrace)) {
+                n.c = try self.parse_block();
+            } else {
+                n.c = try self.parse_expr();
+            }
+        }
+        return n;
+    };
+
+    const parse_for = fn (self: *Parser, label: ?[]const u8, allow_nobind: bool) !*Node {
+        let t = self.advance();
+        let n = self.new(NK.for_);
+        n.label = label;
+        try self.expect(lex.Kind.lparen);
+        // 序列
+        var seqs = std.ArrayList(*Node).init(self.al);
+        var go = true;
+        while (go) {
+            var e = try self.parse_expr();
+            if (self.accept(lex.Kind.dotdot)) {
+                let r = self.new(NK.range);
+                r.a = e;
+                if (!self.at(lex.Kind.comma) && !self.at(lex.Kind.rparen)) {
+                    r.b = try self.parse_expr();
+                }
+                e = r;
+            }
+            var ok = seqs.push(e);
+            if (!ok) {
+                std.println("bootstrap: out of memory");
+                std.process.exit(1);
+            }
+            if (!self.accept(lex.Kind.comma)) {
+                go = false;
+            }
+        }
+        try self.expect(lex.Kind.rparen);
+        // 绑定（inline for 允许一个都不写）
+        var binds = std.ArrayList(*Node).init(self.al);
+        var go2 = true;
+        while (go2) {
+            if (allow_nobind && !self.at(lex.Kind.ident)) {
+                go2 = false;
+            } else {
+                let bn = try self.take_ident();
+                let b = self.new(NK.id);
+                b.name = bn;
+                var ok = binds.push(b);
+                if (!ok) {
+                    std.println("bootstrap: out of memory");
+                    std.process.exit(1);
+                }
+                if (!self.accept(lex.Kind.comma)) {
+                    go2 = false;
+                }
+            }
+        }
+        var k: usize = 0;
+        while (k < seqs.len) {
+            self.push_item(n, seqs.items()[k]);
+            k = k + 1;
+        }
+        k = 0;
+        while (k < binds.len) {
+            self.push_item(n, binds.items()[k]);
+            k = k + 1;
+        }
+        // 绑定之后不再接受标签（旧写法是报错路径）
+        if (self.at(lex.Kind.ident) && !self.is_bool_word(self.cur()) &&
+            self.peek_tok(1).kind == lex.Kind.colon) {
+            return (error)Fail.f;
+        }
+        let arity = self.new(NK.tuple);
+        arity.ival = (u64)(seqs.len);
+        n.a = arity;
+        n.b = try self.parse_block();
+        if (self.accept(lex.Kind.kw_else)) {
+            if (self.at(lex.Kind.lbrace)) {
+                n.c = try self.parse_block();
+            } else {
+                n.c = try self.parse_expr();
+            }
+        }
+        return n;
+    };
+
+    const parse_switch = fn (self: *Parser, label: ?[]const u8) !*Node {
+        let t = self.advance();
+        let n = self.new(NK.switch_);
+        n.label = label;
+        try self.expect(lex.Kind.lparen);
+        n.a = try self.parse_expr();
+        try self.expect(lex.Kind.rparen);
+        try self.expect(lex.Kind.lbrace);
+
+        var go = true;
+        while (go && !self.at(lex.Kind.rbrace) && !self.at(lex.Kind.eof)) {
+            let arm = self.new(NK.arm);
+            if (self.accept(lex.Kind.kw_else)) {
+                arm.flag = true;
+            } else {
+                // 模式：.name | int | char | (error)Err.x | …
+                var go2 = true;
+                while (go2) {
+                    if (self.at(lex.Kind.dot) && self.peek_tok(1).kind == lex.Kind.ident) {
+                        let dot = self.advance();
+                        let id = self.advance();
+                        let pat = self.new(NK.field);
+                        pat.name = self.tok_text(id);
+                        self.push_item(arm, pat);
+                    } else {
+                        let pat = try self.parse_unary();
+                        self.push_item(arm, pat);
+                    }
+                    // 逗号后面能开一个新模式才继续
+                    if (self.at(lex.Kind.comma) && self.starts_pattern(self.peek_tok(1))) {
+                        self.advance();
+                    } else {
+                        go2 = false;
+                    }
+                }
+            }
+            // 旧写法 `模式 标签:` 是报错路径
+            if (self.at(lex.Kind.ident) && self.peek_tok(1).kind == lex.Kind.colon &&
+                !self.is_bool_word(self.cur())) {
+                return (error)Fail.f;
+            }
+            try self.expect(lex.Kind.colon);
+            // 冒号后最多两个名字：cap / lbl / cap lbl
+            if (self.at(lex.Kind.ident) && !self.is_bool_word(self.cur())) {
+                if (self.peek_tok(1).kind == lex.Kind.lbrace) {
+                    arm.name = try self.take_ident();
+                    if (self.at(lex.Kind.ident) && self.peek_tok(1).kind == lex.Kind.colon) {
+                        arm.label = try self.take_ident();
+                        self.advance();
+                    }
+                } else {
+                    if (self.peek_tok(1).kind == lex.Kind.colon) {
+                        arm.label = try self.take_ident();
+                        self.advance();
+                    } else {
+                        if (self.peek_tok(1).kind == lex.Kind.ident &&
+                            self.peek_tok(2).kind == lex.Kind.colon) {
+                            arm.name = try self.take_ident();
+                            arm.label = try self.take_ident();
+                            self.advance();
+                        }
+                    }
+                }
+            }
+            var has_label = false;
+            if (arm.label) lb2 { has_label = true; }
+            if (has_label && !self.at(lex.Kind.lbrace)) {
+                return (error)Fail.f;
+            }
+            if (self.at(lex.Kind.lbrace)) {
+                arm.a = try self.parse_block();
+            } else {
+                arm.a = try self.parse_expr();
+            }
+            self.push_item(n, arm);
+            if (!self.accept(lex.Kind.comma)) {
+                if (!self.at(lex.Kind.rbrace)) { return (error)Fail.f; }
+                go = false;
+            }
+        }
+        try self.expect(lex.Kind.rbrace);
+        return n;
+    };
+
+    const parse_construct = fn (self: *Parser, label: ?[]const u8) !*Node {
+        let k = self.cur().kind;
+        if (k == lex.Kind.kw_if) { return self.parse_if(label); }
+        if (k == lex.Kind.kw_while) { return self.parse_while(label); }
+        if (k == lex.Kind.kw_for) { return self.parse_for(label, false); }
+        if (k == lex.Kind.kw_switch) { return self.parse_switch(label); }
+        if (k == lex.Kind.lbrace) {
+            let b = try self.parse_block();
+            b.label = label;
+            return b;
+        }
+        return (error)Fail.f;
+    };
+
+    // yield 语句：tag: expr;   或   tag: {tuple};
+    const parse_yield = fn (self: *Parser) !*Node {
+        let t = self.cur();
+        let tag = try self.take_ident();
+        try self.expect(lex.Kind.colon);
+        let n = self.new(NK.yield);
+        n.label = tag;
+        if (self.at(lex.Kind.lbrace)) {
+            n.a = try self.parse_brace_expr();
+        } else {
+            n.a = try self.parse_expr();
+        }
+        try self.expect(lex.Kind.semi);
+        return n;
+    };
+
+    const parse_stmt = fn (self: *Parser) !*Node {
+        let t = self.cur();
+
+        if (t.kind == lex.Kind.kw_pub) {
+            self.advance();
+            let inn = try self.parse_stmt();
+            if (inn.kind == NK.decl || inn.kind == NK.fn_) {
+                if (inn.is_extern) { return (error)Fail.f; }
+                inn.is_pub = true;
+            } else {
+                return (error)Fail.f;
+            }
+            return inn;
+        }
+
+        // extern ["C"] fn name(params) Ret;
+        if (t.kind == lex.Kind.kw_extern) {
+            self.advance();
+            if (self.at(lex.Kind.string)) {
+                let ab = self.advance();
+                // 只认 "C"；好文件不会写别的
+                if (ab.text_len != 1) { return (error)Fail.f; }
+            }
+            if (!self.at(lex.Kind.kw_fn)) { return (error)Fail.f; }
+            let f = try self.parse_fn(true);
+            f.is_extern = true;
+            f.flag = false;
+            try self.expect(lex.Kind.semi);
+            return f;
+        }
+
+        if (t.kind == lex.Kind.kw_const || t.kind == lex.Kind.kw_let || t.kind == lex.Kind.kw_var) {
+            return self.parse_decl();
+        }
+
+        if (t.kind == lex.Kind.kw_fn) {
+            let f = try self.parse_fn(false);
+            self.accept(lex.Kind.semi);
+            return f;
+        }
+
+        if (t.kind == lex.Kind.kw_defer) {
+            self.advance();
+            let n = self.new(NK.defer_);
+            if (self.at(lex.Kind.lbrace)) {
+                n.a = try self.parse_block();
+            } else {
+                n.a = try self.parse_expr();
+            }
+            if (!self.at(lex.Kind.rbrace)) {
+                try self.expect(lex.Kind.semi);
+            }
+            return n;
+        }
+
+        if (t.kind == lex.Kind.kw_return) {
+            self.advance();
+            let n = self.new(NK.return_);
+            if (!self.at(lex.Kind.semi)) {
+                n.a = try self.parse_expr();
+            }
+            try self.expect(lex.Kind.semi);
+            return n;
+        }
+
+        if (t.kind == lex.Kind.kw_continue) {
+            self.advance();
+            let n = self.new(NK.continue_);
+            if (self.accept(lex.Kind.colon)) {
+                n.label = try self.take_ident();
+            }
+            try self.expect(lex.Kind.semi);
+            return n;
+        }
+
+        // IDENT ':' —— yield 或带标签的构造
+        if (t.kind == lex.Kind.ident && self.peek_tok(1).kind == lex.Kind.colon &&
+            !self.is_bool_word(t)) {
+            let after = self.peek_tok(2).kind;
+            if (after == lex.Kind.kw_for || after == lex.Kind.kw_while ||
+                after == lex.Kind.kw_switch || after == lex.Kind.kw_if) {
+                let label = self.advance();
+                self.advance();
+                let n = try self.parse_construct(self.tok_text(label));
+                self.accept(lex.Kind.semi);
+                return n;
+            }
+            if (after == lex.Kind.lbrace) {
+                if (self.brace_is_block(self.i + 2)) {
+                    let label = self.advance();
+                    self.advance();
+                    let b = try self.parse_block();
+                    b.label = self.tok_text(label);
+                    return b;
+                }
+                return self.parse_yield();
+            }
+            return self.parse_yield();
+        }
+
+        let e = try self.parse_expr();
+        self.accept(lex.Kind.semi);
+        return e;
+    };
+
+    const parse_block = fn (self: *Parser) !*Node {
+        let t = self.cur();
+        try self.expect(lex.Kind.lbrace);
+        let n = self.new(NK.block);
+        while (!self.at(lex.Kind.rbrace) && !self.at(lex.Kind.eof)) {
+            let before = self.i;
+            let st = try self.parse_stmt();
+            self.push_item(n, st);
+            if (self.i == before) { self.advance(); }
+        }
+        try self.expect(lex.Kind.rbrace);
+        return n;
+    };
+
+    const parse_program = fn (self: *Parser) !*Node {
+        let root = self.new(NK.root);
+        while (!self.at(lex.Kind.eof)) {
+            let before = self.i;
+            let st = try self.parse_stmt();
+            self.push_item(root, st);
+            if (self.i == before) { self.advance(); }
+        }
+        return root;
+    };
+};

@@ -1,0 +1,39 @@
+// bootstrap/astdump.zx —— 自举阶段 2 的对拍工具。
+//
+// 用法：astdump <file.zx>
+// 读入源文件 → lex.zx 词法 → parse.zx 语法 → 按 `zxc --ast` 的
+// s 表达式格式打到 stdout，与 C 侧输出逐字节 diff，必须为空。
+// 对拍脚本：bootstrap/diff_ast.sh。
+const std = module("std");
+const lex = module("lex.zx");
+const parse = module("parse.zx");
+
+const main = fn () i32 {
+    let al = std.heap.page;
+    let args = std.process.args();
+    if (args.len < 1) {
+        std.println("usage: astdump <file.zx>");
+        return 2;
+    }
+    let path = args[0];
+    let r = std.file.read(al, path);
+    if (r) src {
+        var lx = lex.Lexer.init(al, src);
+        lx.run();
+        if (lx.n_errors > 0) { return 1; }
+        var p = parse.Parser.init(al, src, &lx);
+        let pr = p.parse_program();
+        if (pr) root {
+            var out = std.ArrayList(u8).init(al);
+            parse.dump(root, &out, 0);
+            std.io.print(std.io.stdout(), "{s}", out.items());
+            return 0;
+        }
+        let ct = p.cur();
+        std.println("astdump: parse failed at {}:{} near token {}",
+                    ct.line, ct.col, lex.spell(ct.kind));
+        return 1;
+    }
+    std.println("astdump: cannot open {}", path);
+    return 2;
+};
