@@ -353,8 +353,52 @@ pub const dump = fn (n: *Node, out: *std.ArrayList(u8), depth: u32) void {
 
 // ---- 解析器 ----
 
+// 括号配对预计算（A1）。栈式走一遍 token 流；失配/未闭合记 toks.len
+// （消歧处落回旧试探路径——那是错误用例，不赶时间）。分配失败返回
+// 空表，同样落回旧路径，解析照常工作。
+const bracket_match = fn (al: std.Allocator, toks: []lex.Tok) []usize {
+    let nomatch = toks.len;
+    var m = std.ArrayList(usize).init(al);
+    var stk = std.ArrayList(usize).init(al);
+    var i: usize = 0;
+    while (i < toks.len) {
+        var ok = m.push(nomatch);
+        if (!ok) { return m.items(); }      // OOM：短表 → 消歧处走旧路径
+        let k = toks[i].kind;
+        if (k == lex.Kind.lparen || k == lex.Kind.lbracket ||
+            k == lex.Kind.lbrace || k == lex.Kind.dot_brace) {
+            ok = stk.push(i);
+            if (!ok) { return m.items(); }
+        } else if (k == lex.Kind.rparen || k == lex.Kind.rbracket ||
+                   k == lex.Kind.rbrace) {
+            if (stk.items().len > 0) {
+                let j = stk.last().?;
+                let open = toks[j].kind;
+                let pairs = (k == lex.Kind.rparen && open == lex.Kind.lparen) ||
+                            (k == lex.Kind.rbracket && open == lex.Kind.lbracket) ||
+                            (k == lex.Kind.rbrace &&
+                             (open == lex.Kind.lbrace || open == lex.Kind.dot_brace));
+                if (pairs) {
+                    let popped = stk.pop();
+                    ok = m.set(j, i);
+                    ok = m.set(i, j) && ok;
+                    if (!ok) { return m.items(); }
+                } else {
+                    // 交叉嵌套：栈作废重来（多余闭括号留给报错）
+                    while (stk.items().len > 0) { let dead = stk.pop(); }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return m.items();
+};
+
 pub const Parser = struct {
     toks: []lex.Tok,
+    match: []usize,       // 括号配对表（A1）：下标=token 序号，值=配对括号序号，
+                          // toks.len = 没有配对。cast 消歧用它做 O(1) 必要条件
+                          // 检查，嵌套括号不再付试探 parse_type 的 O(n²)。
     i: usize,
     src: []const u8,
     strbuf: []const u8,   // lex 完成后的解码文本存储区（STRING/CHAR 取这里）
@@ -367,6 +411,7 @@ pub const Parser = struct {
     const init = fn (al: std.Allocator, src: []const u8, lx: *lex.Lexer) Parser {
         return Parser{
             .toks = lx.toks.items(),
+            .match = bracket_match(al, lx.toks.items()),
             .i = 0,
             .src = src,
             .strbuf = lx.strbuf.items(),
@@ -1304,7 +1349,25 @@ pub const Parser = struct {
         }
 
         if (t.kind == lex.Kind.lparen) {
-            // cast (T)e 还是括号表达式 (e)？试探。
+            // cast (T)e 还是括号表达式 (e)？
+            // A1：先做 O(1) 必要条件检查再试探——真 cast 的 `)` 一定是括号
+            // 配对的那个（类型里括号自平衡），且其后必须能跟 cast。不满足
+            // 就直接走表达式路径：嵌套括号下，试探 parse_type 每层都要把
+            // 剩余 token 全部走一遍，O(n²) 就是这么来的。
+            var maybe_cast = false;
+            if (self.match.len == self.toks.len) {
+                let close = self.match[self.i];
+                if (close + 1 < self.toks.len && close != self.toks.len) {
+                    maybe_cast = self.can_follow_cast(self.toks[close + 1].kind);
+                }
+            }
+            if (!maybe_cast) {
+                self.advance();   // '('
+                let e0 = try self.parse_expr();
+                try self.expect(lex.Kind.rparen);
+                return e0;
+            }
+            // 试探：把剩余 token 当类型读一遍，成了再看后面能不能跟 cast
             let save = self.i;
             self.spec_depth = self.spec_depth + 1;
             self.advance();   // '('

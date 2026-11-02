@@ -38,6 +38,9 @@ typedef struct {
     Token  *t;
     size_t  n, i;
     int     last_line;
+    size_t *match;   /* A1：括号配对表（下标=token 序号，值为配对括号序号）。
+                      * 进 parser 前算一次 O(n)；cast 消歧用它做 O(1) 必要
+                      * 条件检查，嵌套括号不再付试探 parse_type 的 O(n²)。 */
 } P;
 
 static jmp_buf g_spec;
@@ -841,6 +844,19 @@ static Node *parse_primary(P *p) {
 
     case TOK_LPAREN: {
         /* cast (T)e  vs  parenthesized expr (e) */
+        /* A1：先做 O(1) 必要条件检查再试探——真 cast 的 `)` 一定是括号
+         * 配对的那个（类型里括号自平衡），且其后必须能跟 cast。不满足
+         * 就直接走表达式路径：嵌套括号下，试探 parse_type 每层都要把
+         * 剩余 token 全部走一遍，O(n²) 就是这么来的。 */
+        size_t close = p->match ? p->match[p->i] : SIZE_MAX;
+        bool maybe_cast = close != SIZE_MAX && close + 1 < p->n &&
+                          can_follow_cast(p->t[close + 1].kind);
+        if (!maybe_cast) {
+            advance(p);   /* '(' */
+            Node *e = parse_expr(p);
+            expect(p, TOK_RPAREN);
+            return e;
+        }
         size_t save = p->i;
         jmp_buf saveBuf;
         memcpy(&saveBuf, &g_spec, sizeof(jmp_buf));
@@ -1527,8 +1543,43 @@ static void sync_decl(P *p) {
     }
 }
 
+/* 括号配对预计算（A1）。栈式走一遍 token 流；失配/未闭合的括号位置记
+ * SIZE_MAX（消歧处落回旧试探路径——那是错误用例，不赶时间）。分配失败
+ * 返回 NULL，同样落回旧路径，解析照常工作。 */
+static size_t *bracket_match(Token *t, size_t n) {
+    size_t *m = malloc(sizeof(size_t) * (n ? n : 1));
+    if (!m) return NULL;
+    size_t *stk = malloc(sizeof(size_t) * (n ? n : 1));
+    if (!stk) { free(m); return NULL; }
+    size_t top = 0;
+    for (size_t i = 0; i < n; i++) {
+        m[i] = SIZE_MAX;
+        switch (t[i].kind) {
+        case TOK_LPAREN: case TOK_LBRACKET: case TOK_LBRACE: case TOK_DOT_BRACE:
+            stk[top++] = i;
+            break;
+        case TOK_RPAREN: case TOK_RBRACKET: case TOK_RBRACE: {
+            if (top == 0) break;                      /* 多余的闭括号：留给报错 */
+            TokKind open = t[stk[top - 1]].kind;
+            bool pairs = (t[i].kind == TOK_RPAREN   && open == TOK_LPAREN) ||
+                         (t[i].kind == TOK_RBRACKET && open == TOK_LBRACKET) ||
+                         (t[i].kind == TOK_RBRACE  && (open == TOK_LBRACE || open == TOK_DOT_BRACE));
+            if (!pairs) { top = 0; break; }           /* 交叉嵌套：栈作废重来 */
+            size_t j = stk[--top];
+            m[i] = j;
+            m[j] = i;
+            break;
+        }
+        default: break;
+        }
+    }
+    free(stk);
+    return m;
+}
+
 Node *parse_program(Lexer *lx) {
-    P p = { .t = lx->toks, .n = lx->ntoks, .i = 0, .last_line = 0 };
+    P p = { .t = lx->toks, .n = lx->ntoks, .i = 0, .last_line = 0,
+            .match = bracket_match(lx->toks, lx->ntoks) };
     Node *root = node_new(NK_ROOT, 1, 1);
     while (!at(&p, TOK_EOF_)) {
         size_t before = p.i;

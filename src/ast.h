@@ -86,6 +86,9 @@ struct Node {
     bool          esc;        /* 值指向当前栈帧（std.stackAlloc 调用打上；逃逸检查用） */
     bool          body_checked;
     bool          meth_done;  /* 方法调用已补过接收者（重复检查时直接返回类型） */
+    bool          ct_no;      /* A1 负缓存：检查阶段这块子树折不出编译期值。
+                               只在 g_ct_exec==0 时读写——编译期执行阶段 var
+                               槽位是活的，同一棵树可能算得出值。 */
     int           index;    /* destructuring slot */
 };
 

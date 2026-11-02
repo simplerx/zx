@@ -4851,6 +4851,11 @@ static Value *ct_eval(Node *n) {
     if (!n) return val_void();
     /* 标识符不缓存：var 的槽位随时会变，每次都得重新读 */
     if (n->ct && n->kind != NK_IDENT) return n->ct;
+    /* 负缓存（A1）：检查阶段已经证明这块子树折不出编译期值，直接短路。
+     * 没有它，每个祖先节点的 fold_expr 都把整条左脊柱重新走一遍——
+     * 8000 项的 `a+a+…` 链要付 O(n²)。只在检查阶段读（g_ct_exec==0）：
+     * 执行阶段 var 槽位是活的，同一棵树可能算得出值。 */
+    if (n->ct_no && g_ct_exec == 0 && n->kind != NK_IDENT) return NULL;
     if (g_ct_stuck) return NULL;
     if (g_ct_flow.kind != CT_NORMAL) return NULL;
 
@@ -5328,6 +5333,9 @@ static Value *fold(Node *n) {
 
     Value *v = ct_eval(n);
 
+    /* 负缓存（A1）：这次是干净的上下文（stuck / flow 已存起再清空），
+     * 折不出值就是这块子树的真性质——记下来，祖先别再重走。 */
+    if (!v && g_ct_exec == 0 && n->kind != NK_IDENT) n->ct_no = true;
     if (v) { n->ct = v; }
     /* 求值失败没关系：这个表达式就"只能运行时算" */
     g_ct_stuck = save;
