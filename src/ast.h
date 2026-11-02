@@ -121,4 +121,15 @@ int  sema_fn_ncomp(Node *fn);
 /* s-expression dump for debugging */
 void ast_dump(const Node *n, int depth);
 
+/* 自举阶段 3：装载 Zx 前端（zxfe）产出的序列化 AST。
+ * 失败（格式坏 / 打不开）返回 NULL。文本版给测试用。 */
+Node *ast_load_file(const char *path);
+Node *ast_load_text(const char *text, size_t len);
+
+/* 前端选择（src/fe.c）：默认 Zx 前端，--fe=c 切回 C 解析器交叉验证。 */
+void  fe_set_mode(bool use_zx);
+void  fe_set_argv0(const char *p);
+bool  fe_is_zx(void);
+Node *fe_parse_file(const char *path);
+
 #endif

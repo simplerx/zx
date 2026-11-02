@@ -1,12 +1,12 @@
-// `try` 只传播错误。`?T` 的"空"不是错误——它没有错误码可以往上带，
-// 想给默认值用 `orelse`，想分支用 `if` 捕获。
-// expect: `try` needs an error union, found `?i32`
+// `try` 传播错误（v0.26：`?T` 也行，空抛 error.null）。普通值没有"空/错"
+// 可言——`try` 一个 i32 是类型错误；就地处理用普通绑定，别 `try`。
+// expect: `try` needs an error union or an optional, found `i32`
 // expect-code: E0301
 // expect-count: 1
-const maybe = fn () ?i32 { return 1; };
+const plain = fn () i32 { return 1; };
 
 const f = fn () !i32 {
-    return try maybe();
+    return try plain();
 };
 
 const main = fn () i32 {

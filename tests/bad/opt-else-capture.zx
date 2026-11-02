@@ -1,0 +1,16 @@
+// `?T` 不许 else 捕获（v0.26）：`if (o) v {} else e {}` 的值臂是"?"、
+// 错误捕获臂是"!"，同框就是被禁的 `?!T`。else **捕获**只属于 `!T`；
+// `?T` 的空就地分支写不带名的 `else { … }`，或交给 `try` 抛 error.null。
+// expect: a `?T` capture cannot have an `else e` capture
+// expect-count: 1
+const probe = fn (o: ?i32) u16 {
+    if (o) v {
+        return 1;
+    } else e {
+        return (u16)e;
+    }
+};
+
+const main = fn () u16 {
+    return probe(null);
+};

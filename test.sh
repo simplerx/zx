@@ -32,7 +32,7 @@ if [ "${ZX_CHECKED:-0}" = "1" ]; then
     printf "== 构建编译器（Debug -O0，zig 的运行时检查开着）\n"
     $ZYG cc -std=c11 -O0 -g -o bin/zxc_checked.exe \
         src/zxc.c src/ty.c src/val.c src/lex.c src/parse.c src/sema.c \
-        src/backend.c src/main.c
+        src/backend.c src/main.c src/fe.c src/astload.c
     ZXC=./bin/zxc_checked.exe
 fi
 # zxc 从自己的路径推 zig cc 的位置，给反斜杠路径它就不必靠 cwd
@@ -47,6 +47,14 @@ if ! $ZYG cc -std=c11 -O2 -o "$RUNNER" tools/runner.c; then
 fi
 
 # 2. 文件类用例
+printf "\n== 构建 Zx 前端（bootstrap/zxfe.zx，由 zxc 自己编译——自举）\n"
+# 自举鸡蛋：编 zxfe 必须走 --fe=c（旧 zxfe 吃不进新 char 语义，见 build.sh）
+if ! $ZXC bootstrap/zxfe.zx -o bin/zxfe.exe --fe=c > "$TMP.zxfe.log" 2>&1; then
+    printf "  FAIL zxfe 编译失败\n"
+    cat "$TMP.zxfe.log"
+    exit 1
+fi
+
 printf "\n== 文件类用例\n"
 if ! "$RUNNER" "$@" "$ZXCW" "$TMP" \
         spec/examples/*.zx tests/good/*.zx tests/bad/*.zx \

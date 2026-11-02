@@ -1,0 +1,248 @@
+// bootstrap/zxfe.zx —— 自举阶段 3：Zx 前端驱动（zxc --fe=zx 的供货方）。
+//
+// 用法：
+//   zxfe <file.zx> --ast      成功：s 表达式 AST 到 stdout（与 zxc --ast 同格式）
+//   zxfe <file.zx> -o <out>   成功：**可装载** AST 序列化写到 <out>（src/astload.c 消费）
+//   失败：诊断按 C 侧格式打到 stderr（path:line:col: error[CODE]: text），
+//         退出码 1。zxc 只看退出码与 stderr 文本，不重复打印。
+//
+// 序列化格式（一个结点一行无所谓，token 空白分隔）：
+//   node  := "(" kind line col op op2 flg ival fvbits slen name label str
+//            { "a" (node|"-") | "b" … | "c" … | "d" … } "i" "(" { node } ")" ")"
+//   kind/op 是与 C 侧 ast.h NodeKind / zxc.h TokKind **同序的编号**（两边都有
+//   静态顺序注释钉住）；fvbits 是 fval 的 64 位原样位型；字符串带转义，
+//   null 记作 "-"。flg 位 0/1/2 = flag / is_pub / is_extern。
+const std = module("std");
+const lex = module("lex.zx");
+const parse = module("parse.zx");
+
+// ---- 数字 → 十进制 ----
+
+const utos = fn (al: std.Allocator, v: u64) []const u8 {
+    if (v == 0) { return "0"; }
+    var buf = std.ArrayList(u8).init(al);
+    var x = v;
+    while (x > 0) {
+        var ok = buf.push(((u8)(x % 10)) + '0');
+        x = x / 10;
+    }
+    let items = buf.items();
+    let n = items.len;
+    if (al.alloc(n)) p {
+        var dst = p[0..n];
+        var i: usize = 0;
+        while (i < n) {
+            dst[i] = items[n - 1 - i];
+            i = i + 1;
+        }
+        return dst;
+    }
+    return items;
+};
+
+const itos = fn (al: std.Allocator, v: i64) []const u8 {
+    if (v >= 0) { return utos(al, (u64)v); }
+    let m = utos(al, (u64)(-v));
+    let r = std.str.concat(al, "-", m);
+    if (r) s { return s; }
+    return m;
+};
+
+// ---- 序列化 ----
+
+const hexd = fn (v: u8) u8 {
+    if (v < 10) { return v + '0'; }
+    return v - 10 + 'a';
+};
+
+const push_esc = fn (out: *std.ArrayList(u8), s: []const u8) void {
+    var ok = out.push('"');
+    var i: usize = 0;
+    while (i < s.len) {
+        let c = s[i];
+        if (c == '\\') {
+            ok = out.push('\\'); ok = out.push('\\');
+        } else if (c == '"') {
+            ok = out.push('\\'); ok = out.push('"');
+        } else if (c == '\n') {
+            ok = out.push('\\'); ok = out.push('n');
+        } else if (c == '\r') {
+            ok = out.push('\\'); ok = out.push('r');
+        } else if (c == '\t') {
+            ok = out.push('\\'); ok = out.push('t');
+        } else if (c < 32) {
+            ok = out.push('\\'); ok = out.push('x');
+            ok = out.push(hexd((u8)(c >> 4)));
+            ok = out.push(hexd((u8)(c & 15)));
+        } else {
+            ok = out.push(c);
+        }
+        i = i + 1;
+    }
+    ok = out.push('"');
+};
+
+const pushs = fn (out: *std.ArrayList(u8), s: []const u8) void {
+    var i: usize = 0;
+    while (i < s.len) {
+        var ok = out.push(s[i]);
+        i = i + 1;
+    }
+};
+
+// 可选字符串字段：null 记 "-"
+const push_optstr = fn (al: std.Allocator, out: *std.ArrayList(u8), o: ?[]const u8) void {
+    if (o) s {
+        pushs(out, " ");
+        push_esc(out, s);
+    } else {
+        pushs(out, " -");
+    }
+};
+
+const ser_node = fn (al: std.Allocator, out: *std.ArrayList(u8), n: *parse.Node) void {
+    pushs(out, "(");
+    pushs(out, utos(al, (u64)(i64)(n.kind)));
+    pushs(out, " ");
+    pushs(out, utos(al, (u64)(n.line)));
+    pushs(out, " ");
+    pushs(out, utos(al, (u64)(n.col)));
+    pushs(out, " ");
+    var opv: i64 = -1;
+    if (n.op) k { opv = (i64)k; }
+    pushs(out, itos(al, opv));
+    pushs(out, " ");
+    pushs(out, utos(al, (u64)(n.op2)));
+    pushs(out, " ");
+    var flg: u64 = 0;
+    if (n.flag) { flg = flg + 1; }
+    if (n.is_pub) { flg = flg + 2; }
+    if (n.is_extern) { flg = flg + 4; }
+    pushs(out, utos(al, flg));
+    pushs(out, " ");
+    pushs(out, utos(al, n.ival));
+    pushs(out, " ");
+    // fval 的 64 位位型：指针重解释（语言里位重解释的标准姿势，§5）
+    let bits = ((*u64)(&n.fval)).0;
+    pushs(out, utos(al, bits));
+    pushs(out, " ");
+    var slen: u64 = 0;
+    if (n.str) s0 { slen = (u64)s0.len; }
+    pushs(out, utos(al, slen));
+    push_optstr(al, out, n.name);
+    push_optstr(al, out, n.label);
+    push_optstr(al, out, n.str);
+
+    if (n.a) ch {
+        pushs(out, " a ");
+        ser_node(al, out, ch);
+    } else {
+        pushs(out, " a -");
+    }
+    if (n.b) ch {
+        pushs(out, " b ");
+        ser_node(al, out, ch);
+    } else {
+        pushs(out, " b -");
+    }
+    if (n.c) ch {
+        pushs(out, " c ");
+        ser_node(al, out, ch);
+    } else {
+        pushs(out, " c -");
+    }
+    if (n.d) ch {
+        pushs(out, " d ");
+        ser_node(al, out, ch);
+    } else {
+        pushs(out, " d -");
+    }
+    pushs(out, " i (");
+    var i: usize = 0;
+    while (i < n.items.len) {
+        if (n.items.get(i)) it {
+            ser_node(al, out, it);
+            pushs(out, " ");
+        }
+        i = i + 1;
+    }
+    pushs(out, "))");
+};
+
+const main = fn () i32 {
+    let al = std.heap.page;
+    let args = std.process.args();
+    if (args.len < 1) {
+        std.println("usage: zxfe <file.zx> [--ast | -o <out>]");
+        return 2;
+    }
+    var path: []const u8 = args[0];
+    var ast_mode = false;
+    var out_path: ?[]const u8 = null;
+    var i: usize = 1;
+    while (i < args.len) {
+        let a = args[i];
+        if (std.str.eq(a, "--ast")) {
+            ast_mode = true;
+        } else if (std.str.eq(a, "-o")) {
+            if (i + 1 < args.len) {
+                out_path = args[i + 1];
+                i = i + 1;
+            }
+        }
+        i = i + 1;
+    }
+
+    let r = std.file.read(al, path);
+    if (r) src {
+        var lx = lex.Lexer.init(al, src);
+        lx.run();
+        if (lx.n_errors > 0) {
+            std.io.print(std.io.stderr(), "{s}: error[E0101]: lexical error(s)\n", path);
+            return 1;
+        }
+        var p = parse.Parser.init(al, src, &lx);
+        let pr = p.parse_program();
+
+        // 诊断：格式与 C 侧 zxc.c 一致；先于任何输出
+        var printed: usize = 0;
+        while (printed < p.errs.len) {
+            if (p.errs.get(printed)) e {
+                std.io.print(std.io.stderr(), "{s}:{}:{}: error[{s}]: {s}\n",
+                             path, e.line, e.col, e.code, e.msg);
+            }
+            printed = printed + 1;
+        }
+        if (printed > 0) {
+            std.io.print(std.io.stderr(), "zxc: {} error(s)\n", printed);
+            return 1;
+        }
+        if (pr) root {
+            if (ast_mode) {
+                var out = std.ArrayList(u8).init(al);
+                parse.dump(root, &out, 0);
+                std.io.print(std.io.stdout(), "{s}", out.items());
+                return 0;
+            }
+            if (out_path) op {
+                var out = std.ArrayList(u8).init(al);
+                ser_node(al, &out, root);
+                if (std.BufWriter.create(al, op, 65536)) wr {
+                    var wr2 = wr;
+                    let ok = wr2.write(out.items());
+                    wr2.deinit();
+                    if (ok) { return 0; }
+                }
+                std.println("zxfe: cannot write {}", op);
+                return 2;
+            }
+            std.println("usage: zxfe <file.zx> [--ast | -o <out>]");
+            return 2;
+        }
+        // parse_program 在恢复模式下不该失败；走到这补一条兜底
+        std.io.print(std.io.stderr(), "{s}: error[E0202]: unexpected token\n", path);
+        return 1;
+    }
+    std.println("zxfe: cannot open {}", path);
+    return 2;
+};

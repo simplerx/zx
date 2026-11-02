@@ -628,6 +628,14 @@ zx_init_<stem>(void)  每模块一个初始化函数，main 按依赖倒序调�
       bench、spec 片段、bootstrap 自身）。顺带修出共享出参的嵌套污染：
       `if` 捕获名从 C 的栈上指针出参改成共享字段后，臂块内的嵌套 `if`
       会重写它——改为入口保存、读回后恢复
+- [x] M37 **自举阶段 3——切换 + 交叉验证**（v0.26）：
+      `zxc` 默认走 Zx 前端——`bootstrap/zxfe.zx`（约 250 行驱动）把源文件
+      解析成可装载的序列化 AST，`src/astload.c` 在 C 侧重建 Node 树，
+      C 前端留在 `--fe=c` 开关后做交叉验证。自举鸡蛋问题（编 zxfe 也要
+      过前端，而手上 zxfe 还是旧版）用 `--fe=c` 过河解决；
+      顺带还掉阶段 1 的债——Zx 词法器补上 char 字面量码点。
+      `sh test.sh` **200 项全过**（默认全链路 Zx 前端），
+      `sh bootstrap/diff_ast.sh` **61 个文件 0 差异**。取舍见 decisions **§70**
 
 ### M13：四件"语言设计上的回头路"
 
@@ -995,7 +1003,7 @@ const main = fn () void {
 | 拼字符串 | `std.str.concat` + `ArrayList` 拼命令、拼期望输出 |
 | 起进程 | `extern fn system` 调 `cmd`，把 stdout/stderr 收进临时文件 |
 | 格式化 | `std.println("{}", ...)` 打报告 |
-| 显式转换 | `@intCast(usize, n)` |
+| 显式转换 | `(usize) n`（R4，唯一写法） |
 
 **跑出来的三个真 bug**（都是"写 hello world 永远碰不到"的那种）：
 
@@ -1557,3 +1565,33 @@ Zig 版的差异：槽位管理自包含（"整批槽区 + 内联空闲链"，�
 编译器整对删除（死分配消除），对照组测出来是假的快。环形实测
 **池 177 ms vs 裸 malloc 332 ms**（各含 ~65 ms 进程启动；折算每对
 alloc+free ≈11 ns vs ≈27 ns，约 **2.4x**）。取舍见 decisions **§69**。
+
+## M37：自举阶段 3——zxc 默认走 Zx 前端
+
+三个新文件撑起切换：
+
+- `bootstrap/zxfe.zx`（约 250 行）——Zx 前端驱动：吃一个 `.zx` 文件，
+  诊断按 `path:line:col: error[CODE]: text` 同一格式打到 stderr；
+  `--ast` 复用阶段 2 的 dump（对拍通道不变）；`-o` 写**可装载的
+  序列化 AST**（kind/op 是与 ast.h / zxc.h 枚举同序的编号，fval 按
+  64 位位型传，字符串带转义）。
+- `src/astload.c`——C 侧装载器，把序列化重建回 Node 树。它不是
+  通用反序列化：DECL 的种类 Zx 记在 op2、C 在 op 这类历史形状差异
+  按 kind 特判。取舍见 decisions **§70**。
+- `src/fe.c`——前端选择。默认 Zx；`--fe=c` 保留 C 前端做交叉验证，
+  跑满一个版本周期再删。模块加载走同一条 FE 通道。
+
+**鸡蛋问题**：zxc 默认连模块加载都走 Zx 前端，编 zxfe 自己也要过
+前端——而手上的 zxfe 还是旧版。实测直接炸：阶段 1 对拍时 char 字面量
+的码点被"刻意没算"（够用边界），旧 zxfe 吃不进新语义，char 模式值
+全变 0，编出 `duplicate case value '0'`。解法是自举第一步踩着
+C 前端过河：build.sh / test.sh 编 zxfe 一律 `--fe=c`，阶段 4 zxc 能
+自举出新 zxfe 时再拆。顺带还债：`lex.zx` 补 `char_cp`（UTF-8 解码）
++ `emit_char`。
+
+**Windows `system()` 引号陷阱**（第二次踩）：命令行不能以引号开头，
+`cmd /c` 会吃掉首尾一对引号。让 `dir\zxfe.exe` 顶在第一个字符即可。
+
+结果：`sh test.sh` **200 项全过**（默认全链路走 Zx 前端——正例、
+反例、多文件、增量编译全在内）；`sh bootstrap/diff_ast.sh` 在
+`--fe=c` 交叉验证下 **61 个文件 0 差异**。

@@ -1,0 +1,44 @@
+// 空值当错误（v0.26）：`try` 接受 `?T`——有值取载荷，空抛保留错误码
+// `error.null`（65535），沿 `!T` 的传播路一路上行，到 main 变成退出码
+// （Windows 原样 65535；POSIX 截 8 位得 255）。
+// 注意 `if (o) v {} else e {}` 对 `?T` 是**非法**的：值臂是"?"、错误
+// 捕获臂是"!"，同框就是被禁的 `?!T`。else 捕获只属于 `!T`。
+// expect-exit: 65535
+// expect-output
+// ok=1
+// hit=0
+const std = module("std");
+
+const find = fn (xs: []const i32, want: i32) ?usize {
+    var i: usize = 0;
+    while (i < xs.len) {
+        if (xs[i] == want) { return i; }
+        i = i + 1;
+    }
+    return null;
+};
+
+// null 沿 `try` 上行：middle 是 `!usize`，find 的空在这里变成 error.null
+const middle = fn (xs: []const i32) !usize {
+    return try find(xs, 99);
+};
+
+// `?T` 的空要就地分支：else 不带名（`else e` 捕获是编译错误）
+const probe = fn (o: ?i32) u16 {
+    if (o) v {
+        return 1;
+    } else {
+        return 0;
+    }
+};
+
+const main = fn () !void {
+    let a: []const i32 = &.{1, 7, 3};
+    let ok = try find(a, 7);
+    std.println("ok={}", ok);
+    let miss = probe(null);
+    std.println("hit={}", miss);
+    // find(a, 99) 是 null → error.null 沿 try 传到 main，退出码 65535
+    let never = try middle(a);
+    std.println("exit=0");
+};

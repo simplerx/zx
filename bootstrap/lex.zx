@@ -339,6 +339,19 @@ pub const Lexer = struct {
         if (!ok) { self.fail(); }
     };
 
+    // char token：带码点（int_val = char_val，与 C 同）
+    const emit_char = fn (self: *Lexer, k: Kind, start: usize, off: usize) void {
+        let len = self.p - start;
+        let t = Tok{
+            .kind = k, .line = self.line, .col = self.col - (u32)len,
+            .start = start, .len = len,
+            .int_val = self.char_cp(off), .float_val = 0.0, .big = false,
+            .str_off = off, .text_len = self.strbuf.len - off,
+        };
+        var ok = self.toks.push(t);
+        if (!ok) { self.fail(); }
+    };
+
     // ---- 注释与空白 ----
 
     const skip_trivia = fn (self: *Lexer) void {
@@ -469,6 +482,29 @@ pub const Lexer = struct {
 
     // ---- 字符 ----
 
+    // 解码 char 码点：strbuf[off..] 里是 1..4 字节 UTF-8（与 C lex.c 的
+    // char_val 同规则：单字节取字节，多字节按 UTF-8 拼）。阶段 3 起
+    // 序列化 AST 要带 ival，这个值不再能省。
+    const char_cp = fn (self: *Lexer, off: usize) u64 {
+        let s = self.strbuf.items();
+        let n = s.len - off;
+        if (n == 0) { return 0; }
+        let b0 = s[off];
+        if (b0 < 0x80) { return (u64)(b0); }
+        if ((b0 & 0xE0) == 0xC0 && n >= 2) {
+            return ((u64)(b0 & 0x1F)) << 6 | ((u64)(s[off + 1] & 0x3F));
+        }
+        if ((b0 & 0xF0) == 0xE0 && n >= 3) {
+            return ((u64)(b0 & 0x0F)) << 12 | ((u64)(s[off + 1] & 0x3F)) << 6
+                 | ((u64)(s[off + 2] & 0x3F));
+        }
+        if ((b0 & 0xF8) == 0xF0 && n >= 4) {
+            return ((u64)(b0 & 0x07)) << 18 | ((u64)(s[off + 1] & 0x3F)) << 12
+                 | ((u64)(s[off + 2] & 0x3F)) << 6 | ((u64)(s[off + 3] & 0x3F));
+        }
+        return (u64)(b0);
+    };
+
     const lex_char = fn (self: *Lexer, start: usize) void {
         self.adv();                       // 开引号
         let off = self.strbuf.len;
@@ -507,7 +543,7 @@ pub const Lexer = struct {
         } else {
             self.adv();
         }
-        self.emit_text(Kind.char, start, off);
+        self.emit_char(Kind.char, start, off);
     };
 
     // ---- 数字 ----

@@ -10,6 +10,100 @@ const lex = module("lex.zx");
 
 const Fail = enum(u8) { f = 1 };
 
+// ---- 诊断 ----
+// 与 C 侧 zxc.c 对齐：file:line:col: error[CODE]: text，由驱动（zxfe）打印。
+// 记录规则照抄 perr：试探区（spec_depth > 0）里失败是回溯，不是报错。
+
+pub const Err = struct {
+    line: u32,
+    col: u32,
+    code: []const u8,
+    msg: []const u8,
+};
+
+// C tok_kind_name 的镜像（zxc.h TOKEN_KINDS 的可读名，同序同拼写）。
+pub const kname = fn (k: lex.Kind) []const u8 {
+    return switch (k) {
+        .eof: "end of file",
+        .ident: "identifier",
+        .int: "integer",
+        .float: "float",
+        .char: "char",
+        .string: "string",
+        .kw_const: "'const'",
+        .kw_let: "'let'",
+        .kw_var: "'var'",
+        .kw_fn: "'fn'",
+        .kw_module: "'module'",
+        .kw_type: "'type'",
+        .kw_null: "'null'",
+        .kw_undefined: "'undefined'",
+        .kw_if: "'if'",
+        .kw_else: "'else'",
+        .kw_while: "'while'",
+        .kw_for: "'for'",
+        .kw_inline: "'inline'",
+        .kw_switch: "'switch'",
+        .kw_continue: "'continue'",
+        .kw_return: "'return'",
+        .kw_defer: "'defer'",
+        .kw_struct: "'struct'",
+        .kw_union: "'union'",
+        .kw_enum: "'enum'",
+        .kw_error: "'error'",
+        .kw_pub: "'pub'",
+        .kw_extern: "'extern'",
+        .kw_orelse: "'orelse'",
+        .kw_try: "'try'",
+        .lparen: "'('",
+        .rparen: "')'",
+        .lbracket: "'['",
+        .rbracket: "']'",
+        .lbrace: "'{'",
+        .rbrace: "'}'",
+        .comma: "','",
+        .semi: "';'",
+        .colon: "':'",
+        .at: "'@'",
+        .dot: "'.'",
+        .dot_brace: "'.{'",
+        .dotdot: "'..'",
+        .arrow: "'->'",
+        .plus: "'+'",
+        .minus: "'-'",
+        .star: "*",
+        .slash: "'/'",
+        .percent: "'%'",
+        .caret: "'^'",
+        .tilde: "'~'",
+        .bang: "'!'",
+        .question: "'?'",
+        .amp: "'&'",
+        .pipe: "'|'",
+        .andand: "'&&'",
+        .oror: "'||'",
+        .shl: "'<<'",
+        .shr: "'>>'",
+        .lt: "'<'",
+        .le: "'<='",
+        .gt: "'>'",
+        .ge: "'>='",
+        .eq: "'=='",
+        .ne: "'!='",
+        .assign: "'='",
+        .pluseq: "'+='",
+        .minuseq: "'-='",
+        .stareq: "'*='",
+        .slasheq: "'/='",
+        .perceq: "'%='",
+        .ampeq: "'&='",
+        .pipeeq: "'|='",
+        .careteq: "'^='",
+        .shleq: "'<<='",
+        .shreq: "'>>='",
+    };
+};
+
 // ---- AST 节点 ----
 // 对应 src/ast.h 的 Node：只带解析期字段，sema 期的不进来。
 
@@ -33,6 +127,11 @@ pub const NK = enum {
 
 pub const Node = struct {
     kind: NK,
+    // 位置：C 版每个 node_new 都带构造点的 line/col；这里在 new() 里取
+    // cur() 近似（个别声明会差一个 token），诊断位置对齐留给阶段 4。
+    line: u32,
+    col: u32,
+    fval: f64,           // float 字面量值；for 的 arity 节点存绑定数
     name: ?[]const u8,
     label: ?[]const u8,
     op: ?lex.Kind,       // bin/un 的运算符；decl 的种类放 op2
@@ -255,6 +354,8 @@ pub const Parser = struct {
     al: std.Allocator,
     spec_depth: u32,
     cap: ?[]const u8,     // parse_if_arm 的捕获名出参
+    errs: std.ArrayList(Err),   // 语法诊断（试探区里不记录）
+    msgb: std.ArrayList(u8),    // 消息拼装草稿（record 前复制走）
 
     const init = fn (al: std.Allocator, src: []const u8, lx: *lex.Lexer) Parser {
         return Parser{
@@ -265,7 +366,68 @@ pub const Parser = struct {
             .al = al,
             .spec_depth = 0,
             .cap = null,
+            .errs = std.ArrayList(Err).init(al),
+            .msgb = std.ArrayList(u8).init(al),
         };
+    };
+
+    // ---- 诊断 ----
+
+    const pushs = fn (self: *Parser, s: []const u8) void {
+        var i: usize = 0;
+        while (i < s.len) {
+            var ok = self.msgb.push(s[i]);
+            i = i + 1;
+        }
+    };
+
+    // 草稿复制成稳定切片：下一条消息还要用同一块草稿
+    const dup_msg = fn (self: *Parser) []const u8 {
+        let items = self.msgb.items();
+        let n = items.len;
+        if (self.al.alloc(n)) p {
+            var dst = p[0..n];
+            var i: usize = 0;
+            while (i < n) {
+                dst[i] = items[i];
+                i = i + 1;
+            }
+            return dst;
+        }
+        return items;
+    };
+
+    const record = fn (self: *Parser, code: []const u8, msg: []const u8) void {
+        if (self.spec_depth > 0) { return; }   // 试探区：失败是回溯，不是报错
+        let t = self.cur();
+        var ok = self.errs.push(Err{ .line = t.line, .col = t.col, .code = code, .msg = msg });
+    };
+
+    // expect 家族共用的 "expected X, found Y"（C parse.c:82/85）
+    const err_expected = fn (self: *Parser, k: lex.Kind) void {
+        if (self.spec_depth > 0) { return; }
+        let t = self.cur();
+        let tk = t.kind;
+        self.msgb.clear();
+        self.pushs("expected ");
+        self.pushs(kname(k));
+        self.pushs(", found ");
+        self.pushs(kname(tk));
+        // 带文本的 token 附原文（截 24 字节，与 C 一致）
+        if (tk == lex.Kind.ident || tk == lex.Kind.int ||
+            tk == lex.Kind.float || tk == lex.Kind.string) {
+            self.pushs(" `");
+            var txt = self.tok_text(t);
+            var n = txt.len;
+            if (n > 24) { n = 24; }
+            var i: usize = 0;
+            while (i < n) {
+                var ok = self.msgb.push(txt[i]);
+                i = i + 1;
+            }
+            self.pushs("`");
+        }
+        self.record("E0201", self.dup_msg());
     };
 
     // ---- 游标 ----
@@ -304,6 +466,7 @@ pub const Parser = struct {
             var t = self.advance();
             return;
         }
+        self.err_expected(k);
         return (error)Fail.f;
     };
 
@@ -316,6 +479,7 @@ pub const Parser = struct {
             let t = self.advance();
             return self.tok_text(t);
         }
+        self.err_expected(lex.Kind.ident);
         return (error)Fail.f;
     };
 
@@ -326,6 +490,10 @@ pub const Parser = struct {
         if (raw) p {
             let n = (*Node)p;
             n.kind = k;
+            let ct = self.cur();
+            n.line = ct.line;
+            n.col = ct.col;
+            n.fval = 0.0;
             n.name = null;
             n.label = null;
             n.op = null;
@@ -662,6 +830,10 @@ pub const Parser = struct {
         }
 
         // 非法类型开头：报错（试探区由试探点回溯，顶层直接失败）
+        self.msgb.clear();
+        self.pushs("expected a type, found ");
+        self.pushs(kname(t.kind));
+        self.record("E0201", self.dup_msg());
         return (error)Fail.f;
     };
 
@@ -1054,6 +1226,7 @@ pub const Parser = struct {
             self.advance();
             let n = self.new(NK.float);
             n.str = self.tok_text(t);
+            n.fval = t.float_val;
             return n;
         }
         if (t.kind == lex.Kind.string) {
@@ -1208,6 +1381,10 @@ pub const Parser = struct {
             return n;
         }
 
+        self.msgb.clear();
+        self.pushs("expected an expression, found ");
+        self.pushs(kname(t.kind));
+        self.record("E0201", self.dup_msg());
         return (error)Fail.f;
     };
 
@@ -1370,6 +1547,7 @@ pub const Parser = struct {
         }
 
         if (self.at(lex.Kind.ident) && self.starts_stmt_kw(self.peek_tok(1).kind)) {
+            self.record("E0202", "a capture name must be followed by `{ … }` or a single value; put the statement inside a block");
             return (error)Fail.f;
         }
         // 捕获名 + 单个返回值（语法糖）：`if (o) v v else 0`
@@ -1535,6 +1713,7 @@ pub const Parser = struct {
         }
         let arity = self.new(NK.tuple);
         arity.ival = (u64)(seqs.len);
+        arity.fval = (f64)(binds.len);   // C 版 a->fval = nbind，后端读这里
         n.a = arity;
         n.b = try self.parse_block();
         if (self.accept(lex.Kind.kw_else)) {
@@ -1782,11 +1961,48 @@ pub const Parser = struct {
 
     const parse_program = fn (self: *Parser) !*Node {
         let root = self.new(NK.root);
-        while (!self.at(lex.Kind.eof)) {
+        var go = true;
+        while (go) {
+            if (self.at(lex.Kind.eof)) { go = false; continue; }
             let before = self.i;
-            let st = try self.parse_stmt();
-            self.push_item(root, st);
-            if (self.i == before) { self.advance(); }
+            let nerr = self.errs.len;
+            let r = self.parse_stmt();
+            if (r) st {
+                self.push_item(root, st);
+                if (self.i == before) { self.advance(); }
+            } else {
+                // 顶层恢复（对应 C 的 crude recovery）：补齐兜底消息，
+                // 然后丢到下一个顶层声明起点——后面的函数照常报错，
+                // 不能一条语法错吞掉整个文件。
+                if (self.errs.len == nerr) {
+                    self.msgb.clear();
+                    self.pushs("unexpected token in top-level declaration");
+                    self.record("E0202", self.dup_msg());
+                }
+                var depth: u32 = 0;
+                var g2 = true;
+                while (g2) {
+                    if (self.at(lex.Kind.eof)) { g2 = false; continue; }
+                    let k = self.cur().kind;
+                    if (k == lex.Kind.rbrace) {
+                        if (depth == 0) {
+                            self.advance();
+                            g2 = false;
+                            continue;
+                        }
+                        depth = depth - 1;
+                        self.advance();
+                        continue;
+                    }
+                    if (k == lex.Kind.lbrace) { depth = depth + 1; }
+                    if (depth == 0 && (k == lex.Kind.kw_const || k == lex.Kind.kw_pub ||
+                                       k == lex.Kind.kw_extern || k == lex.Kind.kw_type)) {
+                        g2 = false;
+                        continue;
+                    }
+                    self.advance();
+                }
+            }
         }
         return root;
     };

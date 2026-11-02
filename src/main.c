@@ -212,6 +212,15 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--ast"))    dump_ast = true;
         else if (!strcmp(argv[i], "--emit-c")) emit_c = true;
         else if (!strcmp(argv[i], "--check"))  check = true;
+        else if (!strncmp(argv[i], "--fe=", 5)) {
+            /* 前端选择（自举阶段 3）：默认 Zx 前端，--fe=c 交叉验证 */
+            if (!strcmp(argv[i] + 5, "zx"))       fe_set_mode(true);
+            else if (!strcmp(argv[i] + 5, "c"))   fe_set_mode(false);
+            else {
+                fprintf(stderr, "zxc: --fe expects 'zx' or 'c'\n");
+                return 2;
+            }
+        }
         else if (!strcmp(argv[i], "-o")) {
             if (++i >= argc) { fprintf(stderr, "zxc: -o needs a path\n"); return 2; }
             out = argv[i];
@@ -225,26 +234,30 @@ int main(int argc, char **argv) {
         else file = argv[i];
     }
     if (!file) { usage(); return 2; }
+    fe_set_argv0(argv[0]);
 
-    size_t len = 0;
-    char *src = read_source(file, &len);
     g_srcpath = file;
 
-    Lexer lx;
-    lexer_init(&lx, src, len);
-    lexer_run(&lx);
-    if (g_error_count) return 1;
-
     if (dump_tokens) {
+        /* 词法单元 dump 仍走 C 词法器：这是调试视图，且阶段 1 已对拍过
+         * 两侧词法器逐 token 一致（bootstrap/diff_tok.sh 一族）。 */
+        size_t len = 0;
+        char *src = read_source(file, &len);
+        if (!src) { fprintf(stderr, "zxc: cannot open '%s'\n", file); return 2; }
+        Lexer lx;
+        lexer_init(&lx, src, len);
+        lexer_run(&lx);
+        if (g_error_count) return 1;
         dump_toklist(&lx);
         return 0;
     }
 
-    if (dump_ast && g_error_count == 0) {
-        Node *root = parse_program(&lx);
+    Node *root = fe_parse_file(file);
+    if (!root || g_error_count) return 1;
+
+    if (dump_ast) {
         ast_dump(root, 0);
     } else {
-        Node *root = parse_program(&lx);
         if (check && g_error_count == 0) sema_check(root);
         if ((emit_c || out) && g_error_count == 0) {
             if (out) {

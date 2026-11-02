@@ -1846,7 +1846,8 @@ static Type *check_cast(Node *n) {
     /* 错误码 0 就是"没有错误"。`(error)X` 里 X 在编译期能算出 0 的，
      * 等于把"出错了"写成"成功了"——而 `!T` 的成功分支还会去读一段
      * 未初始化的 payload。这类错编译过、跑起来答案错，必须在编译期拦下。
-     * 命名错误码请从 1 起（`enum { open = 1, … }`），别用 0。 */
+     * 命名错误码请从 1 起（`enum { open = 1, … }`），别用 0。
+     * 65535 同样保留：那是 error.null（§5，空可选值 try 出来的错误码）。 */
     if (to->kind == TY_ERROR) {
         int64_t cv = 0;
         bool known = false;
@@ -1858,6 +1859,9 @@ static Type *check_cast(Node *n) {
             return BAD_CODE("E0508", n, "error code 0 means \"no error\": this would be read as "
                                         "success and hand back an uninitialized payload — "
                                         "number your error codes from 1");
+        if (known && cv == 65535)
+            return BAD_CODE("E0508", n, "error code 65535 is reserved for `error.null` — "
+                                        "the code a null optional throws when you `try` it (§5)");
     }
 
     if ((from->kind == TY_COMPTIME_INT || from->kind == TY_COMPTIME_FLOAT) &&
@@ -2749,9 +2753,11 @@ static Type *check_expr_raw(Node *n, Type *expect) {
         if (g_in_defer)
             return BAD(n, "`try` is not allowed inside `defer` — a defer body cannot "
                           "propagate; handle the error there (`if` capture / `orelse`)");
-        if (t->kind != TY_ERR)
-            return BAD(n, "`try` needs an error union, found `%s` — "
-                          "for `?T` the " "empty case is not an error; use `orelse` or `if` capture",
+        /* `?T` 也行（v0.26）：空值当错误——null 抛保留错误码 error.null（65535）。
+         * "可能没有"和"可能出错"不靠嵌套表达（?!T 非法），靠同一条传播路。 */
+        if (t->kind != TY_ERR && t->kind != TY_OPT)
+            return BAD(n, "`try` needs an error union or an optional, found `%s` — "
+                          "use `orelse` or `if` capture to handle the empty case here",
                        ty_str(t));
         /* 往外抛要有地方抛：所在函数必须能返回错误（`!U`）。 */
         if (!g_ret || g_ret->kind != TY_ERR)
@@ -3293,12 +3299,14 @@ static Module *module_load_full(const char *full, int line, int col) {
         return old;
     }
 
-    size_t len = 0;
-    char *src = read_source(full, &len);
-    if (!src) {
+    /* 打得开吗？先探一下，保留 "cannot open module" 的语义
+     * （解析/读源由 fe_parse_file 接手，Zx 前端在 zxfe 里读）。 */
+    FILE *probe = fopen(full, "rb");
+    if (!probe) {
         err_at(line, col, "cannot open module '%s'", full);
         return NULL;
     }
+    fclose(probe);
 
     Module *m = calloc(1, sizeof(Module));
     m->path = full;
@@ -3326,10 +3334,13 @@ static Module *module_load_full(const char *full, int line, int col) {
     const char *save_p = g_srcpath;
 
     g_srcpath = m->path;
-    Lexer lx;
-    lexer_init(&lx, src, len);
-    lexer_run(&lx);
-    m->root = parse_program(&lx);
+    /* 自举阶段 3：模块也走同一前端（默认 zxfe，--fe=c 时走 C 解析器）。
+     * Zx 前端解析失败时诊断已由 zxfe 打到 stderr，这里补一条定位。 */
+    m->root = fe_parse_file(m->path);
+    if (!m->root) {
+        err_at(line, col, "module '%s' failed to parse", full);
+        return NULL;
+    }
 
     g_mod = m;
     g_scope = &m->scope;        /* parent 为空：模块之间不共享名字 */
@@ -3683,8 +3694,22 @@ static Type *check_if(Node *n, Type *expect) {
     if (n->c && !(known && cv->bval)) {
         Scope sc;
         scope_push(&sc);
+        /* `?T` 不许 else 捕获（v0.26）：值臂是"?"、错误捕获臂是"!"，
+         * 同框就是被禁的 `?!T`。else **捕获**只属于 `!T`；`?T` 的空
+         * 要么 `else { … }` 不带名，要么交给 `try`（抛 error.null）。
+         * （meth_done 在 IF 上没有别的用途，拿它当"已报过"标记——
+         *   同一节点可能经 ct 求值路径再来一遍，不能报两条。） */
+        if (is_opt && n->d && n->d->kind == NK_IDENT && !n->meth_done) {
+            n->meth_done = true;
+            err_at(n->line, n->col,
+                   "a `?T` capture cannot have an `else e` capture — `?T` and `!T` "
+                   "do not nest (?!T is illegal); use plain `else { … }` for the empty "
+                   "case, or `try` to treat null as the error `error.null`");
+        }
         if (n->d && n->d->kind == NK_IDENT) {
-            Type *ft = is_err ? ty_error() : is_opt ? ty_bool() : NULL;
+            /* `?T` 报错后仍把 e 绑成 error 类型：只报这一条，别让
+             * else 臂里对 e 的引用级联成一串未知标识符。 */
+            Type *ft = is_err ? ty_error() : ty_error();
             if (ft) {
                 Symbol *s = scope_add(&sc, n->d->name, SK_CAPTURE);
                 if (s) { s->ty = ft; s->state = 2; }

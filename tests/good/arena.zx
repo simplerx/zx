@@ -31,7 +31,7 @@ const push = fn (head: ?*Node, v: i32) ?*Node {
         node.value = v;
         node.next = head;
         return node;
-    } else e {
+    } else {
         return null;
     }
 };
@@ -42,21 +42,21 @@ const main = fn () u8 {
     var a = std.format(arena, "x={} y={}", 1, 2);
     if (a) sa {
         std.println("a=[{s}] used={}", sa, used);
-    } else e {
+    } else {
         std.println("oom a");
     }
 
     var b = std.format(arena, "{s}-{s}", "ab", "cd");
     if (b) sb {
         std.println("b=[{s}] used={}", sb, used);
-    } else e {
+    } else {
         std.println("oom b");
     }
 
     var c = render(arena, 5);
     if (c) sc {
         std.println("c=[{s}] used={}", sc, used);
-    } else e {
+    } else {
         std.println("oom c");
     }
 
@@ -78,7 +78,7 @@ const main = fn () u8 {
     var big = std.format(arena, "{s}", LONG);
     if (big) s {
         std.println("big=[{s}]", s);
-    } else e {
+    } else {
         std.println("oom big");
     }
     return 0;

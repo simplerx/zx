@@ -30,12 +30,12 @@ const main = fn () i32 {
     std.println("pick {}", pick(7));
     std.println("pick {}", pick(null));
 
-    // 失败分支也能捕获：?T 时它拿到的是 bool（"确实为空"）
+    // 失败分支：`?T` 不许 else 捕获（?!T 非法）——else 捕获只属于 `!T`
     const row: ?[]const u8 = "abcdef";
     if (row) s {
         std.println("len {}", s.len);
-    } else e {
-        std.println("empty {}", e);
+    } else {
+        std.println("empty");
     }
 
     std.println("done");
