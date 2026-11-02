@@ -1,0 +1,27 @@
+// Zx 项目任务（Zed task runner）。
+[
+  {
+    "label": "zx: build（zxc → zxfe → zxls 三件套）",
+    "command": "sh",
+    "args": ["build.sh"],
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  },
+  {
+    "label": "zx: check 当前文件",
+    "command": "bin/zxc.exe",
+    "args": ["--check", "$ZED_FILE"],
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  },
+  {
+    "label": "zx: 编译并运行当前文件",
+    "command": "sh",
+    "args": ["-c", "bin/zxc.exe \"$ZED_FILE\" -o .zc-cache/run.exe && ./.zc-cache/run.exe"],
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  }
+]

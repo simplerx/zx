@@ -127,6 +127,7 @@ module.exports = grammar({
         $.return_statement,
         $.continue_statement,
         $.defer_statement,
+        $.errdefer_statement,
         $.expression_statement,
         $.block,
       ),
@@ -611,6 +612,9 @@ module.exports = grammar({
 
     defer_statement: ($) =>
       seq("defer", field("body", $._statement)),
+
+    errdefer_statement: ($) =>
+      seq("errdefer", field("body", $._statement)),
 
     continue_statement: ($) =>
       seq("continue", optional(seq(":", field("label", $.identifier))), ";"),

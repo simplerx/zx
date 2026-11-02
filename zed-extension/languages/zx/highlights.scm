@@ -21,7 +21,7 @@
 [
   "const" "let" "var" "fn" "module"
   "if" "else" "while" "for" "inline" "switch" "continue" "return"
-  "defer" "struct" "union" "enum" "error" "pub" "extern" "try"
+  "defer" "errdefer" "struct" "union" "enum" "error" "pub" "extern" "try"
   "and" "or"
 ] @keyword
 

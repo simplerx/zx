@@ -24,3 +24,18 @@ if [ ! -f bin/zxfe.exe ]; then
 fi
 ./bin/zxc.exe bootstrap/zxfe.zx -o bin/zxfe.exe $ZFE_FLAG
 echo "built bin/zxfe.exe"
+
+# zxls：Zx 语言服务器（LSP over stdio），给 Zed / VS Code 提供诊断与补全。
+# 注意：zxls 是宿主工具（不走自举），用 anyzig 管理的 zig 0.17.0 编译；
+# vendored 0.15 的 API 与 0.17 不兼容（std.Io 接口等）。
+# anyzig 会被 ZIG_GLOBAL_CACHE_DIR 干扰（找不到已装版本），故 subshell 里清掉。
+if command -v zig >/dev/null 2>&1; then
+    if (unset ZIG_GLOBAL_CACHE_DIR ZIG_LOCAL_CACHE_DIR; exec zig 0.17.0 version) >/dev/null 2>&1; then
+        (unset ZIG_GLOBAL_CACHE_DIR ZIG_LOCAL_CACHE_DIR; exec zig 0.17.0 build-exe tools/zxls.zig -O ReleaseSafe -femit-bin=bin/zxls.exe)
+        echo "built bin/zxls.exe"
+    else
+        echo "skip bin/zxls.exe（anyzig 侧 zig 0.17.0 不可用，见 README）"
+    fi
+else
+    echo "skip bin/zxls.exe（未找到 zig/anyzig，见 README）"
+fi

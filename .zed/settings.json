@@ -1,0 +1,19 @@
+// Zx 项目开发环境（随仓库走）。
+// 依赖 bin/ 下的三件套：zxc.exe（编译器）、zxfe.exe（自举前端）、zxls.exe（语言服务器）。
+// 先跑一次 `sh build.sh` 生成它们（zxls 需要 anyzig 管理的 zig 0.17.0）。
+{
+  "lsp": {
+    "zx-lsp": {
+      "binary": {
+        // 相对路径相对 worktree 根解析（Zed 内建行为）
+        "path": "bin/zxls.exe"
+      }
+    }
+  },
+  "languages": {
+    "Zx": {
+      "language_servers": ["zx-lsp"],
+      "format_on_save": "off"
+    }
+  }
+}

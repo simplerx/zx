@@ -31,6 +31,35 @@ bin/zxc.exe file.zx -o prog       # 生成 C 并调 zig cc 编成可执行文件
 后端用的 C 编译器是 `ZX_CC` 环境变量指定的命令，缺省是项目内的
 `.toolchain/zig.exe cc`。
 
+## 开发环境（编辑器）
+
+给 Zed 装 zx 语法扩展（详见 M39）后，本仓库自带完整 IDE 能力：
+
+```sh
+sh build.sh          # 三件套：bin/zxc.exe + bin/zxfe.exe + bin/zxls.exe
+```
+
+- **zxls.exe（语言服务器）**是宿主工具，不走自举：用 anyzig 管理的
+  zig 0.17.0 编译（`zig 0.17.0 build-exe tools/zxls.zig -O ReleaseSafe`）。
+  vendored 0.15 的 std API 与 0.17 不兼容（`std.Io` 接口等），不要混用。
+  注意 anyzig 会被 `ZIG_GLOBAL_CACHE_DIR` 干扰（找不到已装版本）——
+  `build.sh` 里已在 subshell 中清掉该变量再调用。
+- **Zed 接入**零手工配置：`.zed/settings.json` 已随仓库提交
+  （`lsp.zx-lsp.binary.path = "bin/zxls.exe"`，相对路径相对 worktree 根
+  解析）。打开项目即生效；`.zed/tasks.json` 提供三个任务：构建三件套、
+  `zxc --check` 当前文件、编译并运行当前文件。
+- **诊断**：didOpen/didChange 后防抖 250ms，把**缓冲内容**写影子文件
+  （同目录 `.zxls-<hash>.zx`）跑 `zxc --check`，解析 stderr 的
+  `path:line:col: error[CODE]: msg` 推给编辑器。诊断与编译器 100% 同源。
+  Windows 上 spawn 链必须经 `cmd /c` 中转——zig 直接拉 zxc 时孙进程
+  （zxfe）的 stderr 句柄继承断链，诊断会全丢。
+- **补全**：`std.`（编译器 seed 的 13 个内建 + std.zx 顶层声明）、
+  `std.<ns>.`（heap/file/io/process 成员）、`@`（18 个内建）、关键字、
+  容器字段 / enum 变体、工作区标识符。词表与 `src/sema.c` 逐字对齐
+  （注意 `@println` 不存在——打印是 `std.println`）。
+- **排障**：zxls 会在 exe 同目录写 `zxls-lsp.log`（boot / didOpen /
+  publish 各一行）；Zed 侧 LSP 不启动时先看这里有没有 boot。
+
 ## 代码结构
 
 | 文件 | 内容 |
