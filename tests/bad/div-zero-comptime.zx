@@ -1,0 +1,9 @@
+// expect: division by zero in a compile-time expression
+// expect-code: E0505
+// 这里不断条数：除零之后 const 还会连带报一条 R1（"该初始化需要运行期值"），
+// 那条是级联消息，属正常。去重单独在 div-zero-dedup.zx 里断。
+const bad: i32 = 10 / 0;
+
+fn main() void {
+    let x = bad;
+}

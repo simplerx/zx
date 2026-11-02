@@ -1,0 +1,8 @@
+// expect: a type is required, not a value
+// 泛型的类型参数只能吃类型
+const List = fn (T: type) type {
+    return struct { data: []T };
+};
+fn main() void {
+    var x: List(0) = undefined;
+}

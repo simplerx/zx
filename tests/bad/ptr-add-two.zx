@@ -1,0 +1,9 @@
+// expect: cannot add two pointers
+fn main() u8 {
+    var a: *[4]i32 = undefined;
+    var b: *[4]i32 = undefined;
+    let p: *i32 = a;
+    let q: *i32 = b;
+    let r = p + q;
+    return 0;
+}

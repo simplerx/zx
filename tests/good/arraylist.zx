@@ -1,0 +1,51 @@
+// ArrayList 的完整 API（M19）：增删插、首尾、反转、伸缩、交换。
+const std = module("std");
+
+fn main() u8 {
+    let al = std.heap.page;
+    var xs = std.ArrayList(i32).init(al);
+
+    for (0..5) i { if (!xs.push((i32)i)) { return 1; } }
+    std.println("{}", xs.items());
+
+    if (!xs.insertAt(2, 99)) { return 1; }
+    std.println("{}", xs.items());
+
+    if (!xs.insertAt(xs.len, 7)) { return 1; }     // 等价 push
+    std.println("{}", xs.items());
+
+    if (!xs.removeAt(0)) { return 1; }
+    std.println("{}", xs.items());
+
+    if (xs.removeAt(99)) { return 1; }             // 越界必须 false
+
+    if (xs.first()) f { std.println("first {}", f); }
+    if (xs.last()) l { std.println("last {}", l); }
+
+    xs.reverse();
+    std.println("{}", xs.items());
+
+    if (!xs.resize(3, 0)) { return 1; }            // 截断
+    std.println("{}", xs.items());
+
+    if (!xs.resize(5, 42)) { return 1; }           // 补 fill
+    std.println("{}", xs.items());
+
+    if (!xs.swap(0, 4)) { return 1; }
+    std.println("{}", xs.items());
+
+    xs.deinit();
+    return 0;
+}
+
+// expect-output
+// [0, 1, 2, 3, 4]
+// [0, 1, 99, 2, 3, 4]
+// [0, 1, 99, 2, 3, 4, 7]
+// [1, 99, 2, 3, 4, 7]
+// first 1
+// last 7
+// [7, 4, 3, 2, 99, 1]
+// [7, 4, 3]
+// [7, 4, 3, 42, 42]
+// [42, 4, 3, 42, 7]

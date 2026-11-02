@@ -1,0 +1,121 @@
+/* ast.h — AST node definitions for zxc. */
+#ifndef ZXC_AST_H
+#define ZXC_AST_H
+
+#include "zxc.h"
+
+typedef enum {
+    NK_INT, NK_FLOAT, NK_STR, NK_CHAR,
+    NK_IDENT,           /* name */
+    NK_BOOL, NK_NULL, NK_UNDEF,
+    NK_BIN,             /* a op b (op = TokKind) */
+    NK_RANGE,           /* lo .. [hi]  (hi==NULL → open, for/multi-bind only) */
+    NK_UN,              /* op a  — -, +, !, ~, & (addr) */
+    NK_CAST,            /* (T)e — a=type, b=expr */
+    NK_INDEX,           /* base[idx] */
+    NK_SLICE,           /* base[lo..hi] (hi NULL → open) */
+    NK_FIELD,           /* base.name / base.N (name NULL → idx in ival) */
+    NK_CALL,            /* callee(args) */
+    NK_TUPLE,           /* { e, ... }  items */
+    NK_ANON_STRUCT,     /* .{ .x = e } items = NK_PAIR */
+    NK_STRUCT_LIT,      /* Type{ .f = e } a=type, items = NK_PAIR */
+    NK_ARRAY_LIT,       /* &.{ e, ... } items */
+    NK_PAIR,            /* .name = expr  (name; a = value) */
+    NK_BLOCK,           /* { stmts } label? */
+    NK_IF,              /* a=cond, b=then, c=else; name=capture; str=label? */
+    NK_WHILE,           /* a=cond, b=body, c=else; label */
+    NK_FOR,             /* seqs+binds in items (seqs first, then binds), b=body, c=else */
+    NK_SWITCH,          /* a=subject, items = NK_ARM */
+    NK_ARM,             /* pats in items (or flag=else), a=body, label */
+    NK_RETURN,          /* a */
+    NK_CONTINUE,        /* label = tag? */
+    NK_YIELD,           /* label = tag, a = value (NULL → {}) */
+    NK_DEFER,           /* a */
+    NK_BUILTIN,         /* @name(args) */
+    NK_MODULE,          /* module("str") */
+    NK_DECL,            /* const/let/var name [: T] = init  (flag: 0=const,1=let,2=var) */
+    NK_FN,              /* [name](params) ret body — ret NULL/flag when none */
+    NK_PARAM,           /* name: type (name NULL → anon), flag = is_var */
+    /* type expressions */
+    NK_TYPE_IDENT,      /* name (error/type keywords too) */
+    NK_PTR_TYPE,        /* *[N]elem / *elem — a=elem, b=len (NULL→none), flag=is_const */
+    NK_SLICE_TYPE,      /* []elem — flag = is_const */
+    NK_TUPLE_TYPE,      /* { T, ... } */
+    NK_STRUCT_TYPE,     /* flag: 0=plain,1=packed,2=c */
+    NK_UNION_TYPE,      /* tagged if any member is tuple-typed */
+    NK_ENUM_TYPE,       /* a = backing type */
+    NK_OPT_TYPE,        /* ?elem */
+    NK_ERR_TYPE,        /* !elem */
+    NK_ROOT,            /* file */
+} NodeKind;
+
+struct Node;
+typedef struct Node Node;
+struct Type;
+struct Symbol;
+
+struct Node {
+    NodeKind    kind;
+    int         line, col;
+    int         op;         /* TokKind for BIN/UN */
+    const char *name;       /* ident / field / capture / builtin */
+    const char *label;      /* tag on a block/loop/switch, or yield target */
+    uint64_t    ival;       /* INT value / field index */
+    double      fval;
+    const char *str;        /* string content / enum tag name */
+    int         str_len;
+    Node       *a, *b, *c, *d;
+    Node      **items;
+    int         nitems;
+    bool        flag;
+    /* inline for：sema 按迭代次数克隆循环体，后端逐份发射。
+     * 只挂在 NK_FOR 上（flag = 是不是 inline）。 */
+    Node      **unroll;
+    int         nunroll;
+    bool        is_pub;     /* 顶层声明带 pub：模块外可见 */
+    bool        is_extern;  /* `extern fn …;`：外部 C 函数，没有函数体 */
+    /* filled in by sema */
+    struct Type   *ty;        /* 表达式的类型（类型值则是 TY_TYPE） */
+    struct Type   *type_val;  /* ty == TY_TYPE 时，它表示的那个类型 */
+    struct Value  *ct;        /* 编译期值；NULL = 只能运行时算 */
+    struct Node   *inst;      /* 泛型调用：单态化出来的那份函数 */
+    struct Symbol *sym;
+    bool          esc;        /* 值指向当前栈帧（std.stackAlloc 调用打上；逃逸检查用） */
+    bool          body_checked;
+    bool          meth_done;  /* 方法调用已补过接收者（重复检查时直接返回类型） */
+    int           index;    /* destructuring slot */
+};
+
+Node *node_new(NodeKind k, int line, int col);
+
+/* 后端要用符号名：Symbol 本体是 sema.c 私有的，这里只暴露名字。 */
+const char *sema_sym_name(struct Symbol *s);
+/* 命令行第 0 个参数：用来找随附的 std/ 源码 */
+void sema_set_argv0(const char *p);
+Node *parse_program(Lexer *lx);
+/* 后端生成 C 名字用：模块内的名字带模块前缀，避免多文件重名 */
+const char *sema_sym_cname(struct Symbol *s);
+/* 这个符号是 `extern fn` 声明的外部 C 函数吗？（名字原样发，不转义） */
+bool sema_sym_is_extern(struct Symbol *s);
+/* 模块表：0 是入口文件 */
+int   sema_module_count(void);
+Node *sema_module_root(int i);
+const char *sema_module_path(int i);
+const char *sema_module_stem(int i);
+bool sema_fn_is_generic(Node *fn);
+/* 这个符号在生成的 C 里有自己的存储吗？泛型实参、运行时形参都没有。 */
+bool sema_sym_has_storage(struct Symbol *s);
+/* 符号上挂的编译期值（泛型实参用得到） */
+struct Value *sema_sym_ct(struct Symbol *s);
+/* 这个类型只在编译期存在吗？（std.TypeInfo / std.FieldInfo——里面装着
+ * type 值，C 里没有对应物；后端用它跳过这些"声明"的物化） */
+bool sema_ty_ct_only(struct Type *t);
+/* 内建分配器类型（std.heap.page 的类型） */
+struct Type *sema_allocator_type(void);
+/* 泛型实例：签名前面还有几个参数是编译期的 */
+int  sema_fn_ncomp(Node *fn);
+
+/* s-expression dump for debugging */
+void ast_dump(const Node *n, int depth);
+
+#endif

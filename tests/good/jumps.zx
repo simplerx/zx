@@ -1,0 +1,50 @@
+// jumps.zx —— defer / continue / 嵌套标签 的交互
+const std = module("std");
+
+fn main() u8 {
+    // continue 前必须先跑本轮 defer
+    var log: i32 = 0;
+    var i: usize = 0;
+    while (i < 3) {
+        defer log = log + 10;
+        i = i + 1;
+        if (i == 2) { continue; }
+        log = log + 1;
+    }
+    std.println("log={}", log);
+
+    // 嵌套标签：内层跳出两层
+    const hit = search: for (0..4) a {
+        for (0..4) b {
+            if (a * b == 6) { search: a * 10 + b; }
+        }
+    };
+    std.println("hit={}", hit);
+
+    // 带值 while + else
+    var n: usize = 0;
+    const got = count: while (n < 5) {
+        n = n + 1;
+        if (n == 3) { count: n * 100; }
+    } else 0;
+    std.println("got={}", got);
+
+    // return 穿过两层 defer
+    std.println("ret={}", through());
+
+    return 0;
+}
+
+fn through() i32 {
+    defer std.print("D1 ");
+    {
+        defer std.print("D2 ");
+        return 7;
+    }
+}
+
+// expect-output
+// log=32
+// hit=23
+// got=300
+// D2 D1 ret=7

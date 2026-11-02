@@ -1,0 +1,9 @@
+// expect: division by zero in a compile-time expression
+// expect-code: E0505
+// expect-count: 1
+// 语义检查对同一个表达式求值两次（定型一次、折叠一次），
+// 求值是带副作用的——诊断必须在出口处去重，条数才对得上摘要里的数字。
+fn main() i32 {
+    let a: i32 = 1 / 0;
+    return a;
+}

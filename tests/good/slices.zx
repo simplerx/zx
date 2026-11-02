@@ -1,0 +1,32 @@
+// 切片：ptr + len，运行时下标，多绑定 for
+const std = module("std");
+
+const sumWeighted = fn (xs: []const i32) i32 {
+    var total: i32 = 0;
+    for (xs, 0..) x, i { total = total + x * (i32)i; }
+    return total;
+};
+
+const dot3 = fn (a: *const [3]i32, b: *const [3]i32) i32 {
+    var acc: i32 = 0;
+    for (a[0..], b[0..]) x, y { acc = acc + x * y; }
+    return acc;
+};
+
+fn main() u8 {
+    var buf: *[3]i32 = &.{1, 2, 3};
+    let s = buf[0..];
+    let p = s.ptr;
+    std.println("{} {} {}", s.len, s.0, p.0);
+    std.println("{}", sumWeighted(s));
+    let b: *const [3]i32 = &.{4, 5, 6};
+    std.println("{}", dot3(buf, b));
+    std.println("{} {}", buf.len, buf.size);
+    return 0;
+}
+
+// expect-output
+// 3 1 1
+// 8
+// 32
+// 3 12

@@ -1,0 +1,4 @@
+// expect: continue` outside a loop
+fn main() void {
+    continue;
+}

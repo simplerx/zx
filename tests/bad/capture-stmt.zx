@@ -1,0 +1,7 @@
+// expect: a capture name must be followed by
+fn pick(o: ?i32) i32 {
+    if (o) v if (v > 0) { return 1; }
+    return 0;
+}
+
+fn main() i32 { return pick(1); }

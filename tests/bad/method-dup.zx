@@ -1,0 +1,7 @@
+// expect: 'x' is already a member; a method cannot share its name
+const P = struct {
+    x: i32,
+    fn x(self: Self) i32 { return 1; }
+};
+
+fn main() u8 { return 0; }

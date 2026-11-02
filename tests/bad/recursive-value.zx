@@ -1,0 +1,5 @@
+// expect: contains the struct by value
+// 自引用必须经过指针：值类型里放自己，大小无穷
+const Node = struct { value: i32, next: Node };
+
+fn main() u8 { return 0; }

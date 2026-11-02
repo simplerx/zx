@@ -1,0 +1,4 @@
+// private.zx 的配套模块：secret 没有 pub，外面引用必须报错
+pub fn ok() i32 { return 1; }
+
+fn secret(n: i32) i32 { return n * 2; }

@@ -1,0 +1,23 @@
+// defer 在离开作用域时执行，LIFO
+const std = module("std");
+
+const cleanup = fn () void { std.print("bye\n"); };
+
+const run = fn () i32 {
+    var x: i32 = 0;
+    {
+        defer x = x + 100;
+        x = 1;
+    }
+    defer cleanup();
+    return x;
+};
+
+fn main() u8 {
+    std.println("{}", run());
+    return 0;
+}
+
+// expect-output
+// bye
+// 101

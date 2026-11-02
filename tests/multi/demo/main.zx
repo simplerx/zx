@@ -1,0 +1,23 @@
+// 多文件：一个文件一个模块，`pub` 决定对外接口
+const std = module("std");
+const util = module("util.zx");
+const geo = module("geo.zx");
+
+fn main() u8 {
+    std.println("add={} twice={}", util.add(2, 3), util.twice(21));
+    std.println("module={} version={}", util.name, util.VERSION);
+
+    var p = geo.Point{ .x = 3, .y = 4 };
+    std.println("len2={} tag={}", geo.len2(p), p.tag);
+    let q = geo.scale(p, 2);
+    std.println("scaled={} {}", q.x, q.y);
+    std.println("origin={} {}", geo.origin.x, geo.origin.y);
+    return 0;
+}
+
+// expect-output
+// add=5 twice=44
+// module=util version=3
+// len2=25 tag=pt
+// scaled=6 8
+// origin=0 0

@@ -1,0 +1,43 @@
+// views.zx —— 编译期视图折叠：切片 / 下标 / .len / .ptr 都能算出值（R1）
+const std = module("std");
+
+const str = "hello";
+const head = str[0..2];          // "he"："hello" 的视图，编译期就是一小段字符串
+const tail = str[1..];           // "ello"
+const c1 = str[1];               // 'e'
+const hlen = head.len;           // 2
+
+const arr: *const [3]i32 = &.{10, 20, 30};
+const alen = arr.len;            // 3
+const asize = arr.size;          // 12
+const a0 = arr.0;                // 10
+const mid = arr[1..];            // []const i32，长度 2，指向 arr[1]
+const m0 = mid.0;                // 20
+const mlen = mid.len;            // 2
+
+const tup = {1, "two", 3.0};
+const tsize = tup.size;          // 按 R7 的默认宽度算：4 + (4) + 16 + 8
+const tlen = tup.len;            // 3
+const t2 = tup.2;                // 3.0
+const {d0, d1, d2} = tup;        // 解构出来的分量也是编译期常量
+
+const maybe: ?i32 = 5;
+const p: *const i32 = (*const i32)&maybe;   // &maybe 就是 &payload
+
+fn main() u8 {
+    std.println("head={} len={} c1={c}", head, hlen, c1);
+    std.println("tail={} a0={} alen={} asize={}", tail, a0, alen, asize);
+    std.println("mid.len={} m0={}", mlen, m0);
+    std.println("tup: len={} size={} t2={}", tlen, tsize, t2);
+    std.println("destructure: {} {} {}", d0, d1, d2);
+    std.println("payload via &maybe = {}", p.0);
+    return 0;
+}
+
+// expect-output
+// head=he len=2 c1=e
+// tail=ello a0=10 alen=3 asize=12
+// mid.len=2 m0=20
+// tup: len=3 size=32 t2=3
+// destructure: 1 two 3
+// payload via &maybe = 5

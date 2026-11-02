@@ -1,0 +1,78 @@
+// if 的单条语句臂（M19/M20）：臂里只有一条语句时不用写花括号。
+//   if (c) return x;      if (o) v return v;      if (c) continue;
+//   if (c) call(); else other();                  （M20：表达式语句 + 分号）
+// 语义和写块完全一样（解析时就是包一层单语句块）。
+const std = module("std");
+
+fn grade(n: i32) []const u8 {
+    if (n >= 90) return "A";
+    if (n >= 60) return "B";
+    return "C";
+}
+
+fn countOver(xs: []const i32, limit: i32) i32 {
+    var n: i32 = 0;
+    for (xs) x {
+        if (x <= limit) continue;
+        n = n + 1;
+    }
+    return n;
+}
+
+// 捕获名 + 单条语句
+fn doubled(o: ?i32) i32 {
+    if (o) v return v * 2;
+    return -1;
+}
+
+// 表达式语句臂：分号属于臂，不再逼着写花括号（M20）
+fn shout(c: bool) void {
+    if (c) std.println("shout yes"); else std.println("shout no");
+}
+
+// 赋值语句臂（赋值在 Zx 里也是表达式，同样吃这套糖）
+fn label(c: bool) []const u8 {
+    var out: []const u8 = "?";
+    if (c) out = "yes"; else out = "no";
+    return out;
+}
+
+// else-if 链，每一臂都是语句
+fn chain(n: i32) void {
+    if (n == 1) std.println("one");
+    else if (n == 2) std.println("two");
+    else std.println("many");
+}
+
+fn main() u8 {
+    std.println("{} {} {}", grade(95), grade(75), grade(20));
+
+    let xs = &.{ 1, 5, 9, 12 };
+    std.println("over {}", countOver(xs[0..4], 5));
+
+    std.println("{} {}", doubled(null), doubled(21));
+
+    shout(true);
+    shout(false);
+    std.println("{} {}", label(true), label(false));
+    chain(1);
+    chain(2);
+    chain(3);
+
+    // 值形态不受影响：`else` 前面没有分号，照旧是表达式臂
+    let pick = if (xs[0] > 0) 10 else 20;
+    std.println("pick {}", pick);
+    return 0;
+}
+
+// expect-output
+// A B C
+// over 2
+// -1 42
+// shout yes
+// shout no
+// yes no
+// one
+// two
+// many
+// pick 10

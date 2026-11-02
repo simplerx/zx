@@ -1,0 +1,4 @@
+// expect: has no count
+// 数量只在 *[N]T 上；*T 已经丢掉数量
+fn head(p: *i32) usize { return p.len; }
+fn main() void {}

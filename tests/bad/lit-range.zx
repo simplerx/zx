@@ -1,0 +1,4 @@
+// expect: integer literal 300 does not fit in `i8`
+fn main() void {
+    let a: i8 = 300;
+}

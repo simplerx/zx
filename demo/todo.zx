@@ -1,0 +1,114 @@
+// todo.zx —— 极简待办 CLI。
+//
+//   todo add <text>    添加一条
+//   todo list          列出全部
+//   todo done <n>      完成第 n 条
+//   todo rm <n>        删除第 n 条
+//
+// 存储就是当前目录的 todo.txt，一行一条：<0|1>|<内容>
+// 函数一律写成 `const 名字 = fn (参数) 返回 { … };`——函数是值。
+const std = module("std");
+
+const Item = struct { done: bool, text: []const u8 };
+
+// 把 todo.txt 读进列表；文件不存在就从空列表开始。
+const load = fn (al: std.Allocator) std.ArrayList(Item) {
+    var xs = std.ArrayList(Item).init(al);
+    let text = std.file.read(al, "todo.txt");
+    if (text) t {
+        let parts = std.str.split(al, t, "\n");
+        if (parts) ps {
+            for (ps) p {
+                if (p.len < 3) continue;                    // 末尾空行 / 残行
+                let it = Item{ .done = p[0] == '1', .text = p[2..p.len] };
+                if (!xs.push(it)) std.process.exit(1);
+            }
+            std.str.freeSplit(al, ps);
+        }
+    }
+    return xs;
+};
+
+// 整体重写 todo.txt：每行 "{d}|{s}"。
+const save = fn (al: std.Allocator, var xs: std.ArrayList(Item)) bool {
+    var out: []const u8 = "";
+    for (0..xs.len) i {
+        if (xs.get(i)) it {
+            if (std.format(al, "{d}|{s}\n", it.done, it.text)) line {
+                if (std.str.concat(al, out, line)) o { out = o; }
+                else return false;
+            } else return false;
+        }
+    }
+    return std.file.write("todo.txt", out);
+};
+
+const list = fn (var xs: std.ArrayList(Item)) void {
+    if (xs.len == 0) { std.println("(nothing yet)"); return; }
+    for (0..xs.len) i {
+        if (xs.get(i)) it {
+            // 一条表达式语句的臂：分号属于臂（v0.15），两边都是 void 调用
+            if (it.done) std.println("{d}. [x] {s}", i + 1, it.text);
+            else         std.println("{d}. [ ] {s}", i + 1, it.text);
+        }
+    }
+};
+
+const usage = fn () void {
+    std.println("todo - a tiny todo cli");
+    std.println("  todo add <text>    add an item");
+    std.println("  todo list          show all items");
+    std.println("  todo done <n>      mark item n as done");
+    std.println("  todo rm <n>        remove item n");
+};
+
+const main = fn () u8 {
+    let al = std.heap.page;
+    let args = std.process.args();                          // argv[0] 不算
+
+    if (args.len == 0 || std.str.eq(args[0], "list")) {
+        list(load(al));
+        return 0;
+    }
+
+    if (std.str.eq(args[0], "add")) {
+        if (args.len < 2) { usage(); return 1; }
+        var xs = load(al);
+        if (!xs.push(Item{ .done = false, .text = args[1] })) return 1;
+        if (!save(al, xs)) { std.println("save failed"); return 1; }
+        std.println("added  [ ] {s}", args[1]);
+        return 0;
+    }
+
+    if (std.str.eq(args[0], "done") || std.str.eq(args[0], "rm")) {
+        if (args.len < 2) { usage(); return 1; }
+        let n = std.str.parseInt(args[1]);
+        if (n) v {
+            var xs = load(al);
+            if (v < 1 || (usize)(v) > xs.len) {
+                std.println("no item {s}", args[1]);
+                return 1;
+            }
+            let idx: usize = (usize)(v) - 1;
+            if (std.str.eq(args[0], "done")) {
+                if (xs.get(idx)) it {
+                    var nit = it;
+                    nit.done = true;
+                    if (!xs.set(idx, nit)) return 1;
+                    if (!save(al, xs)) return 1;
+                    std.println("done   [x] {s}", nit.text);
+                }
+            } else {
+                if (!xs.removeAt(idx)) return 1;            // ArrayList.removeAt
+                if (!save(al, xs)) return 1;
+                std.println("removed #{d}", v);
+            }
+            return 0;
+        }
+        std.println("bad index: {s}", args[1]);
+        return 1;
+    }
+
+    usage();
+    return 1;
+};

@@ -1,0 +1,133 @@
+// methods.zx —— 结构体/联合体体里的 fn
+//
+// 方法就是"第一个参数是接收者的普通函数"：p.f(a) 等价于 f(p, a)。
+// 接收者写 `Self` / `*Self` / `*const Self`，泛型类型体里也一样（不用重写 T）。
+const std = module("std");
+
+const Vec = struct {
+    x: i32,
+    y: i32,
+
+    const ZERO = Vec{ .x = 0, .y = 0 };
+
+    fn add(self: Self, o: Self) Self {
+        return Self{ .x = self.x + o.x, .y = self.y + o.y };
+    }
+
+    fn dot(self: Self, o: Self) i32 { return self.x * o.x + self.y * o.y; }
+
+    fn neg(self: Self) Self { return Self{ .x = -self.x, .y = -self.y }; }
+
+    // 指针接收者：改的就是调用者本身
+    fn shift(self: *Self, d: i32) void {
+        self.x = self.x + d;
+        self.y = self.y + d;
+    }
+
+    // 只读接收者：常量也能直接调
+    fn len2(self: *const Self) i32 { return self.x * self.x + self.y * self.y; }
+};
+
+const Tag = enum { circle, rect };
+const Shape = union {
+    circle: {Tag.circle, f64},
+    rect:   {Tag.rect, {f64, f64}},
+
+    fn area(self: *const Self) f64 {
+        switch (self.tag) {
+            .circle: { return 3.0 * self.circle * self.circle; },
+            .rect:   { return self.rect.0 * self.rect.1; },
+        }
+    }
+};
+
+// 自引用类型上的递归方法
+const Node = struct {
+    value: i32,
+    next: ?*Self,
+
+    fn sum(self: *const Self) i32 {
+        var total = self.value;
+        if (self.next) n { total = total + n.sum(); }
+        return total;
+    }
+};
+
+// 泛型类型里的方法：T / cap 在方法体里照常可用
+const List = fn (T: type, cap: usize) type {
+    return struct {
+        buf: *[cap]T,
+        len: usize,
+
+        fn push(self: *Self, v: T) bool {
+            if (self.len == cap) { return false; }
+            self.buf[self.len] = v;
+            self.len = self.len + 1;
+            return true;
+        }
+
+        fn get(self: *const Self, i: usize) ?T {
+            if (i >= self.len) { return null; }
+            return self.buf[i];
+        }
+    };
+};
+
+fn main() u8 {
+    var a = Vec{ .x = 3, .y = 4 };
+    const b = Vec{ .x = 1, .y = 2 };
+    std.println("add {}", a.add(b));
+    std.println("chain {}", a.add(b).neg().dot(Vec.ZERO.add(a)));
+    std.println("len2 {}", a.len2());
+
+    a.shift(10);
+    std.println("shift {}", a);
+
+    // 显式写法：接收者自己写出来，方法名挂在类型上
+    std.println("explicit {}", Vec.dot(a, b));
+
+    const c = Shape{ .circle = 2.0 };
+    std.println("circle {}", c.area());
+    const r = Shape{ .rect = { 3.0, 4.0 } };
+    std.println("rect {}", r.area());
+
+    var leaf = Node{ .value = 1, .next = null };
+    var mid  = Node{ .value = 2, .next = &leaf };
+    var head = Node{ .value = 3, .next = &mid };
+    std.println("sum {}", head.sum());
+
+    var buf = std.stackAlloc(i32, 3);
+    var l = List(i32, 3){ .buf = buf, .len = 0 };
+    var i: i32 = 0;
+    while (i < 4) {
+        let ok = l.push(i * 7);
+        std.println("push {} -> {}", i * 7, ok);
+        i = i + 1;
+    }
+    var k: usize = 0;
+    while (k < 4) {
+        var v = l.get(k);
+        if (v) x { std.println("get {} = {}", k, x); }
+        else     { std.println("get {} = none", k); }
+        k = k + 1;
+    }
+    return 0;
+}
+
+// expect-output
+// add Vec{x: 4, y: 6}
+// chain -36
+// len2 25
+// shift Vec{x: 13, y: 14}
+// explicit 41
+// circle 12
+// rect 12
+// sum 6
+// push 0 -> true
+// push 7 -> true
+// push 14 -> true
+// push 21 -> false
+// get 0 = 0
+// get 1 = 7
+// get 2 = 14
+// get 3 = none

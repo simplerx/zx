@@ -1,0 +1,6 @@
+// expect: cannot assign through a read-only path
+// let / const 绑定的数组是只读存储
+const ro: *const [3]i32 = &.{1, 2, 3};
+fn main() void {
+    ro.0 = 5;
+}

@@ -1,0 +1,60 @@
+// generic-alias.zx —— 泛型类型可以起别名
+//
+// `Pair(i32)` 是一次编译期调用，结果是个类型值：`const P = Pair(i32);` 之后
+// P 就是类型。类型名来自构造式（`Pair(i32)`），不来自谁先给它起别名。
+const std = module("std");
+
+const Pair = fn (T: type) type {
+    return struct { a: T, b: T };
+};
+
+const List = fn (T: type, cap: usize) type {
+    return struct {
+        buf: *[cap]T,
+        len: usize,
+        fn full(self: *const Self) bool { return self.len == cap; }
+    };
+};
+
+const IPair = Pair(i32);            // 顶层别名
+const IL2 = List(i32, 2);           // 带数值参数的别名
+
+fn sum(p: IPair) i32 { return p.a + p.b; }
+
+fn show(T: type, v: T) void { std.println("show {}", v); }
+
+fn main() u8 {
+    const P = Pair(i32);            // 函数内别名
+    const p = P{ .a = 3, .b = 4 };
+    std.println("{} sum={}", p, sum(p));
+
+    // 同一个实例换个名字还是同一个类型
+    const also = Pair(i32);
+    std.println("same {}", also{ .a = 1, .b = 2 });
+
+    const Q = Pair([]const u8);
+    show(Q, Q{ .a = "x", .b = "y" });
+    show(P, p);
+
+    const Nested = Pair(Pair(i32));
+    const n = Nested{ .a = P{ .a = 1, .b = 2 }, .b = P{ .a = 5, .b = 6 } };
+    std.println("{}", n);
+
+    var buf: *[2]i32 = undefined;
+    var l = IL2{ .buf = buf, .len = 2 };
+    std.println("full={} len={}", l.full(), l.len);
+
+    // 带标注的匿名字面量：期望类型驱动（R6），别名照样认得
+    var l2: IL2 = .{ .buf = buf, .len = 1 };
+    std.println("anon full={} len={}", l2.full(), l2.len);
+    return 0;
+}
+
+// expect-output
+// Pair(i32){a: 3, b: 4} sum=7
+// same Pair(i32){a: 1, b: 2}
+// show Pair([]const u8){a: "x", b: "y"}
+// show Pair(i32){a: 3, b: 4}
+// Pair(Pair(i32)){a: Pair(i32){a: 1, b: 2}, b: Pair(i32){a: 5, b: 6}}
+// full=true len=2
+// anon full=false len=1

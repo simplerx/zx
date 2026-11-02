@@ -1,0 +1,9 @@
+// expect: can reach the end of its body without returning
+// 有限循环不保证执行：`for` 一遍都没跑（或一次都没命中）就掉出末尾
+fn find(xs: []const i32, t: i32) i32 {
+    for (xs) x {
+        if (x == t) { return x; }
+    }
+}
+
+fn main() u8 { return 0; }

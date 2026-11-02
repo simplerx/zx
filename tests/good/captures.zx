@@ -1,0 +1,52 @@
+// 捕获名后面只有两种写法：块，或者单个返回值（语法糖）。
+//
+// 语句一律写进块里——`if (o) v if (…) {…}` 在语法上无法区分"第二个 if 是
+// 分支体"和"第二个 if 是兄弟语句"，两种读法都能过，语义却完全不同
+// （后者会先判断 o、丢掉结果，然后无条件判断 v）。所以现在直接报错，
+// 反例见 tests/bad/capture-stmt.zx。
+const std = module("std");
+
+fn describe(o: ?i32) void {
+    if (o) v {
+        if (v > 10) {
+            std.println("big {}", v);
+        } else {
+            std.println("small {}", v);
+        }
+    } else {
+        std.println("none");
+    }
+}
+
+fn pick(o: ?i32) i32 {
+    return if (o) v v else 0;          // 捕获 + 单个返回值
+}
+
+fn main() i32 {
+    describe(42);
+    describe(3);
+    describe(null);
+
+    std.println("pick {}", pick(7));
+    std.println("pick {}", pick(null));
+
+    // 失败分支也能捕获：?T 时它拿到的是 bool（"确实为空"）
+    const row: ?[]const u8 = "abcdef";
+    if (row) s {
+        std.println("len {}", s.len);
+    } else e {
+        std.println("empty {}", e);
+    }
+
+    std.println("done");
+    return 0;
+}
+
+// expect-output
+// big 42
+// small 3
+// none
+// pick 7
+// pick 0
+// len 6
+// done

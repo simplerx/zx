@@ -1,0 +1,54 @@
+// io_fmt.zx —— std.io.print / println：往任意句柄上格式化输出（M18）。
+// stdout 之外的落点（文件、stderr）用同一套格式串语法；动词在 sema
+// 编译期校验，发射全部走运行时解析器 zx_fmt_out（decisions §46）。
+const std = module("std");
+
+const P = struct { x: i32, y: i32 };
+
+fn main() u8 {
+    const io = std.io;
+
+    // ① 写进文件：全部动词 + {{}} 转义 + {N} 索引
+    if (io.openWrite("io_fmt.tmp")) h {
+        io.println(h, "n={d} hex={x} bin={b}", 42, 255, 5);
+        io.print(h, "{s}|{c}|{}|{}|{b}\n", "str", 'Z', true, 1.5, 12);
+        io.println(h, "{0}-{1}-{0} {{literal}}", 1, 2);
+        io.close(h);
+    } else {
+        std.println("open failed");
+        return 1;
+    }
+
+    // ② 读回来：内容经 stdout 验证（三行正好落在 [ ] 里）
+    if (io.openRead("io_fmt.tmp")) h {
+        var buf = std.stackAlloc(u8, 256);
+        let n = io.read(h, buf[0..256]);
+        std.println("[{s}]", buf[0..n]);
+        io.close(h);
+    }
+
+    // ③ 标准流也是普通句柄：stdout 进 expect-output
+    //    （stderr 也是同一个入口，test.sh 会把 2>&1 并进比对，这里不往那儿打）
+    io.println(io.stdout(), "to stdout {}", 7);
+    io.print(io.stdout(), "ch={c} {b}\n", 'Q', 9);
+
+    // ④ 聚合值照样展开（{} 和 {any} 同一条描述符路径）
+    io.println(io.stdout(), "{}", P{ .x = 1, .y = 2 });
+    io.println(io.stdout(), "{any}", P{ .x = 3, .y = 4 });
+
+    // ⑤ fmt 是变量：同一条路，只是 fmt 运行时才知道
+    var f: []const u8 = "rt {}";
+    io.println(io.stdout(), f, 9);
+    return 0;
+}
+
+// expect-output
+// [n=42 hex=ff bin=101
+// str|Z|true|1.5|1100
+// 1-2-1 {literal}
+// ]
+// to stdout 7
+// ch=Q 1001
+// P{x: 1, y: 2}
+// P{x: 3, y: 4}
+// rt 9

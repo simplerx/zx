@@ -1,0 +1,89 @@
+// @typeInfo(T)：编译期的类型描述 + @hasField / @fieldType。
+// 描述本身是纯编译期值：bytes / align / fieldCount 都算好了，
+// `switch (info.kind)` 也因此能在编译期分派。
+const std = module("std");
+
+const Point = struct { x: i32, y: i32, tag: u8 };
+const Shape = enum { circle, rect };
+const Mixed = union { n: i32, f: f64 };
+
+// 用反射写"看类型办事"的泛型函数：这里只分派，不碰字段。
+fn kindName(T: type) []const u8 {
+    const info = @typeInfo(T);
+    return switch (info.kind) {
+        .void_: "void",
+        .bool_: "bool",
+        .int_: "int",
+        .float_: "float",
+        .pointer: "pointer",
+        .slice: "slice",
+        .array: "array",
+        .struct_: "struct",
+        .union_: "union",
+        .enum_: "enum",
+        .optional: "optional",
+        .error_union: "error union",
+        .function: "fn",
+        .type_: "type",
+        else: "?",
+    };
+}
+
+fn layout(T: type) void {
+    const info = @typeInfo(T);
+    std.println("{s}: kind={s} bytes={d} align={d} fields={d}",
+                info.name, kindName(T), info.bytes, info.align, info.fieldCount);
+}
+
+fn main() u8 {
+    layout(i32);
+    layout(f64);
+    layout(bool);
+    layout(Point);
+    layout(Shape);
+    layout(Mixed);
+    layout([]const u8);
+    layout(*[3]i32);
+    layout(?i32);
+    layout(fn (i32, i32) i32);
+
+    // 结构体的字段查询
+    std.println("Point.y  {} {s}", @hasField(Point, "y"), @typeName(@fieldType(Point, "y")));
+    std.println("Point.n  {}", @hasField(Point, "n"));
+
+    // 嵌套：数组的元素类型
+    const inner = @typeInfo(*[3]i32);
+    std.println("array kind is array: {}", inner.kind == std.TypeKind.array);
+    std.println("i32 is struct: {}", @typeInfo(i32).kind == std.TypeKind.struct_);
+
+    // 反射 + 泛型：一个函数给任何类型报出名字、种类、大小
+    report(i32);
+    report(Point);
+    report([]const u8);
+
+    return 0;
+}
+
+fn report(T: type) void {
+    const info = @typeInfo(T);
+    std.println("report {s} -> {s}, {d} bytes", info.name, kindName(T), info.bytes);
+}
+
+// expect-output
+// i32: kind=int bytes=4 align=4 fields=0
+// f64: kind=float bytes=8 align=8 fields=0
+// bool: kind=bool bytes=1 align=1 fields=0
+// Point: kind=struct bytes=12 align=4 fields=3
+// Shape: kind=enum bytes=4 align=4 fields=2
+// Mixed: kind=union bytes=8 align=8 fields=2
+// []const u8: kind=slice bytes=16 align=8 fields=0
+// *[3]i32: kind=array bytes=8 align=8 fields=0
+// ?i32: kind=optional bytes=8 align=4 fields=0
+// fn(i32, i32) i32: kind=fn bytes=8 align=8 fields=0
+// Point.y  true i32
+// Point.n  false
+// array kind is array: true
+// i32 is struct: false
+// report i32 -> int, 4 bytes
+// report Point -> struct, 12 bytes
+// report []const u8 -> slice, 16 bytes

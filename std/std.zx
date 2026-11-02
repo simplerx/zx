@@ -1,0 +1,419 @@
+// std.zx —— 标准库。编译器随附这个文件（std/ 目录），`module("std")` 就是在读它。
+//
+// 这个文件里能用的"魔法"只有三样，全部来自编译器：
+//   print / println / format   打印与格式化
+//   heap.page                  现成的分配器（malloc/free）
+//   file / io                  整块读写文件 / 带句柄的分次读写
+// 其余都是普通 Zx 代码——包括下面这个可增长数组和两个缓冲流。
+
+// 字符串工具（str.zx）。`std.str.eq(a, b)`、`std.str.split(alloc, s, ",")` 之类。
+pub const str = module("str.zx");
+
+// 哈希表（map.zx）。`std.HashMap(i32)` 就是"字符串键 → i32"的表；
+// 下面这行是普通的名字别名，不是特殊的导出语法。
+pub const map = module("map.zx");
+pub const HashMap = map.HashMap;
+
+// 可增长数组。`T` 是元素类型；容量不够时按倍数向分配器要内存、搬过去、释放旧的。
+pub const ArrayList = fn (T: type) type {
+    return struct {
+        buf: *T,
+        len: usize,
+        cap: usize,
+        alloc: Allocator,
+
+        // ---- 构造 / 释放 ----
+
+        fn init(alloc: Allocator) Self {
+            return Self{ .buf = undefined, .len = 0, .cap = 0, .alloc = alloc };
+        }
+
+        fn deinit(self: *Self) void {
+            if (self.cap > 0) {
+                self.alloc.free((*u8)self.buf, self.cap * @sizeOf(T));
+            }
+            self.buf = undefined;
+            self.len = 0;
+            self.cap = 0;
+        }
+
+        // ---- 取值 ----
+
+        fn at(self: *Self, i: usize) ?*T {
+            if (i >= self.len) { return null; }
+            return self.buf + i;
+        }
+
+        fn get(self: *Self, i: usize) ?T {
+            if (i >= self.len) { return null; }
+            return (self.buf + i).0;
+        }
+
+        fn set(self: *Self, i: usize, v: T) bool {
+            if (i >= self.len) { return false; }
+            (self.buf + i).0 = v;
+            return true;
+        }
+
+        fn items(self: *Self) []T { return self.buf[0..self.len]; }
+
+        fn clear(self: *Self) void { self.len = 0; }
+
+        // ---- 增长 ----
+
+        fn reserve(self: *Self, need: usize) bool {
+            if (need <= self.cap) { return true; }
+
+            var ncap = self.cap;
+            if (ncap == 0) { ncap = 8; }
+            while (ncap < need) { ncap = ncap * 2; }
+
+            let bytes = ncap * @sizeOf(T);
+            let raw = self.alloc.alloc(bytes);
+            if (raw) p {
+                let dst = (*T)p;
+                var i: usize = 0;
+                while (i < self.len) {
+                    (dst + i).0 = (self.buf + i).0;
+                    i = i + 1;
+                }
+                if (self.cap > 0) {
+                    self.alloc.free((*u8)self.buf, self.cap * @sizeOf(T));
+                }
+                self.buf = dst;
+                self.cap = ncap;
+                return true;
+            }
+            return false;
+        }
+
+        fn push(self: *Self, v: T) bool {
+            if (!self.reserve(self.len + 1)) { return false; }
+            (self.buf + self.len).0 = v;
+            self.len = self.len + 1;
+            return true;
+        }
+
+        fn pop(self: *Self) ?T {
+            if (self.len == 0) { return null; }
+            self.len = self.len - 1;
+            return (self.buf + self.len).0;
+        }
+
+        fn first(self: *Self) ?T {
+            if (self.len == 0) { return null; }
+            return (self.buf + 0).0;
+        }
+
+        fn last(self: *Self) ?T {
+            if (self.len == 0) { return null; }
+            return (self.buf + self.len - 1).0;
+        }
+
+        // 在 i 处插一个，后面的整体右移。i == len 等价于 push。
+        fn insertAt(self: *Self, i: usize, v: T) bool {
+            if (i > self.len) { return false; }
+            if (!self.reserve(self.len + 1)) { return false; }
+            var k = self.len;
+            while (k > i) {
+                (self.buf + k).0 = (self.buf + k - 1).0;
+                k = k - 1;
+            }
+            (self.buf + i).0 = v;
+            self.len = self.len + 1;
+            return true;
+        }
+
+        // 删掉第 i 个，后面的左移。删最后一个等价于 pop。
+        fn removeAt(self: *Self, i: usize) bool {
+            if (i >= self.len) { return false; }
+            var k = i;
+            while (k + 1 < self.len) {
+                (self.buf + k).0 = (self.buf + k + 1).0;
+                k = k + 1;
+            }
+            self.len = self.len - 1;
+            return true;
+        }
+
+        fn reverse(self: *Self) void {
+            if (self.len < 2) { return; }
+            var i: usize = 0;
+            var j = self.len - 1;
+            while (i < j) {
+                let t = (self.buf + i).0;
+                (self.buf + i).0 = (self.buf + j).0;
+                (self.buf + j).0 = t;
+                i = i + 1;
+                j = j - 1;
+            }
+        }
+
+        // 把长度改成 n：变长用 fill 补，变短直接截断（容量不动）。
+        fn resize(self: *Self, n: usize, fill: T) bool {
+            if (n > self.len) {
+                if (!self.reserve(n)) { return false; }
+                var k = self.len;
+                while (k < n) {
+                    (self.buf + k).0 = fill;
+                    k = k + 1;
+                }
+            }
+            self.len = n;
+            return true;
+        }
+
+        // 就地交换两个元素。
+        fn swap(self: *Self, i: usize, j: usize) bool {
+            if (i >= self.len || j >= self.len) { return false; }
+            let t = (self.buf + i).0;
+            (self.buf + i).0 = (self.buf + j).0;
+            (self.buf + j).0 = t;
+            return true;
+        }
+
+        // 追加一个切片
+        fn append(self: *Self, vs: []const T) bool {
+            if (!self.reserve(self.len + vs.len)) { return false; }
+            var i: usize = 0;
+            while (i < vs.len) {
+                (self.buf + self.len + i).0 = vs[i];
+                i = i + 1;
+            }
+            self.len = self.len + vs.len;
+            return true;
+        }
+    };
+};
+
+// ---- 缓冲流 ----
+//
+// std.file 是"整块读、整块写"：一次 fread 到分配好的缓冲区里。
+// 逐行处理大文件时那样太重——每读一行就要把整个文件搬一遍。
+// io 给的是句柄（open / read / write / close），下面两个结构在它上面加一层缓冲：
+//   BufReader  一次向文件要 cap 字节，按行切出来（行还指向缓冲，不复制）
+//   BufWriter  攒满 cap 字节才真正写一次
+//
+// 缓冲层用普通 Zx 代码写，编译器只提供句柄原语——这样"缓冲多大、怎么切行"
+// 都留在库里，改起来不用动编译器。
+
+// 一次读一块、按行交付。切出来的行**指向内部缓冲**，下一次 next() 之后失效；
+// 要留住就自己复制。行比缓冲还长时缓冲会翻倍（`grow`），所以不会读一半断掉。
+pub const BufReader = struct {
+    h: usize,
+    buf: *u8,
+    cap: usize,
+    start: usize,     // 已消费到的位置
+    end: usize,       // 缓冲里有效数据的末尾
+    eof: bool,
+    owned: bool,      // 句柄是不是自己开的（deinit 时负责关）
+    alloc: Allocator,
+
+    fn init(alloc: Allocator, h: usize, cap: usize) ?Self {
+        var n = cap;
+        if (n < 16) { n = 16; }
+        let raw = alloc.alloc(n);
+        if (raw) p {
+            return Self{ .h = h, .buf = p, .cap = n, .start = 0, .end = 0,
+                         .eof = false, .owned = false, .alloc = alloc };
+        }
+        return null;
+    }
+
+    // 开文件 + 建缓冲，一步到位。路径打不开就返回 null。
+    fn open(alloc: Allocator, path: []const u8, cap: usize) ?Self {
+        if (io.openRead(path)) h {
+            if (Self.init(alloc, h, cap)) got {
+                var r = got;
+                r.owned = true;
+                return r;
+            }
+            io.close(h);
+        }
+        return null;
+    }
+
+    fn deinit(self: *Self) void {
+        if (self.owned) { io.close(self.h); }
+        self.alloc.free(self.buf, self.cap);
+        self.buf = undefined;
+        self.cap = 0;
+        self.start = 0;
+        self.end = 0;
+    }
+
+    fn close(self: *Self) void { self.deinit(); }
+
+    // 缓冲里的数据用完、又还没到文件尾 → 再要一块。
+    // 行跨块时先把残段挪到最前面，腾出空间；整块都不够就翻倍。
+    fn fill(self: *Self) bool {
+        if (self.start == self.end) {
+            /* 缓冲已经全部交付完了：从头再来，别把它当成"残段"挤到前面 */
+            self.start = 0;
+            self.end = 0;
+        } else if (self.start > 0) {
+            var i = self.start;
+            var j: usize = 0;
+            while (i < self.end) {
+                (self.buf + j).0 = (self.buf + i).0;
+                i = i + 1;
+                j = j + 1;
+            }
+            self.end = self.end - self.start;
+            self.start = 0;
+        }
+        if (self.end == self.cap) {
+            if (!self.grow()) { return false; }
+        }
+        let n = io.read(self.h, self.buf[self.end..self.cap]);
+        if (n == 0) { return false; }
+        self.end = self.end + n;
+        return true;
+    }
+
+    fn grow(self: *Self) bool {
+        let ncap = self.cap * 2;
+        let raw = self.alloc.alloc(ncap);
+        if (raw) p {
+            var i: usize = 0;
+            while (i < self.end) {
+                (p + i).0 = (self.buf + i).0;
+                i = i + 1;
+            }
+            self.alloc.free(self.buf, self.cap);
+            self.buf = p;
+            self.cap = ncap;
+            return true;
+        }
+        return false;
+    }
+
+    // 下一行（去掉行尾的 \n 和 \r）。文件结束且没有残行时返回 null。
+    fn next(self: *Self) ?[]const u8 {
+        while (true) {
+            var i = self.start;
+            while (i < self.end) {
+                if ((self.buf + i).0 == '\n') {
+                    var stop = i;
+                    if (stop > self.start && (self.buf + stop - 1).0 == '\r') { stop = stop - 1; }
+                    let line = self.buf[self.start..stop];
+                    self.start = i + 1;
+                    return line;
+                }
+                i = i + 1;
+            }
+            if (self.eof) {
+                if (self.start == self.end) { return null; }
+                let line = self.buf[self.start..self.end];
+                self.start = self.end;
+                return line;
+            }
+            if (!self.fill()) { self.eof = true; }
+        }
+    }
+
+    // 下一块原始字节（不切行）。适合读二进制。
+    fn chunk(self: *Self) ?[]const u8 {
+        while (self.start == self.end) {
+            if (self.eof) { return null; }
+            if (!self.fill()) { self.eof = true; }
+        }
+        let out = self.buf[self.start..self.end];
+        self.start = self.end;
+        return out;
+    }
+
+    // 还剩多少字节没消费（当前缓冲里）
+    fn buffered(self: *Self) usize { return self.end - self.start; }
+};
+
+// 攒够再写。write 超过缓冲大小就直接写出去，不绕道。
+pub const BufWriter = struct {
+    h: usize,
+    buf: *u8,
+    cap: usize,
+    len: usize,
+    owned: bool,
+    alloc: Allocator,
+
+    fn init(alloc: Allocator, h: usize, cap: usize) ?Self {
+        var n = cap;
+        if (n < 16) { n = 16; }
+        let raw = alloc.alloc(n);
+        if (raw) p {
+            return Self{ .h = h, .buf = p, .cap = n, .len = 0,
+                         .owned = false, .alloc = alloc };
+        }
+        return null;
+    }
+
+    // 建文件（存在就清空）+ 建缓冲
+    fn create(alloc: Allocator, path: []const u8, cap: usize) ?Self {
+        if (io.openWrite(path)) h {
+            if (Self.init(alloc, h, cap)) got {
+                var r = got;
+                r.owned = true;
+                return r;
+            }
+            io.close(h);
+        }
+        return null;
+    }
+
+    // 追加模式：文件已有的内容不动
+    fn appendTo(alloc: Allocator, path: []const u8, cap: usize) ?Self {
+        if (io.openAppend(path)) h {
+            if (Self.init(alloc, h, cap)) got {
+                var r = got;
+                r.owned = true;
+                return r;
+            }
+            io.close(h);
+        }
+        return null;
+    }
+
+    fn deinit(self: *Self) void {
+        if (self.len > 0) { self.flush(); }
+        if (self.owned) { io.close(self.h); }
+        self.alloc.free(self.buf, self.cap);
+        self.buf = undefined;
+        self.cap = 0;
+        self.len = 0;
+    }
+
+    fn flush(self: *Self) bool {
+        if (self.len == 0) { return true; }
+        let want = self.len;
+        self.len = 0;
+        return io.write(self.h, self.buf[0..want]) == want;
+    }
+
+    fn write(self: *Self, data: []const u8) bool {
+        // 大块直接落盘：占满缓冲再 flush 反而多一次拷贝
+        if (data.len >= self.cap) {
+            if (!self.flush()) { return false; }
+            return io.write(self.h, data) == data.len;
+        }
+        if (self.len + data.len > self.cap) {
+            if (!self.flush()) { return false; }
+        }
+        var i: usize = 0;
+        while (i < data.len) {
+            (self.buf + self.len + i).0 = data[i];
+            i = i + 1;
+        }
+        self.len = self.len + data.len;
+        return true;
+    }
+
+    fn writeByte(self: *Self, c: u8) bool { return self.write(&.{c}); }
+
+    // 一行：内容 + \n
+    fn writeLine(self: *Self, s: []const u8) bool {
+        if (!self.write(s)) { return false; }
+        return self.write(&.{'\n'});
+    }
+
+    fn pending(self: *Self) usize { return self.len; }
+};

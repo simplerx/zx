@@ -1,0 +1,101 @@
+// std.io —— 句柄 + 缓冲流。
+// ① BufWriter 攒够才写；② BufReader 一次读一块、按行交付；
+// ③ 行比缓冲还长时缓冲自己翻倍，不会只给半行。
+const std = module("std");
+
+fn main() u8 {
+    const al = std.heap.page;
+    const io = std.io;
+
+    // ① 写：缓冲只有 16 字节，三行加起来 17 字节，中途会真的 flush 一次
+    if (std.BufWriter.create(al, "io_test.txt", 16)) w0 {
+        var w = w0;
+        if (!w.writeLine("alpha")) { return 1; }
+        if (!w.writeLine("beta")) { return 1; }
+        if (!w.write("gamma delta epsilon")) { return 1; }   // 比缓冲大 → 直接落盘
+        if (!w.writeByte('\n')) { return 1; }
+        w.deinit();
+    } else {
+        std.println("create failed");
+        return 1;
+    }
+
+    // ② 读：16 字节缓冲 < 文件，必然跨块
+    if (std.BufReader.open(al, "io_test.txt", 16)) r0 {
+        var r = r0;
+        var n: usize = 0;
+        var total: usize = 0;
+        while (r.next()) line {
+            n = n + 1;
+            total = total + line.len;
+            std.println("{d}: {s}", n, line);
+        }
+        std.println("lines={d} bytes={d}", n, total);
+        r.deinit();
+    } else {
+        std.println("open failed");
+        return 1;
+    }
+
+    // ③ 长行：往同一个文件里追加一条 60 字节的行，再用 8 字节缓冲读最后一行
+    if (std.BufWriter.appendTo(al, "io_test.txt", 8)) a0 {
+        var a = a0;
+        if (!a.writeLine("012345678901234567890123456789012345678901234567890123456789")) {
+            return 1;
+        }
+        a.deinit();
+    }
+    if (std.BufReader.open(al, "io_test.txt", 8)) s0 {
+        var s = s0;
+        var last: []const u8 = "";
+        var ln: usize = 0;
+        while (s.next()) line {
+            ln = ln + 1;
+            last = line;
+        }
+        std.println("after append: lines={d} last.len={d}", ln, last.len);
+        s.deinit();
+    }
+
+    // ④ 句柄原语：seek / tell / 大块读
+    if (io.openRead("io_test.txt")) h {
+        var buf = std.stackAlloc(u8, 8);
+        std.println("pos0={d}", io.tell(h));
+        if (io.seek(h, 6)) {
+            let got = io.read(h, buf[0..4]);
+            std.println("at6={s} ({d})", buf[0..got], got);
+        }
+        io.close(h);
+    }
+
+    // ⑤ 直接写 stdout（不经文件）
+    let out = io.stdout();
+    if (io.write(out, "direct ok\n") != 10) { return 1; }
+
+    // ⑥ 按块读（不切行）：要 8 字节，缓冲下限抬到 16，92 字节 → 6 块
+    if (std.BufReader.open(al, "io_test.txt", 8)) c0 {
+        var c = c0;
+        var chunks: usize = 0;
+        var bytes: usize = 0;
+        while (c.chunk()) part {
+            chunks = chunks + 1;
+            bytes = bytes + part.len;
+        }
+        std.println("chunks={d} bytes={d}", chunks, bytes);
+        c.deinit();
+    }
+
+    std.file.remove("io_test.txt");
+    return 0;
+}
+
+// expect-output
+// 1: alpha
+// 2: beta
+// 3: gamma delta epsilon
+// lines=3 bytes=28
+// after append: lines=4 last.len=60
+// pos0=0
+// at6=beta (4)
+// direct ok
+// chunks=6 bytes=92

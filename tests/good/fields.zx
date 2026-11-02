@@ -1,0 +1,48 @@
+// fields 元表：@typeInfo(T).fields 是编译期切片，inline for 遍历。
+// FieldInfo = { name: []const u8, ty: type }——`ty` 而不是 `type`（关键字）。
+const std = module("std");
+
+const P = struct { x: i32, y: u64, tag: bool };
+
+const Color = enum { red, green, blue };
+
+fn describe(T: type) u8 {
+    const info = @typeInfo(T);
+    std.println("type {s} fields={d}", info.name, info.fields.len);
+    inline for (0..info.fields.len) i {
+        const f = info.fields[i];
+        std.println("  {d}: {s} : {s}", i, f.name, @typeName(f.ty));
+    }
+    return 0;
+}
+
+fn main() u8 {
+    describe(P);
+    describe(Color);
+
+    const si = @typeInfo(i32);
+    std.println("i32 fields={d}", si.fields.len);
+
+    // fields 与 @fieldType / @field 联动：按名字取值
+    const p = P{ .x = 7, .y = 9, .tag = true };
+    const info = @typeInfo(P);
+    var sum: u64 = 0;
+    inline for (0..info.fields.len) i {
+        const f = info.fields[i];
+        if (@typeName(f.ty) == "u64") { sum = sum + @field(p, f.name); }
+    }
+    std.println("u64 sum={d}", sum);
+
+    return 0;
+}
+// expect-output
+// type P fields=3
+//   0: x : i32
+//   1: y : u64
+//   2: tag : bool
+// type Color fields=3
+//   0: red : Color
+//   1: green : Color
+//   2: blue : Color
+// i32 fields=0
+// u64 sum=9

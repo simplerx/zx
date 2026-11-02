@@ -1,0 +1,71 @@
+// enums.zx —— 枚举体是作用域：变体 + const + fn
+//
+// 方法的第一参数是接收者（枚举值就是整数，所以 `Self` 按值传最自然）；
+// 没有接收者的 fn 是挂在类型上的普通函数，写 `Color.count()` 调。
+const std = module("std");
+
+const Color = enum {
+    red, green = 5, blue,
+
+    const FIRST = Color.red;        // 体里的常量成员，可以引用自己的变体
+    const COUNT = 3;
+    var calls: i32 = 0;             // 静态变量：全程序一份
+
+    fn name(self: Self) []const u8 {
+        return switch (self) {
+            .red:   "red",
+            .green: "green",
+            .blue:  "blue",
+        };
+    }
+
+    fn is_cool(self: Self) bool { return self == Color.blue; }
+
+    // 自引用：从自己出发算下一个
+    fn next(self: Self) Self {
+        if (self == Color.blue) { return Self.red; }
+        return (Color)((i32)self + 1);
+    }
+
+    fn count() i32 { return Color.COUNT; }
+
+    fn touch() void { Color.calls = Color.calls + 1; }
+};
+
+const Flag = enum(u8) {
+    off = 0, on = 1,
+
+    fn flip(self: Self) Self {
+        if (self == Flag.on) { return Flag.off; }
+        return Flag.on;
+    }
+};
+
+fn main() u8 {
+    std.println("{} {} {}", Color.red.name(), Color.green.name(), Color.blue.name());
+    std.println("cool {} {}", Color.red.is_cool(), Color.blue.is_cool());
+
+    const c = Color.green;
+    std.println("next {} -> {}", c.name(), c.next().name());
+    std.println("explicit {}", Color.name(Color.blue));
+
+    std.println("COUNT {} FIRST {} isred {}", Color.count(), (i32)Color.FIRST,
+                Color.FIRST == Color.red);
+
+    Color.touch();
+    Color.touch();
+    std.println("calls {}", Color.calls);
+
+    const f = Flag.off;
+    std.println("flip {} -> {}", (i32)f, (i32)f.flip());
+    return 0;
+}
+
+// expect-output
+// red green blue
+// cool false true
+// next green -> blue
+// explicit blue
+// COUNT 3 FIRST 0 isred true
+// calls 2
+// flip 0 -> 1

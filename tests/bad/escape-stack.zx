@@ -1,0 +1,11 @@
+// expect: cannot return a pointer into the current function's stack frame
+// 逃逸检查（decisions §44）：栈上申请的存储活不过本次调用，不能被 return 带出去
+const std = module("std");
+
+fn fresh() *[4]u64 {
+    return std.stackAlloc(u64, 4);
+}
+
+fn main() u8 {
+    return 0;
+}

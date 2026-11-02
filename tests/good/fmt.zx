@@ -1,0 +1,55 @@
+const std = module("std");
+const F = "v={}";
+
+// 运行时格式串：fmt 是变量，走运行时解析器——输出必须和编译期路径一致
+fn rt(fmt: []const u8, n: i32, s: []const u8) void {
+    std.println(fmt, n, s);
+}
+
+// 分配器是普通的值，可以当参数传
+fn build(a: Allocator, n: i32) ![]u8 {
+    return std.format(a, "<{}:{}>", n, n * 2);
+}
+
+fn main() u8 {
+    // 1. 编译期路径：逐段 printf，零解析零分配
+    std.println("hex={x} dec={d} bin={b} ch={c} str={s}", 255, 42, 5, 'A', "hi");
+    std.println(F, 7);
+    std.println("{0} {0} {1}", 1, 2);
+    std.println("{{literal}} {} done", (i32)3);
+
+    // 2. 运行时路径：同一个语法，只是慢
+    const alloc = std.heap.page;
+    var f: []const u8 = "v={}";
+    std.println(f, 7);
+    rt("rt {} {s}", 42, "hi");
+    var f2: []const u8 = "float {} bool {}";
+    std.println(f2, 1.5, false);
+    var g: []const u8 = "{0}-{1}-{0} {{x}}";
+    std.println(g, 1, 2);
+
+    // 3. std.format：结果在堆上，用完自己还回去
+    var r = std.format(alloc, "n={} s={s}", 42, "hi");
+    if (r) s {
+        std.println("[{}] len={}", s, s.len);
+        alloc.free(s.ptr, s.len);
+    }
+    var q = build(alloc, 5);
+    if (q) s2 {
+        std.println("{}", s2);
+        alloc.free(s2.ptr, s2.len);
+    }
+    return 0;
+}
+
+// expect-output
+// hex=ff dec=42 bin=101 ch=A str=hi
+// v=7
+// 1 1 2
+// {literal} 3 done
+// v=7
+// rt 42 hi
+// float 1.5 bool false
+// 1-2-1 {x}
+// [n=42 s=hi] len=9
+// <5:10>

@@ -1,0 +1,33 @@
+// M23：extern "C" —— 直接调 libc，不用再自己实现一遍。
+// `extern fn` 就是"这个名字的意义在编译器外面"：sema 只认签名，
+// 后端发一条 extern 原型（标准头里已有的名字就不重复发），不生成函数体。
+//
+// expect-output
+// hello from libc
+// strlen = 15
+// ok
+// malloc ok
+// freed
+
+const std = module("std");
+
+extern fn puts(s: *const u8) i32;
+extern fn strlen(s: *const u8) usize;
+extern fn malloc(n: usize) *u8;
+extern fn free(p: *u8) void;
+
+fn main() void {
+    let s = "hello from libc";
+    puts(s.ptr);
+    std.println("strlen = {}", strlen(s.ptr));
+
+    // libc 的内存照样能当 Zx 的字节缓冲用
+    let p = malloc(8);
+    p[0] = 'o';
+    p[1] = 'k';
+    p[2] = 0;
+    puts(p);
+    std.println("malloc ok");
+    free(p);
+    std.println("freed");
+}

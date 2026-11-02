@@ -1,0 +1,11 @@
+// expect: must be computable at compile time
+const std = module("std");
+
+var counter: i32 = 0;
+
+const derived = counter * 2;   // 顶层 var 是运行时存储 → 报错
+
+fn main() u8 {
+    std.println("{}", derived);
+    return 0;
+}

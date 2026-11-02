@@ -1,0 +1,186 @@
+// str.zx —— 字符串（`[]const u8`）工具。全是普通 Zx 代码。
+//
+//   const std = module("std");
+//   if (std.str.eq(a, b)) { … }
+//
+// 不分配的函数直接切片返回；要分配的把分配器放在第一个参数上。
+
+const I64_MAX: i64 = 9223372036854775807;
+
+fn isSpace(c: u8) bool {
+    return c == 32 || c == 9 || c == 10 || c == 13;
+}
+
+// hay[i..i+needle.len] 是不是 needle。调用者必须先保证 i + needle.len <= hay.len：
+// 这个函数自己不查越界（它是最内层循环）。
+fn matchAt(hay: []const u8, i: usize, needle: []const u8) bool {
+    var j: usize = 0;
+    while (j < needle.len) {
+        if (hay[i + j] != needle[j]) { return false; }
+        j = j + 1;
+    }
+    return true;
+}
+
+pub fn eq(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) { return false; }
+    var i: usize = 0;
+    while (i < a.len) {
+        if (a[i] != b[i]) { return false; }
+        i = i + 1;
+    }
+    return true;
+}
+
+pub fn startsWith(s: []const u8, p: []const u8) bool {
+    if (p.len > s.len) { return false; }
+    var i: usize = 0;
+    while (i < p.len) {
+        if (s[i] != p[i]) { return false; }
+        i = i + 1;
+    }
+    return true;
+}
+
+pub fn endsWith(s: []const u8, p: []const u8) bool {
+    if (p.len > s.len) { return false; }
+    let off = s.len - p.len;
+    var i: usize = 0;
+    while (i < p.len) {
+        if (s[off + i] != p[i]) { return false; }
+        i = i + 1;
+    }
+    return true;
+}
+
+pub fn indexOfFrom(hay: []const u8, needle: []const u8, from: usize) ?usize {
+    if (needle.len == 0) { return from; }
+    if (needle.len > hay.len) { return null; }
+    var i = from;
+    while (i + needle.len <= hay.len) {
+        if (matchAt(hay, i, needle)) { return i; }
+        i = i + 1;
+    }
+    return null;
+}
+
+pub fn indexOf(hay: []const u8, needle: []const u8) ?usize {
+    return indexOfFrom(hay, needle, 0);
+}
+
+pub fn contains(hay: []const u8, needle: []const u8) bool {
+    let r = indexOf(hay, needle);
+    if (r) _ { return true; }
+    return false;
+}
+
+// 从开头去掉空白
+pub fn trimStart(s: []const u8) []const u8 {
+    var i: usize = 0;
+    while (i < s.len && isSpace(s[i])) { i = i + 1; }
+    return s[i..];
+}
+
+// 从结尾去掉空白
+pub fn trimEnd(s: []const u8) []const u8 {
+    var n = s.len;
+    while (n > 0 && isSpace(s[n - 1])) { n = n - 1; }
+    return s[0..n];
+}
+
+pub fn trim(s: []const u8) []const u8 {
+    return trimEnd(trimStart(s));
+}
+
+// 十进制整数，允许前面的 + / -。多余字符、空串、溢出都算失败。
+pub fn parseInt(s: []const u8) ?i64 {
+    let t = trim(s);
+    if (t.len == 0) { return null; }
+    var i: usize = 0;
+    var neg = false;
+    if (t[0] == 45 || t[0] == 43) {
+        neg = (t[0] == 45);
+        i = 1;
+        if (t.len == 1) { return null; }
+    }
+    var v: i64 = 0;
+    while (i < t.len) {
+        let c = t[i];
+        if (c < 48 || c > 57) { return null; }
+        let d: i64 = (i64)(c - 48);
+        if (v > (I64_MAX - d) / 10) { return null; }   /* 溢出：宁可 null，不要乱数 */
+        v = v * 10 + d;
+        i = i + 1;
+    }
+    if (neg) { return -v; }
+    return v;
+}
+
+// 拼两个切片，结果末尾补 0（可以当 C 串直接传给 file.write）
+pub fn concat(alloc: Allocator, a: []const u8, b: []const u8) ?[]u8 {
+    let n = a.len + b.len;
+    let raw = alloc.alloc(n + 1);
+    if (raw) p {
+        var dst = p[0..n];
+        var i: usize = 0;
+        while (i < a.len) {
+            dst[i] = a[i];
+            i = i + 1;
+        }
+        var j: usize = 0;
+        while (j < b.len) {
+            dst[a.len + j] = b[j];
+            j = j + 1;
+        }
+        var whole = p[0..n + 1];
+        whole[n] = 0;
+        return dst;
+    }
+    return null;
+}
+
+fn countOf(s: []const u8, sep: []const u8) usize {
+    if (sep.len == 0) { return 1; }
+    var n: usize = 1;
+    var i: usize = 0;
+    while (i + sep.len <= s.len) {
+        if (matchAt(s, i, sep)) {
+            n = n + 1;
+            i = i + sep.len;
+        } else {
+            i = i + 1;
+        }
+    }
+    return n;
+}
+
+// 按 sep 切开。结果和每段都指向原串（不复制），数组本身向分配器要。
+// sep 为空时整串作为唯一一段返回（不是"每个字节切一刀"）。
+pub fn split(alloc: Allocator, s: []const u8, sep: []const u8) ?[][]const u8 {
+    let n = countOf(s, sep);
+    let raw = alloc.alloc(n * @sizeOf([]const u8));
+    if (raw) p {
+        let slots = ((*[]const u8)p)[0..n];
+        var k: usize = 0;
+        var start: usize = 0;
+        var i: usize = 0;
+        while (sep.len > 0 && i + sep.len <= s.len) {
+            if (matchAt(s, i, sep)) {
+                slots[k] = s[start..i];
+                k = k + 1;
+                i = i + sep.len;
+                start = i;
+            } else {
+                i = i + 1;
+            }
+        }
+        slots[k] = s[start..];
+        return slots;
+    }
+    return null;
+}
+
+// 释放 split 的结果
+pub fn freeSplit(alloc: Allocator, parts: [][]const u8) void {
+    alloc.free((*u8)parts.ptr, parts.len * @sizeOf([]const u8));
+}

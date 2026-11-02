@@ -1,0 +1,10 @@
+// expect: exists only at compile time
+const std = module("std");
+
+fn f(fi: std.FieldInfo) u8 {
+    return 0;
+}
+
+fn main() u8 {
+    return 0;
+}

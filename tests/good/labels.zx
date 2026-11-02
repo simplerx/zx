@@ -1,0 +1,27 @@
+// 标签收割：一次跳出多层、循环 else 的值、continue 继续
+const std = module("std");
+
+const firstBig = fn (xs: []const i32) i32 {
+    return found: for (xs) x {
+        if (x <= 100) { continue; }
+        found: x;
+    } else 0;
+};
+
+const countEven = fn (xs: []const i32) usize {
+    var n: usize = 0;
+    for (xs) x {
+        if (x % 2 != 0) { continue; }
+        n = n + 1;
+    }
+    return n;
+};
+
+fn main() u8 {
+    let xs: *const [4]i32 = &.{7, 250, 9, 400};
+    std.println("{} {}", firstBig(xs[0..]), countEven(xs[0..]));
+    return 0;
+}
+
+// expect-output
+// 250 2

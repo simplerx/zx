@@ -1,0 +1,100 @@
+// any.zx —— {any} 与默认 {} 的结构展开
+//
+// 编译期路径（格式串是常量）和运行时路径（fmt 是变量、或 std.format）必须
+// 一个字节都不差：两边都调 zx_any，输出由同一份类型描述符决定。
+const std = module("std");
+
+const Color = enum { red, green, blue };
+const ShapeTag = enum { circle, rect };
+const Shape = union {
+    circle: {ShapeTag.circle, f64},
+    rect:   {ShapeTag.rect,   {f64, f64}},
+};
+const Raw = union { i: i32, f: f32 };
+
+const Point = struct { x: i32, y: i32 };
+const Line = struct { a: Point, b: Point, tag: Color, name: []const u8 };
+const Node = struct { val: i32, next: ?*Node };
+
+const mk = fn (x: i32, y: i32) Point {
+    return Point{ .x = x, .y = y };
+};
+
+fn main() u8 {
+    const alloc = std.heap.page;
+
+    // 1. 聚合值默认就打结构：{} 与 {any} 对结构体是一回事
+    const p = Point{ .x = 1, .y = 2 };
+    std.println("{}", p);
+    std.println("{any}", p);
+
+    // 2. 元组 / 切片 / 可选 / 错误联合
+    const tup = {1, "two", 3.5};
+    std.println("{}", tup);
+
+    const nums: *[3]i32 = &.{ 10, 20, 30 };
+    std.println("{}", nums[0..]);
+
+    var some: ?i32 = 5;
+    var none: ?i32 = null;
+    std.println("{} {}", some, none);
+
+    // 3. 枚举：{} 是数字，{any} 带类型名
+    const c: Color = Color.blue;
+    std.println("{} {any}", c, c);
+
+    // 4. 带标签联合体：标签 + 载荷
+    const s: Shape = Shape{ .circle = 2.5 };
+    const r: Shape = Shape{ .rect = {1.0, 2.0} };
+    std.println("{} {}", s, r);
+
+    // 5. 普通联合体没有标签，所有成员叠在一起，就都打出来
+    const raw = Raw{ .i = 1 };
+    std.println("{}", raw);
+
+    // 6. 字符串：{} 是裸的，{any} 带引号和转义
+    std.println("[{}] [{any}]", "a\tb", "a\tb");
+
+    // 7. 嵌套：函数返回值、切片里放结构体、指针只打地址不跟进去
+    const l = Line{
+        .a = mk(1, 2),
+        .b = mk(3, 4),
+        .tag = Color.green,
+        .name = "ab",
+    };
+    std.println("{}", l);
+
+    const leaf = Node{ .val = 2, .next = null };
+    std.println("{}", leaf);
+
+    var op: ?Point = p;
+    std.println("{}", op);
+
+    // 8. 运行时格式串走 zx_fmt：和上面第 7 条必须一致
+    var f: []const u8 = "rt {}";
+    std.println(f, l);
+
+    // 9. std.format 同样走描述符
+    var out = std.format(alloc, "fmt={}", l);
+    if (out) str {
+        std.println("{}", str);
+        alloc.free(str.ptr, str.len);
+    }
+    return 0;
+}
+
+// expect-output
+// Point{x: 1, y: 2}
+// Point{x: 1, y: 2}
+// {1, "two", 3.5}
+// [10, 20, 30]
+// some(5) null
+// 2 Color.blue
+// Shape{circle: 2.5} Shape{rect: {1, 2}}
+// Raw{i: 1 | f: 1.4013e-45}
+// [a	b] ["a\tb"]
+// Line{a: Point{x: 1, y: 2}, b: Point{x: 3, y: 4}, tag: Color.green, name: "ab"}
+// Node{val: 2, next: null}
+// some(Point{x: 1, y: 2})
+// rt Line{a: Point{x: 1, y: 2}, b: Point{x: 3, y: 4}, tag: Color.green, name: "ab"}
+// fmt=Line{a: Point{x: 1, y: 2}, b: Point{x: 3, y: 4}, tag: Color.green, name: "ab"}

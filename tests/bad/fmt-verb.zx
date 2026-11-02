@@ -1,0 +1,9 @@
+// expect: format specifier `{s}` needs a slice, found `Point`
+const std = module("std");
+const Point = struct { x: i32, y: i32 };
+
+fn main() u8 {
+    const p = Point{ .x = 1, .y = 2 };
+    std.println("{s}", p);        // {s} 只能用在切片上
+    return 0;
+}

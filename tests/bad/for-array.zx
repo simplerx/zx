@@ -1,0 +1,6 @@
+// expect: an array is not a sequence
+// *[N]T 不是序列，先 xs[0..] 变切片
+const a: *const [3]i32 = &.{1, 2, 3};
+fn main() void {
+    for (a) x { }
+}

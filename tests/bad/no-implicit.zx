@@ -1,0 +1,7 @@
+// expect: no implicit conversion
+// R4：没有任何隐式数值转换，i32 + i64 必须显式转换
+fn main() void {
+    var a: i32 = 1;
+    var b: i64 = 2;
+    let c = a + b;
+}

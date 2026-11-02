@@ -1,0 +1,6 @@
+// expect: cannot assign to 'x'
+// let 是只读运行时槽位，要写就用 var
+fn main() void {
+    let x: i32 = 1;
+    x = 2;
+}

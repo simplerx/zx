@@ -1,0 +1,7 @@
+// expect: can reach the end of its body without returning
+// 缺返回路径：条件不成立时函数直接掉出末尾，返回类型 i32 没有值
+fn sign(n: i32) i32 {
+    if (n < 0) { return -1; }
+}
+
+fn main() u8 { return 0; }

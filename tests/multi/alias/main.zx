@@ -1,0 +1,26 @@
+// main.zx —— "只把需要的名字拿进来"就是普通的 const 绑定：
+// 函数、常量、类型都能绑，绑完直接用，不占存储（它们只是名字别名）。
+const std = module("std");
+const mathx = module("mathx.zx");
+
+const square = mathx.square;
+const cube3  = mathx.cube;          // 顺便改名
+const GOLDEN = mathx.GOLDEN;
+const Vec2   = mathx.Vec2;
+const dot    = mathx.dot;
+
+fn main() u8 {
+    std.println("square {} cube {}", square(4), cube3(3));
+    std.println("golden {}", GOLDEN);
+    const a = Vec2{ .x = 1, .y = 2 };
+    const b = Vec2{ .x = 3, .y = 4 };
+    std.println("dot {} len2 {}", dot(a, b), dot(a, a));
+    std.println("namespace {}", mathx.square(5));
+    return 0;
+}
+
+// expect-output
+// square 16 cube 27
+// golden 1.618
+// dot 11 len2 5
+// namespace 25

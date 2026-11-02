@@ -1,0 +1,8 @@
+// expect: unreachable code: the `return` above never falls through
+// 不可达代码：`return` 之后还在写东西
+fn f(n: i32) i32 {
+    return n;
+    n + 1;
+}
+
+fn main() u8 { return 0; }

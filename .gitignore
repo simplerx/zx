@@ -1,0 +1,15 @@
+# 构建产物
+bin/
+*.o
+*.exe
+*.tmp
+
+# 工具链（zig cc，不入库）
+.toolchain/
+
+# 本地缓存与临时目录
+.tmp/
+.zc-cache/
+
+# 一次性探测文件
+err_probe.zx

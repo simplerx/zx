@@ -1,0 +1,4 @@
+// expect: 'hidden' is private to module
+const m = module("mod.zx");
+
+fn main() u8 { return (u8)m.hidden(); }

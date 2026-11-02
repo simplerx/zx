@@ -1,0 +1,10 @@
+// util.zx —— 一个模块。只有带 pub 的名字对外可见。
+pub const name: []const u8 = "util";
+pub const VERSION: u32 = 3;
+
+pub fn add(a: i32, b: i32) i32 { return a + b; }
+
+pub fn twice(n: i32) i32 { return secret(n) * 2; }
+
+// 私有：别的模块引用会报错
+fn secret(n: i32) i32 { return n + 1; }

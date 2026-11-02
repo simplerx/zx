@@ -1,0 +1,35 @@
+// seqs.zx —— 多序列 for 的长度检查
+//
+// 长度算得出来（范围 / 定长数组上的视图）就必须一致；切片本身不带长度，
+// 参数的 `s[0..]` 交给运行时，检查阶段不瞎报。
+const std = module("std");
+
+const dot = fn (a: []const i32, b: []const i32) i32 {
+    var acc: i32 = 0;
+    for (a[0..], b[0..]) x, y { acc = acc + x * y; }
+    return acc;
+};
+
+fn main() u8 {
+    const a: *[3]i32 = &.{ 1, 2, 3 };
+    const b: *[2]i32 = &.{ 4, 5 };
+
+    // 两条视图都截到 2：一致
+    var acc: i32 = 0;
+    for (a[0..2], b[0..2]) x, y { acc = acc + x * y; }
+    std.println("{}", acc);
+
+    // 范围 3 对整条 a：一致
+    var sum: i32 = 0;
+    for (0..3, a[0..]) i, v { sum = sum + (i32)i * v; }
+    std.println("{}", sum);
+
+    // 长度未知：不检查，运行时按 min 走
+    std.println("{}", dot(a[0..2], b[0..2]));
+    return 0;
+}
+
+// expect-output
+// 14
+// 8
+// 14

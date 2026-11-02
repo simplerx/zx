@@ -1,0 +1,176 @@
+// types.zx —— 类型总览：每种类型都在这里出现一次
+//
+// 四条核心规则：
+//   1. 取地址用 &，指针类型写 *T，解引用用 .0，. 自动穿透一层指针
+//   2. 数组就是指针：*[N]T（8 字节），N 进类型但表示仍是一个地址
+//   3. 元组是 {…}，数组是 &.{…} —— 差一个点，意思是"取这个聚合的地址"
+//   4. 无标签块的值恒为 {}，带标签靠收割；{x} 是一元组，不是块
+
+const std = module("std");
+
+// ---------- 整数 / 浮点 ----------
+const umax: u32 = 0xDEAD_BEEF;
+const pi: f64 = 3.14159;
+const half: f16 = 0.5;
+const neg: i128 = -170141183460469231731687303715884105728;
+
+// ---------- 元组：{…}，值类型，内联 ----------
+const tup = {1, "two", 3.0};       // {comptime_int, []const u8, comptime_float}
+const tlen = tup.len;              // 3，comptime usize
+const tsize = tup.size;            // 总字节数（含对齐填充），comptime
+const t0 = tup.0;                  // 1
+const t2 = tup.2;                  // 3.0
+const {a, b, c} = tup;             // 解构
+
+// {x} 是一元组；块加标签收割才有值
+const one = {42};                  // {comptime_int}，一元组
+const blk = answer: { answer: 42; };   // 块，值 42 —— 类型是 comptime_int
+
+// ---------- 数组 = 指针 + 编译期数量 ----------
+const arr: *const [3]i32 = &.{10, 20, 30};   // 8 字节，数量 3 在类型里
+const alen = arr.len;              // 3，comptime
+const asize = arr.size;            // 12，comptime
+const a0 = arr.0;                  // 10，编译期下标，无边界检查
+const a2 = arr.2;                  // 30
+
+// 省略类型：元素类型从字面量推出（整数默认 i32，浮点默认 f64）
+var inferred = &.{10, 20, 30};     // *[3]i32，数量从字面量推出
+
+// 顶层 undefined：静态数据段上分配（§3.5；局部要用 std.stackAlloc）
+var buf: *[64]u8 = undefined;
+const bufLen = buf.len;            // 64，comptime
+const bufSize = buf.size;          // 64，comptime
+
+// ---------- 切片 = {ptr, len}，16 字节 ----------
+const str: []const u8 = "hello";   // 字符串字面量就是 []const u8
+const part = str[0..2];            // []const u8，"he"
+const tail = str[1..];             // []const u8，"ello"
+const plen = part.len;             // 运行时 usize（切片自己存了 len）
+const p0 = part.0;                 // 'h'，u8
+const pptr = part.ptr;             // *const u8
+
+// 数组 → 切片：补一个长度，免拷贝
+const sliceOfArr = arr[0..];       // []const i32，长度 3
+
+// ---------- 结构体 ----------
+const S = struct { flag: bool };
+
+const Person = struct {
+    name: []const u8,              // 字段生命周期 = 持有者生命周期
+    age: i32 = 0,                  // 默认值
+};
+
+// 只有 var 成员的结构体 = 静态命名空间
+const Counter = struct {
+    var n: i32 = 10;               // 全程序只有一份，静态生命周期
+    const LIMIT = 100;             // 编译期常量
+};
+
+// ---------- 枚举：就是整数 ----------
+const Color = enum { red, green = 5, blue };      // 底层 u32
+const Small = enum(u8) { a, b, c };               // 指定底层
+const cred: u32 = (u32)Color.red;                 // 0
+const cgreen: u32 = (u32)Color.green;             // 5
+const cblue: u32 = (u32)Color.blue;               // 6
+
+// ---------- 普通联合体（读错成员是 UB） ----------
+const Raw = union { i: i32, f: f32 };
+
+// ---------- 带标签联合体：成员是元组 {标签, 载荷类型} ----------
+const ShapeTag = enum { circle, rect };
+const Shape = union {
+    circle: {ShapeTag.circle, f64},
+    rect:   {ShapeTag.rect,   {f64, f64}},
+};
+
+// ---------- 空值 / 错误：载荷在前，标签在尾部 ----------
+const maybe: ?i32 = 5;             // {payload: 5, tag: true}
+const nothing: ?i32 = null;        // null 就是 bool 的 false
+const oops: !i32 = (error)1;       // {payload: 0, tag: 1}
+const fine: !i32 = 7;              // {payload: 7, tag: 0}
+
+// &maybe 就是 &payload —— 零偏移，可以直接重解释成 *const i32
+const mptr: *const i32 = (*const i32)&maybe;
+
+// ---------- 函数类型 = const 指针（8 字节） ----------
+const BinaryOp = fn (i32, i32) i32;
+
+const add = fn (a: i32, b: i32) i32 { return a + b; };
+const sub = fn (a: i32, b: i32) i32 { return a - b; };
+
+const apply = fn (op: BinaryOp, a: i32, b: i32) i32 { return op(a, b); };
+
+fn main() u8 {
+    // 顶层声明的 var 数组可以写
+    inferred.1 = 99;
+
+    // 结构体构造：字段名前带点
+    var p: Person = Person{ .name = "ann", .age = 30 };
+    p.age = p.age + 1;
+
+    // 静态命名空间
+    Counter.n = Counter.n + 1;
+
+    // 取地址 & / 解引用 .0 / . 自动穿透一层
+    var x: i32 = 1;
+    let px = &x;                   // *i32，存的是 x 的地址
+    px.0 = 2;                      // 写入 → x == 2
+    let xv = px.0;                 // 读 → 2
+
+    // 指向 let 变量得到只读指针
+    let imm: i32 = 7;
+    let pimm = &imm;               // *const i32
+    // pimm.0 = 8;                 // 编译错误：透过 *const 写入
+
+    // 指针自动穿透：ps.flag == ps.0.flag
+    var s = S{ .flag = true };
+    let ps = &s;
+    ps.flag = false;
+    let fv = ps.0.flag;
+
+    // 普通联合体：构造 + 读成员
+    var r: Raw = Raw{ .i = 42 };
+    r.f = 1.5;                     // 覆盖同一块存储
+
+    // 带标签联合体：构造 + 读标签 + 读载荷
+    var shapes = &.{
+        Shape{ .circle = 2.0 },
+        Shape{ .rect = {3.0, 4.0} },
+    };
+    let tag0 = shapes.0.tag;       // ShapeTag.circle
+    let radius = shapes.0.circle;  // 2.0
+    let w = shapes.1.rect.0;       // 3.0
+
+    // 数组的两种读法：编译期下标 vs 运行时下标
+    var i: usize = 1;
+    let slow = shapes[i];          // 运行时下标，带边界检查
+    let whole = shapes[0..];       // → []Shape
+
+    // 函数是指针，可以放进数组、可以传参
+    var ops = &.{add, sub};
+    let v: i32 = ops.0(apply(add, 1, 2), ops.1(5, 1));
+
+    // 显式转换，没有任何隐式转换
+    let wide: i64 = (i64)p.age;
+    let narrow: u8 = (u8)wide;     // 截断
+
+    std.println("types ok, v={}", v);
+    return 0;
+}
+
+// ---------- 块作为表达式：值来自收割 ----------
+const clamp = fn (v: i32, lo: i32, hi: i32) i32 {
+    return body: {
+        if (v < lo) { body: lo; }
+        if (v > hi) { body: hi; }
+        body: v;
+    };
+};
+
+// 表达式臂（糖）等价于"匿名标签块 + 收割"
+const sum3 = fn (x: i32) i32 {
+    return if (true) x + 1 else 0;
+};
+
+// expect-output
+// types ok, v=7

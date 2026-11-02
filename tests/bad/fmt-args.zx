@@ -1,0 +1,9 @@
+// expect: not enough arguments for the format string
+// std.format 的格式串是常量，占位符个数在编译期就该查出来
+const std = module("std");
+
+fn main() u8 {
+    const alloc = std.heap.page;
+    var r = std.format(alloc, "{} {}", 1);
+    return 0;
+}

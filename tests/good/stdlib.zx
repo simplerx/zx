@@ -1,0 +1,110 @@
+// 标准库能写到什么程度：ArrayList、字符串比较/查找/切分、文件读写。
+// 这三样齐了，一般的小程序就不用自己手搓容器和字符串处理了。
+
+const std = module("std");
+
+// 自建 arena：容器要内存时向它要，一块都不碰 malloc。
+var pool: *[256]u8 = undefined;
+var used: usize = 0;
+
+fn bump(n: usize) ?*u8 {
+    if (used + n > pool.len) { return null; }
+    let p = pool[0..].ptr + used;
+    used = used + n;
+    return p;
+}
+
+fn noop(p: *u8, n: usize) void { }
+
+fn main() i32 {
+    let al = std.heap.page;
+
+    // ---- std.ArrayList(T)：init / push / get / pop / items ----
+    var xs = std.ArrayList(i32).init(al);
+    var i: usize = 0;
+    while (i < 10) {
+        if (!xs.push((i32)(i * i))) { std.println("push failed"); }
+        i = i + 1;
+    }
+    std.println("list len={} cap={}", xs.len, xs.cap);
+    std.println("list items {}", xs.items());
+    std.println("list get(2) {}", xs.get(2));
+    std.println("list pop {}", xs.pop());
+    xs.deinit();
+
+    // ---- 同一个 ArrayList 配自建的 arena（泛型 + 自定义分配器）----
+    let arena = std.Allocator{ .alloc = bump, .free = noop };
+    var ys = std.ArrayList(i32).init(arena);
+    var j: usize = 0;
+    while (j < 20) {
+        if (!ys.push((i32)(j + 100))) { std.println("push failed at {}", j); }
+        j = j + 1;
+    }
+    std.println("arena len={} cap={} last={} bytes={}",
+                ys.len, ys.cap, ys.get(19), used);
+    ys.deinit();
+
+    // ---- std.str：比较、前后缀、查找 ----
+    std.println("eq {}", std.str.eq("abc", "abc"));
+    std.println("startsWith {}", std.str.startsWith("zx-lang", "zx"));
+    std.println("endsWith {}", std.str.endsWith("zx-lang", "lang"));
+    std.println("indexOf {}", std.str.indexOf("hello world", "wor"));
+    std.println("trim [{}]", std.str.trim("  42  "));
+    std.println("parseInt {}", std.str.parseInt("  -123  "));
+
+    // ---- std.str.split + parseInt：把一行 CSV 加起来 ----
+    let parts = std.str.split(al, "10,20,30,40", ",");
+    if (parts) ps {
+        var sum: i64 = 0;
+        var k: usize = 0;
+        while (k < ps.len) {
+            if (std.str.parseInt(ps[k])) v { sum = sum + v; }
+            k = k + 1;
+        }
+        std.println("split {} parts, sum {}", ps.len, sum);
+        std.str.freeSplit(al, ps);
+    } else {
+        std.println("split failed");
+    }
+
+    // ---- std.file：写出去再读回来 ----
+    let path = "tests_stdlib.tmp";
+    let msg = std.str.concat(al, "hello, ", "zx");
+    if (msg) s {
+        std.println("concat [{}]", s);
+        std.println("write {}", std.file.write(path, s));
+        let back = std.file.read(al, path);
+        if (back) t {
+            std.println("read  [{}]", std.str.trim(t));
+            std.println("roundtrip {}", std.str.eq(t, s));
+        }
+        std.println("exists {}", std.file.exists(path));
+        std.println("remove {}", std.file.remove(path));
+        std.println("exists {}", std.file.exists(path));
+    }
+
+    std.println("stdlib ok");
+    return 0;
+}
+
+// expect-output
+// list len=10 cap=16
+// list items [0, 1, 4, 9, 16, 25, 36, 49, 64, 81]
+// list get(2) some(4)
+// list pop some(81)
+// arena len=20 cap=32 last=some(119) bytes=224
+// eq true
+// startsWith true
+// endsWith true
+// indexOf some(6)
+// trim [42]
+// parseInt some(-123)
+// split 4 parts, sum 100
+// concat [hello, zx]
+// write true
+// read  [hello, zx]
+// roundtrip true
+// exists true
+// remove true
+// exists false
+// stdlib ok

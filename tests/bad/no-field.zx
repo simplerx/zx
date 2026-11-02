@@ -1,0 +1,6 @@
+// expect: has no field 'age'
+const P = struct { name: []const u8 };
+fn main() void {
+    var p = P{ .name = "a" };
+    let n = p.age;
+}

@@ -1,0 +1,11 @@
+// expect: sequences must have equal length: 3 vs 2
+// 定长数组上的视图长度算得出来，长度不一致就是编译错误
+const abc: *[3]i32 = &.{ 1, 2, 3 };
+const xy: *[2]i32 = &.{ 4, 5 };
+
+fn main() u8 {
+    var acc: i32 = 0;
+    for (abc[0..], xy[0..]) a, b { acc = acc + a * b; }
+    if (acc == 0) { return 1; }
+    return 0;
+}

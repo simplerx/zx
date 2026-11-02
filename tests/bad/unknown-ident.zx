@@ -1,0 +1,4 @@
+// expect: unknown identifier 'nope'
+fn main() void {
+    let x = nope;
+}

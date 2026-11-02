@@ -1,0 +1,75 @@
+// std.HashMap(V)：字符串键的哈希表。开放寻址 + 线性探测，负载过 3/4 翻倍。
+const std = module("std");
+
+const WORDS = &.{
+    "alpha", "beta", "gamma", "delta", "epsilon",
+    "zeta", "eta", "theta", "iota", "kappa",
+    "lambda", "mu", "nu", "xi", "omicron",
+    "pi", "rho", "sigma", "tau", "upsilon",
+};
+
+fn main() i32 {
+    let al = std.heap.page;
+
+    // ---- 基本操作 ----
+    var m = std.HashMap(i32).init(al);
+    if (!m.put("one", 1)) { return 1; }
+    if (!m.put("two", 2)) { return 2; }
+    if (!m.put("three", 3)) { return 3; }
+
+    std.println("count {}", m.count());
+    std.println("two = {}", m.get("two"));
+    std.println("none = {}", m.get("four"));
+
+    if (!m.put("two", 22)) { return 4; }        // 覆盖写：计数不变
+    std.println("two now {} count {}", m.get("two"), m.count());
+
+    // ---- 扩容：20 个键让容量从 8 涨到 32 ----
+    var h = std.HashMap(u32).init(al);
+    var i: usize = 0;
+    for (WORDS[0..]) w {
+        if (!h.put(w, (u32)(i * 7 + 1))) { return 5; }
+        i = i + 1;
+    }
+    std.println("words {} cap {}", h.count(), h.capacity());
+
+    // 扩容搬完之后，每个键都必须还能查回来
+    var bad: usize = 0;
+    var j: usize = 0;
+    for (WORDS[0..]) w {
+        let got = h.get(w);
+        if (got) v {
+            if (v != (u32)(j * 7 + 1)) { bad = bad + 1; }
+        } else {
+            bad = bad + 1;
+        }
+        j = j + 1;
+    }
+    std.println("bad {}", bad);
+
+    // ---- 遍历 ----
+    var seen: usize = 0;
+    var k: usize = 0;
+    while (k < h.capacity()) {
+        if (h.keyAt(k)) name {
+            if (h.valueAt(k)) v { seen = seen + 1; }
+        }
+        k = k + 1;
+    }
+    std.println("seen {}", seen);
+
+    h.deinit();
+    m.deinit();
+    std.println("done");
+    return 0;
+}
+
+// expect-output
+// count 3
+// two = some(2)
+// none = null
+// two now some(22) count 3
+// words 20 cap 32
+// bad 0
+// seen 20
+// done

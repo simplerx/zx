@@ -1,0 +1,35 @@
+// std.process：命令行参数、环境变量、退出。
+// exit 是 noreturn——它之后的代码编译器直接拒收。
+const std = module("std");
+
+fn eqlStr(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) { return false; }
+    for (0..a.len) i { if (a[i] != b[i]) { return false; } }
+    return true;
+}
+
+fn main() u8 {
+    var args = std.process.args();          // [][]const u8，argv[0] 不算
+    std.println("argc={d}", args.len);
+    for (0..args.len) i { std.println("arg {d}: {s}", i, args[i]); }
+
+    if (args.len > 0 && eqlStr(args[0], "--exit")) {
+        std.println("exiting");
+        std.process.exit(3);                // noreturn
+    }
+
+    var home = std.process.getEnv("ZX_NO_SUCH_VAR_XYZ");
+    if (home) v { std.println("set to {s}", v); } else { std.println("<unset>"); }
+
+    var ok = std.process.setEnv("ZX_TEST_ROUNDTRIP", "hello");
+    std.println("setEnv={}", ok);
+    var again = std.process.getEnv("ZX_TEST_ROUNDTRIP");
+    if (again) v { std.println("after: {s}", v); }
+
+    return 0;
+}
+// expect-output
+// argc=0
+// <unset>
+// setEnv=true
+// after: hello

@@ -1,0 +1,12 @@
+// expect: can reach the end of its body without returning
+// 枚举漏了一个变体：运行时那就是一条掉出函数的路径（switch 不穷尽 = 会掉出去）
+const Color = enum { red, green, blue };
+
+fn weight(c: Color) i32 {
+    switch (c) {
+        .red:   { return 1; },
+        .green: { return 2; },
+    }
+}
+
+fn main() u8 { return 0; }

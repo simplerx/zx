@@ -1,0 +1,95 @@
+// 真正的 arena：自己管一块字节缓冲，交给 std.format 当分配器；
+// 同一个缓冲上还能放结构体（自引用类型 + 指针写入）。
+const std = module("std");
+
+const LONG = "012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789";
+
+const Node = struct { value: i32, next: ?*Node };
+
+var pool: *[128]u8 = undefined;
+var used: usize = 0;
+
+fn bump(n: usize) ?*u8 {
+    if (used + n > pool.len) { return null; }
+    let p = pool[0..].ptr + used;
+    used = used + n;
+    return p;
+}
+
+fn noop(p: *u8, n: usize) void { }
+
+// 分配器可以当普通参数传下去
+fn render(a: Allocator, n: i32) ![]u8 {
+    return std.format(a, "<{}:{}>", n, n * 2);
+}
+
+// 在 arena 上造一个节点：把字节地址当成 *Node 用
+fn push(head: ?*Node, v: i32) ?*Node {
+    let mem = bump(16);                 // @sizeOf(Node) == 16
+    if (mem) raw {
+        let node = (*Node)raw;
+        node.value = v;
+        node.next = head;
+        return node;
+    } else e {
+        return null;
+    }
+}
+
+fn main() u8 {
+    const arena = Allocator{ .alloc = bump, .free = noop };
+
+    var a = std.format(arena, "x={} y={}", 1, 2);
+    if (a) sa {
+        std.println("a=[{s}] used={}", sa, used);
+    } else e {
+        std.println("oom a");
+    }
+
+    var b = std.format(arena, "{s}-{s}", "ab", "cd");
+    if (b) sb {
+        std.println("b=[{s}] used={}", sb, used);
+    } else e {
+        std.println("oom b");
+    }
+
+    var c = render(arena, 5);
+    if (c) sc {
+        std.println("c=[{s}] used={}", sc, used);
+    } else e {
+        std.println("oom c");
+    }
+
+    // 同一个缓冲里放三个节点（各自 16 字节）
+    var head: ?*Node = null;
+    head = push(head, 1);
+    head = push(head, 2);
+    head = push(head, 3);
+    var it = head;
+    var seen = 0;
+    while (it) node {
+        seen = seen + 1;
+        std.println("node={}", node.value);
+        it = node.next;
+    }
+    std.println("nodes={} used={}", seen, used);
+
+    // 撑爆：剩下的不够，返回 error 分支而不是崩
+    var big = std.format(arena, "{s}", LONG);
+    if (big) s {
+        std.println("big=[{s}]", s);
+    } else e {
+        std.println("oom big");
+    }
+    return 0;
+}
+
+// expect-output
+// a=[x=1 y=2] used=8
+// b=[ab-cd] used=14
+// c=[<5:10>] used=21
+// node=3
+// node=2
+// node=1
+// nodes=3 used=69
+// oom big
