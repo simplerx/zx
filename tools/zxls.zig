@@ -458,9 +458,186 @@ fn readFileSmall(path: []const u8) ?[]u8 {
     return Io.Dir.cwd().readFileAlloc(g_io, path, gpa, Io.Limit.limited(4 * 1024 * 1024)) catch null;
 }
 
+// ---------------------------------------------------------------- definition
+
+fn pathToUri(path: []const u8) []const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    out.appendSlice(gpa, "file:///") catch {};
+    for (path) |c| out.append(gpa, if (c == '\\') '/' else c) catch {};
+    return out.items;
+}
+
+/// Location JSON（appendSlice 拼字面括号，绕开 fmt 转义）
+fn makeLocation(uri: []const u8, l1: u32, c1: u32, c2: u32) []const u8 {
+    var j = Json{};
+    j.buf.appendSlice(gpa, "{\"uri\":") catch {};
+    j.str(uri);
+    j.buf.appendSlice(gpa, ",\"range\":{\"start\":{\"line\":") catch {};
+    j.raw("{d}", .{l1});
+    j.buf.appendSlice(gpa, ",\"character\":") catch {};
+    j.raw("{d}", .{c1});
+    j.buf.appendSlice(gpa, "},\"end\":{\"line\":") catch {};
+    j.raw("{d}", .{l1});
+    j.buf.appendSlice(gpa, ",\"character\":") catch {};
+    j.raw("{d}", .{c2});
+    j.buf.appendSlice(gpa, "}}}") catch {};
+    return j.buf.items;
+}
+
+/// 行内找 `[pub ](const|let|var|type) word` 声明；返回 0-based 行/列
+fn findDeclLine(text: []const u8, word: []const u8) ?struct { line: u32, col: u32 } {
+    var ln: u32 = 0;
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |line_raw| : (ln += 1) {
+        var ci: usize = 0;
+        while (ci < line_raw.len and (line_raw[ci] == ' ' or line_raw[ci] == '\t')) ci += 1;
+        if (line_raw.len - ci >= 4 and std.mem.eql(u8, line_raw[ci .. ci + 4], "pub ")) ci += 4;
+        while (ci < line_raw.len and (line_raw[ci] == ' ' or line_raw[ci] == '\t')) ci += 1;
+        const rest = line_raw[ci..];
+        const kws = [_][]const u8{ "const", "let", "var", "type" };
+        for (kws) |kw| {
+            if (!(rest.len > kw.len and std.mem.startsWith(u8, rest, kw))) continue;
+            if (rest[kw.len] != ' ' and rest[kw.len] != '\t') continue;
+            var t = kw.len + 1;
+            while (t < rest.len and (rest[t] == ' ' or rest[t] == '\t')) t += 1;
+            if (std.mem.startsWith(u8, rest[t..], word) and
+                (rest.len == t + word.len or !isIdentChar(rest[t + word.len])))
+            {
+                return .{ .line = ln, .col = @intCast(ci + t) };
+            }
+        }
+    }
+    return null;
+}
+
+/// `const word = module("X")` → X
+fn moduleOfBinding(text: []const u8, word: []const u8) ?[]const u8 {
+    var pat: std.ArrayList(u8) = .empty;
+    defer pat.deinit(gpa);
+    pat.appendSlice(gpa, "const ") catch return null;
+    pat.appendSlice(gpa, word) catch return null;
+    pat.appendSlice(gpa, " = module(\"") catch return null;
+    const hit = std.mem.indexOf(u8, text, pat.items) orelse return null;
+    const rest = text[hit + pat.items.len ..];
+    const e = std.mem.indexOfScalar(u8, rest, '"') orelse return null;
+    return rest[0..e];
+}
+
+/// off 在同行 module("…" 字符串内（含停在内容上）→ 完整模块名
+fn moduleStringAt(text: []const u8, off: usize) ?[]const u8 {
+    var ls = off;
+    while (ls > 0 and text[ls - 1] != '\n') ls -= 1;
+    const seg = text[ls..off];
+    const hit = std.mem.lastIndexOf(u8, seg, "module(\"") orelse return null;
+    const start = hit + 8; // 跳过 module("
+    if (std.mem.indexOfScalar(u8, seg[start..], '"') != null) return null; // 已闭合
+    // 模块名延伸到闭合引号
+    var e = off;
+    while (e < text.len and text[e] != '"' and text[e] != '\n') e += 1;
+    return text[ls + start .. e];
+}
+
+/// 模块名 → 真实文件路径（<dir>/<m>.zx 或 <dir>/<m>/<m>.zx）
+fn resolveModuleFile(doc: *const Document, m: []const u8) ?[]const u8 {
+    const doc_dir = dirName(doc.path);
+    var dirs: [2][]const u8 = undefined;
+    var nd: usize = 0;
+    dirs[nd] = doc_dir;
+    nd += 1;
+    if (root_path) |r| {
+        if (!std.mem.eql(u8, r, doc_dir)) {
+            dirs[nd] = r;
+            nd += 1;
+        }
+    }
+    for (dirs[0..nd]) |d| {
+        var path: std.ArrayList(u8) = .empty;
+        defer path.deinit(gpa);
+        path.appendSlice(gpa, d) catch continue;
+        path.append(gpa, '/') catch continue;
+        const base_len = path.items.len;
+        path.appendSlice(gpa, m) catch continue;
+        path.appendSlice(gpa, ".zx") catch continue;
+        if (readFileSmall(path.items) != null) return dupe(path.items);
+        // <m>/<m>.zx
+        path.items.len = base_len + m.len;
+        path.append(gpa, '/') catch continue;
+        path.appendSlice(gpa, m) catch continue;
+        path.appendSlice(gpa, ".zx") catch continue;
+        if (readFileSmall(path.items) != null) return dupe(path.items);
+    }
+    return null;
+}
+
+fn definitionAt(doc: *const Document, line: u32, character: u32) ?[]const u8 {
+    const text = doc.text;
+    const off = posToOffset(text, line, character);
+
+    // module("…") 字符串内（含停在名字上）：跳模块文件
+    if (moduleStringAt(text, off)) |m| {
+        if (resolveModuleFile(doc, m)) |p| return makeLocation(pathToUri(p), 0, 0, 0);
+        return null;
+    }
+
+    var ws = off;
+    while (ws > 0 and isIdentChar(text[ws - 1])) ws -= 1;
+    var we = off;
+    while (we < text.len and isIdentChar(text[we])) we += 1;
+    const word = text[ws..we];
+    if (word.len == 0) return null;
+
+    // 1) 当前文档声明
+    if (findDeclLine(text, word)) |loc|
+        return makeLocation(doc.uri, loc.line, loc.col, loc.col + @as(u32, @intCast(word.len)));
+
+    // 2) 模块绑定名 / std → 模块文件
+    var m = moduleOfBinding(text, word);
+    if (m == null and std.mem.eql(u8, word, "std")) m = "std";
+    if (m) |mm| {
+        if (resolveModuleFile(doc, mm)) |p| return makeLocation(pathToUri(p), 0, 0, 0);
+    }
+
+    // 3) 兄弟文件的顶层声明（同目录 + worktree 根）
+    const doc_dir = dirName(doc.path);
+    var dirs: [2][]const u8 = undefined;
+    var nd: usize = 0;
+    dirs[nd] = doc_dir;
+    nd += 1;
+    if (root_path) |r| {
+        if (!std.mem.eql(u8, r, doc_dir)) {
+            dirs[nd] = r;
+            nd += 1;
+        }
+    }
+    const self_name = baseName(doc.path);
+    for (dirs[0..nd]) |d| {
+        var dir = Io.Dir.cwd().openDir(g_io, d, .{ .iterate = true }) catch continue;
+        defer dir.close(g_io);
+        var it = dir.iterate();
+        while (it.next(g_io) catch null) |entry| {
+            if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".zx")) continue;
+            if (std.mem.eql(u8, entry.name, self_name)) continue;
+            var fp: std.ArrayList(u8) = .empty;
+            defer fp.deinit(gpa);
+            fp.appendSlice(gpa, d) catch continue;
+            fp.append(gpa, '/') catch continue;
+            fp.appendSlice(gpa, entry.name) catch continue;
+            const txt = readFileSmall(fp.items) orelse continue;
+            if (findDeclLine(txt, word)) |loc|
+                return makeLocation(pathToUri(fp.items), loc.line, loc.col, loc.col + @as(u32, @intCast(word.len)));
+        }
+    }
+    return null;
+}
+
 // ---------------------------------------------------------------- completion
 
-fn addItem(list: *Json, seen: *std.StringHashMapUnmanaged(void), label: []const u8, kind: u32, detail: []const u8) void {
+/// tier：0 上下文成员（std.* / @ 内建 / 容器字段）
+///      1 当前文件标识符
+///      2 关键字
+///      3 工作区其他文件的标识符
+/// Zed 按 sortText 排序，前缀字母分层保证上下文匹配永远排在噪音前面。
+fn addItem(list: *Json, seen: *std.StringHashMapUnmanaged(void), label: []const u8, kind: u32, detail: []const u8, tier: u8) void {
     if (seen.contains(label)) return;
     seen.put(gpa, dupe(label), {}) catch {};
     if (seen.count() > 1) list.raw(",", .{});
@@ -471,17 +648,48 @@ fn addItem(list: *Json, seen: *std.StringHashMapUnmanaged(void), label: []const 
         list.raw(",\"detail\":", .{});
         list.str(detail);
     }
+    var st: std.ArrayList(u8) = .empty;
+    st.append(gpa, 'a' + tier) catch {};
+    st.appendSlice(gpa, label) catch {};
+    list.raw(",\"sortText\":", .{});
+    list.str(st.items);
     list.raw("}}", .{});
 }
 
-fn addIdents(list: *Json, seen: *std.StringHashMapUnmanaged(void), doc_dir: []const u8, prefix: []const u8) void {
-    var idents: std.StringHashMapUnmanaged(void) = .empty;
-    defer idents.deinit(gpa);
-    workspaceIdents(doc_dir, &idents);
-    var it = idents.keyIterator();
+/// 工作区补全上限：全仓库标识符再多也不能淹没列表/撑爆报文
+const MAX_WORKSPACE_COMPLETIONS = 250;
+
+fn isKeywordWord(w: []const u8) bool {
+    for (keywords) |kw| {
+        if (std.mem.eql(u8, kw, w)) return true;
+    }
+    return false;
+}
+
+fn addIdents(list: *Json, seen: *std.StringHashMapUnmanaged(void), doc_text: []const u8, doc_dir: []const u8, prefix: []const u8) void {
+    // 当前文件标识符（tier 1）；关键字不算标识符
+    var local: std.StringHashMapUnmanaged(void) = .empty;
+    defer local.deinit(gpa);
+    collectIdents(doc_text, &local);
+    var it = local.keyIterator();
     while (it.next()) |k| {
+        if (isKeywordWord(k.*)) continue;
         if (prefix.len == 0 or std.mem.startsWith(u8, k.*, prefix))
-            addItem(list, seen, k.*, 6, "");
+            addItem(list, seen, k.*, 6, "当前文件", 1);
+    }
+    // 工作区（tier 3，带上限）
+    var ws: std.StringHashMapUnmanaged(void) = .empty;
+    defer ws.deinit(gpa);
+    workspaceIdents(doc_dir, &ws);
+    var count: usize = 0;
+    it = ws.keyIterator();
+    while (it.next()) |k| {
+        if (count >= MAX_WORKSPACE_COMPLETIONS) break;
+        if (isKeywordWord(k.*)) continue;
+        if (prefix.len == 0 or std.mem.startsWith(u8, k.*, prefix)) {
+            addItem(list, seen, k.*, 6, "", 3);
+            count += 1;
+        }
     }
 }
 
@@ -524,14 +732,14 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
             for (std_ns_table) |t| {
                 if (!std.mem.eql(u8, t.name, ns)) continue;
                 handled = true;
-                for (t.members) |m| addItem(&list, &seen, m, 3, t.detail);
+                for (t.members) |m| addItem(&list, &seen, m, 3, t.detail, 0);
             }
         }
 
         if (!handled) {
             // std 顶层：编译器 seed 的名字（println/heap/io/…，不在 std.zx 文本里）
             if (std.mem.eql(u8, path, "std")) {
-                for (std_seeded) |m| addItem(&list, &seen, m, 3, "std 编译器内建");
+                for (std_seeded) |m| addItem(&list, &seen, m, 3, "std 编译器内建", 0);
             }
 
             // module 绑定？const <path> = module("…")
@@ -586,10 +794,10 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                         .variant => 20,
                         .value => 6,
                     };
-                    addItem(&list, &seen, dcl.name, k, path);
+                    addItem(&list, &seen, dcl.name, k, path, 0);
                 }
             } else if (!std.mem.eql(u8, path, "std")) {
-                addIdents(&list, &seen, doc_dir, "");
+                // 未知容器：不给工作区噪音，宁可空列表
             }
         }
     } else if (is_at_ctx) {
@@ -600,16 +808,16 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                 for (builtin_docs) |bd| {
                     if (std.mem.eql(u8, bd.name, b)) detail = bd.detail;
                 }
-                addItem(&list, &seen, b, 3, detail);
+                addItem(&list, &seen, b, 3, detail, 0);
             }
         }
     } else {
-        // 关键字 + 工作区标识符
+        // 当前文件标识符 + 关键字 + 工作区标识符（分层排序）
+        addIdents(&list, &seen, text, doc_dir, prefix);
         for (keywords) |kw| {
             if (prefix.len == 0 or std.mem.startsWith(u8, kw, prefix))
-                addItem(&list, &seen, kw, 14, "");
+                addItem(&list, &seen, kw, 14, "关键字", 2);
         }
-        addIdents(&list, &seen, doc_dir, prefix);
     }
 
     list.raw("]}}", .{});
@@ -799,7 +1007,7 @@ fn handle(v: std.json.Value) ?[]const u8 {
         var j = Json{};
         j.raw("{{\"jsonrpc\":\"2.0\",\"id\":", .{});
         writeId(&j, id);
-        j.raw(",\"result\":{{\"capabilities\":{{\"textDocumentSync\":{{\"openClose\":true,\"change\":1}},\"completionProvider\":{{\"triggerCharacters\":[\".\"]}}}}}}}}", .{});
+        j.buf.appendSlice(gpa, ",\"result\":{\"capabilities\":{\"textDocumentSync\":{\"openClose\":true,\"change\":1},\"completionProvider\":{\"triggerCharacters\":[\".\",\"@\"]},\"definitionProvider\":true}}}") catch @panic("oom");
         return j.buf.items;
     }
     if (std.mem.eql(u8, method, "initialized")) return null;
@@ -911,6 +1119,37 @@ fn handle(v: std.json.Value) ?[]const u8 {
         if (result) |r| {
             j.buf.appendSlice(gpa, r) catch {};
         } else j.raw("{{\"isIncomplete\":false,\"items\":[]}}", .{});
+        j.raw("}}", .{});
+        return j.buf.items;
+    }
+
+    if (std.mem.eql(u8, method, "textDocument/definition")) {
+        var result: ?[]const u8 = null;
+        blk: {
+            const pm = params orelse break :blk;
+            if (pm != .object) break :blk;
+            const td = pm.object.get("textDocument") orelse break :blk;
+            const pos = pm.object.get("position") orelse break :blk;
+            if (td != .object or pos != .object) break :blk;
+            const uri_v = td.object.get("uri") orelse break :blk;
+            const ln_v = pos.object.get("line") orelse break :blk;
+            const ch_v = pos.object.get("character") orelse break :blk;
+            if (uri_v != .string or ln_v != .integer or ch_v != .integer) break :blk;
+            const path = uriToPath(uri_v.string);
+            docs_mu.lockUncancelable(g_io);
+            const doc_copy: ?Document = docs.get(path);
+            docs_mu.unlock(g_io);
+            if (doc_copy) |d| {
+                result = definitionAt(&d, @intCast(ln_v.integer), @intCast(ch_v.integer));
+            }
+        }
+        var j = Json{};
+        j.raw("{{\"jsonrpc\":\"2.0\",\"id\":", .{});
+        writeId(&j, id);
+        j.raw(",\"result\":", .{});
+        if (result) |r| {
+            j.buf.appendSlice(gpa, r) catch {};
+        } else j.raw("null", .{});
         j.raw("}}", .{});
         return j.buf.items;
     }
