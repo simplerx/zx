@@ -29,7 +29,10 @@ const Json = struct {
     fn raw(j: *Json, comptime fmt: []const u8, args: anytype) void {
         j.buf.print(gpa, fmt, args) catch @panic("oom");
     }
-    fn str(j: *Json, s: []const u8) void {
+    fn str(j: *Json, s_in: []const u8) void {
+        // 出站清洗：宿主（Zed）读到非法 UTF-8 会直接杀掉 server——
+        // 无论来源编码（GBK 诊断文本、磁盘旧文件），一律替换为 U+FFFD。
+        const s = sanitizeUtf8(s_in);
         j.buf.append(gpa, '"') catch @panic("oom");
         for (s) |c| switch (c) {
             '"' => j.buf.appendSlice(gpa, "\\\"") catch @panic("oom"),
@@ -149,6 +152,30 @@ fn logLine(msg: []const u8) void {
         Io.Dir.cwd().writeFile(g_io, .{ .sub_path = path, .data = buf.items }) catch {};
     }
 }
+
+/// 非法 UTF-8 序列替换为 U+FFFD；合法输入原样返回（零拷贝）。
+fn sanitizeUtf8(s: []const u8) []const u8 {
+    if (std.unicode.utf8ValidateSlice(s)) return s;
+    var out: std.ArrayList(u8) = .empty;
+    var i: usize = 0;
+    while (i < s.len) {
+        const len = std.unicode.utf8ByteSequenceLength(s[i]) catch {
+            out.appendSlice(gpa, "\u{FFFD}") catch {};
+            i += 1;
+            continue;
+        };
+        if (i + len <= s.len and std.unicode.utf8ValidateSlice(s[i .. i + len])) {
+            out.appendSlice(gpa, s[i .. i + len]) catch {};
+            i += len;
+        } else {
+            out.appendSlice(gpa, "\u{FFFD}") catch {};
+            i += 1;
+        }
+    }
+    logLine("sanitized invalid utf-8 in outgoing string");
+    return out.items;
+}
+
 fn dupe(s: []const u8) []const u8 {
     return gpa.dupe(u8, s) catch @panic("oom");
 }
