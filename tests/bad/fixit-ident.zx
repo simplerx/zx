@@ -1,0 +1,12 @@
+// fix-it（A2）：未知标识符给出作用域链上编辑距离最近的候选（OSA 距离，
+// 换位错算 1 次编辑）。
+//
+// expect-count: 2
+// expect: unknown identifier 'mesage'
+// expect: did you mean `message`?
+// expect: cannot assign to 'mesage': it is not a `var`
+
+const main = fn () void {
+    var message: i32 = 0;
+    mesage = 1;
+};

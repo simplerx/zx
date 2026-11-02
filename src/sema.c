@@ -17,6 +17,97 @@
 #define BAD_CODE(code, n, ...) \
     (diag_code_at((code), (n)->line, (n)->col, __VA_ARGS__), ty_invalid())
 
+/* ---------------- fix-it：did you mean（A2 · M42） ----------------
+ * 三类建议：未知标识符（作用域链）、聚合成员（fields/methods/statics）、
+ * std 与模块成员（名字表 / 模块作用域）。在 err_at 之前调 diag_help，
+ * 建议行跟在那条诊断后面；没有合适的候选就不挂，诊断保持原样。 */
+
+/* OSA 距离：Levenshtein + 相邻换位算 1 次编辑。手滑换位（naem / coutn）
+ * 是最高频的拼写错误，纯 Levenshtein 会把它算成 2 次而错过建议。 */
+static int edit_distance(const char *a, const char *b) {
+    int la = (int)strlen(a), lb = (int)strlen(b);
+    if (la > 64 || lb > 64) return 999;
+    int d[66][66];
+    for (int i = 0; i <= la; i++) d[i][0] = i;
+    for (int j = 0; j <= lb; j++) d[0][j] = j;
+    for (int i = 1; i <= la; i++) {
+        for (int j = 1; j <= lb; j++) {
+            int cost = (a[i - 1] == b[j - 1]) ? 0 : 1;
+            int m = d[i - 1][j] + 1;                          /* 删 */
+            if (d[i][j - 1] + 1 < m) m = d[i][j - 1] + 1;     /* 插 */
+            if (d[i - 1][j - 1] + cost < m) m = d[i - 1][j - 1] + cost;  /* 换 */
+            if (i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1])
+                if (d[i - 2][j - 2] + 1 < m) m = d[i - 2][j - 2] + 1;    /* 换位 */
+            d[i][j] = m;
+        }
+    }
+    return d[la][lb];
+}
+
+/* 阈值：短名容 1 次编辑，长名容 2 次——按长度比例放太宽会把 3 字母
+ * 名字配到很远的候选上。 */
+static bool name_close(const char *bad, const char *cand) {
+    if (!bad || !cand || !*cand) return false;
+    return edit_distance(bad, cand) <= (strlen(bad) <= 4 ? 1 : 2);
+}
+
+/* 聚合类型的成员建议：fields + methods + statics（枚举体的 const/var）。 */
+static const char *suggest_member(const char *bad, Type *t) {
+    if (!t || !bad) return NULL;
+    const char *best = NULL;
+    int bd = 999;
+    for (int i = 0; i < t->nfields; i++) {
+        const char *c = t->fields[i].name;
+        if (!name_close(bad, c)) continue;
+        int d = edit_distance(bad, c);
+        if (d < bd) { bd = d; best = c; }
+    }
+    for (int i = 0; i < t->nmethods; i++) {
+        const char *c = t->methods[i].name;
+        if (!name_close(bad, c)) continue;
+        int d = edit_distance(bad, c);
+        if (d < bd) { bd = d; best = c; }
+    }
+    for (int i = 0; i < t->nstatics; i++) {
+        const char *c = t->statics[i].name;
+        if (!name_close(bad, c)) continue;
+        int d = edit_distance(bad, c);
+        if (d < bd) { bd = d; best = c; }
+    }
+    return best;
+}
+
+/* std 命名空间的成员建议。名字表与 std_lookup 的 key 手工对齐——
+ * 漂移的代价只是"少一条建议"，不会出错，别为它建机制。 */
+static const char *suggest_std_member(const char *ns, const char *bad) {
+    static const char *const std_top[] = { "print", "println", "format", "heap",
+        "file", "io", "Allocator", "TypeKind", "TypeInfo", "FieldInfo",
+        "stackAlloc", "heapAlloc", "process", NULL };
+    static const char *const io_m[] = { "read", "write", "openRead", "openWrite",
+        "openAppend", "seek", "tell", "close", "flush", "stdin", "stdout",
+        "stderr", NULL };
+    static const char *const file_m[] = { "read", "write", "append", "exists",
+        "remove", NULL };
+    static const char *const proc_m[] = { "args", "getenv", "setenv", "exit",
+        NULL };
+    static const char *const heap_m[] = { "page", NULL };
+    const char *const *tab = NULL;
+    if (!strcmp(ns, "std"))        tab = std_top;
+    else if (!strcmp(ns, "std.io"))     tab = io_m;
+    else if (!strcmp(ns, "std.file"))   tab = file_m;
+    else if (!strcmp(ns, "std.process")) tab = proc_m;
+    else if (!strcmp(ns, "std.heap"))   tab = heap_m;
+    if (!tab) return NULL;
+    const char *best = NULL;
+    int bd = 999;
+    for (int i = 0; tab[i]; i++) {
+        if (!name_close(bad, tab[i])) continue;
+        int d = edit_distance(bad, tab[i]);
+        if (d < bd) { bd = d; best = tab[i]; }
+    }
+    return best;
+}
+
 /* ---------------- 符号与作用域 ---------------- */
 
 enum { SK_CONST, SK_LET, SK_VAR, SK_PARAM, SK_CAPTURE, SK_FN, SK_NS };
@@ -62,6 +153,21 @@ typedef struct Scope {
 } Scope;
 
 static Scope *g_scope;
+
+/* 作用域链上找与 bad 最接近的名字（fix-it）。符号名的寿命覆盖诊断
+ * 打印，直接返回指针。 */
+static const char *suggest_ident(const char *bad) {
+    const char *best = NULL;
+    int bd = 999;
+    for (Scope *sc = g_scope; sc; sc = sc->parent) {
+        for (Symbol *s = sc->first; s; s = s->next) {
+            if (!name_close(bad, s->name)) continue;
+            int d = edit_distance(bad, s->name);
+            if (d < bd) { bd = d; best = s->name; }
+        }
+    }
+    return best;
+}
 
 /* 一个文件就是一个模块。入口文件是 g_mods[0]。
  * 别的文件只能看到本模块里带 `pub` 的顶层声明。 */
@@ -716,12 +822,20 @@ static const char *g_std_seeded[] = {
 static Symbol *ns_member(Symbol *ns, const char *name, int line, int col) {
     if (ns->builtin == BI_HEAP) {
         if (!strcmp(name, "page")) return std_builtin("heap.page");
+        {
+            const char *sug = suggest_std_member("std.heap", name);
+            if (sug) diag_help("did you mean `%s`?", sug);
+        }
         err_at(line, col, "'std.heap' has no member '%s'", name);
         return NULL;
     }
     if (ns->builtin == BI_FILE) {
         Symbol *f = std_builtin(name);
         if (f && f->builtin) return f;
+        {
+            const char *sug = suggest_std_member("std.file", name);
+            if (sug) diag_help("did you mean `%s`?", sug);
+        }
         err_at(line, col, "'std.file' has no member '%s'", name);
         return NULL;
     }
@@ -732,6 +846,10 @@ static Symbol *ns_member(Symbol *ns, const char *name, int line, int col) {
         snprintf(key, sizeof key, "io.%s", name);
         Symbol *f = std_builtin(key);
         if (f && (f->builtin == BI_IO_FN || f->builtin == BI_IO_PRINT)) return f;
+        {
+            const char *sug = suggest_std_member("std.io", name);
+            if (sug) diag_help("did you mean `%s`?", sug);
+        }
         err_at(line, col, "'std.io' has no member '%s'", name);
         return NULL;
     }
@@ -740,6 +858,10 @@ static Symbol *ns_member(Symbol *ns, const char *name, int line, int col) {
         snprintf(key, sizeof key, "process.%s", name);
         Symbol *f = std_builtin(key);
         if (f && f->builtin == BI_PROC_FN) return f;
+        {
+            const char *sug = suggest_std_member("std.process", name);
+            if (sug) diag_help("did you mean `%s`?", sug);
+        }
         err_at(line, col, "'std.process' has no member '%s'", name);
         return NULL;
     }
@@ -755,8 +877,24 @@ static Symbol *ns_member(Symbol *ns, const char *name, int line, int col) {
             }
             return m;
         }
+        {
+            /* 候选就是那个模块的顶层符号——pub 与否都算，建议不给出去
+             * 泄露私有名，只是帮人拼对名字。 */
+            const char *best = NULL;
+            int bd = 999;
+            for (Symbol *m = ns->mod->scope.first; m; m = m->next) {
+                if (!name_close(name, m->name)) continue;
+                int d = edit_distance(name, m->name);
+                if (d < bd) { bd = d; best = m->name; }
+            }
+            if (best) diag_help("did you mean `%s`?", best);
+        }
         err_at(line, col, "module '%s' has no member '%s'", ns->mod->stem, name);
         return NULL;
+    }
+    if (ns->is_std) {
+        const char *sug = suggest_std_member("std", name);
+        if (sug) diag_help("did you mean `%s`?", sug);
     }
     err_at(line, col, "'%s' has no member '%s'", ns->name ? ns->name : "?", name);
     return NULL;
@@ -1922,6 +2060,10 @@ static Type *check_field(Node *n) {
                 }
                 Method *mth = ty_method(tv, n->name);
                 if (mth) { n->inst = mth->fn; n->flag = mth->has_self; return type_of(n, mth->fnty); }
+                {
+                    const char *sug = suggest_member(n->name, tv);
+                    if (sug) diag_help("did you mean `%s`?", sug);
+                }
                 return BAD(n, "`%s` has no member '%s'", ty_str(tv), n->name);
             }
             if (tv->kind == TY_ENUM && !f->is_static) return type_of(n, tv);
@@ -1969,6 +2111,10 @@ static Type *check_field(Node *n) {
         if (!f) {
             Method *m = ty_method(e, n->name);
             if (m) { n->inst = m->fn; n->flag = m->has_self; return type_of(n, m->fnty); }
+            {
+                const char *sug = suggest_member(n->name, e);
+                if (sug) diag_help("did you mean `%s`?", sug);
+            }
             return BAD(n, "`%s` has no member '%s'", ty_str(e), n->name);
         }
         if (f->is_static) return type_of(n, f->ty);
@@ -1999,6 +2145,10 @@ static Type *check_field(Node *n) {
         if (!f) {
             Method *m = ty_method(bt, n->name);
             if (m) { n->inst = m->fn; n->flag = m->has_self; return type_of(n, m->fnty); }
+            {
+                const char *sug = suggest_member(n->name, bt);
+                if (sug) diag_help("did you mean `%s`?", sug);
+            }
             return BAD(n, "`%s` has no field '%s'", ty_str(bt), n->name);
         }
         /* 编译期聚合值里的 type 字段（std.FieldInfo.ty）：字段值本身就是
@@ -2432,6 +2582,10 @@ static Type *check_lit_fields(Node *n, Type *t) {
             Node *p = n->items[i];
             int idx = ty_field_index(t, p->name);
             if (idx < 0) {
+                {
+                    const char *sug = suggest_member(p->name, t);
+                    if (sug) diag_help("did you mean `%s`?", sug);
+                }
                 BAD(p, "`%s` has no field '%s'", ty_str(t), p->name);
                 check_expr(p->a, NULL);
                 continue;
@@ -2697,6 +2851,8 @@ static Type *check_expr_raw(Node *n, Type *expect) {
             if (!strcmp(n->name, "_")) return type_of(n, ty_void());
             Type *b = base_type(n->name);
             if (b) { n->type_val = b; return type_of(n, ty_type()); }
+            const char *sug = suggest_ident(n->name);
+            if (sug) diag_help("did you mean `%s`?", sug);
             return BAD(n, "unknown identifier '%s'", n->name);
         }
         n->sym = s;

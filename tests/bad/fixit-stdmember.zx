@@ -1,0 +1,11 @@
+// fix-it（A2）：std 成员拼错给出成员名表里最近的候选。
+//
+// expect-count: 1
+// expect: 'std' has no member 'printfln'
+// expect: did you mean `println`?
+
+const std = module("std");
+
+const main = fn () void {
+    std.printfln("x");
+};

@@ -138,6 +138,20 @@ static bool diag_is_dup(const char *code, int line, int col, const char *msg) {
     return false;
 }
 
+/* fix-it（A2）：预挂一条 help 行，跟在下一条发出的诊断后面（rustc 的
+ * `help:` 风格）。调用方在 err_at 之前调 diag_help；诊断被去重或超上限
+ * 截断时一并丢弃，help 永远不会孤立出现。 */
+static char g_help[240];
+static bool g_help_pending;
+
+void diag_help(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(g_help, sizeof g_help, fmt, ap);
+    va_end(ap);
+    g_help_pending = true;
+}
+
 static void diag_remember(const char *code, int line, int col, const char *msg) {
     int i = g_recent_n % 8;
     g_recent[i].line = line;
@@ -148,12 +162,15 @@ static void diag_remember(const char *code, int line, int col, const char *msg) 
 }
 
 static void diag_emit(const char *code, int line, int col, const char *msg) {
-    if (diag_is_dup(code, line, col, msg)) return;
+    if (diag_is_dup(code, line, col, msg)) { g_help_pending = false; return; }
     diag_remember(code, line, col, msg);
     g_error_count++;
-    if (g_error_count > g_diag_max_print) return;   /* 只计数，不再刷屏 */
+    if (g_error_count > g_diag_max_print) { g_help_pending = false; return; }   /* 只计数，不再刷屏 */
     g_diag_shown++;
     fprintf(stderr, "%s:%d:%d: error[%s]: %s\n", g_srcpath, line, col, code, msg);
+    /* fix-it（A2）：diag_help 预挂的建议行跟在刚发的这条后面。 */
+    if (g_help_pending) fprintf(stderr, "  help: %s\n", g_help);
+    g_help_pending = false;
 }
 
 static void diag_v(DiagPhase ph, int line, int col, const char *fmt, va_list ap) {

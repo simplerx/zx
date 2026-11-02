@@ -28,6 +28,8 @@ void diag_at(DiagPhase ph, int line, int col, const char *fmt, ...);
 /* 明确知道码的调用点用它（解析器几乎全是 E0201，不该让码表猜） */
 void diag_code_at(const char *code, int line, int col, const char *fmt, ...);
 void err_at(int line, int col, const char *fmt, ...);   /* = diag_at(PH_SEMA, …) */
+/* fix-it：预挂一条 help 行，跟在下一条诊断后面（A2）。 */
+void diag_help(const char *fmt, ...);
 extern int g_error_count;
 extern int g_diag_shown;       /* 实际打印过多少条（超过上限后只计数） */
 extern int g_diag_max_print;   /* 打印上限 */

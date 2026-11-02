@@ -684,6 +684,10 @@ zx_init_<stem>(void)  每模块一个初始化函数，main 按依赖倒序调�
       函数以**错误返回**时触发——`return` 按运行时 `.tag != 0` 判，
       `try` 传播路径无条件触发；要求所在函数返回 `!T`。顺带放宽
       `defer { … }` 块形式的尾分号。取舍见 decisions **§73**。
+- [x] M42 **阶段 A·诊断 fix-it**：`diag_help()` 预挂 `help:` 行跟在下一条
+      诊断后（rustc 风格）；建议器三类——未知标识符（作用域链）、
+      聚合成员（fields/methods/statics）、std 与模块成员；距离用
+      **OSA**（换位错算 1 次）。取舍见 decisions **§74**。
       C/Zx 两侧镜像同修；`sh test.sh` **200 项全过**、对拍 **61/61**。
       取舍见 decisions **§72**
 
@@ -1757,3 +1761,25 @@ decisions **§72**。
 C / Zx 两侧镜像同修。结果：`sh test.sh` **203 项全过**（新增
 `tests/good/errdefer.zx` + 2 个反例）；`diff_ast.sh` **62/62**、
 `diff_lex.sh` **73/73** 全等。规格 v0.27（§8.6.1）、decisions **§73**。
+
+## M42：阶段 A·诊断 fix-it——did you mean
+
+错误信息从"哪里错了"进化到"大概想写什么"。`diag_help()` 预挂一条
+`help:` 行跟在下一条诊断后面（rustc 风格），挂载点在诊断唯一出口——
+去重与截断的诊断把 help 一并丢弃，建议永不孤立出现。
+
+- **建议器三类**：未知标识符（作用域链全扫）、聚合成员
+  （fields/methods/statics）、std 与模块成员（成员名表 / 模块作用域）。
+- **距离是 OSA**：相邻换位算 1 次编辑——`naem`→`name`、`coutn`→`count`
+  这类手滑换位纯 Levenshtein 会算成 2 次而错过短名阈值。
+- 边界：`@builtin` 建议跳过（内建名无可枚举的表，双份维护不值）。
+
+效果示例：
+
+```text
+demo.zx:4:5: error[E0401]: unknown identifier 'coutn'
+  help: did you mean `count`?
+```
+
+结果：`sh test.sh` **206 项全过**（新增 3 个 fix-it 反例）；
+`diff_ast.sh` **62/62**、`diff_lex.sh` **73/73** 全等。decisions **§74**。

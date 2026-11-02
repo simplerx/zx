@@ -1,0 +1,15 @@
+// fix-it（A2）：字段名拼错给出该类型 fields/methods 里最近的候选。
+//
+// expect-count: 1
+// expect: has no field 'naem'
+// expect: did you mean `name`?
+
+const P = struct {
+    name: []const u8,
+    age: i32,
+};
+
+const main = fn () void {
+    var p: P = undefined;
+    p.naem = "x";
+};
