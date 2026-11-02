@@ -1,0 +1,8 @@
+// `null orelse x` 同样不成立：`null` 没有类型，也就没有"左边是不是空的"可问。
+// 想表达"没有就用默认值"，左边得是一个真的 `?T` / `!T`。
+// expect: `orelse` needs an optional or an error union, found `null`
+// expect-code: E0301
+// expect-count: 1
+fn main() i32 {
+    return null orelse 42;
+}

@@ -1,0 +1,10 @@
+// 编译期就知道是空的可选值，再 `.?` 必然 abort——按 §7.R10 的"能定就编译期定"
+// 直接报错（E0506），和"编译期除零"（E0505）是同一类处置。
+// expect: `.?` on a value that is `null` at compile time
+// expect-code: E0506
+// expect-count: 1
+const NONE: ?i32 = null;
+const BAD: i32 = NONE.?;
+fn main() i32 {
+    return BAD;
+}

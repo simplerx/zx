@@ -13,6 +13,9 @@
 #include "val.h"
 
 #define BAD(n, ...) (err_at((n)->line, (n)->col, __VA_ARGS__), ty_invalid())
+/* 码由调用点指定：措辞会改，码不改（§17.1） */
+#define BAD_CODE(code, n, ...) \
+    (diag_code_at((code), (n)->line, (n)->col, __VA_ARGS__), ty_invalid())
 
 /* ---------------- 符号与作用域 ---------------- */
 
@@ -2573,8 +2576,19 @@ static Type *check_expr_raw(Node *n, Type *expect) {
     case NK_UNWRAP: {
         Type *t = check_expr(n->a, NULL);
         if (!t || t->kind == TY_INVALID) return ty_invalid();
+        if (t->kind == TY_NULL)
+            /* `null` 自己没有类型——它只是"给 ?T 填空"的那个字面量，不是 ?T。
+             * 所以 `null.?` 不是"运行时空解包"，而是压根没东西可解。 */
+            return BAD(n, "`.?` needs an optional or an error union, found `null` — "
+                          "`null` only fills a `?T`, it is not one");
         if (t->kind != TY_OPT && t->kind != TY_ERR)
             return BAD(n, "`.?` needs an optional or an error union, found `%s`", ty_str(t));
+        /* 编译期就知道是空的：`.?` 在这里必然 abort，和除零同一处置（§7.R10）——
+         * 能定就在编译期报，不要留到运行期。 */
+        Value *cv = ct_eval(n->a);
+        if (cv && (cv->kind == V_NULL || cv->kind == V_UNDEF))
+            return BAD_CODE("E0506", n, "`.?` on a value that is `null` at compile time — "
+                                        "it would abort every time");
         return type_of(n, t->elem);
     }
 
@@ -2585,18 +2599,14 @@ static Type *check_expr_raw(Node *n, Type *expect) {
             check_expr(n->b, expect);      /* 右边照样检查，别把错漏过去 */
             return ty_invalid();
         }
-        Type *elem = NULL;
-        if (t->kind == TY_OPT || t->kind == TY_ERR) elem = t->elem;
-        else if (t->kind == TY_NULL) elem = expect;   /* `null orelse x`：靠期望类型 */
-        if (!elem) {
-            /* 没有期望类型（比如直接喂给 `{}` 格式参数）：右边的类型就是答案。
-             * `null orelse 42` 是 i32，不需要谁告诉它。 */
-            if (t->kind != TY_NULL)
-                return BAD(n, "`orelse` needs an optional or an error union, found `%s`", ty_str(t));
-            Type *alt = check_expr(n->b, NULL);
-            if (!alt || alt->kind == TY_INVALID) return ty_invalid();
-            return type_of(n, alt);
-        }
+        if (t->kind == TY_NULL)
+            /* 同 `null.?`：`null` 只在"有 ?T 落点"的位置成立。`null orelse x`
+             * 没有落点，也就没有左值可看——直接报错，别退化成"右边恒为答案"。 */
+            return BAD(n, "`orelse` needs an optional or an error union, found `null` — "
+                          "`null` only fills a `?T`, it is not one");
+        if (t->kind != TY_OPT && t->kind != TY_ERR)
+            return BAD(n, "`orelse` needs an optional or an error union, found `%s`", ty_str(t));
+        Type *elem = t->elem;
         Type *alt = check_expr(n->b, elem);
         coerce_node(n->b, alt, elem, "`orelse` alternative");
         return type_of(n, elem);
@@ -3028,7 +3038,8 @@ static void ensure_raw(Symbol *s) {
 
     /* R1：凡 const，编译器必须能在编译期算出值 */
     if (s->kind == SK_CONST && d->b && !s->ct && !s->type_val &&
-        s->ty && s->ty->kind != TY_INVALID && d->b->kind != NK_MODULE)
+        s->ty && s->ty->kind != TY_INVALID && d->b->kind != NK_MODULE &&
+        (!init || init->kind != TY_INVALID))   /* 初始化器本身报过错就别再叠一条 */
         err_at(d->line, d->col,
                "const '%s' must be computable at compile time (R1); "
                "this initializer needs runtime values", s->name ? s->name : "?");
@@ -4639,10 +4650,7 @@ static Value *ct_eval(Node *n) {
      * 左边是字面量 `null` 时永远是空——这一支最常用（`const X = null orelse 42;`）。 */
     case NK_ORELSE: {
         Value *a = ct_eval(n->a);
-        if (!a) {
-            if (n->a->kind == NK_NULL) v = ct_eval(n->b);
-            break;
-        }
+        if (!a) break;                     /* `null orelse x` 已在类型检查处报错 */
         if (a->kind == V_NULL || a->kind == V_UNDEF) v = ct_eval(n->b);
         else v = with_ty(a, n->ty);        /* 有值：取载荷 */
         break;
@@ -4651,7 +4659,6 @@ static Value *ct_eval(Node *n) {
     /* `.?' 同理：编译期就知道是空的，不在这里"算出个值"——那等于把
      * 运行时 trap 悄悄变成编译期的 0。让它折不动，交给后端发 trap。 */
     case NK_UNWRAP: {
-        if (n->a->kind == NK_NULL) break;
         Value *a = ct_eval(n->a);
         if (!a || a->kind == V_NULL || a->kind == V_UNDEF) break;
         v = with_ty(a, n->ty);

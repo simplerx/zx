@@ -1,0 +1,8 @@
+// `null` 是"给 ?T 填空"的那个字面量，它自己不是 ?T——没有 payload 可解。
+// 这不是"运行时空解包"，是根本没东西可解，所以是类型错。
+// expect: `.?` needs an optional or an error union, found `null`
+// expect-code: E0301
+// expect-count: 1
+fn main() i32 {
+    return null.?;
+}

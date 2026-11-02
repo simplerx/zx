@@ -1098,21 +1098,30 @@ fn lhs_or(nd: *Node, dflt: *Node) *Node { return nd.lhs orelse dflt; }
 空值解包按整数除零那一套处置——`fflush(stdout)` → stderr 一行
 `zx: unwrap of a null optional at 文件:行` → `abort()`。
 
-**这一轮抓到两个"跑得出答案、答案是错的"**：
+**v0.21 补记：`null` 不许当值用。** 这一轮最初为了让 `null orelse x`、`null.?`
+"能跑"，前后打了两个补丁——根子是同一个错误：**把 `null` 当成了"空的可选值"**。
+它其实只是给 `?T` 填空的字面量，没有自己的类型，离开"有 `?T` 落点"的位置就该报错：
 
-1. `null orelse x` 被当成"左值不是可选类型"整段略过，发出去的是那个 `null`
-   字面量（`0`）。`null` 的类型是 `TY_NULL`，压根没有 payload 可取——正确做法
-   是直接发右边。
-2. `null orelse 42` 写在 `{}` 格式参数里时没有期望类型，语义层判不出结果类型就
-   报错，可右边明明有类型。改成"期望类型缺失就取右边的类型"。
+```zx
+let a: ?i32 = null;                     // 对：落点是 ?i32
+let b = null;                           // 错：推不出类型
+null.?;                                 // 错：没有 payload 可解
+null orelse 42;                         // 错：没有"左边是不是空的"可问
+const Z: ?i32 = null; const V = Z.?;    // 错：编译期就空了（E0506）
+var z: ?i32 = null; z.?;                // 对：运行期才 trap
+```
 
-顺带把编译期折叠接上：`const FALLBACK = null orelse 42;` 折成 `42`，
-`const N: i32 = SomeConst orelse 0;` 也折得出来；但 `null.?` **不**折——
-把本该系统崩的地方悄悄变成 `0`，和 §54 那两个静默错误是同一类病。
+想表达"没有就用默认值"，先给"没有"一个名字：`const NONE: ?i32 = null;` 然后
+`NONE orelse 42`。宁可多写一行声明，也不让 `null` 变成"哪儿都能凑合"的值——
+理由在 decisions §59。编译期折叠照旧：`NONE orelse 42` 折成 `42`，
+`SomeConst orelse 0` 也折得出来；而"编译期就空"的 `.?' 现在报 **E0506**，
+和编译期除零（E0505）是对称的一对。
 
 测试：`tests/good/optional.zx`（基本语义 / 右结合与优先级 / 惰性 / 链式解包 /
-const 折叠）、`tests/bad/unwrap-nonoptional.zx`、`tests/bad/orelse-nonoptional.zx`；
-`tests/good/if_arm.zx` 补了值位置的 `else if` 链。
+const 折叠）、`tests/bad/unwrap-nonoptional.zx`、`tests/bad/orelse-nonoptional.zx`、
+`tests/bad/unwrap-null.zx`、`tests/bad/orelse-null.zx`、
+`tests/bad/unwrap-comptime-null.zx`；`tests/good/if_arm.zx` 补了值位置的
+`else if` 链。`sh test.sh` **167 项全过**。
 
 ## M28：switch 捕获——模式说是什么，捕获直接拿
 

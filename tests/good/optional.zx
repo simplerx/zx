@@ -6,7 +6,7 @@
 //   ② 右结合 + 优先级低于算术（`a orelse 0 + 1` 是 `a orelse (0 + 1)`）
 //   ③ 右边只在真的空/错时才求值（惰性）
 //   ④ `.?` 在表达式任意位置可用（含 `(.?).?.` 这类链）
-//   ⑤ 编译期能定下来的就在编译期折掉（`null orelse 42` 是常量）
+//   ⑤ 编译期能定下来的就在编译期折掉（`NONE orelse 42` 是常量）
 const std = module("std");
 
 const Node = struct { v: i32, next: ?*Node };
@@ -27,7 +27,9 @@ fn must(o: ?i32) i32 {
 }
 
 // ⑤ 编译期折叠
-const FALLBACK = null orelse 42;
+const NONE: ?i32 = null;
+const NAME: ?[]const u8 = null;
+const FALLBACK: i32 = NONE orelse 42;
 const SOME: ?i32 = 7;
 const FROM_SOME: i32 = SOME orelse 0;
 const FROM_UNWRAP: i32 = SOME.?;
@@ -45,7 +47,7 @@ fn main() i32 {
     std.println("{} {} {}", e orelse -1, ok orelse -1, ok.?);
 
     // ② 右结合与优先级
-    std.println("{} {}", b orelse (null orelse 9), b orelse 0 + 1);
+    std.println("{} {}", b orelse (NONE orelse 9), b orelse 0 + 1);
     std.println("{}", (a orelse 0) + 1);
 
     // ③ 惰性：a 有值，右边的 side 不该出现；b 是空，才会出现
@@ -59,7 +61,7 @@ fn main() i32 {
     std.println("{} {}", (head.next).?.v, (head.next).?.next.?.v);
 
     // ⑤ const 侧的折叠
-    std.println("{} {} {} {}", FALLBACK, FROM_SOME, FROM_UNWRAP, null orelse "s");
+    std.println("{} {} {} {}", FALLBACK, FROM_SOME, FROM_UNWRAP, NAME orelse "s");
     return 0;
 }
 

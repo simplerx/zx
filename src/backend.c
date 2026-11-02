@@ -2884,10 +2884,8 @@ static void ex(Buf *b, Node *n) {
      * （那会把 b 提前算掉）。左边先落进临时量，保证只求值一次。 */
     case NK_ORELSE: {
         Type *t = n->a->ty;
-        /* `null orelse x`：左边是多态字面量 null，类型里只有"空"这一种可能，
-         * 没有 payload 可取——直接发右边。少这条会被当成"不是可选类型"整段
-         * 略过，最终发出去的是那个 0 字节的 null。 */
-        if (t && t->kind == TY_NULL) { ex(b, n->b); return; }
+        /* `null orelse x` 是类型错误（见 sema），这里只处理真正的 ?T / !T。
+         * 留一条兜底：类型缺失时按左值发，别静默变成别的东西。 */
         if (!t || (t->kind != TY_OPT && t->kind != TY_ERR)) { ex(b, n->a); return; }
         const char *has = (t->kind == TY_OPT) ? ".tag" : ".tag == 0";
         if (!g_in_fn) {                    /* 顶层初始化器：只能老老实实写三元式 */
