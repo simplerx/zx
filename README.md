@@ -733,7 +733,7 @@ zx_init_<stem>(void)  每模块一个初始化函数，main 按依赖倒序调�
   会把 `g_ct_stuck` 留成 1 毒化后续所有编译期求值（inline for 展开成
   空块、@typeName 反射变 `<error>`）；新增 ct_eval_probe（失败不留痕）
   堵住。另：格式串**实参过多**从静默吞掉改为编译期报错（E0802）。
-  `sh test.sh` **209 项全过**。见 decisions **§77**。
+  `sh test.sh` **212 项全过**。见 decisions **§77**。
 - [x] M44 **前端提速——AST 序列化缓存**：Zx 前端每文件起一次 zxfe
       子进程，import std 的程序 7 次 spawn 占 `--check` 0.35 s 的七成。
       按「源内容 + 路径 + 编译器二进制指纹」缓存序列化 AST，命中直接
@@ -1893,7 +1893,7 @@ std 扩容引入的。
 错（E0802）——格式串少写一个 `{}` 会把后面全部错位，这种错位运行期
 几乎无法排查（stdfs 测试真实踩过一次，还差点当成编译器 bug 追了半天）。
 
-`sh test.sh` 209 项全过（stdfs/stdjson/stdtime 三个新测试）；bench
+`sh test.sh` 212 项全过（stdfs/stdjson/stdtime 三个新测试）；bench
 新增 `bench/json.zx`（2 万次 parse+stringify 校验和）。见 decisions
 **§77**。
 
