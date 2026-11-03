@@ -591,7 +591,11 @@ static int build_program(Node *root, const char *out, const char *cachedir, OutK
         buf_printf(&objs, "\"%s\"", opath);
     }
 
-    if (run_cc_jobs(g_jobs, njobs) != 0) {
+    int ccfail = run_cc_jobs(g_jobs, njobs);
+    /* 成功时把日志清掉（失败时留着，ZX_TRACE/ZX_VERBOSE 还要看） */
+    if (!ccfail && !getenv("ZX_VERBOSE"))
+        for (int i = 0; i < njobs; i++) remove(g_jobs[i].log);
+    if (ccfail) {
         /* 把 C 编译器的抱怨翻成 zx 侧诊断（模块 + 行 + 人话），逐条报出来 */
         int nerr = 0;
         for (int pass = 0; pass < 2; pass++)
