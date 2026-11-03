@@ -183,6 +183,13 @@ typedef struct Module {
 static Module **g_mods;
 static int      g_nmods, g_cmods;
 static Module  *g_mod;
+static bool g_ct_stuck;
+static int  g_ct_exec;
+/* 一个 Comptime 栈帧：返回值 / 收割都靠它往上冒 */
+typedef struct { int kind; Value *val; const char *label; } CtFlow;
+static CtFlow g_ct_flow;
+enum { CT_NORMAL, CT_RETURN, CT_YIELD, CT_CONTINUE };
+static Value *ct_eval_probe(Node *n);
 
 int   sema_module_count(void)      { return g_nmods; }
 Node *sema_module_root(int i)      { return (i >= 0 && i < g_nmods) ? g_mods[i]->root : NULL; }
@@ -1990,7 +1997,7 @@ static Type *check_cast(Node *n) {
         int64_t cv = 0;
         bool known = false;
         Value *v = n->b->ct;
-        if (!v) v = ct_eval(n->b);
+        if (!v) v = ct_eval_probe(n->b);
         if (v && v->kind == V_INT) { cv = val_i64(v); known = true; }
         else if (enum_member_value(n->b, &cv)) known = true;
         if (known && cv == 0)
@@ -2155,7 +2162,12 @@ static Type *check_field(Node *n) {
          * 一个类型，把它折出来挂到 type_val 上，这个表达式才能当类型用。 */
         if (f->ty && f->ty->kind == TY_TYPE) {
             n->ty = ty_type();
+            /* 只想问一嘴值，失败不能污染 g_ct_stuck（见 ct_eval_probe） */
+            bool save_stuck = g_ct_stuck;
+            CtFlow save_flow = g_ct_flow;
             Value *cv = ct_field(n);
+            g_ct_stuck = save_stuck;
+            g_ct_flow = save_flow;
             n->type_val = (cv && cv->kind == V_TYPE) ? cv->tval : ty_invalid();
             return type_of(n, ty_type());
         }
@@ -2900,7 +2912,7 @@ static Type *check_expr_raw(Node *n, Type *expect) {
             return BAD(n, "`.?` needs an optional or an error union, found `%s`", ty_str(t));
         /* 编译期就知道是空的：`.?` 在这里必然 abort，和除零同一处置（§7.R10）——
          * 能定就在编译期报，不要留到运行期。 */
-        Value *cv = ct_eval(n->a);
+        Value *cv = ct_eval_probe(n->a);
         if (cv && (cv->kind == V_NULL || cv->kind == V_UNDEF))
             return BAD_CODE("E0506", n, "`.?` on a value that is `null` at compile time — "
                                         "it would abort every time");
@@ -4680,7 +4692,7 @@ void sema_check(Node *root) {
  *    - 任何循环都有上限，编译期不会挂死。
  * ====================================================================== */
 
-static bool g_ct_stuck;
+
 
 /* 编译期调用栈：检查递归函数的函数体时，不能再去折叠本体里的同一函数，
  * 否则 fib(-1) → fib(-2) → … 会把编译器栈打穿。
@@ -4698,11 +4710,6 @@ static bool ct_on_stack(Node *fn) {
 /* 正在"执行"编译期代码的深度。var / 参数 / 捕获是只读运行时槽位，
  * 只有在编译期真的跑起来的时候（ct_run / ct_call 里）才能读它们的值；
  * 否则 `const k = runtimeVar + 1` 会被悄悄折叠成一个过时的数。 */
-static int g_ct_exec;
-
-/* 一个 Comptime 栈帧：返回值 / 收割都靠它往上冒 */
-typedef struct { int kind; Value *val; const char *label; } CtFlow;
-enum { CT_NORMAL, CT_RETURN, CT_YIELD, CT_CONTINUE };
 
 static CtFlow ct_run(Node *n);
 static CtFlow ct_run_raw(Node *n);
@@ -4722,7 +4729,6 @@ static void ct_clear(Node *n) {
 
 /* 表达式里出现的 `return`（`if (c) { return 1; }` 之类）没有返回值可给，
  * 于是挂在这里往上冒，由语句序列和函数体接手。 */
-static CtFlow g_ct_flow;
 
 #define CT_MAX_CALLS  200000
 #define CT_MAX_LOOPS  1000000
@@ -5589,6 +5595,18 @@ static Value *fold(Node *n) {
     if (v) { n->ct = v; }
     /* 求值失败没关系：这个表达式就"只能运行时算" */
     g_ct_stuck = save;
+    g_ct_flow = save_flow;
+    return v;
+}
+
+/* ct_eval_probe 的实现：见前面的注释。不写负缓存、不烙 ct，
+ * 调用方拿到的就只是一个"能折/不能折"的答案。 */
+static Value *ct_eval_probe(Node *n) {
+    if (!n) return NULL;
+    bool save_stuck = g_ct_stuck;
+    CtFlow save_flow = g_ct_flow;
+    Value *v = ct_eval(n);
+    g_ct_stuck = save_stuck;
     g_ct_flow = save_flow;
     return v;
 }

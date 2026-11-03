@@ -1,0 +1,44 @@
+// bench/json.zx —— std.json 解析 + 序列化。
+// 一份含嵌套对象/数组/字符串/数字的文档，反复 parse + stringify，
+// 末尾校验和钉住行为（改坏了语义 benchmark 就没意义了）。
+const std = module("std");
+
+const DOC = "{\"name\":\"zx-json\",\"n\":42,\"pi\":3.14159,\"ok\":true,\"nil\":null,\"tags\":[\"a\",\"b\",\"c\"],\"nest\":{\"x\":1,\"y\":[10,20,30],\"s\":\"hello\\nworld\"}}";
+
+const asInt = fn (v: std.json.Value) ?i64 {
+    return switch (v.tag) { .int: v.int, else: null };
+};
+
+const main = fn () u8 {
+    let al = std.heap.page;
+    var h: u64 = 5381;
+    var total: u64 = 0;
+
+    for (0..20000) i {
+        let r = std.json.parse(al, DOC);
+        if (r) v {
+            // 摘出几个字段，撑起"解析结果真的被用过"
+            let n = std.json.member(v, "n");
+            if (n) nv {
+                if (asInt(nv)) iv {
+                    total = total + (u64)iv;
+                } else {
+                    std.process.exit(1);
+                }
+            }
+            let out = std.json.stringify(al, v);
+            if (out) s {
+                h = (h * 33 + (u64)s.len) & 0xffffffff;
+                for (s[0..]) ch { h = (h * 33 + (u64)ch) & 0xffffffff; }
+            } else {
+                std.process.exit(1);
+            }
+        } else e {
+            std.println("parse failed: {}", e);
+            std.process.exit(1);
+        }
+    }
+
+    std.println("json total={} hash={}", total, h);
+    return 0;
+};

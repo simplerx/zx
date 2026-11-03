@@ -19,6 +19,15 @@ pub const HashMap = map.HashMap;
 pub const pool = module("pool.zx");
 pub const Pool = pool.Pool;
 
+// 文件系统（fs.zx）。路径操作零分配；DirIter 流式遍历；stat/exists 元数据。
+pub const fs = module("fs.zx");
+
+// JSON（json.zx）。零拷贝解析、最短 round-trip 序列化，arena 友好。
+pub const json = module("json.zx");
+
+// 时间（time.zx）。QPC 单调钟（nsBetween 测耗时）、墙钟、ISO 8601 格式化。
+pub const time = module("time.zx");
+
 // 可增长数组。`T` 是元素类型；容量不够时按倍数向分配器要内存、搬过去、释放旧的。
 pub const ArrayList = fn (T: type) type {
     return struct {

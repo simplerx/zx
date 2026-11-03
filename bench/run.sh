@@ -39,6 +39,7 @@ run fib    bench/fib.zx
 run mandel bench/mandel.zx
 run mmat   bench/mmat.zx
 run str    bench/str.zx
+run json   bench/json.zx
 run cont   bench/containers.zx
 run pool    bench/pool.zx
 run poolraw bench/poolraw.zx

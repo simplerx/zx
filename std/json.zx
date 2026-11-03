@@ -1,0 +1,954 @@
+// json.zx —— JSON 解析与序列化。
+//
+//   const std = module("std");
+//   const v = std.json.parse(al, text) orelse { ... };
+//   let name = std.json.member(v, "name");
+//
+//   let out = std.json.stringify(al, v);      // 紧凑格式（无空白）
+//
+// 性能设计（第一优先级）：
+//   - **字符串零拷贝**：不含转义的字符串值/键直接指向源缓冲，一个字节不复制；
+//     有转义才分配，且第一遍扫描就算出精确长度（无重分配）；
+//   - **整数快路径**：`-?[0-9]+` 直接在 u128 上累加（溢出检测免费），
+//     只有浮点/超范围才落 strtod；浮点词元整个解析共享一份 64 字节暂存；
+//   - **对象开放寻址**：容量 2 的幂、负载 3/4 翻倍、每槽缓存 64 位哈希
+//     （探测先比哈希，热点路径不碰字符串；扩容重排不重算哈希）——
+//     与 std.map 同一结构，但专为 Value 定制，少一层泛型间接；
+//   - **arena 友好**：解析器从头到尾只向分配器要，从不还——
+//     配 std.Pool / 自定义 arena，整棵 JSON 树一次 bump 掉。
+//
+// 语义钉子（严格 RFC 8259）：
+//   - 重复键后者覆盖；前导零拒绝（"01" 不是数）；裸控制字符拒绝；
+//   - 孤立代理对拒绝；\uXXXX 解出 UTF-8（代理对合成 4 字节）；
+//   - 嵌套深度上限 512（防恶意输入打爆栈）——深度走参数不走字段，
+//     错误路径（try 短路返回）不用做清理；
+//   - 失败位置在 errLine / errCol（1 起）；错误码见 ParseErr（0 保留）。
+
+const map = module("map.zx");
+const str = module("str.zx");
+
+// ---- 值 -----------------------------------------------------------------------
+
+pub const Value = union(enum) {
+    nul: u8,               // JSON null（void 载荷构造不了，u8 占位恒 0）
+    boolean: bool,
+    int: i64,
+    float: f64,
+    str: []const u8,
+    arr: *Arr,
+    obj: *Obj,
+};
+
+pub const Arr = struct {
+    items: *Value,
+    len: usize,
+    cap: usize,
+    alloc: Allocator,
+
+    // 末尾追加。扩容按倍数（@memcpy 一次搬家）。
+    const push = fn (self: *Self, v: Value) bool {
+        if (self.len == self.cap) {
+            var ncap = self.cap * 2;
+            if (ncap < 4) { ncap = 4; }
+            let raw = self.alloc.alloc(ncap * @sizeOf(Value));
+            if (raw) r {
+                let dst = (*Value)r;
+                if (self.len > 0) {
+                    @memcpy((*u8)dst, (*u8)self.items, self.len * @sizeOf(Value));
+                }
+                if (self.cap > 0) {
+                    self.alloc.free((*u8)self.items, self.cap * @sizeOf(Value));
+                }
+                self.items = dst;
+                self.cap = ncap;
+                (self.items + self.len).0 = v;
+                self.len = self.len + 1;
+                return true;
+            }
+            return false;
+        }
+        (self.items + self.len).0 = v;
+        self.len = self.len + 1;
+        return true;
+    };
+
+    // 下标访问。越界返回 null。
+    const at = fn (self: *Self, i: usize) ?Value {
+        if (i >= self.len) { return null; }
+        return (self.items + i).0;
+    };
+};
+
+pub const Obj = struct {
+    keys: *[]const u8,     // 每槽一个键切片；空槽看 hashes
+    vals: *Value,
+    hashes: *u64,          // 0 = 空槽（FNV 结果 0 压成 1）
+    n: usize,
+    cap: usize,            // 0 或 2 的幂
+    alloc: Allocator,
+
+    const norm = fn (h: u64) u64 { return if (h == 0) 1 else h; };
+
+    // 命中返回下标；没命中返回插入点（第一个空槽）。
+    const slotFor = fn (self: *Self, key: []const u8, h: u64) usize {
+        let mask = self.cap - 1;
+        var i = (usize)h & mask;
+        var probes: usize = 0;
+        while (probes <= mask) {
+            let sh = (self.hashes + i).0;
+            if (sh == 0) { return i; }
+            if (sh == h && str.eq((self.keys + i).0, key)) { return i; }
+            i = (i + 1) & mask;
+            probes = probes + 1;
+        }
+        return i;
+    };
+
+    // 写入。重复键覆盖（JSON 语义：后者赢）。失败（OOM）返回 false。
+    const put = fn (self: *Self, key: []const u8, v: Value) bool {
+        if (self.cap == 0) {
+            if (!self.grow(8)) { return false; }
+        } else if ((self.n + 1) * 4 > self.cap * 3) {
+            if (!self.grow(self.cap * 2)) { return false; }
+        }
+        let h = Self.norm(map.fnv1a(key));
+        let i = self.slotFor(key, h);
+        let existed = (self.hashes + i).0 != 0;
+        (self.keys + i).0 = key;
+        (self.vals + i).0 = v;
+        (self.hashes + i).0 = h;
+        if (!existed) { self.n = self.n + 1; }
+        return true;
+    };
+
+    // 查找。没有返回 null。
+    const get = fn (self: *Self, key: []const u8) ?Value {
+        if (self.cap == 0) { return null; }
+        let i = self.slotFor(key, Self.norm(map.fnv1a(key)));
+        if ((self.hashes + i).0 != 0) { return (self.vals + i).0; }
+        return null;
+    };
+
+    // 成员数。
+    const count = fn (self: *Self) usize { return self.n; };
+
+    // 扩容重排：哈希已缓存，不用重算、不用比键——第一个空槽放下即可。
+    const grow = fn (self: *Self, ncap: usize) bool {
+        let kb = self.alloc.alloc(ncap * @sizeOf([]const u8));
+        if (kb) k2 {
+            let hb = self.alloc.alloc(ncap * @sizeOf(u64));
+            if (hb) h2 {
+                let vb = self.alloc.alloc(ncap * @sizeOf(Value));
+                if (vb) v2 {
+                    let nk = (*[]const u8)k2;
+                    let nh = (*u64)h2;
+                    let nv = (*Value)v2;
+                    var j: usize = 0;
+                    while (j < ncap) { (nh + j).0 = 0; j = j + 1; }
+                    let mask = ncap - 1;
+                    var i: usize = 0;
+                    while (i < self.cap) {
+                        let h = (self.hashes + i).0;
+                        if (h != 0) {
+                            var k = (usize)h & mask;
+                            while ((nh + k).0 != 0) { k = (k + 1) & mask; }
+                            (nh + k).0 = h;
+                            (nk + k).0 = (self.keys + i).0;
+                            (nv + k).0 = (self.vals + i).0;
+                        }
+                        i = i + 1;
+                    }
+                    if (self.cap > 0) {
+                        self.alloc.free((*u8)self.keys, self.cap * @sizeOf([]const u8));
+                        self.alloc.free((*u8)self.hashes, self.cap * @sizeOf(u64));
+                        self.alloc.free((*u8)self.vals, self.cap * @sizeOf(Value));
+                    }
+                    self.keys = nk;
+                    self.hashes = nh;
+                    self.vals = nv;
+                    self.cap = ncap;
+                    return true;
+                }
+                self.alloc.free((*u8)h2, ncap * @sizeOf(u64));
+            }
+            self.alloc.free((*u8)k2, ncap * @sizeOf([]const u8));
+        }
+        return false;
+    };
+};
+
+// ---- 取值辅助（对 Value 的分派） ----------------------------------------------
+
+// v 是对象时取成员，否则 null。
+pub const member = fn (v: Value, key: []const u8) ?Value {
+    return switch (v.tag) {
+        .obj: v.obj.get(key),
+        else: null,
+    };
+};
+
+// v 是数组时取下标，否则 null。
+pub const item = fn (v: Value, i: usize) ?Value {
+    return switch (v.tag) {
+        .arr: v.arr.at(i),
+        else: null,
+    };
+};
+
+// v 是字符串时返回内容，否则 null。
+pub const text = fn (v: Value) ?[]const u8 {
+    return switch (v.tag) {
+        .str: v.str,
+        else: null,
+    };
+};
+
+// ---- 解析器 -------------------------------------------------------------------
+
+pub const ParseErr = enum(u16) {
+    syntax = 1,        // 词法/语法错
+    depth = 2,         // 嵌套超过 MAX_DEPTH
+    oom = 3,           // 分配器没给内存
+    trailing = 4,      // 顶层值之后还有内容
+};
+
+// 最近一次解析失败的位置（1 起的行列）。成功时归零。
+pub var errLine: usize = 0;
+pub var errCol: usize = 0;
+
+const MAX_DEPTH: u32 = 512;
+const NUM_SCRATCH: usize = 64;     // 浮点词元暂存（超出即语法错）
+
+extern fn strtod(s: *const u8, end: *(*const u8)) f64;
+
+const Parser = struct {
+    src: []const u8,
+    pos: usize,
+    line: usize,
+    col: usize,
+    alloc: Allocator,
+    nbuf: *u8,             // NUM_SCRATCH 字节浮点暂存（整个解析共享一份）
+
+    // 记录失败位置并返回错误码（调用处 `return (error)e;`）。
+    const fail = fn (self: *Self, e: ParseErr) ParseErr {
+        errLine = self.line;
+        errCol = self.col;
+        return e;
+    };
+
+    const peek = fn (self: *Self) u8 {
+        if (self.pos >= self.src.len) { return 0; }
+        return self.src[self.pos];
+    };
+
+    // 前进一格，维护行列。调用者保证 pos < len。
+    const adv = fn (self: *Self) u8 {
+        let c = self.src[self.pos];
+        self.pos = self.pos + 1;
+        if (c == '\n') { self.line = self.line + 1; self.col = 1; }
+        else { self.col = self.col + 1; }
+        return c;
+    };
+
+    const skipWs = fn (self: *Self) void {
+        while (self.pos < self.src.len) {
+            let c = self.src[self.pos];
+            if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+                self.adv();
+            } else {
+                return;
+            }
+        }
+    };
+
+    const expect = fn (self: *Self, c: u8) bool {
+        if (self.peek() == c) {
+            self.adv();
+            return true;
+        }
+        return false;
+    };
+
+    // ---- 值分派（d = 当前嵌套深度，参数传递免错误路径清理） ----
+
+    const value = fn (self: *Self, d: u32) !Value {
+        if (d > MAX_DEPTH) {
+            let e = self.fail(ParseErr.depth);
+            return (error)e;
+        }
+        self.skipWs();
+        let c = self.peek();
+        if (c == '{') { return self.objValue(d); }
+        if (c == '[') { return self.arrValue(d); }
+        if (c == '"') { return self.stringValue(); }
+        if (c == 't') { return self.lit("true", Value{ .boolean = true }); }
+        if (c == 'f') { return self.lit("false", Value{ .boolean = false }); }
+        if (c == 'n') { return self.lit("null", Value{ .nul = 0 }); }
+        if (c == '-' || (c >= '0' && c <= '9')) { return self.numberValue(); }
+        let e = self.fail(ParseErr.syntax);
+        return (error)e;
+    };
+
+    // true/false/null：逐字比对。
+    const lit = fn (self: *Self, word: []const u8, v: Value) !Value {
+        var i: usize = 0;
+        while (i < word.len) {
+            if (self.peek() != word[i]) {
+                let e = self.fail(ParseErr.syntax);
+                return (error)e;
+            }
+            self.adv();
+            i = i + 1;
+        }
+        return v;
+    };
+
+    // ---- 数组 ----
+
+    const arrValue = fn (self: *Self, d: u32) !Value {
+        self.adv();                                  // 吃 '['
+        let raw = self.alloc.alloc(@sizeOf(Arr));
+        if (raw) rb {
+            let a = (*Arr)rb;
+            a.items = undefined;
+            a.len = 0;
+            a.cap = 0;
+            a.alloc = self.alloc;
+
+            self.skipWs();
+            if (self.peek() == ']') {
+                self.adv();
+                return Value{ .arr = a };
+            }
+            while (true) {
+                let v = try self.value(d + 1);       // 错误原样上行
+                if (!a.push(v)) {
+                    let e = self.fail(ParseErr.oom);
+                    return (error)e;
+                }
+                self.skipWs();
+                if (self.expect(',')) {
+                    self.skipWs();
+                    continue;
+                }
+                if (self.expect(']')) {
+                    return Value{ .arr = a };
+                }
+                let e = self.fail(ParseErr.syntax);
+                return (error)e;
+            }
+        }
+        let e = self.fail(ParseErr.oom);
+        return (error)e;
+    };
+
+    // ---- 对象 ----
+
+    const objValue = fn (self: *Self, d: u32) !Value {
+        self.adv();                                  // 吃 '{'
+        let raw = self.alloc.alloc(@sizeOf(Obj));
+        if (raw) rb {
+            let o = (*Obj)rb;
+            o.keys = undefined;
+            o.vals = undefined;
+            o.hashes = undefined;
+            o.n = 0;
+            o.cap = 0;
+            o.alloc = self.alloc;
+
+            self.skipWs();
+            if (self.peek() == '}') {
+                self.adv();
+                return Value{ .obj = o };
+            }
+            while (true) {
+                self.skipWs();
+                if (self.peek() != '"') {
+                    let e = self.fail(ParseErr.syntax);
+                    return (error)e;
+                }
+                let k = try self.stringValue();      // 键（.str）
+                self.skipWs();
+                if (!self.expect(':')) {
+                    let e = self.fail(ParseErr.syntax);
+                    return (error)e;
+                }
+                let v = try self.value(d + 1);
+                if (!o.put(k.str, v)) {
+                    let e = self.fail(ParseErr.oom);
+                    return (error)e;
+                }
+                self.skipWs();
+                if (self.expect(',')) { continue; }
+                if (self.expect('}')) {
+                    return Value{ .obj = o };
+                }
+                let e = self.fail(ParseErr.syntax);
+                return (error)e;
+            }
+        }
+        let e = self.fail(ParseErr.oom);
+        return (error)e;
+    };
+
+    // ---- 字符串（零拷贝快路径 + 精确两遍转义路径） ----
+
+    // 调用点保证 peek() == '"'。
+    const stringValue = fn (self: *Self) !Value {
+        self.adv();                                  // 吃 '"'
+        let start = self.pos;
+
+        // 第一遍：找结束引号，算解码后精确长度。
+        // 循环条件即出口（没有 break：离开循环靠条件失败，错误走 return）。
+        var i = self.pos;
+        var sawEsc = false;
+        var outLen: usize = 0;
+        while (i < self.src.len && self.src[i] != '"') {
+            let c = self.src[i];
+            if (c < 0x20) {                          // 裸控制字符
+                self.pos = i;
+                let e = self.fail(ParseErr.syntax);
+                return (error)e;
+            }
+            if (c == 92) {                           // '\\'
+                sawEsc = true;
+                if (i + 1 >= self.src.len) {
+                    self.pos = i;
+                    let e = self.fail(ParseErr.syntax);
+                    return (error)e;
+                }
+                let esc = self.src[i + 1];
+                if (esc == 'u') {
+                    if (i + 6 > self.src.len) {
+                        self.pos = i;
+                        let e = self.fail(ParseErr.syntax);
+                        return (error)e;
+                    }
+                    let cp = try self.hex4(i + 2);
+                    if (cp >= 0xD800 && cp <= 0xDBFF) {
+                        // 高代理：必须紧跟 \uXXXX 低代理（合成 4 字节 UTF-8）
+                        if (i + 12 > self.src.len
+                            || self.src[i + 6] != 92
+                            || self.src[i + 7] != 'u') {
+                            self.pos = i;
+                            let e = self.fail(ParseErr.syntax);
+                            return (error)e;
+                        }
+                        let lo = try self.hex4(i + 8);
+                        if (!(lo >= 0xDC00 && lo <= 0xDFFF)) {
+                            self.pos = i;            // 孤立高代理
+                            let e = self.fail(ParseErr.syntax);
+                            return (error)e;
+                        }
+                        outLen = outLen + 4;
+                        i = i + 12;
+                    } else {
+                        if (cp >= 0xDC00 && cp <= 0xDFFF) {
+                            self.pos = i;            // 孤立低代理
+                            let e = self.fail(ParseErr.syntax);
+                            return (error)e;
+                        }
+                        outLen = outLen + utf8Len(cp);
+                        i = i + 6;
+                    }
+                } else {
+                    outLen = outLen + 1;
+                    i = i + 2;
+                }
+            } else {
+                outLen = outLen + 1;
+                i = i + 1;
+            }
+        }
+        let endI = i;                                 // 结束引号位置
+        if (endI >= self.src.len) {                   // 没等到引号 = 没闭合
+            self.pos = endI;
+            let e = self.fail(ParseErr.syntax);
+            return (error)e;
+        }
+
+        if (!sawEsc) {
+            // 快路径：切片指向源缓冲，零复制
+            var j = start;
+            while (j <= endI) { self.adv(); j = j + 1; }   // 含结束引号
+            return Value{ .str = self.src[start..endI] };
+        }
+
+        // 第二遍：解码进精确大小的分配（转义串里没有裸换行，
+        // 整段同行，列号由结尾的 adv 一跳到位）。
+        let raw = self.alloc.alloc(outLen);
+        if (raw) r2 {
+            let dst = r2[0..outLen];
+            var w: usize = 0;
+            var j = start;
+            while (j < endI) {
+                let c = self.src[j];
+                if (c != 92) { dst[w] = c; w = w + 1; j = j + 1; continue; }
+                let esc = self.src[j + 1];
+                j = j + 2;
+                if (esc == '"') { dst[w] = '"'; w = w + 1; }
+                else if (esc == 92) { dst[w] = 92; w = w + 1; }
+                else if (esc == '/') { dst[w] = '/'; w = w + 1; }
+                else if (esc == 'b') { dst[w] = 8; w = w + 1; }
+                else if (esc == 'f') { dst[w] = 12; w = w + 1; }
+                else if (esc == 'n') { dst[w] = 10; w = w + 1; }
+                else if (esc == 'r') { dst[w] = 13; w = w + 1; }
+                else if (esc == 't') { dst[w] = 9; w = w + 1; }
+                else {                                // 'u'
+                    // 代理对已在第一遍验证过形状，这里直接解码
+                    let cp = try self.hex4(j);
+                    j = j + 4;
+                    if (cp >= 0xD800 && cp <= 0xDBFF) {
+                        let lo = try self.hex4(j + 2);
+                        let full: u32 = 0x10000
+                            + ((u32)cp - 0xD800) * 0x400
+                            + ((u32)lo - 0xDC00);
+                        w = w + putUtf8(dst[w..], full);
+                    } else {
+                        w = w + putUtf8(dst[w..], cp);
+                    }
+                }
+            }
+            var j2 = start;
+            while (j2 <= endI) { self.adv(); j2 = j2 + 1; }  // 推进含引号
+            return Value{ .str = dst };
+        }
+        self.pos = endI;
+        let e = self.fail(ParseErr.oom);
+        return (error)e;
+    };
+
+    // 4 位十六进制（大小写都收）。位置/字符非法报错。
+    const hex4 = fn (self: *Self, at: usize) !u32 {
+        if (at + 4 > self.src.len) {
+            let e = self.fail(ParseErr.syntax);
+            return (error)e;
+        }
+        var v: u32 = 0;
+        var k: usize = 0;
+        while (k < 4) {
+            let c = self.src[at + k];
+            var d: u32 = 0;
+            if (c >= '0' && c <= '9') { d = (u32)(c - 48); }
+            else if (c >= 'a' && c <= 'f') { d = (u32)(c - 87); }
+            else if (c >= 'A' && c <= 'F') { d = (u32)(c - 55); }
+            else {
+                let e = self.fail(ParseErr.syntax);
+                return (error)e;
+            }
+            v = v * 16 + d;
+            k = k + 1;
+        }
+        return v;
+    };
+
+    // ---- 数字（整数 u128 快路径 + strtod 精路径） ----
+
+    const numberValue = fn (self: *Self) !Value {
+        let start = self.pos;
+        var isInt = true;
+
+        if (self.peek() == '-') { self.adv(); }
+        // 整数部分：至少一位；前导零拒绝（"01"）
+        let c0 = self.peek();
+        if (!(c0 >= '0' && c0 <= '9')) {
+            let e = self.fail(ParseErr.syntax);
+            return (error)e;
+        }
+        if (c0 == '0') {
+            self.adv();
+            let n = self.peek();
+            if (n >= '0' && n <= '9') {
+                let e = self.fail(ParseErr.syntax);
+                return (error)e;
+            }
+        } else {
+            while (self.peek() >= '0' && self.peek() <= '9') { self.adv(); }
+        }
+        // 小数 / 指数 → 浮点路径
+        let pc = self.peek();
+        if (pc == '.' || pc == 'e' || pc == 'E') {
+            isInt = false;
+            if (pc == '.') {
+                self.adv();
+                if (!(self.peek() >= '0' && self.peek() <= '9')) {
+                    let e = self.fail(ParseErr.syntax);
+                    return (error)e;
+                }
+                while (self.peek() >= '0' && self.peek() <= '9') { self.adv(); }
+            }
+            let ec = self.peek();
+            if (ec == 'e' || ec == 'E') {
+                self.adv();
+                let sc = self.peek();
+                if (sc == '+' || sc == '-') { self.adv(); }
+                if (!(self.peek() >= '0' && self.peek() <= '9')) {
+                    let e = self.fail(ParseErr.syntax);
+                    return (error)e;
+                }
+                while (self.peek() >= '0' && self.peek() <= '9') { self.adv(); }
+            }
+        }
+        let tok = self.src[start..self.pos];
+
+        if (isInt) {
+            // 整数快路径：u128 累加，范围检查一次做完
+            var mag: u128 = 0;
+            var neg = false;
+            var d: usize = 0;
+            if (tok[0] == '-') { neg = true; d = 1; }
+            while (d < tok.len) {
+                mag = mag * 10 + (u128)(tok[d] - 48);
+                d = d + 1;
+            }
+            let iMax: u128 = 9223372036854775807;
+            let iMinMag: u128 = 9223372036854775808;   // |i64 min|
+            if ((!neg && mag <= iMax) || (neg && mag <= iMinMag)) {
+                if (neg) {
+                    return Value{ .int = -(i64)mag };
+                }
+                return Value{ .int = (i64)mag };
+            }
+            // 超出 i64：按浮点处理（RFC 允许实现自由，strtod 给最近值）
+        }
+
+        // 浮点：词元拷进共享暂存（NUL 结尾），strtod 精确解析
+        if (tok.len >= NUM_SCRATCH) {
+            let e = self.fail(ParseErr.syntax);
+            return (error)e;
+        }
+        var k: usize = 0;
+        while (k < tok.len) { (self.nbuf + k).0 = tok[k]; k = k + 1; }
+        (self.nbuf + tok.len).0 = 0;
+        var endp: *const u8 = (*const u8)self.nbuf;
+        let f = strtod((*const u8)self.nbuf, &endp);
+        // strtod 吃完整个词元才算数
+        if ((usize)endp - (usize)self.nbuf != tok.len) {
+            let e = self.fail(ParseErr.syntax);
+            return (error)e;
+        }
+        // 无穷大（"1e999"）拒绝：inf 的一半还是 inf，有限大数不是
+        if (f != 0.0 && f * 0.5 == f) {
+            let e = self.fail(ParseErr.syntax);
+            return (error)e;
+        }
+        return Value{ .float = f };
+    };
+};
+
+// ---- 解析入口 -----------------------------------------------------------------
+
+// 解析一段 UTF-8 JSON 文本。失败返回错误，位置在 errLine / errCol。
+// 分配器只进不出（arena 惯例）；传入的 src 被零拷贝引用，生命周期要盖过结果。
+pub const parse = fn (alloc: Allocator, src: []const u8) !Value {
+    errLine = 0;
+    errCol = 0;
+    let nb = alloc.alloc(NUM_SCRATCH);
+    if (nb) n2 {
+        var p = Parser{ .src = src, .pos = 0, .line = 1, .col = 1,
+                        .alloc = alloc, .nbuf = (*u8)n2 };
+        let v = try p.value(0);
+        p.skipWs();
+        if (p.pos != src.len) {
+            let e = p.fail(ParseErr.trailing);
+            return (error)e;
+        }
+        return v;
+    }
+    errLine = 1;
+    errCol = 1;
+    return (error)ParseErr.oom;
+};
+
+// ---- 序列化 -------------------------------------------------------------------
+
+// 可增长字节缓冲（stringify 内部用；失败用 failed 标记，不中断控制流）。
+const Buf = struct {
+    data: *u8,
+    len: usize,
+    cap: usize,
+    alloc: Allocator,
+    failed: bool,
+
+    const reserve = fn (self: *Self, need: usize) void {
+        if (self.failed) { return; }
+        if (self.len + need <= self.cap) { return; }
+        var ncap = self.cap * 2;
+        if (ncap < 64) { ncap = 64; }
+        while (ncap < self.len + need) { ncap = ncap * 2; }
+        let raw = self.alloc.alloc(ncap);
+        if (raw) r {
+            let dst = (*u8)r;
+            var i: usize = 0;
+            while (i < self.len) { (dst + i).0 = (self.data + i).0; i = i + 1; }
+            if (self.cap > 0) { self.alloc.free(self.data, self.cap); }
+            self.data = dst;
+            self.cap = ncap;
+            return;
+        }
+        self.failed = true;
+    };
+
+    const byte = fn (self: *Self, c: u8) void {
+        self.reserve(1);
+        if (self.failed) { return; }
+        (self.data + self.len).0 = c;
+        self.len = self.len + 1;
+    };
+
+    const bytes = fn (self: *Self, s: []const u8) void {
+        self.reserve(s.len);
+        if (self.failed) { return; }
+        var i: usize = 0;
+        while (i < s.len) {
+            (self.data + self.len + i).0 = s[i];
+            i = i + 1;
+        }
+        self.len = self.len + s.len;
+    };
+
+    // 无符号十进制（倒序收在缓冲尾部再翻转）。首位在循环外写，
+    // 保证 0 也有一位；循环条件即出口。
+    const u64dec = fn (self: *Self, v: u64) void {
+        self.reserve(20);
+        if (self.failed) { return; }
+        let start = self.len;
+        var x = v;
+        (self.data + self.len).0 = 48 + (u8)(x % 10);
+        self.len = self.len + 1;
+        x = x / 10;
+        while (x != 0) {
+            (self.data + self.len).0 = 48 + (u8)(x % 10);
+            self.len = self.len + 1;
+            x = x / 10;
+        }
+        var a = start;
+        var b = self.len - 1;
+        while (a < b) {
+            let t = (self.data + a).0;
+            (self.data + a).0 = (self.data + b).0;
+            (self.data + b).0 = t;
+            a = a + 1;
+            b = b - 1;
+        }
+    };
+
+    const i64dec = fn (self: *Self, v: i64) void {
+        if (v < 0) {
+            self.byte('-');
+            // -i64min 会溢出，取负走 u64
+            self.u64dec(((u64)(-(v + 1))) + 1);
+            return;
+        }
+        self.u64dec((u64)v);
+    };
+};
+
+// UTF-8 编码一个码点，返回写入字节数（调用者保证空间 ≥ 4）。
+const putUtf8 = fn (dst: []u8, cp: u32) usize {
+    if (cp < 0x80) {
+        dst[0] = (u8)cp;
+        return 1;
+    }
+    if (cp < 0x800) {
+        dst[0] = (u8)(0xC0 | (cp >> 6));
+        dst[1] = (u8)(0x80 | (cp & 0x3F));
+        return 2;
+    }
+    if (cp < 0x10000) {
+        dst[0] = (u8)(0xE0 | (cp >> 12));
+        dst[1] = (u8)(0x80 | ((cp >> 6) & 0x3F));
+        dst[2] = (u8)(0x80 | (cp & 0x3F));
+        return 3;
+    }
+    dst[0] = (u8)(0xF0 | (cp >> 18));
+    dst[1] = (u8)(0x80 | ((cp >> 12) & 0x3F));
+    dst[2] = (u8)(0x80 | ((cp >> 6) & 0x3F));
+    dst[3] = (u8)(0x80 | (cp & 0x3F));
+    return 4;
+};
+
+// 码点要几个字节（第一遍扫描用；解析路径上单 \u 不会超 BMP）。
+const utf8Len = fn (cp: u32) usize {
+    if (cp < 0x80) { return 1; }
+    if (cp < 0x800) { return 2; }
+    return 3;
+};
+
+// 十六进制一位（< 16）。if 语句式，值-if 不能当实参。
+const hexc = fn (d: u8) u8 {
+    var c = 48 + d;                    // '0'..'9'
+    if (d >= 10) { c = 87 + d; }       // 'a'..'f'
+    return c;
+};
+
+// 字符串值写入（带转义）。UTF-8 字节原样过（JSON 传输就是 UTF-8）。
+const writeStr = fn (b: *Buf, s: []const u8) void {
+    b.byte('"');
+    var i: usize = 0;
+    while (i < s.len) {
+        let c = s[i];
+        if (c == '"') { b.bytes("\\\""); }
+        else if (c == 92) { b.bytes("\\\\"); }
+        else if (c == 8) { b.bytes("\\b"); }
+        else if (c == 12) { b.bytes("\\f"); }
+        else if (c == 10) { b.bytes("\\n"); }
+        else if (c == 13) { b.bytes("\\r"); }
+        else if (c == 9) { b.bytes("\\t"); }
+        else if (c < 0x20) {
+            // \u00XX
+            b.bytes("\\u00");
+            b.byte(hexc((u8)(c >> 4)));
+            b.byte(hexc((u8)(c & 0xF)));
+        }
+        else { b.byte(c); }
+        i = i + 1;
+    }
+    b.byte('"');
+};
+
+// 浮点写入：**最短 round-trip**——从 1 位有效数字起逐级试探，
+// strtod 回读等于原值即采纳（最坏 17 次 _ecvt + strtod，浮点本身低频，
+// 而 "3.14159" 不会再变成 "3.1415899999999999"）。记法与 %g 同向：
+// 指数 [-6, 16) 用普通记法（.0 结尾保 float 性），否则科学记法。
+// 返回类型必须与系统 stdlib.h 一致（char*），否则 C 层重声明冲突。
+extern fn _ecvt(v: f64, ndig: i32, decpt: *i32, sign: *i32) *u8;
+
+// 把 digits[0..n]（decpt = 小数点位置）按记法规则写进 cand（NUL 结尾），
+// 返回长度（不含 NUL）。neg 给负号。
+const fmtFloatInto = fn (cand: *u8, digits: *const u8, n: usize,
+                         decpt: i32, neg: bool) usize {
+    var w: usize = 0;
+    if (neg) { (cand + 0).0 = '-'; w = 1; }
+    let e10 = decpt - 1;
+    var k: usize = 0;
+    if (e10 >= 0 && e10 < 16) {
+        if (decpt >= (i32)n) {
+            while (k < n) { (cand + w).0 = (digits + k).0; w = w + 1; k = k + 1; }
+            var z = decpt - (i32)n;
+            while (z > 0) { (cand + w).0 = '0'; w = w + 1; z = z - 1; }
+            (cand + w).0 = '.'; w = w + 1;
+            (cand + w).0 = '0'; w = w + 1;
+        } else {
+            while (k < (usize)decpt) { (cand + w).0 = (digits + k).0; w = w + 1; k = k + 1; }
+            (cand + w).0 = '.'; w = w + 1;
+            while (k < n) { (cand + w).0 = (digits + k).0; w = w + 1; k = k + 1; }
+        }
+    } else if (e10 >= -6 && e10 < 0) {
+        (cand + w).0 = '0'; w = w + 1;
+        (cand + w).0 = '.'; w = w + 1;
+        var z = decpt;
+        while (z < 0) { (cand + w).0 = '0'; w = w + 1; z = z + 1; }
+        while (k < n) { (cand + w).0 = (digits + k).0; w = w + 1; k = k + 1; }
+    } else {
+        (cand + w).0 = (digits + 0).0; w = w + 1;
+        if (n > 1) {
+            (cand + w).0 = '.'; w = w + 1;
+            k = 1;
+            while (k < n) { (cand + w).0 = (digits + k).0; w = w + 1; k = k + 1; }
+        }
+        (cand + w).0 = 'e'; w = w + 1;
+        var ex = e10;
+        if (ex < 0) { (cand + w).0 = '-'; w = w + 1; ex = -ex; }
+        // 指数最多 3 位（f64 范围 ±308）
+        if (ex >= 100) {
+            (cand + w).0 = 48 + (u8)(ex / 100); w = w + 1;
+            ex = ex % 100;
+        }
+        (cand + w).0 = 48 + (u8)(ex / 10); w = w + 1;
+        (cand + w).0 = 48 + (u8)(ex % 10); w = w + 1;
+    }
+    (cand + w).0 = 0;
+    return w;
+};
+
+const writeFloat = fn (b: *Buf, v: f64) void {
+    if (v != v) { b.bytes("null"); return; }          // NaN → null（JSON 没有 NaN）
+    if (v * 0.5 == v && v != 0.0) { b.bytes("null"); return; }   // ±inf → null
+    if (v == 0.0) {
+        if (1.0 / v < 0.0) { b.bytes("-0.0"); } else { b.bytes("0.0"); }
+        return;
+    }
+    let raw = b.alloc.alloc(48);                      // 候选串暂存（最长 ~26）
+    if (raw) r3 {
+        let cand = (*u8)r3;
+        var ndig: i32 = 1;
+        while (ndig <= 17) {
+            var decpt: i32 = 0;
+            var sign: i32 = 0;
+            let digits = _ecvt(v, ndig, &decpt, &sign);
+            // _ecvt 按请求位数补齐，剪尾零（"250" → "25"）
+            var n: usize = (usize)ndig;
+            while (n > 1 && (digits + n - 1).0 == '0') { n = n - 1; }
+            let len = fmtFloatInto(cand, digits, n, decpt, sign != 0);
+            // 回读验证：等于原值即最短表示
+            var endp: *const u8 = (*const u8)cand;
+            let back = strtod((*const u8)cand, &endp);
+            if (back == v && (usize)endp - (usize)cand == len) {
+                b.bytes(cand[0..len]);
+                b.alloc.free(cand, 48);
+                return;
+            }
+            ndig = ndig + 1;
+        }
+        // 理论到不了（17 位保证 round-trip）：保底交 17 位展开
+        var decpt: i32 = 0;
+        var sign: i32 = 0;
+        let digits = _ecvt(v, 17, &decpt, &sign);
+        let len = fmtFloatInto(cand, digits, 17, decpt, sign != 0);
+        b.bytes(cand[0..len]);
+        b.alloc.free(cand, 48);
+        return;
+    }
+    b.failed = true;
+};
+
+// 递归写值。d = 嵌套深度（防环做不到——Value 树本来就该是无环的，
+// 深度上限只防意外，超限视为失败）。
+const writeValue = fn (b: *Buf, v: Value, d: u32) void {
+    if (d > 512) { b.failed = true; return; }
+    switch (v.tag) {
+        .nul: b.bytes("null"),
+        .boolean: {
+            if (v.boolean) { b.bytes("true"); } else { b.bytes("false"); }
+        },
+        .int: b.i64dec(v.int),
+        .float: writeFloat(b, v.float),
+        .str: writeStr(b, v.str),
+        .arr: {
+            b.byte('[');
+            var i: usize = 0;
+            while (i < v.arr.len) {
+                if (i > 0) { b.byte(','); }
+                writeValue(b, (v.arr.items + i).0, d + 1);
+                i = i + 1;
+            }
+            b.byte(']');
+        },
+        .obj: {
+            b.byte('{');
+            var i: usize = 0;
+            var first = true;
+            while (i < v.obj.cap) {
+                if ((v.obj.hashes + i).0 != 0) {
+                    if (!first) { b.byte(','); }
+                    first = false;
+                    writeStr(b, (v.obj.keys + i).0);
+                    b.byte(':');
+                    writeValue(b, (v.obj.vals + i).0, d + 1);
+                }
+                i = i + 1;
+            }
+            b.byte('}');
+        },
+    }
+};
+
+// 序列化成紧凑 JSON（无空白）。失败返回 null（OOM / 树超深）。
+pub const stringify = fn (alloc: Allocator, v: Value) ?[]u8 {
+    var buf = Buf{ .data = undefined, .len = 0, .cap = 0,
+                   .alloc = alloc, .failed = false };
+    writeValue(&buf, v, 0);
+    if (buf.failed) { return null; }
+    return buf.data[0..buf.len];
+};

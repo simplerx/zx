@@ -1,0 +1,392 @@
+// fs.zx —— 文件系统：路径操作 + 目录遍历 + 文件元数据。
+//
+//   const std = module("std");
+//   std.fs.basename("a/b/c.txt")          // "c.txt"（零分配，切片指向原串）
+//   let d = std.fs.readDir(al, "src");    // 目录条目列表
+//
+// 性能约定（与 str.zx 同一思想）：
+//   - 纯路径函数**零分配**：结果是指向原串的切片；
+//   - 遍历优先用 DirIter（流式、零拷贝——名字指向内部缓冲，next() 后失效，
+//     和 BufReader 的行同一个语义）；readDir 是"收集版"，名字会复制进分配器；
+//   - 每次遍历/元数据查询只做一次固定 320 字节的分配（FindData 工作区），
+//     arena 分配器下一 pass 就没影。
+//
+// 平台：Windows 先行（extern 走 kernel32，zig cc 默认链接）。POSIX 版
+// 等语言有条件编译后再补——std 里没法写两份 extern。
+
+// ---- Win32 extern：Find*File 系列 + 目录/文件操作 ----------------------------
+//
+// WIN32_FIND_DATAA 里 cFileName[260] 是内嵌数组——Zx 没有内嵌数组字段
+// （只有 *[N]T 数组指针），所以把前 44 字节声明成结构体、名字区用指针
+// 算术访问：布局手工对齐 C 侧，@sizeOf(FindData) == 44 是防回归的锚。
+
+extern fn FindFirstFileA(p: *const u8, fd: *u8) usize;
+extern fn FindNextFileA(h: usize, fd: *u8) i32;
+extern fn FindClose(h: usize) i32;
+extern fn GetFileAttributesA(p: *const u8) u32;
+extern fn CreateDirectoryA(p: *const u8, sa: usize) i32;
+extern fn DeleteFileA(p: *const u8) i32;
+extern fn RemoveDirectoryA(p: *const u8) i32;
+
+const FindData = struct {
+    attr: u32,
+    ctLo: u32, ctHi: u32,          // 创建时间（FILETIME = 两个 u32）
+    atLo: u32, atHi: u32,          // 最后访问
+    wtLo: u32, wtHi: u32,          // 最后写入
+    szHi: u32, szLo: u32,          // 文件大小（高位/低位）
+    r0: u32, r1: u32,              // 系统保留
+};
+
+const FD_HDR: usize = 44;          // 名字区在 FindData 之后的偏移
+const FD_BUF: usize = 320;         // 44 + 260(名字) + 14(短名)，对齐到 320
+const INVALID_HANDLE: usize = 18446744073709551615;   // (usize)(-1)
+
+const ATTR_DIR: u32 = 16;          // FILE_ATTRIBUTE_DIRECTORY
+const ATTR_HIDDEN: u32 = 2;        // FILE_ATTRIBUTE_HIDDEN
+
+// NUL 结尾的副本（extern 调用都要 C 串）。返回切片不含 NUL，
+// 但分配里 NUL 就紧随其后（str.concat 同一约定）。
+const zpath = fn (alloc: Allocator, p: []const u8) ?[]u8 {
+    let raw = alloc.alloc(p.len + 1);
+    if (raw) q {
+        let whole = q[0..p.len + 1];
+        var i: usize = 0;
+        while (i < p.len) { whole[i] = p[i]; i = i + 1; }
+        whole[p.len] = 0;
+        return q[0..p.len];
+    }
+    return null;
+};
+
+// 从 FindData 工作区读出元数据。
+const statFrom = fn (fd: *u8) Stat {
+    let d = (*FindData)fd;
+    var s = Stat{ .size = ((u64)d.szHi << 32) | (u64)d.szLo,
+                  .mtime = ((u64)d.wtHi << 32) | (u64)d.wtLo,
+                  .isDir = (d.attr & ATTR_DIR) != 0,
+                  .isHidden = (d.attr & ATTR_HIDDEN) != 0 };
+    if (s.isDir) { s.size = 0; }         // 目录的大小无意义，钉成 0
+    return s;
+};
+
+// 当前条目的名字（指向工作区，下一次 next()/close 之前有效）。
+const nameOf = fn (fd: *u8) []const u8 {
+    let name = fd + FD_HDR;
+    var n: usize = 0;
+    while ((name + n).0 != 0) { n = n + 1; }
+    return name[0..n];
+};
+
+// ---- 路径操作（纯函数，零分配） ---------------------------------------------
+
+const isSep = fn (c: u8) bool { return c == '/' || c == 92; };   // 92 = '\'
+
+// 绝对路径？根路径（/ 或 \ 开头）或盘符（X:）开头都算。
+pub const isAbs = fn (p: []const u8) bool {
+    if (p.len == 0) { return false; }
+    if (isSep(p[0])) { return true; }
+    if (p.len >= 2 && p[1] == ':') { return true; }
+    return false;
+};
+
+// 最后一段。"a/b/" 的 basename 是空串（尾分隔符之后没有东西）。
+pub const basename = fn (p: []const u8) []const u8 {
+    var i = p.len;
+    scan: while (i > 0) {
+        if (isSep(p[i - 1])) { scan: {}; }        // 收割 = 别的语言的 break
+        i = i - 1;
+    }
+    return p[i..];
+};
+
+// 目录部分（不含末尾分隔符）。没有分隔符返回空串（调用者自己当 "." 用）。
+// "a/b/c" → "a/b"；"a/b/" → "a/b"；"/x" → ""（根目录没有"再往上一级"）。
+pub const dirname = fn (p: []const u8) []const u8 {
+    var i = p.len;
+    while (i > 0) {
+        if (isSep(p[i - 1])) { return p[0..i - 1]; }
+        i = i - 1;
+    }
+    return p[0..0];
+};
+
+// 扩展名（含点）。点必须是 basename 的**非首字符**才计数：
+// "a.tar.gz" → ".gz"，".gitignore" → ""（dotfile 不是扩展名）。
+pub const ext = fn (p: []const u8) []const u8 {
+    let b = basename(p);
+    var i = b.len;
+    scan: while (i > 0) {
+        let c = b[i - 1];
+        if (c == '.') {
+            if (i == 1) { return b[b.len..]; }    // ".gitignore"：点在首位
+            return b[i - 1..];
+        }
+        if (isSep(c)) { scan: {}; }
+        i = i - 1;
+    }
+    return b[b.len..];
+};
+
+// 去掉扩展名的 basename："archive.tar.gz" → "archive.tar"。
+pub const stem = fn (p: []const u8) []const u8 {
+    let b = basename(p);
+    let e = ext(b);
+    return b[0..b.len - e.len];
+};
+
+// 拼接。a 末尾已有分隔符就不再加。结果末尾补 NUL（可直接当 C 串用）。
+pub const join = fn (alloc: Allocator, a: []const u8, b: []const u8) ?[]u8 {
+    if (a.len == 0) { return zpath(alloc, b); }
+    if (b.len == 0) { return zpath(alloc, a); }
+    let need = a.len + b.len + 2;        // 可能的分隔符 + NUL
+    let raw = alloc.alloc(need);
+    if (raw) q {
+        let whole = q[0..need];
+        var n: usize = 0;
+        var i: usize = 0;
+        while (i < a.len) { whole[n] = a[i]; n = n + 1; i = i + 1; }
+        if (!isSep(a[a.len - 1])) { whole[n] = '/'; n = n + 1; }
+        i = 0;
+        while (i < b.len) { whole[n] = b[i]; n = n + 1; i = i + 1; }
+        whole[n] = 0;
+        return q[0..n];
+    }
+    return null;
+};
+
+// ---- 文件元数据 -------------------------------------------------------------
+
+pub const Stat = struct {
+    size: u64,
+    mtime: u64,          // 最后写入时间，Windows FILETIME（100ns，自 1601）
+    isDir: bool,
+    isHidden: bool,
+};
+
+// 查一次文件元数据。路径不存在（或分配失败）返回 null。
+pub const stat = fn (alloc: Allocator, path: []const u8) ?Stat {
+    let zp = zpath(alloc, path);
+    if (zp) z {
+        let buf = alloc.alloc(FD_BUF);
+        if (buf) b {
+            let fd = (*u8)b;
+            let h = FindFirstFileA((*const u8)z.ptr, fd);
+            if (h != INVALID_HANDLE) {
+                let s = statFrom(fd);
+                FindClose(h);
+                alloc.free(fd, FD_BUF);
+                return s;
+            }
+            alloc.free(fd, FD_BUF);
+        }
+    }
+    return null;
+};
+
+// 存在吗？一次 GetFileAttributesA。路径要过一遍 C 串拷贝（运行期拼出来的
+// 路径没有 NUL），arena 下这次分配可以忽略。
+pub const exists = fn (alloc: Allocator, path: []const u8) bool {
+    let zp = zpath(alloc, path);
+    if (zp) z {
+        return GetFileAttributesA(z.ptr) != 0xFFFFFFFF;
+    }
+    return false;
+};
+
+// 建目录（单层；父目录不存在会失败）。
+pub const createDir = fn (alloc: Allocator, path: []const u8) bool {
+    let zp = zpath(alloc, path);
+    if (zp) z {
+        return CreateDirectoryA(z.ptr, 0) != 0;
+    }
+    return false;
+};
+
+// 删文件（目录要走 RemoveDirectoryA，这里不管）。
+pub const removeFile = fn (alloc: Allocator, path: []const u8) bool {
+    let zp = zpath(alloc, path);
+    if (zp) z {
+        return DeleteFileA(z.ptr) != 0;
+    }
+    return false;
+};
+
+// 删空目录（目录里还有东西会失败；递归删除调用者自己拿 readDir 拼）。
+pub const removeDir = fn (alloc: Allocator, path: []const u8) bool {
+    let zp = zpath(alloc, path);
+    if (zp) z {
+        return RemoveDirectoryA(z.ptr) != 0;
+    }
+    return false;
+};
+
+// ---- 目录遍历 ----------------------------------------------------------------
+//
+// DirIter 是流式零拷贝：名字指向内部 FindData 工作区，next() 之后失效；
+// 要留住就自己复制（或用下面的 readDir）。
+//
+//   var it = std.fs.DirIter.open(al, "src") orelse { ... };
+//   defer it.close();
+//   while (it.next()) name { std.println("{}", name); }
+//
+// "." 和 ".." 不交付（所有主流 std 的通行约定）。
+
+pub const DirIter = struct {
+    h: usize,
+    buf: *u8,            // 320 字节 FindData 工作区
+    first: bool,         // FindFirst 已经交付了第一条
+    done: bool,
+    alloc: Allocator,    // 只为释放 buf
+
+    // 打开目录。打不开（不存在/是文件/没内存）返回 null。
+    const open = fn (alloc: Allocator, path: []const u8) ?Self {
+        // 通配 pattern：path + "\\*"（path 末尾已有分隔符就不加）
+        let need = path.len + 3;
+        let raw = alloc.alloc(need);
+        if (raw) r {
+            let pat = r[0..need];
+            var n: usize = 0;
+            var i: usize = 0;
+            while (i < path.len) { pat[n] = path[i]; n = n + 1; i = i + 1; }
+            if (n > 0 && !isSep(pat[n - 1])) { pat[n] = 92; n = n + 1; }
+            pat[n] = '*'; n = n + 1;
+            pat[n] = 0;
+
+            let wbuf = alloc.alloc(FD_BUF);
+            if (wbuf) b {
+                let fd = (*u8)b;
+                let h = FindFirstFileA((*const u8)pat.ptr, fd);
+                alloc.free((*u8)r, need);
+                if (h != INVALID_HANDLE) {
+                    return Self{ .h = h, .buf = fd, .first = true, .done = false,
+                                 .alloc = alloc };
+                }
+                alloc.free(fd, FD_BUF);
+            }
+        }
+        return null;
+    };
+
+    // 关闭并归还工作区。重复调用无害（靠句柄哨兵防双重释放）。
+    const close = fn (self: *Self) void {
+        if (self.h != INVALID_HANDLE) {
+            FindClose(self.h);
+            self.h = INVALID_HANDLE;
+            self.alloc.free(self.buf, FD_BUF);
+        }
+        self.done = true;
+    };
+
+    // 下一个条目。没有更多（或已关闭）返回 null。
+    const next = fn (self: *Self) ?[]const u8 {
+        while (!self.done) {
+            if (!self.first) {
+                if (FindNextFileA(self.h, self.buf) == 0) {
+                    self.done = true;
+                    return null;
+                }
+            }
+            self.first = false;
+            let name = nameOf(self.buf);
+            // 跳过 "." / ".."
+            if (name.len == 1 && name[0] == '.') { continue; }
+            if (name.len == 2 && name[0] == '.' && name[1] == '.') { continue; }
+            return name;
+        }
+        return null;
+    };
+
+    // 当前条目是不是目录（紧跟 next() 之后问，下一个 next() 之前有效）。
+    const isDir = fn (self: *Self) bool {
+        let d = (*FindData)self.buf;
+        return (d.attr & ATTR_DIR) != 0;
+    };
+
+    // 当前条目的大小（目录是 0）。
+    const size = fn (self: *Self) u64 {
+        let d = (*FindData)self.buf;
+        return ((u64)d.szHi << 32) | (u64)d.szLo;
+    };
+};
+
+// 收集版：目录里所有条目（不含 "." / ".."），名字复制进分配器
+// （名字带 NUL 后缀，可直接当 C 串用）。列表倍增扩容。
+// 空目录返回长度 0 的切片（不是 null）；打不开返回 null。
+// 返回的切片和每个名字都归调用者的分配器管。
+pub const readDir = fn (alloc: Allocator, path: []const u8) ?[][]const u8 {
+    let opened = DirIter.open(alloc, path);
+    if (opened) itv {
+        return collectAll(alloc, itv);
+    }
+    return null;
+};
+
+const collectAll = fn (alloc: Allocator, itv: DirIter) ?[][]const u8 {
+    var it = itv;
+    defer it.close();
+
+    var list = List{ .items = undefined, .len = 0, .cap = 0, .alloc = alloc };
+    while (it.next()) name {
+        let copy = zpath(alloc, name);
+        if (copy) c {
+            if (list.push(c)) { continue; }
+        }
+        list.deinit();               // 失败路径自清理
+        return null;
+    }
+    return list.take();
+};
+
+// 局部可增长指针数组（元素是切片）。take() 之后所有权交出去。
+const List = struct {
+    items: *[]const u8,
+    len: usize,
+    cap: usize,
+    alloc: Allocator,
+
+    const push = fn (self: *Self, s: []const u8) bool {
+        if (self.len == self.cap) {
+            var ncap = self.cap * 2;
+            if (ncap < 16) { ncap = 16; }
+            let raw = self.alloc.alloc(ncap * @sizeOf([]const u8));
+            if (raw) r {
+                let dst = (*[]const u8)r;
+                var i: usize = 0;
+                while (i < self.len) {
+                    (dst + i).0 = (self.items + i).0;
+                    i = i + 1;
+                }
+                if (self.cap > 0) {
+                    self.alloc.free((*u8)self.items, self.cap * @sizeOf([]const u8));
+                }
+                self.items = dst;
+                self.cap = ncap;
+                (self.items + self.len).0 = s;
+                self.len = self.len + 1;
+                return true;
+            }
+            return false;
+        }
+        (self.items + self.len).0 = s;
+        self.len = self.len + 1;
+        return true;
+    };
+
+    const deinit = fn (self: *Self) void {
+        if (self.cap > 0) {
+            self.alloc.free((*u8)self.items, self.cap * @sizeOf([]const u8));
+        }
+        self.items = undefined;
+        self.len = 0;
+        self.cap = 0;
+    };
+
+    // 交出底层数组（调用者负责释放），自身清空。
+    const take = fn (self: *Self) [][]const u8 {
+        let out = self.items[0..self.len];
+        self.items = undefined;
+        self.len = 0;
+        self.cap = 0;
+        return out;
+    };
+};

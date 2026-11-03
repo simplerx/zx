@@ -724,6 +724,16 @@ zx_init_<stem>(void)  每模块一个初始化函数，main 按依赖倒序调�
       默认 dev 档 `-O0`、`--release` 才 `-O2`，编译参数记 stamp 防止
       旧 `.o` 混链。dev 冷构建 5.83 s → **1.09 s**，release 冷构建
       1.99 s。顺带揪出两处 `-O1` 优化器掩盖的潜伏问题（见 decisions **§75**）。
+- [x] M45 **std 扩容——fs / json / time 三模块（性能第一）**：
+  `std.fs`（路径纯函数零分配、DirIter 流式零拷贝、stat/exists/目录增删）、
+  `std.json`（零拷贝解析、u128 整数快路径、开放寻址 Obj 每槽缓存哈希、
+  最短 round-trip 浮点序列化）、`std.time`（QPC 单调钟、Hinnant 纯整数
+  民用历、固定 24 字节 ISO 格式化）。顺带修掉一个 **sema 既有 bug**：
+  `(error)运行期变量` / `.?` 探针 / type 字段折值三处裸调 ct_eval，失败
+  会把 `g_ct_stuck` 留成 1 毒化后续所有编译期求值（inline for 展开成
+  空块、@typeName 反射变 `<error>`）；新增 ct_eval_probe（失败不留痕）
+  堵住。另：格式串**实参过多**从静默吞掉改为编译期报错（E0802）。
+  `sh test.sh` **209 项全过**。见 decisions **§77**。
 - [x] M44 **前端提速——AST 序列化缓存**：Zx 前端每文件起一次 zxfe
       子进程，import std 的程序 7 次 spawn 占 `--check` 0.35 s 的七成。
       按「源内容 + 路径 + 编译器二进制指纹」缓存序列化 AST，命中直接
@@ -1847,6 +1857,45 @@ x64）对"增量、快、高性能"三个目标一个都帮不上——瓶颈全
 效果：dev 冷构建 5.83 → **1.09 s**，release 冷构建 **1.99 s**，
 增量命中 **0.57 s**。`sh test.sh` **206 项全过**，对拍 62/62 + 73/73。
 取舍见 decisions **§75**。
+
+## M45：std 扩容——fs / json / time（性能第一）
+
+蓝图阶段 B 的 std 扩容，三个模块全部按"热路径零开销"设计：
+
+- **std.fs**：路径操作（basename/dirname/ext/stem/join/isAbs）全是
+  **纯函数零分配**——切片直接指向原串，改输入它们跟着变，这是约定也
+  是代价；目录遍历两条路：`DirIter` 流式（名字指向内部 320 B 工作区，
+  next() 之后失效，零拷贝）和 `readDir` 收集版（List 倍增，take() 交
+  所有权）。Win32 extern 一层薄封装，`FindData` 用 44 字节 u32 结构 +
+  指针算术读名字区（语言暂无内嵌数组字段）。
+- **std.json**：解析器**零拷贝**——无转义的字符串直接切片指向源缓冲，
+  有转义才两遍扫（先算精确长度含 \uXXXX/代理对，再写）；整数走
+  **u128 快路径**（i64 范围内不碰 strtod），超界落浮点；`Obj` 开放寻
+  址（2 的幂、3/4 负载，**每槽缓存 64 位哈希**——探测先比哈希不碰字
+  符串，扩容重排不重算）；`stringify` 浮点取**最短 round-trip**（ndig
+  1..17 逐级 _ecvt 试探 + strtod 回读验证），"3.14159" 就印
+  "3.14159"。depth 上限 512，错误带 1 起行列。
+- **std.time**：QPC 单调钟（模块级缓存频率，nsBetween 走 **u128 中转**
+  防溢出）；`fromUnixMs` 是 **Hinnant civil_from_days**——一次除法链
+  出年月日，纯整数，闰年/纪元都是回归锚点；`formatUtc` 一次精确分配
+  写 24 字节，不经过格式化机器。
+
+**顺带修掉一个 sema 既有 bug**（json.zx 的 `let e = ...fail(...);
+return (error)e;` 模式第一个踩中）：`(error)运行期变量`、`.?` 编译期
+空值探针、type 字段折值（`f.ty`）三处**裸调 ct_eval**——折叠失败会把
+`g_ct_stuck` 留成 1 且无人恢复，之后整个编译的常量求值全部短路：
+inline for 展开成空块、`@typeName(f.ty)` 变 `<error>`、fields 反射全
+哑。修法是新增 `ct_eval_probe`（失败不留痕）替换三处裸调。HEAD 的旧
+代码全写 `(error)Enum.x`（能折叠）所以从未触发——是既有 bug，不是
+std 扩容引入的。
+
+另：`std.print/println/format` 的**实参过多**从静默吞掉改为编译期报
+错（E0802）——格式串少写一个 `{}` 会把后面全部错位，这种错位运行期
+几乎无法排查（stdfs 测试真实踩过一次，还差点当成编译器 bug 追了半天）。
+
+`sh test.sh` 209 项全过（stdfs/stdjson/stdtime 三个新测试）；bench
+新增 `bench/json.zx`（2 万次 parse+stringify 校验和）。见 decisions
+**§77**。
 
 ## M44：前端提速——AST 序列化缓存
 

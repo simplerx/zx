@@ -1,0 +1,99 @@
+// stdfs.zx —— std.fs 三件套：路径操作（零分配）、目录遍历、元数据。
+//
+// 钉住的行为：
+//   - basename/dirname/ext/stem 全是切片指向原串（改输入它们跟着变——
+//     这是零分配的代价，也是约定）；
+//   - ext 的点必须在非首字符位置（".gitignore" 没有扩展名）；
+//   - readDir 不交付 "." / ".."，名字带 NUL 后缀（可直接当 C 串）；
+//   - DirIter 流式：名字指向内部缓冲，next() 之后失效；
+//   - stat 目录 size = 0。
+//
+// expect-output
+// base=c.txt dir=a/b ext=.gz stem=a.tar
+// dotfile ext=true abs=true abs2=false joinlen=9 ok=true
+// stat dir=false size>0=true
+// exists=true
+// listed=3 got_all=true
+// iter again=3
+// makedirs=true nested=true
+const std = module("std");
+
+const main = fn () i32 {
+    const al = std.heap.page;
+
+    // ---- 路径操作（纯函数） ----
+    std.println("base={} dir={} ext={} stem={}",
+               std.fs.basename("a/b/c.txt"), std.fs.dirname("a/b/c.txt"),
+               std.fs.ext("a.tar.gz"), std.fs.stem("a.tar.gz"));
+    var jlen: usize = 0;
+    let j = std.fs.join(al, "a/b", "c.txt");
+    if (j) jj { jlen = jj.len; }
+    std.println("dotfile ext={} abs={} abs2={} joinlen={} ok={}",
+               std.fs.ext(".gitignore").len == 0,
+               std.fs.isAbs("C:/x"), std.fs.isAbs("rel/path"),
+               jlen, jlen == 9);
+
+    // ---- 元数据（真实文件：std/std.zx） ----
+    let st = std.fs.stat(al, "std/std.zx");
+    if (st) s {
+        std.println("stat dir={} size>0={}", s.isDir, s.size > 0);
+    } else {
+        std.println("stat dir=false size>0=false");
+    }
+    std.println("exists={}", std.fs.exists(al, "std/std.zx"));
+
+    // ---- 目录遍历：先造一个已知内容的目录，数得清 ----
+    let made = std.fs.createDir(al, "fs_t_dir");
+    // 已存在也当成功（第二次跑测试）
+    std.file.write("fs_t_dir/one.txt", "1");
+    std.file.write("fs_t_dir/two.txt", "22");
+    std.file.write("fs_t_dir/three.dat", "333");
+
+    let d = std.fs.readDir(al, "fs_t_dir");
+    if (d) items {
+        var found: usize = 0;
+        var i: usize = 0;
+        while (i < items.len) {
+            let n = items[i];
+            if (std.str.eq(n, "one.txt") || std.str.eq(n, "two.txt")
+                || std.str.eq(n, "three.dat")) {
+                found = found + 1;
+            } else {
+                // 有幽灵条目（比如 "." / ".." 漏进来）就报出来
+                std.println("  unexpected: {}", n);
+            }
+            i = i + 1;
+        }
+        std.println("listed={} got_all={}", items.len, found == 3);
+    } else {
+        std.println("listed=0 got_all=false");
+    }
+
+    // ---- DirIter 流式（零拷贝）：跑两遍确认可重开 ----
+    var cnt: usize = 0;
+    let opened = std.fs.DirIter.open(al, "fs_t_dir");
+    if (opened) itv {
+        var it = itv;
+        defer it.close();
+        while (it.next()) name {
+            cnt = cnt + 1;
+        }
+    }
+    std.println("iter again={}", cnt);
+
+    // ---- 建目录（已存在也算过：测试可重跑） ----
+    var ok1 = std.fs.createDir(al, "fs_t_dir2");
+    if (!ok1) { ok1 = std.fs.exists(al, "fs_t_dir2"); }
+    var ok2 = std.fs.createDir(al, "fs_t_dir2/nested");
+    if (!ok2) { ok2 = std.fs.exists(al, "fs_t_dir2/nested"); }
+    std.println("makedirs={} nested={}", ok1, ok2);
+
+    // ---- 清理测试产物（目录删空即走） ----
+    std.fs.removeFile(al, "fs_t_dir/one.txt");
+    std.fs.removeFile(al, "fs_t_dir/two.txt");
+    std.fs.removeFile(al, "fs_t_dir/three.dat");
+    std.fs.removeDir(al, "fs_t_dir/nested");
+    std.fs.removeDir(al, "fs_t_dir2");
+    std.fs.removeDir(al, "fs_t_dir");
+    return 0;
+};

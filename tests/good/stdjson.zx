@@ -1,0 +1,195 @@
+// stdjson.zx —— std.json：解析（零拷贝 / i64 边界 / 转义 / Unicode）、
+// 增改查（Obj 开放寻址 / Arr 倍增）、错误定位、序列化 round-trip。
+//
+// 钉住的行为：
+//   - 字符串零拷贝：无转义的串直接指向源缓冲（改源它跟着变——约定）；
+//   - 整数走 u128 快路径：i64 范围内是 .int，超界落 .float；
+//   - 重复键后者赢；depth 上限 512；顶层值之后还有内容报 trailing；
+//   - 错误定位 1 起行列，记录在 errLine / errCol；
+//   - 浮点序列化取最短 round-trip 表示（3.14159 就是 "3.14159"）。
+//
+// expect-output
+// obj name=zx n=3 pi=3.5 ok=true nil=true
+// arr0=1 neg=-7
+// imax=9223372036854775807 imin=-9223372036854775808
+// overfloat=true tiny=true
+// esc=true emoji_len=4
+// dup=2 arrpush=30
+// bad depth=true trailing=true at=1:3
+// syntax-code=1 at=1:7
+// rt-int=42 rt-str=true
+// flt=3.14159 flt2=0.5 exp=1e+21
+const std = module("std");
+
+// ---- 判别辅助：测试里反复用的按类型取载荷 ----
+const asInt = fn (v: std.json.Value) ?i64 {
+    return switch (v.tag) { .int: v.int, else: null };
+};
+const asStr = fn (v: std.json.Value) ?[]const u8 {
+    return switch (v.tag) { .str: v.str, else: null };
+};
+const asBool = fn (v: std.json.Value) ?bool {
+    return switch (v.tag) { .boolean: v.boolean, else: null };
+};
+const asFloat = fn (v: std.json.Value) f64 {
+    return switch (v.tag) { .float: v.float, else: -1.0 };
+};
+const isFloat = fn (v: std.json.Value) bool {
+    return switch (v.tag) { .float: true, else: false };
+};
+const isNul = fn (v: std.json.Value) bool {
+    return switch (v.tag) { .nul: true, else: false };
+};
+const ok = fn (v: ?std.json.Value) bool {
+    if (v) x { return true; }
+    return false;
+};
+const asObj = fn (v: std.json.Value) ?*std.json.Obj {
+    return switch (v.tag) { .obj: v.obj, else: null };
+};
+const asArr = fn (v: std.json.Value) ?*std.json.Arr {
+    return switch (v.tag) { .arr: v.arr, else: null };
+};
+const isSyntax = fn (e: std.json.ParseErr) bool {
+    return switch (e) { .syntax: true, else: false };
+};
+
+const main = fn () i32 {
+    const al = std.heap.page;
+
+    // ---- 基本解析：对象 / 数组 / 标量 ----
+    let r = std.json.parse(al,
+        "{\"name\":\"zx\",\"n\":3,\"pi\":3.5,\"ok\":true,\"nil\":null}");
+    if (r) v {
+        let name = std.json.member(v, "name") orelse std.json.Value{ .nul = 0 };
+        let n = std.json.member(v, "n") orelse std.json.Value{ .nul = 0 };
+        let pi = std.json.member(v, "pi") orelse std.json.Value{ .nul = 0 };
+        let okv = std.json.member(v, "ok") orelse std.json.Value{ .nul = 0 };
+        let nil = std.json.member(v, "nil") orelse std.json.Value{ .nul = 0 };
+        std.println("obj name={s} n={} pi={} ok={} nil={}",
+                    asStr(name) orelse "?",
+                    asInt(n) orelse -1,
+                    asFloat(pi),
+                    asBool(okv) orelse false,
+                    isNul(nil));
+    } else e {
+        std.println("parse err {}", e);
+    }
+
+    // ---- 数组 ----
+    let ra = std.json.parse(al, "[1, [2], -7, \"x\"]");
+    if (ra) a {
+        let i0 = std.json.item(a, 0) orelse std.json.Value{ .nul = 0 };
+        let i2 = std.json.item(a, 2) orelse std.json.Value{ .nul = 0 };
+        std.println("arr0={} neg={}", asInt(i0) orelse 0, asInt(i2) orelse 0);
+    } else e {
+        std.println("arr err {}", e);
+    }
+
+    // ---- i64 边界：u128 快路径的上下界 ----
+    let rb = std.json.parse(al, "[9223372036854775807, -9223372036854775808]");
+    if (rb) b {
+        let mx = std.json.item(b, 0) orelse std.json.Value{ .nul = 0 };
+        let mn = std.json.item(b, 1) orelse std.json.Value{ .nul = 0 };
+        std.println("imax={} imin={}", asInt(mx) orelse 0, asInt(mn) orelse 0);
+    } else e {
+        std.println("i64 err {}", e);
+    }
+
+    // ---- 超出 i64：落成 float ----
+    let rc = std.json.parse(al, "[123456789012345678901234]");
+    if (rc) c {
+        let big = std.json.item(c, 0) orelse std.json.Value{ .nul = 0 };
+        std.println("overfloat={} tiny={}", isFloat(big),
+                    asFloat(big) > 1.2345678e23);
+    } else e {
+        std.println("big err {}", e);
+    }
+
+    // ---- 转义与 Unicode：\u0041 → A；代理对 → 4 字节 UTF-8 ----
+    let rd = std.json.parse(al, "{\"a\":\"\\u0041\\t\\\"\",\"e\":\"\\ud83d\\ude00\"}");
+    if (rd) d {
+        let a = std.json.member(d, "a") orelse std.json.Value{ .nul = 0 };
+        let e = std.json.member(d, "e") orelse std.json.Value{ .nul = 0 };
+        let sa = asStr(a) orelse "";
+        let se = asStr(e) orelse "";
+        let esc_ok = sa.len == 3 && sa[0] == 'A' && sa[1] == '\t' && sa[2] == '"';
+        std.println("esc={} emoji_len={}", esc_ok, se.len);
+    } else e {
+        std.println("esc err {}", e);
+    }
+
+    // ---- Obj 重复键覆盖 / Arr push-at（实例从空文本解析得来） ----
+    var dup: i64 = -1;
+    var third: i64 = -1;
+    let empt = std.json.parse(al, "{}");
+    if (empt) ev {
+        if (asObj(ev)) op {
+            op.put("k", std.json.Value{ .int = 1 });
+            op.put("k", std.json.Value{ .int = 2 });   // 后者赢
+            if (op.get("k")) kv { dup = asInt(kv) orelse -1; }
+        }
+    }
+    let earr = std.json.parse(al, "[]");
+    if (earr) ev2 {
+        if (asArr(ev2)) ap {
+            ap.push(std.json.Value{ .int = 10 });
+            ap.push(std.json.Value{ .int = 20 });
+            ap.push(std.json.Value{ .int = 30 });
+            if (ap.at(2)) tv { third = asInt(tv) orelse -1; }
+        }
+    }
+    std.println("dup={} arrpush={}", dup, third);
+
+    // ---- 错误处理：语法错 / 深度 / trailing / 行列定位 ----
+    // 520 层嵌套必超 MAX_DEPTH=512
+    var bad_depth_ok = false;
+    let depraw = al.alloc(1040);
+    if (depraw) dp {
+        var di: usize = 0;
+        while (di < 520) { (dp + di).0 = '['; di = di + 1; }
+        while (di < 1040) { (dp + di).0 = ']'; di = di + 1; }
+        let bd = std.json.parse(al, dp[0..1040]);
+        if (bd) { bad_depth_ok = true; }
+    }
+    var trail_ok = false;
+    let bad_trail = std.json.parse(al, "1 2");
+    if (bad_trail) { trail_ok = true; }
+    std.println("bad depth={} trailing={} at={}:{}",
+                !bad_depth_ok, !trail_ok,
+                std.json.errLine, std.json.errCol);
+
+    // 语法错的位置：第 1 行第 8 列（"}" 处）
+    let bad_syntax = std.json.parse(al, "{\"a\": }");
+    if (bad_syntax) { std.println("syntax unexpectedly ok"); } else se {
+        std.println("syntax-code={} at={}:{}", se,
+                    std.json.errLine, std.json.errCol);
+    }
+
+    // ---- 序列化 round-trip：整数与字符串保真 ----
+    let rr = std.json.parse(al, "{\"i\":42,\"s\":\"hi\\n\"}");
+    if (rr) src {
+        let out = std.json.stringify(al, src);
+        if (out) s {
+            let back = std.json.parse(al, s);
+            if (back) v2 {
+                let i2 = std.json.member(v2, "i") orelse std.json.Value{ .nul = 0 };
+                let s2 = std.json.member(v2, "s") orelse std.json.Value{ .nul = 0 };
+                std.println("rt-int={} rt-str={}",
+                            asInt(i2) orelse 0,
+                            std.str.eq(asStr(s2) orelse "", "hi\n"));
+            } else ee { std.println("rt parse err {}", ee); }
+        } else { std.println("stringify err"); }
+    } else { std.println("rt src err"); }
+
+    // ---- 浮点最短 round-trip ----
+    let rf = std.json.parse(al, "[3.14159, 0.5, 1e21]");
+    if (rf) f {
+        let f0 = std.json.item(f, 0) orelse std.json.Value{ .nul = 0 };
+        let f1 = std.json.item(f, 1) orelse std.json.Value{ .nul = 0 };
+        let f2 = std.json.item(f, 2) orelse std.json.Value{ .nul = 0 };
+        std.println("flt={} flt2={} exp={}",
+                    asFloat(f0), asFloat(f1), asFloat(f2));
+    } else { std.println("float err"); }
+    return 0;
+};

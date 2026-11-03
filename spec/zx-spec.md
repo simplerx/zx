@@ -2013,6 +2013,25 @@ if (raw) p {
 | `std.BufReader.open(alloc, path, cap)` | `?BufReader` | 一次读 `cap` 字节，`next()` 按行给（行指向缓冲） |
 | `std.BufReader.chunk()` | `?[]const u8` | 不切行，给一块原始字节 |
 | `std.BufWriter.create/appendTo(alloc, path, cap)` | `?BufWriter` | 攒满 `cap` 才真写；`write/flush/writeLine/writeByte` |
+| `std.fs.isAbs/basename/dirname/ext/stem(p)` | `bool` / `[]const u8` | 纯路径拆解，零分配；`ext` 含点（`.txt`），`stem` 是去扩展名的文件名 |
+| `std.fs.join(alloc, a, b)` | `?[]u8` | 拼路径，处理分隔符去重；`a` 为空时退化为 `b` |
+| `std.fs.stat(alloc, path)` | `?Stat` | `Stat = { size: u64, mtime: u64, isDir: bool, isHidden: bool }`（mtime 是 Windows FILETIME） |
+| `std.fs.exists(alloc, path)` | `bool` | 一次 `GetFileAttributesA` |
+| `std.fs.createDir/removeDir(alloc, path)` | `bool` | 建单层目录 / 删**空**目录；递归调用者拿 `readDir` 自己拼 |
+| `std.fs.removeFile(alloc, path)` | `bool` | 删文件 |
+| `std.fs.DirIter.open(alloc, path)` | `?DirIter` | 流式目录遍历：`next()` 给名字（指向内部工作区，next 后失效）、`isDir()/size()` 元数据；`.`/`..` 不交付 |
+| `std.fs.readDir(alloc, path)` | `?[][]const u8` | 一次性收齐目录名（内部就是 DirIter）；`take()` 拿走所有权 |
+| `std.json.parse(alloc, src)` | `!Value` | 手写解析器：失败给 `ParseErr`（`syntax/depth/oom/trailing`），位置在 `errLine/errCol`（1 起）；嵌套上限 512 层 |
+| `std.json.Value` | union(enum) | `nul/boolean/int/float/str/arr/obj`；`arr`/`obj` 是指针（`*Arr`/`*Obj`），树在分配器上 |
+| `std.json.member(v, key)` / `item(v, i)` | `?Value` | 取对象成员 / 数组元素；类型不对给 `null` |
+| `std.json.text(v)` | `?[]const u8` | 把 `str` 变体取出来，其他变体给 `null` |
+| `std.json.stringify(alloc, v)` | `?[]u8` | 最短浮点、原样转义输出 |
+| `std.json.Obj` / `Arr` | struct | 开放寻址表 / 倍增数组；从 `"{}"` / `"[]"` 解析出实例后用 `put/get` / `push/at` |
+| `std.time.counter()` / `freq()` | `u64` | QPC 单调计时；`freq` 是每秒计数 |
+| `std.time.nsBetween(a, b)` / `nsSince(a)` | `u64` | 两次 counter 的间隔（纳秒） |
+| `std.time.unixMs()` / `unixSecs()` / `unixNs()` | `u64` | Unix 纪元墙钟（`wall100ns()` 是底层 100ns FILETIME） |
+| `std.time.fromUnixMs(ms)` | `DateTime` | 纯整数换算 `{ year, month, day, hour, min, sec, ms }`（UTC，无闰秒） |
+| `std.time.formatUtc(alloc, ms)` | `?[]u8` | `"YYYY-M-D H:M:S.mmmZ"`，24 字节 |
 
 ```zx
 const std = module("std");

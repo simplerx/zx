@@ -1,0 +1,151 @@
+// time.zx —— 时间：高精度单调钟 + 墙钟 + UTC 格式化。
+//
+//   const std = module("std");
+//   let t0 = std.time.counter();
+//   ... 干活 ...
+//   std.println("{} ms", std.time.nsBetween(t0, std.time.counter()) / 1000000);
+//
+//   std.println("{}", std.time.formatUtc(al, std.time.unixMs()));  // ISO 8601
+//
+// 性能约定：
+//   - counter()/elapsedNs 不分配、不锁：QueryPerformanceCounter 一次系统调用；
+//     频率第一次问过就缓存进模块全局（QPF 结果进程内不变）；
+//   - 时间差全程 u128（频率换算 1e9 倍不溢出）；
+//   - formatUtc 固定 24 字节一次分配，天数→日期是 Hinnant 算法（无循环）。
+//
+// 平台：Windows 先行（kernel32）。POSIX 版等语言有条件编译后再补。
+
+extern fn QueryPerformanceCounter(lp: *i64) i32;
+extern fn QueryPerformanceFrequency(lp: *i64) i32;
+extern fn GetSystemTimeAsFileTime(lp: *u64) void;
+
+// QPC 频率缓存：0 = 还没问过。QPF 在进程生命周期内不变，问一次就够。
+var g_freq: u64 = 0;
+
+// ---- 单调钟（测耗时用这个，墙钟会被校时/闰秒拨动） -----------------------------
+
+// 高精度计数器原始读数。单位不定（看 freq()），只用于减法。
+pub const counter = fn () u64 {
+    var v: i64 = 0;
+    QueryPerformanceCounter(&v);
+    return (u64)v;
+};
+
+// 每秒多少个 counter 刻度（缓存）。
+pub const freq = fn () u64 {
+    if (g_freq == 0) {
+        var v: i64 = 0;
+        QueryPerformanceFrequency(&v);
+        g_freq = (u64)v;
+        if (g_freq == 0) { g_freq = 10000000; }   // 理论上到不了：防御除零
+    }
+    return g_freq;
+};
+
+// 两个计数器读数之间的纳秒数。u128 中转：counter*1e9 对 64 位会溢出
+// （~18 秒就爆），128 位下任何现实区间都安全。
+pub const nsBetween = fn (start: u64, end: u64) u64 {
+    let d: u128 = (u128)end - (u128)start;
+    return (u64)(d * 1000000000 / (u128)freq());
+};
+
+// 从 start 到现在的纳秒数。
+pub const nsSince = fn (start: u64) u64 {
+    return nsBetween(start, counter());
+};
+
+// ---- 墙钟 ---------------------------------------------------------------------
+//
+// FILETIME：自 1601-01-01 UTC 起的 100 纳秒数（u64）。
+// 换 Unix 纪元减去 1601→1970 的差值。
+
+const EPOCH_1601_TO_1970: u64 = 116444736000000000;   // 100ns 单位
+
+// 墙钟原始读数（100ns，自 1601）。
+pub const wall100ns = fn () u64 {
+    var v: u64 = 0;
+    GetSystemTimeAsFileTime(&v);
+    return v;
+};
+
+// Unix 纪元起的毫秒数（JS Date.now() 同一数值域）。
+pub const unixMs = fn () u64 {
+    return (wall100ns() - EPOCH_1601_TO_1970) / 10000;
+};
+
+// Unix 纪元起的秒数。
+pub const unixSecs = fn () u64 {
+    return (wall100ns() - EPOCH_1601_TO_1970) / 10000000;
+};
+
+// Unix 纪元起的纳秒数。u64 能撑到 2554 年。
+pub const unixNs = fn () u64 {
+    return (wall100ns() - EPOCH_1601_TO_1970) * 100;
+};
+
+// ---- UTC 格式化 ----------------------------------------------------------------
+
+// 拆成 UTC 日历分量。民用年从 1 开始（month/day 同理）。
+pub const DateTime = struct {
+    year: u64, month: u64, day: u64,     // y-m-d
+    hour: u64, min: u64, sec: u64, ms: u64,
+};
+
+// Unix 毫秒 → 日历分量。天数→年月日走 Hinnant 的 civil_from_days：
+// 纯整数运算（一次除法链），没有逐月逐年的循环。
+pub const fromUnixMs = fn (ms: u64) DateTime {
+    let days = ms / 86400000;
+    let tod = ms % 86400000;                      // 当天内的毫秒
+    // civil_from_days（era 算法，1970-01-01 = 0）
+    let z = days + 719468;
+    let era = z / 146097;
+    let doe = z - era * 146097;                   // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;   // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);                 // [0, 365]
+    let mp = (5 * doy + 2) / 153;                 // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1;         // [1, 31]
+    var m = mp + 3;                               // [3, 14] → [1, 12]
+    if (mp >= 10) { m = mp - 9; }
+    var yr = y;                                   // 民用年：1、2 月属上一年
+    if (m <= 2) { yr = y + 1; }
+    return DateTime{ .year = yr,
+                     .month = m, .day = d,
+                     .hour = tod / 3600000,
+                     .min = (tod % 3600000) / 60000,
+                     .sec = (tod % 60000) / 1000,
+                     .ms = tod % 1000 };
+};
+
+// 两位十进制（内部用）。
+const two = fn (buf: *u8, off: usize, v: u64) void {
+    (buf + off).0 = 48 + (u8)(v / 10);
+    (buf + off + 1).0 = 48 + (u8)(v % 10);
+};
+
+// Unix 毫秒 → "2026-11-03T06:31:49.123Z"（ISO 8601 UTC，固定 24 字节）。
+// 一次精确分配，逐字节写位，不经过格式化机器。
+pub const formatUtc = fn (alloc: Allocator, ms: u64) ?[]u8 {
+    let raw = alloc.alloc(24);
+    if (raw) b {
+        let dt = fromUnixMs(ms);
+        two(b, 0, dt.year / 100);
+        two(b, 2, dt.year % 100);
+        (b + 4).0 = '-';
+        two(b, 5, dt.month);
+        (b + 7).0 = '-';
+        two(b, 8, dt.day);
+        (b + 10).0 = 'T';
+        two(b, 11, dt.hour);
+        (b + 13).0 = ':';
+        two(b, 14, dt.min);
+        (b + 16).0 = ':';
+        two(b, 17, dt.sec);
+        (b + 19).0 = '.';
+        two(b, 20, dt.ms / 10);            // 毫秒前两位
+        (b + 22).0 = 48 + (u8)(dt.ms % 10); // 毫秒个位
+        (b + 23).0 = 'Z';
+        return b[0..24];
+    }
+    return null;
+};

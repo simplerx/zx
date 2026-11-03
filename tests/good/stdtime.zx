@@ -1,0 +1,64 @@
+// stdtime.zx —— std.time：QPC 单调钟、墙钟、ISO 8601 格式化。
+//
+// 钉住的行为：
+//   - counter() 单调不减；nsBetween(a,b) = b-a（u128 中转，跨 2^64 不溢出）；
+//   - unixMs 与 unixSecs/unixNs 换算一致；
+//   - fromUnixMs 走 Hinnant civil_from_days：纯整数除法链，
+//     闰年（2000-02-29）与纪元（1970-01-01）都是锚点；
+//   - formatUtc 固定 24 字节 "YYYY-MM-DDTHH:MM:SS.mmmZ"。
+//
+// expect-output
+// monotonic=true freq>0=true
+// secs-consistent=true ns-consistent=true
+// epoch=1970-1-1 y2k=2000-2-29 bil=2001-9-9
+// y2038=2038-1-19 ms=123
+// fmt len=24 z=true
+const std = module("std");
+
+const main = fn () i32 {
+    const al = std.heap.page;
+
+    // ---- 单调钟：counter 不减，freq 合理，nsBetween 是纯减法 ----
+    let t0 = std.time.counter();
+    let t1 = std.time.counter();
+    let fr = std.time.freq();
+    std.println("monotonic={} freq>0={}", t1 >= t0, fr > 0);
+
+    // ---- 墙钟：毫秒 / 秒 / 纳秒三条换算互相咬合 ----
+    let ms = std.time.unixMs();
+    let secs = std.time.unixSecs();
+    let ns = std.time.unixNs();
+    std.println("secs-consistent={} ns-consistent={}",
+                secs == ms / 1000, ns / 1000000 == ms);
+
+    // ---- civil_from_days 锚点：纪元 / 闰年 / 十亿秒 / 2038 ----
+    // 1970-01-01T00:00:00.000Z
+    let de = std.time.fromUnixMs(0);
+    // 2000-02-29T00:00:00.000Z = 951782400000 ms（闰年，4 年一闰但 1900 不闰 2000 闰）
+    let dy = std.time.fromUnixMs(951782400000);
+    // 2001-09-09T01:46:40.000Z = 1000000000000 ms
+    let db = std.time.fromUnixMs(1000000000000);
+    std.println("epoch={}-{}-{} y2k={}-{}-{} bil={}-{}-{}",
+                de.year, de.month, de.day,
+                dy.year, dy.month, dy.day,
+                db.year, db.month, db.day);
+
+    // 2038-01-19T03:14:08.000Z = 2147483648000 ms（i32 秒的上界）
+    let d3 = std.time.fromUnixMs(2147483648000);
+    // 毫秒分量保留：951782400123 → .ms == 123
+    let dm = std.time.fromUnixMs(951782400123);
+    std.println("y2038={}-{}-{} ms={}",
+                d3.year, d3.month, d3.day, dm.ms);
+
+    // ---- formatUtc：固定 24 字节，末尾 Z ----
+    let s = std.time.formatUtc(al, 951782400123);
+    var z_ok = false;
+    if (s) f {
+        std.println("fmt len={} z={}", f.len, f[23] == 'Z');
+        z_ok = f.len == 24;
+    } else {
+        std.println("fmt len=0 z=false");
+    }
+    if (!z_ok) { std.println("fmt length wrong"); }
+    return 0;
+};
