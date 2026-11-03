@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <sys/stat.h>
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -56,12 +57,74 @@ static char *fe_read_source(const char *path, size_t *out_len) {
     return buf;
 }
 
-/* Zx 前端：起 zxfe 子进程拿序列化 AST，装载成 Node 树 */
-static Node *fe_parse_zx(const char *path) {
-    char *dir = fe_exe_path();
-    if (!dir) return NULL;
+/* ---- AST 序列化缓存 ----------------------------------------------------
+ * Zx 前端每解析一个文件就要起一次 zxfe 子进程；一个普通程序 import std
+ * 后是 4~5 个模块 = 4~5 次 spawn，Windows 上 cmd /c 一次就要 ~50ms——
+ * zxc --check 0.35s 里 spawn 占了七成。而 std 这些模块的内容在两次编译
+ * 之间根本不变，序列化结果也不变。
+ *
+ * 解法：按「源内容 + 源路径 + zxfe.exe 状态」为键缓存序列化 AST，命中
+ * 就直接 ast_load_file，一个进程都不用起。键里放编译器二进制的
+ * mtime+size：重编 zxfe（枚举编号一变序列化就不兼容，M41 的教训）自动
+ * 全部失效。ZXC_NO_AST_CACHE 置位可整体关闭（调试序列化问题时用）。
+ * 缓存装载失败一律退回 spawn 路径，宁可慢不可错。 */
 
-    /* 临时文件：优先 TEMP 环境变量（老行为，MSYS 下 TMP 可能是 test.sh
+/* FNV-1a 64 位：够散、够快、无状态依赖 */
+static unsigned long long fnv1a(const char *data, size_t len,
+                                unsigned long long h) {
+    for (size_t i = 0; i < len; i++) {
+        h ^= (unsigned char)data[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+/* 把一个文件的大小 + mtime 揉进哈希（二进制身份指纹） */
+static unsigned long long fnv_file(const char *path, unsigned long long h) {
+    struct stat st;
+    if (stat(path, &st) != 0) return h ^ 0x9e3779b97f4a7c15ULL;
+    h = fnv1a((char *)&st.st_size, sizeof st.st_size, h);
+    h = fnv1a((char *)&st.st_mtime, sizeof st.st_mtime, h);
+    return h;
+}
+
+static void ast_cache_paths(char *cache, size_t csz, const char *tmpdir,
+                            const char *path, const char *src, size_t slen) {
+    unsigned long long key = 1469598103934665603ULL;
+    key = fnv1a(src, slen, key);
+    key = fnv1a(path, strlen(path), key);
+    /* 编译器两侧的二进制身份：任何一个重编过，旧缓存整体作废 */
+    key = fnv_file(g_fe_argv0 ? g_fe_argv0 : "zxc", key);
+
+    char *dir = fe_exe_path();
+    if (dir) {
+        char exe[2048];
+        size_t dl = strlen(dir);
+        if (dl && dir[dl - 1] != '\\' && dir[dl - 1] != '/')
+            snprintf(exe, sizeof exe, "%s\\zxfe.exe", dir);
+        else
+            snprintf(exe, sizeof exe, "%szxfe.exe", dir);
+        key = fnv_file(exe, key);
+        free(dir);
+    }
+
+    size_t tl = strlen(tmpdir);
+    if (tl > 0 && (tmpdir[tl - 1] == '\\' || tmpdir[tl - 1] == '/'))
+        snprintf(cache, csz, "%szxc-ast-%016llx.ast", tmpdir, key);
+    else
+        snprintf(cache, csz, "%s\\zxc-ast-%016llx.ast", tmpdir, key);
+}
+
+/* Zx 前端：先查缓存，未命中起 zxfe 子进程拿序列化 AST，装载成 Node 树 */
+static Node *fe_parse_zx(const char *path) {
+    /* 缓存路径先行：源读不出来就让 spawn 路径去报错（zxfe 的诊断
+     * 带 path:line:col，比我们在这一层模仿更可信） */
+    size_t slen = 0;
+    char *src = fe_read_source(path, &slen);
+    char cache[1400];
+    bool caching = src && !getenv("ZXC_NO_AST_CACHE");
+
+    /* 临时目录：优先 TEMP 环境变量（老行为，MSYS 下 TMP 可能是 test.sh
      * 沙箱前缀这类不存在的目录，GetTempPath 会优先吃 TMP 而踩坑），
      * TEMP 缺失时退 GetTempPath（Zed 拉起的进程链里 TEMP 可能缺失，
      * 回退 "." 会把 .zxfe-*.ast 写进项目根，触发文件监视报错刷屏）；
@@ -78,6 +141,23 @@ static Node *fe_parse_zx(const char *path) {
         const char *t = getenv("TMPDIR");
         tmpdir = (t && *t) ? t : ".";
     }
+
+    if (caching) {
+        ast_cache_paths(cache, sizeof cache, tmpdir, path, src, slen);
+        free(src);
+        Node *hit = ast_load_file(cache);   /* 格式坏/截断 → NULL，走重编 */
+        if (hit) {
+            if (getenv("ZX_DEBUG_FE")) fprintf(stderr, "[fe] cache hit  %s\n", path);
+            return hit;
+        }
+        if (getenv("ZX_DEBUG_FE")) fprintf(stderr, "[fe] cache miss %s\n", path);
+    } else {
+        free(src);
+    }
+
+    char *dir = fe_exe_path();
+    if (!dir) return NULL;
+
     unsigned long long key = (unsigned long long)time(NULL)
                            ^ (unsigned long long)(uintptr_t)dir;
 #ifdef _WIN32
@@ -92,7 +172,6 @@ static Node *fe_parse_zx(const char *path) {
     else
         snprintf(tmp, sizeof tmp, "%s\\.zxfe-%llu.ast", tmpdir, key);
     char cmd[2800];
-    int rc;
     if (*dir) {
         /* 注意：Windows 的 system() 会让 cmd /c 吃掉首尾引号——命令行
          * 不能以引号开头（与 main.c 里 zig cc 的拼法同一约束）。 */
@@ -102,11 +181,17 @@ static Node *fe_parse_zx(const char *path) {
     }
     free(dir);
 
-    rc = system(cmd);
+    int rc = system(cmd);
     if (rc != 0) return NULL;            /* 诊断已由 zxfe 打到 stderr */
 
     Node *root = ast_load_file(tmp);
-    remove(tmp);
+    /* 装载成功才写缓存；rename 顺带把临时文件清掉（同目录，同盘） */
+    if (root && caching) {
+        remove(cache);
+        if (rename(tmp, cache) != 0) { /* 缓存写失败只是慢一点，不是错 */ }
+        else tmp[0] = '\0';              /* 已搬走，别再 remove */
+    }
+    if (tmp[0]) remove(tmp);
     return root;
 }
 
