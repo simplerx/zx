@@ -8,10 +8,12 @@
 # 若用 freestanding/-no-entry 静态模型自建内存，Zed 装载后解析文件时会崩溃。
 #
 # 用法: ./build-wasm.sh [zig路径]
-#   默认使用 zx 自带工具链 .toolchain/zig.exe（zig cc 即 clang + wasm lld）
+#   默认使用仓库自带工具链 <repo>/.toolchain/zig.exe（zig cc 即 clang + wasm lld）
+#   产物直接覆盖 editor/zed/grammars/zx.wasm——Zed 扩展读取的就是这一份。
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-cd "$(dirname "$0")/tree-sitter-zx"
+cd "$(dirname "$0")"
+OUT="$REPO_ROOT/editor/zed/grammars/zx.wasm"
 
 ZIG="${1:-$REPO_ROOT/.toolchain/zig.exe}"
 
@@ -57,7 +59,7 @@ EOF
 "$ZIG" cc --target=wasm32-wasi -nostdlib -shared -fPIC \
     -I"$STUB" \
     -Wl,--no-entry -Wl,--export=tree_sitter_zx \
-    -O2 -o ../zx.wasm src/parser.c "$STUB/glue.c"
+    -O2 -o "$OUT" src/parser.c "$STUB/glue.c"
 
 rm -rf "$STUB" 2>/dev/null || true
-echo "OK: ../zx.wasm"
+echo "OK: $OUT"

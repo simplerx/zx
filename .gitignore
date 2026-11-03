@@ -2,20 +2,26 @@
 bin/
 *.o
 *.exe
+*.pdb
 *.tmp
 
 # 工具链（zig cc，不入库）
 .toolchain/
+.toolchain-015-bak/
+
+# 语言服务器日志（zxls 写在 exe 同目录）
+zxls-lsp.log
 
 # 本地缓存与临时目录
 .tmp/
 .zc-cache/
+out/
+
+# Zed 扩展的 cargo 产物（wasm 本身入库，target 不入库）
+editor/zed/target/
 
 # 一次性探测文件
 err_probe.zx
 
 # zxls 影子文件（诊断用临时副本，异常退出时可能残留）
 .zxls-*.zx
-
-# 0.15 工具链备份（0.17 升级后留作回滚）
-.toolchain-015-bak/

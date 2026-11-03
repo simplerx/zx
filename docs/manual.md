@@ -1,0 +1,655 @@
+# Zx 语言手册
+
+> 对应版本 **zxc 0.49.0**（语言规格 `spec/zx-spec.md` v0.27）
+> 本文是**查表用的**：命令怎么敲、某个语法点怎么写、标准库有什么、什么地方会坑。
+> 想从头学，先读 `docs/guide.md`；想改编译器，读 `README.md` 与 `spec/decisions.md`。
+
+---
+
+## 0. 文档分工
+
+| 文档 | 回答什么 | 什么时候读 |
+| --- | --- | --- |
+| `docs/guide.md` | 从 hello 到泛型的完整教程，讲"为什么" | 第一次接触 Zx |
+| `docs/manual.md`（本文） | 命令、语法点、标准库、坑与限制 | 写代码时随手查 |
+| `spec/zx-spec.md` | 规则的精确定义（编译期语义、布局、诊断） | 要判断"这到底算不算合法" |
+| `spec/decisions.md` | 每个设计的取舍、否掉的替代方案 | 想知道"为什么不能那样" |
+| `README.md` | 编译器实现与里程碑日志 | 改编译器、看历史 |
+| `editor/README.md` | 编辑器安装与排障 | 高亮/补全不工作 |
+
+Zx 的目标很窄，先记住这一句能省很多疑惑：**编译到可读的 C11，产物是普通本机可执行文件**。
+没有虚拟机、没有 GC、没有运行时安装；Zx 只负责把语言翻成 C，剩下的交给 C 编译器。
+
+---
+
+## 1. 十分钟上手
+
+### 1.1 环境
+
+只需要仓库自带的工具链，不用装 gcc/clang：
+
+```sh
+sh build.sh        # → bin/zxc.exe（编译器）bin/zxfe.exe（前端）bin/zxls.exe（语言服务器）
+sh test.sh         # 回归；退出码非 0 = 有失败
+```
+
+- 编译器本身是 C11，用 `.toolchain/zig.exe cc` 编（zig 的 cc 就是 clang + 自带 libc）。
+- `.toolchain/`、`.zc-cache/`、`bin/` 不入版本控制，换机器重新 `build.sh` 即可。
+- 后端 C 编译器可用 `ZX_CC` 换成系统的 `cc`/`clang`/`gcc`（见 §2.4）。
+
+### 1.2 第一个程序
+
+```zx
+const std = module("std");
+
+const main = fn () i32 {
+    std.println("hello, zx");
+    return 0;
+};
+```
+
+```sh
+bin/zxc.exe hello.zx -o hello && ./hello
+```
+
+注意三件事，它们几乎能解释一半的"新语法看不懂"：
+
+1. **函数就是常量**：`const main = fn () i32 { … };`，`fn main() {}` 这种写法不存在。
+2. **`return` 是唯一出口**：函数体是块，块末尾的表达式不是返回值。
+3. **`main` 的返回类型决定退出码**：`i32` → 那个值；`void` → 0；`!void` → 错误码。
+
+### 1.3 工程
+
+```sh
+bin/zxc.exe init shop     # 新建工程（当前目录下创建 shop/）
+cd shop
+bin/zxc.exe run           # 构建 + 运行
+```
+
+`zxc init` 生成：
+
+```
+shop/
+├── zx.json              工程清单
+├── src/main.zx          入口
+├── vendor/              外部模块根（第三方 Zx 源码放这里）
+│   └── README.md        用法说明（空目录进不了 git，用这份占位）
+├── README.md
+└── .gitignore           out/ .zxc-cache/ 等
+```
+
+`zx.json` 只有四个常用字段：
+
+```json
+{
+  "name": "shop",
+  "version": "0.1.0",
+  "main": "src/main.zx",
+  "out": "shop",
+  "deps": ["vendor2", "../shared"]
+}
+```
+
+`deps` 是"工程外"的模块搜索目录；工程内的第三方代码请放 `vendor/`（存在即自动生效，
+不用写进 deps）。两者的搜索顺序见 §3.7。
+
+---
+
+## 2. 命令行参考
+
+### 2.1 总览
+
+```sh
+zxc -h | --help | help [cmd]      帮助（总览 / 子命令细节），stdout + 退出码 0
+zxc -v | -V | --version           版本（含前端与后端工具链实际路径）
+zxc <file.zx> [选项]              单文件：解析 + 类型检查（默认）
+zxc <file.zx> -o <prog>           单文件：生成 C 并编成可执行文件
+```
+
+| 子命令 | 作用 | 关键细节 |
+| --- | --- | --- |
+| `init [name]` | 创建工程 | 生成 `src/`、`vendor/`、`zx.json`、`.gitignore`；建完自检 `main.zx` |
+| `build` | 按 `zx.json` 构建到 `out/` | 中间文件在 `.zxc-cache/`，见 §5 |
+| `run` | `build` 后直接运行 | `--` 之后的参数传给程序 |
+| `test [过滤]` | 跑 `src/test/` 用例 | 零参 `pub` 函数即用例，每例一个进程 |
+| `check [file...]` | 静态检查 | 缺省当前目录，回落 `src/`、`src/test/` |
+| `fmt [file...] [--check]` | 格式化 | `--check` 只报告不写回 |
+
+### 2.2 单文件选项
+
+| 选项 | 作用 |
+| --- | --- |
+| `--check` | 只做检查（等价默认行为，显式写法） |
+| `--tokens` | 打印 token 流（调词法器） |
+| `--ast` | 打印语法树（s-expression） |
+| `--emit-c` | 只把生成的 C 打到 stdout |
+| `-o <path>` | 输出可执行文件（`-opath` 连写也认） |
+| `--release` | `-O2` 发布档；默认 dev 档 `-O0`（迭代快） |
+| `--fe=zx|c` | 前端选择：默认 Zx 前端；`c` 只用于交叉验证/种子构建 |
+
+### 2.3 `build` 细节
+
+```sh
+zxc build                  # out/<out>.exe（Windows）或 out/<out>
+zxc build --release        # -O2
+zxc build --lib            # out/<out>.a
+zxc build --lib --shared   # out/<out>.dll（非 Windows: .so）
+```
+
+- `--shared` 必须配 `--lib`（可执行文件不是库）。
+- 构建失败时，后端 C 的报错会被翻回 **zx 源码行列**；`ZX_VERBOSE=1` 看原始命令行与 C 报错。
+- 同一模块内容没变不重写、不重编（按 mtime 判定）。
+
+### 2.4 环境变量与退出码
+
+| 变量 | 作用 |
+| --- | --- |
+| `ZX_CC` | 后端 C 编译器命令；缺省 `<zxc 目录>/../.toolchain/zig.exe cc` |
+| `ZX_VERBOSE=1` | 打印构建细节（cc 命令行、后端原始报错、缓存命中） |
+
+- 退出码：成功 `0`；**有诊断**或构建失败 `1`；**用法错误** `2`。
+- 帮助与版本打 **stdout + 0**——用户主动要的信息不是错误，可以直接 `zxc -h | less`。
+- 脚本里判断"能不能编过"请看退出码，不要 grep 输出。
+
+---
+
+## 3. 语言参考
+
+> 本节是速查；每条规则的完整推导见 `docs/guide.md` 对应章节。
+
+### 3.1 词法
+
+```zx
+// 行注释     /* 块注释，不嵌套 */
+42  42u64  0xFF  0b1010  0o17  1_000_000
+3.14  3.14f32  1e9
+'a'  '\n'  '中'          // char：1..4 字节 UTF-8，参与整数运算时是码位
+"hi\n"                   // 字符串 → []const u8
+```
+
+- 关键字 25 个：`const let var fn module type null undefined if else while for inline switch continue return defer struct union enum error pub extern orelse try`，另有 `errdefer`、`and`、`or`。
+- **没有 `break`**；`true`/`false` 是字面量不是关键字。
+- 字符串转义：`\n \t \r \0 \\ \" \' \a \b \f \v \e \xHH \uXXXX`。
+- `.{` 是一个 token（复合字面量开头）；`..` 是范围；浮点必须有整数部分（`.5` 非法）。
+
+### 3.2 三种绑定
+
+| 形式 | 求值 | 可写 | 用途 |
+| --- | --- | --- | --- |
+| `const X = e;` | 必须编译期 | 否 | 常量、函数、类型、模块、泛型 |
+| `let x: T = e;` | 运行时 | 否 | 只读值 |
+| `var x: T = e;` | 运行时 | 是 | 唯一可变绑定 |
+
+无标注时：整数字面量落 `i32`，浮点落 `f64`，其余按初值类型。参数天然只读。
+
+### 3.3 类型总表
+
+| 写法 | 大小(64 位) | 说明 |
+| --- | --- | --- |
+| `u8…u128` / `usize` | 1/2/4/8/16 / 8 | 无符号 |
+| `i8…i128` / `isize` | 1/2/4/8/16 / 8 | 有符号 |
+| `f16 f32 f64` | 2/4/8 | IEEE-754 |
+| `bool` / `void` / `type` / `noreturn` | 1 / 0 / 0 / 0 | — |
+| `{T1, T2}` | 字段和 | 元组（值内联） |
+| `*[N]T` | 8 | 数组：指针 + 长度进类型 |
+| `*T` / `*const T` | 8 | 裸指针 / 只读 |
+| `[]T` / `[]const T` | 16 | 切片 `{ptr, len}` |
+| `struct{…}` / `union{…}` | 按声明 | 与 C 布局兼容 |
+| `enum{…}` / `enum(T){…}` | sizeof(T)，默认 u32 | 枚举就是整数 |
+| `?T` / `!T` | sizeof(T)+1 / +2 | 载荷在前、标签在后 |
+| `fn(P…) R` | 8 | 函数值（回调） |
+| `error` | 2 | u16，0 = 无错误 |
+
+**只有显式转换**：`(i64)a`、`(usize)ptr`、`(Color)5`。同宽符号互转也要写出来，
+字面量例外（`42` 能落到任何整数类型）。
+
+### 3.4 数值语义
+
+- 整数溢出：安全模式运行时 trap；编译期常量直接编译错。要绕回自己写位运算。
+- 除零 trap；`a / 0` 编译期能定就是编译错误。
+- 有符号右移是算术移位；左移掩到类型宽度。
+
+### 3.5 表达式与运算符
+
+| 类别 | 运算符 |
+| --- | --- |
+| 算术 | `+ - * / %` |
+| 位 | `& \| ^ ~ << >>` |
+| 比较 | `== != < <= > >=` |
+| 逻辑 | `&& \|\| !`（另有 `and` / `or`） |
+| 其它 | `a orelse b`、`e.?`、`try e`、`(T)e`、`&e`、`e[idx]`、`e.field`、`e.0` |
+
+- `.` 自动穿透一层指针：`p.name` ≡ `p.0.name`；`.0` 是"元素 0"（指针/数组/元组统一）。
+- 条件必须是 `bool`，没有真值语义（`if (n)` 非法，写 `if (n != 0)`）。
+- `orelse` 惰性求值、右结合；`.?` 空了直接 abort 并打印说明。
+
+### 3.6 复合类型
+
+```zx
+const Person = struct { name: []const u8, age: i32 = 0 };   // 字段默认值
+var p = Person{ .name = "ann" };                            // 缺省字段用默认值
+var q: Person = .{ .name = "bob" };                         // 有期望类型时用 .{}
+
+var arr: *[4]i32 = &.{1, 2, 3, 4};   // 数组字面量
+arr[2] = 30;  arr.len;  arr.size;    // 运行时下标；len/size 是编译期
+sum(arr[0..]);                       // 数组 → 切片，零开销
+arr[1..3]                            // 左闭右开
+
+const Color = enum(u8) { red, green = 5, blue };   // blue == 6
+const Shape = union(enum) { circle: f64, rect: {f64, f64} };
+let s = Shape{ .circle = 2.0 };
+switch (s) { .circle: r a: { a: 3.14159 * r * r; }, .rect: wh a: { a: wh.0 * wh.1; } }
+```
+
+- 结构体体是作用域：可以放 `var` 静态字段、`const` 编译期常量、方法。
+- 方法 = 第一参数是接收者的普通函数；接收者 `Self` / `*Self` / `*const Self` 三选一。
+- 第一参数不叫 `self` 就是关联函数（`Color.count()`）。
+- 联合体 `union(enum)` 的标签按声明顺序自动编号；普通 `union{}` 无标签，读错成员是 UB。
+- 自引用必须过指针：`next: ?*Node`。
+
+### 3.7 控制流（没有 break）
+
+```zx
+if (n > 0) { use(n); } else { report(); }
+let max = if (a > b) a else b;                 // 表达式臂
+if (maybe) v { use(v); } else e { log((usize)e); }   // ?T / !T 捕获
+
+while (i < 10) { i = i + 1; }                  // 没有自增子句
+while (it.next()) v { total = total + v; } else { done(); }
+
+for (xs) x { }                                 // 遍历切片
+for (0..n) i { }                               // 整数范围，左闭右开
+for (xs, 0..) x, i { }                         // 值 + 下标
+for (xs, ys) a, b { }                          // 两个等长序列
+
+const w = done: while (true) {                 // 标签写在结构前面
+    n = n + 1;
+    if (n == 7) { done: n * 10; }              // 收割 = 带值的 break
+};
+
+let idx = hit: for (0..n) i {                  // 循环的 else：正常跑完才执行
+    if (xs[i] == target) { hit: (i32)i; }
+} else -1;
+```
+
+**收割 `tag: expr;`** 是 Zx 里唯一的"提前离开 + 带值"手段：块 `tag: { … }`、
+循环 `tag: while/for (…)`。`continue;` 走本轮末尾，`continue :tag;` 跳到外层标签循环的下一轮。
+
+`switch` 的模式：`.成员` / 整数 / char / `true` / `false` / 负数 / `else`；逗号并列是
+同一条臂。**冒号后紧跟 `{` 是捕获，紧跟 `:` 是标签**。枚举、`union(enum)`、`?T`、`!T`、bool
+必须穷尽或有 `else`。
+
+`defer` 离开所在块时执行（LIFO），**表达式在退出时求值**——所以 `defer free(buf); return buf;`
+返回的是悬空指针。`errdefer` 只在"因错误返回"时执行。
+
+### 3.8 函数与泛型
+
+```zx
+const add = fn (a: i32, b: i32) i32 { return a + b; };
+const fact = fn (n: i32) i32 { if (n <= 1) { return 1; } return n * fact(n - 1); };
+
+extern fn system(cmd: *const u8) i32;          // 只有声明，没有函数体
+```
+
+- 无重载、无默认参数、无变参；多返回值用元组 `let {q, r} = divmod(a, b);`。
+- 非 void 函数**每条路径都要 return**（到达性分析），不可达代码也是错误。
+- 函数值是 `fn(i32, i32) i32`，8 字节，可当参数/字段。
+- 定长数组参数用编译期长度：`fn f(n: usize, p: *const [n]i32)`。
+
+泛型就是"返回类型的编译期函数"：
+
+```zx
+const List = fn (T: type) type {
+    return struct {
+        buf: *T, len: usize, cap: usize,
+        const push = fn (self: *Self, v: T) bool { … };   // 泛型体里写 Self
+    };
+};
+var xs = List(i32).init(std.heap.page);
+```
+
+- 也可以有编译期值参数：`Buffer(u8, 4)` 与 `Buffer(u8, 8)` 是不同类型。
+- 每次实例化生成独立代码（单态化），零运行时开销。
+- **没有 trait/约束**：要约束用编译期 `if` + `@typeInfo` 自检。
+
+### 3.9 空值与错误
+
+```zx
+let a: ?i32 = 5;      let b: ?i32 = null;
+let c: !i32 = 5;      let d: !i32 = (error)1;
+
+if (parse(s)) n { use(n); } else e { log((usize)e); }   // 就地处理
+let port = cfg.port orelse 8080;                        // 默认值
+let p = n.?;                                            // 断言有值，否则 abort
+let fd = try open_file(p);                              // 错误原样上抛
+```
+
+- `?T` / `!T` 都是带标签联合体，**载荷在前、标签在后**；`&x` 拿的是载荷地址。
+- `null` 没有自己的类型：`let a = null;` 编译错。
+- `?T` / `!T` **不能嵌套**。
+- 错误码 `0` 是"无错误"，候选码从 1 起；`65535` 保留给 `error.null`。
+- `main` 的 `!void`：出错时退出码就是错误码，能直接对 shell 的 `&&` / `||`。
+
+**错误集**把"只会出这些错"写进类型：
+
+```zx
+const IoError = error{ open, read, write };
+
+const open_file = fn (p: []const u8) IoError!i32 {
+    if (p.len == 0) { return error.open; }
+    return 100;
+};
+const read_it = fn (p: []const u8) IoError!i32 {
+    let fd = try open_file(p);     // {open} ⊆ {open, read, write} ✓
+    return fd + 1;
+};
+```
+
+- 集合协变：窄集合可以交给宽集合，反过来不行。
+- 编译器守三件事：`return` 的码（E0901）、`try` 可能抛的码（E0902）、
+  anyerror 抛进声明了集合的函数（E0903，得显式放宽返回类型）。
+- 布局不变：`E!T` 与 `!T` 内存里一模一样，只多一份编译期信息。
+- 带集合的函数不能 `try` 可选值（`?T` 的空用保留码 `error.null`，写不进 `error{…}`）。
+
+### 3.10 模块与可见性
+
+```zx
+// util.zx
+pub const VERSION: u32 = 3;
+pub const add = fn (a: i32, b: i32) i32 { return a + b; };
+const secret = fn (n: i32) i32 { return n * 2; };
+
+// main.zx
+const util = module("util");        // 省 .zx；相对调用者所在文件
+util.add(1, 2);
+util.secret(1);                     // ✗ private to module 'util'
+```
+
+**搜索顺序**（相对导入打不开时依次回退）：
+
+1. 调用者所在文件目录
+2. 工程根 `vendor/`（存在即自动加入）
+3. `zx.json` 的 `deps`（按数组顺序）
+
+- `module("std")` 是内建模块，从仓库 `std/` 找。
+- 同一文件只加载一次（路径先归一化，折叠 `..`/`.`），循环导入直接报错。
+- 模块顶层只能有声明，没有自由语句。
+- **没有 import 语法**：`const` 绑定就是别名，函数/类型/常量/命名空间一视同仁
+  （`const println = std.println;`、`const HashMap = std.HashMap;`）。
+- `pub` 是唯一的可见性修饰；别名不改可见性。
+
+### 3.11 内建（`@` 前缀）
+
+| 内建 | 用途 |
+| --- | --- |
+| `@sizeOf(T)` / `@alignOf(T)` | 字节数 / 对齐 |
+| `@typeOf(e)` / `@typeName(T)` | 取类型 / 类型名 |
+| `@typeInfo(T)` | 类型元数据（`kind/name/bytes/align/fieldCount/fields`） |
+| `@hasField(T, "x")` / `@fieldType` / `@fieldName(T, i)` | 编译期字段查询 |
+| `@field(v, "x")` | 按编译期字符串取/写字段 |
+| `@trap()` / `@compileError(msg)` | 中止 / 编译期报错 |
+| `@memcpy(d, s, n)` / `@memmove` / `@memset(d, v, n)` | 批量内存原语 |
+
+`@` 开头的名字不能被用户重定义。**没有 cast 类内建**（`@ptrCast` 等已从规格删除），
+转换统一写 `(T)v`。
+
+元编程示例见 `docs/guide.md` §15.1（`@typeInfo` + `inline for` 写通用 `eql`）。
+
+### 3.12 外部函数
+
+```zx
+extern fn puts(s: *const u8) i32;                 // libc
+extern fn GetTickCount64() u64;                   // Win32（大小写敏感）
+```
+
+- `extern fn` 只声明、无函数体；符号名就是声明名（不做名字修饰）。
+- 参数/返回值只用 C ABI 兼容类型；`*u8` ↔ `char*`，`[]const u8` 不保证 NUL 结尾。
+- **没有 `extern "C" { … }` 块**，逐条声明。
+
+---
+
+## 4. 标准库
+
+`std` = 编译器种下的内建 + 仓库 `std/*.zx`（普通 Zx 代码，可读可改）。
+
+### 4.1 内建命名空间
+
+| 名字 | 成员 |
+| --- | --- |
+| `std.print(fmt, …)` / `std.println` | 格式化到 stdout |
+| `std.format(alloc, fmt, …)` | `![]u8`，堆上格式化 |
+| `std.heap.page` | 默认分配器（`Allocator`） |
+| `std.file` | `read(al, path)`、`write(path, data)`、`append`、`exists`、`remove` |
+| `std.io` | `openRead/openWrite/openAppend(path)`、`read/write/seek/tell/close/flush`、`stdin/stdout/stderr`、`print/println` |
+| `std.process` | `args()`、`getEnv(name)`、`setEnv`、`exit(code)` |
+| `std.stackAlloc(T, N)` / `std.heapAlloc(al, T, N)` | 数组分配（OOM abort） |
+
+### 4.2 容器
+
+| 类型 | 要点 |
+| --- | --- |
+| `std.ArrayList(T)` | `init(al)`、`push`、`append`、`insertAt`、`removeAt`、`items`、`get`/`set`、`pop`/`first`/`last`、`resize`、`reverse`、`swap`、`clear`、`deinit` |
+| `std.HashMap(V)` | 字符串键；`put`、`get`(→`?V`)、`contains`、`count`、`clear`、`deinit`；**键不复制**，必须比表活得久；没有 `remove` |
+| `std.BufReader` | `open(al, path, cap)` / `init(al, h, cap)`、`next()` 逐行、`chunk()`、`deinit` |
+| `std.BufWriter` | `create(al, path, cap)` / `init` / `appendTo`、`write`/`writeLine`、`flush`、`deinit`（自动 flush） |
+| `std.Pool` | 19 档分级内存池（≤256 KiB），`init(gpa)`、`alloc`、`free`、`used` |
+
+### 4.3 字符串 / 路径 / 数据
+
+| 模块 | 主要函数 |
+| --- | --- |
+| `std.str` | `eq`、`startsWith`、`endsWith`、`indexOf`、`indexOfFrom`、`contains`、`trim`、`trimStart`、`trimEnd`、`parseInt`、`concat`、`split`、`freeSplit` |
+| `std.fs` | `isAbs`、`basename`、`dirname`、`ext`、`stem`、`join`、`stat`、`exists`、`createDir`、`removeFile`、`removeDir`、`DirIter`、`readDir` |
+| `std.json` | `parse(al, src)` → `!Value`、`stringify(al, v)`；`Value` 是 `union(enum)`；`member/item/text` 取值；`errLine/errCol` 定位 |
+| `std.time` | `counter()`/`freq()`/`nsSince()` 计时；`unixMs/unixSecs/unixNs`；`fromUnixMs`、`formatUtc` |
+
+`std.fs` 与 `std.file` 有分工：`std.file` 是编译器种下的最小读写集（不依赖分配器），
+`std.fs` 是纯 Zx 的路径与目录扩展（大多数函数要传 `alloc` 做临时缓冲）。
+
+### 4.4 格式化
+
+```zx
+std.print("x = {}\n", x);
+std.println("{}:{}", i, v);
+```
+
+| 占位符 | 含义 |
+| --- | --- |
+| `{}` | 按顺序取下一个参数，默认格式 |
+| `{0}` | 按索引取 |
+| `{d}` / `{x}` / `{b}` | 十进制 / 十六进制 / 二进制 |
+| `{s}` | 字符串（要求切片） |
+| `{c}` | 字符（整数按码位） |
+| `{{` `}}` | 字面量花括号 |
+
+- `fmt` 是**编译期常量**时整个格式化在编译期展开：零运行时解析、零分配，动词与
+  实参类型配错是编译错误。
+- `fmt` 是运行时字符串时回落到运行时解析器，语义一致（`std.io.print` 一律走运行时）。
+
+---
+
+## 5. 构建、产物与测试
+
+### 5.1 产物布局
+
+```
+.zxc-cache/           中间文件（每个模块一个 .c/.o，内容没变不重编）
+out/<out>[.exe|.a|.dll]
+```
+
+- dev 档 `-O0`（迭代快），`--release` 才 `-O2`。
+- 增量判据是"内容 hash 没变就不重写，mtime 不动就不重编"，删掉 `.zxc-cache/` 等于全量重建。
+- 交叉验证：`--fe=c` 用 C 版前端，与默认 Zx 前端对比（自举阶段的守门机制）。
+
+### 5.2 测试
+
+```sh
+zxc test                  # src/test/*.zx 全部用例
+zxc test parse            # 名字过滤
+zxc test --release        # 发布档跑（性能用例用）
+```
+
+- `src/test/` 下每个 `*.zx` 是测试模块，**零参 `pub` 函数**就是用例。
+- 每个用例一个独立进程：崩溃/abort 不会带走整轮。
+- 仓库自己的回归是 `sh test.sh`（文件类用例 + 增量编译 + CLI 冒烟 + LSP 会话冒烟）。
+
+---
+
+## 6. 编辑器
+
+完整安装与排障见 **`editor/README.md`**，这里只给结论：
+
+```sh
+sh build.sh                 # 三件套
+sh editor/zed/install.sh    # 装 Zed 扩展（高亮 + 大纲 + LSP 接线）
+```
+
+- 高亮/折叠/大纲 = tree-sitter 语法（`editor/tree-sitter-zx/` + `highlights.scm`），**不需要编译器**。
+- 补全/诊断/跳转/hover/签名/格式化/引用 = `zxls`，它转手问 `zxc`，**需要三件套**。
+- 扩展按平台取 `<worktree>/bin/zxls[.exe]`；**不要在 `.zed/settings.json` 里覆盖绝对路径**。
+- 改了 `zx.json` 的 `deps` 要重启语言服务器（搜索路径只在 initialize 时算一次）。
+
+---
+
+## 7. 性能
+
+设计上的零开销点（都有 benchmark 守着，`bench/`）：
+
+- 泛型单态化：实例化生成专用代码，没有虚表/装箱。
+- 编译期格式化：常量 `fmt` 直接展开成 `fwrite` + 类型化打印。
+- 数组是 8 字节指针 + 长度在类型里：传参不复制。
+- 切片是 `{ptr, len}`：子切片零分配。
+- 容器 `ArrayList`/`HashMap` 的底座是 `@memcpy/@memset` 与手写探测，无隐藏分配。
+- 结构展开 `{any}` 由描述符驱动，编译期与运行时共用一份。
+
+`bench/BASELINE.md` 是锚点（fib / mandel / mmat / str），`sh test.sh --baseline <tsv>` 做对比。
+
+---
+
+## 8. 注意项
+
+### 8.1 语言层面的坑（按踩中频率）
+
+1. **`{x}` 是一元组不是块**。块要交值只能靠收割：`tag: { …; tag: v; }`。
+2. **没有 `break`**。跳出用收割，标签写在结构**前面**：`done: while (…) { done: v; }`。
+3. **块末尾表达式不是返回值**。函数用 `return`；`if` 要值用表达式臂或收割。
+4. **`null` 没有类型**。`let a = null;` 编译错，写落点 `let a: ?i32 = null;`。
+5. **错误码从 1 起**。`(error)0` 编译错（0 = 无错误）。
+6. **`defer` 与返回值**：`defer free(buf); return buf;` 返回悬空指针。
+7. **`?T`/`!T` 不能嵌套**；两个都要表达就让"没有"也变成一个错误码。
+8. **switch 语句位置所有臂同型**：语句 switch 统一写块臂 `模式: { … },`。
+9. **枚举必须穷尽**（或 `else`）——这是保护，不是麻烦。
+10. **HashMap 键不复制**：键切片必须比表活得久。
+11. **浮点必须有整数部分**：`.5` 非法（`.0` 要留给元组下标）。
+12. **`fn name() {}` 不存在**：一律 `const name = fn () … { … };`。
+13. **整数溢出 trap**，不静默绕回。
+14. **不能隐式数值转换**：`let b: i64 = a;`（`a: i32`）编译错，写 `(i64)a`。
+15. **右值不能直接调 `*const Self`/`*Self` 方法**：先绑 `let`。
+16. **`module("x")` 省 `.zx` 是允许的**，但显式写全路径更不容易歧义。
+17. **`try` 只吃 `!T`**：`?T` 的空不是错误，用 `if` / `orelse` / `.?`。
+18. **defer 体里不能再 return / 收割 / continue**；`try` 也不能用在 defer 里。
+
+### 8.2 工程与工具链
+
+- **模块解析链有三处**：编译器（`setup_search_paths`）、LSP（`modDirsInto`）、
+  以及构建时的相对路径。改搜索路径要**同时**改编译器与 LSP，否则会出现
+  "能编过但补不出来"（`spec/decisions.md` §80）。
+- **Windows 上 zxls 拉起 zxc 必须经 `cmd /c`**：直连会断掉孙进程（zxfe）的
+  stderr 句柄继承，诊断全丢。改 spawn 逻辑时不要"优化"掉这层。
+- `.zxc-cache/` 与 `out/` 都该进 `.gitignore`；`vendor/` 相反，是源码的一部分。
+- `bin/zxls.exe` 被编辑器占用时编不进去：`mv bin/zxls.exe bin/zxls.old.exe` 再编
+  （运行中的 exe 可改名），编完删掉 `.old`。
+- **不要混用 zig 工具链版本**：`zxls` 用 0.17 的 `std.Io` 接口，vendored 工具链是
+  0.17.0；0.15 的 std 编不过。
+
+### 8.3 已知限制（会变，但别按"它有"来设计）
+
+| 限制 | 现状 | 影响 |
+| --- | --- | --- |
+| 并发 | 标准库无线程/原子/异步 | 需要就自己 `extern fn` 调 pthread / Win32 |
+| 调试信息 | 后端不生成 DWARF/PDB，`-g` 未暴露 | 调试靠打印与 `@trap`，不能单步 |
+| 包管理 | 没有网络依赖解析 | 依赖靠 `vendor/` 或 `deps` 手工放置 |
+| 优化 | 只做 `-O0`/`-O2` 交给 C 编译器 | 没有 Zx 层优化（不做内联决策） |
+| 约束/特征 | 无 trait/接口/约束 | 用 `union(enum)`、函数字段、`@typeInfo` 自检 |
+| 元组下标 | 编译期 `.N` | 运行时下标要转数组/切片 |
+| 反射 | 仅编译期 `@typeInfo` | 无运行时类型信息 |
+| 平台 | 开发主力是 Windows；C 后端本身可移植 | 非 Windows 需自备 `ZX_CC` 与工具链路径 |
+| VS Code | 无官方 client | 高亮与补全只在 Zed / 通用 LSP 客户端可用 |
+
+---
+
+## 9. 完成度
+
+判断标准不是"文档写了什么"，而是"有没有能跑的东西守着"。
+
+| 维度 | 状态 | 证据 |
+| --- | --- | --- |
+| 词法 / 语法 / 类型检查 | 完成 | 25 关键字、泛型单态化、错误集、编译期求值；`tests/good` 52 + `tests/bad` 95 + 多文件 |
+| C11 后端 | 完成 | 7 个示例 + 正例编译成真二进制跑出期望输出；结构布局与 C 一致 |
+| 自举 | 完成（阶段 1–4） | `bootstrap/zxfe.zx` 用 Zx 写前端，`zxc` 默认走它；`--fe=c` 只作种子与交叉验证 |
+| 标准库 | 可用 | 7 个模块（std/str/map/fs/json/time/pool）+ 容器 + 格式化 |
+| 工具链 | 可用 | `init/build/run/test/check/fmt` + `-h/-v` + 增量编译 + 动态/静态库 |
+| 编辑器 | 可用 | tree-sitter 高亮/大纲 + zxls（补全/诊断/跳转/hover/签名/格式化/引用） |
+| 回归 | 在守 | `sh test.sh`：文件类 217 项 + CLI 冒烟 6 项 + LSP 会话 14 项 |
+| 性能 | 有基线 | fib/mandel/mmat/str 四个锚点，前端已修掉两处 O(n²) |
+| 生态 | 起步 | 无包管理、无调试信息、无并发库 |
+
+一句话结论：**作为"能写真实程序（编译器自己就是用户）"的系统语言是完整可用的；
+作为"给别人用的语言产品"还差生态三件套——包管理、调试、并发。**
+语言核心不再有已知的、会逼你改设计的缺口：自举时暴露的 G1（`orelse`/`.?`）与
+G2（char 模式）都已补掉。
+
+---
+
+## 10. 诊断速查
+
+格式（stderr，可被编辑器和脚本解析）：
+
+```
+path:line:col: error[E0301]: initializer: expected `i32`, found `[]const u8`
+help: ...
+```
+
+| 码段 | 含义 | 典型诱因 |
+| --- | --- | --- |
+| `E01xx` | 词法 | 未闭合字符串/注释、非法字符、数字后缀 |
+| `E02xx` | 语法 | `expected …`、声明边界、缺少分号 |
+| `E03xx` | 类型 | 类型不匹配、参数个数、缺少字段、联合体初始化 |
+| `E04xx` | 名字与作用域 | 未知标识符、私有成员、取地址、循环外 continue |
+| `E05xx` | 编译期与流程 | 非常量、缺返回路径、不可达、穷尽性、除零、溢出错 |
+| `E06xx` | 模块与标准库 | 找不到模块、循环导入、std 成员不存在 |
+| `E07xx` | 泛型 | 实例化失败、类型参数误用 |
+| `E08xx` | 格式化 | 占位符与实参不匹配、序列个数 |
+| `E09xx` | 错误集 | 返回码不在集合、try 可能抛的码、anyerror 混入 |
+
+- 诊断会尽量多报（一次编译能报几个就报几个），并带 `help:` 行（`did you mean`、fix-it）。
+- 只看"能不能过"用 `zxc check <file>`；要看生成物用 `--emit-c` / `--ast`。
+
+---
+
+## 附录 A：关键字与保留字
+
+```
+const  let  var  fn  module  type  null  undefined
+if  else  while  for  inline  switch  continue  return
+defer  errdefer  struct  union  enum  error  pub  extern  orelse  try
+and  or
+```
+
+`true` / `false` 是字面量。`@` 前缀保留给内建。`_` 可用于丢弃。
+
+## 附录 B：与 C / Zig 的一页对照
+
+| 你熟悉的写法 | Zx 的写法 |
+| --- | --- |
+| `*p` / `p->x` | `p.0` / `p.x`（`.` 自动穿透一层） |
+| `T a[N]` | `*[N]T`（8 字节指针） |
+| `(int[]){1,2,3}` | `&.{1, 2, 3}` |
+| `break` / `goto` | 标签 + 收割 `done: tag: v;` |
+| `printf("%d", x)` | `std.println("{}", x)`（编译期展开） |
+| `struct { … }` + typedef | `const P = struct { … };` |
+| `#define` / 模板 | 编译期 `const` + `fn(T: type) type` |
+| `errno` / 返回码 | `!T` / `E!T` + `try` / `orelse` |
+
+更细的差异（布局、`?T` 标签顺序、块求值）见 `docs/guide.md` §17 与
+`spec/zx-spec.md` §15。

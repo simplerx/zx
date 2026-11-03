@@ -5,6 +5,10 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # 仓库根�
 TESTDIR = os.path.join(ROOT, ".tmp", "lsptest")
 os.makedirs(TESTDIR, exist_ok=True)
 
+# 被测的 zxls：测试脚本不假设 bin/ 里那份是最新的（Zed 可能正锁着它），
+# 用 ZXLS_BIN 指到刚编出来的临时 exe。
+ZXLS_BIN = os.environ.get("ZXLS_BIN") or os.path.join(ROOT, "bin", "zxls-new.exe")
+
 MAIN = """const std = module("std");
 
 const Obj = struct {
@@ -31,7 +35,32 @@ pub fn main() i32 {
 """
 
 uri = "file:///" + TESTDIR.replace("\\", "/") + "/main.zx"
-proc = subprocess.Popen([os.path.join(ROOT, "bin", "zxls-new.exe")],
+
+# ---- vendor/ 与 deps 的模块（补全只能走编译器的同一条解析链）-----------------
+SRC_DIR = os.path.join(TESTDIR, "src")
+os.makedirs(SRC_DIR, exist_ok=True)
+os.makedirs(os.path.join(TESTDIR, "vendor"), exist_ok=True)
+os.makedirs(os.path.join(TESTDIR, "libs"), exist_ok=True)
+open(os.path.join(TESTDIR, "zx.json"), "w", encoding="utf-8").write(
+    '{\n  "name": "lsptest",\n  "main": "src/extuser.zx",\n  "out": "lsptest",\n  "deps": ["libs"]\n}\n')
+open(os.path.join(TESTDIR, "vendor", "ext.zx"), "w", encoding="utf-8").write(
+    'pub const VERSION = "1.2.3";\n\npub const hello = fn (n: []const u8) void {\n    n;\n};\n')
+open(os.path.join(TESTDIR, "libs", "util.zx"), "w", encoding="utf-8").write(
+    'pub const twice = fn (x: i32) i32 {\n    return x * 2;\n};\n')
+EXTUSE = """const ext = module("ext");
+const util = module("util");
+
+const main = fn () i32 {
+    ext.hello("x");
+    ext.
+    util.twice(1);
+    return 0;
+};
+"""
+exturi = "file:///" + os.path.join(SRC_DIR, "extuser.zx").replace("\\", "/")
+open(os.path.join(SRC_DIR, "extuser.zx"), "w", encoding="utf-8").write(EXTUSE)
+
+proc = subprocess.Popen([ZXLS_BIN],
                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 out_q = queue.Queue()
 
@@ -181,6 +210,41 @@ send({"jsonrpc": "2.0", "id": 7, "method": "textDocument/definition", "params": 
 r, _ = recv_id("definition", 7)
 ok_def = bool(r and r.get("result"))
 check("definition.make", ok_def, str(r)[:200])
+
+# 10 vendor/ 与 deps 的模块补全：LSP 必须和编译器走同一条解析链
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": exturi, "languageId": "zx", "version": 1, "text": EXTUSE}}})
+
+def complete_at(text, off, rid):
+    send({"jsonrpc": "2.0", "id": rid, "method": "textDocument/completion", "params": {
+        "textDocument": {"uri": exturi}, "position": pos(text, off)}})
+    r, _ = recv_id("completion", rid)
+    return {i["label"] for i in r["result"]["items"]} if r and r.get("result") else set()
+
+off = EXTUSE.index("    ext.\n") + len("    ext.")      # 光标贴在 ext. 后面
+labels = complete_at(EXTUSE, off, 20)
+check("completion.vendor", {"hello", "VERSION"} <= labels, str(sorted(labels))[:200])
+
+off = EXTUSE.index("ext.hello") + len("ext.h")          # 带前缀
+labels = complete_at(EXTUSE, off, 21)
+check("completion.vendorPrefix", "hello" in labels, str(sorted(labels))[:200])
+
+off = EXTUSE.index("util.twice") + len("util.")          # zx.json deps
+labels = complete_at(EXTUSE, off, 22)
+check("completion.deps", "twice" in labels, str(sorted(labels))[:200])
+
+# 11 definition: ext.hello → vendor/ext.zx
+off = EXTUSE.index("ext.hello") + len("ext.h")
+send({"jsonrpc": "2.0", "id": 23, "method": "textDocument/definition", "params": {
+    "textDocument": {"uri": exturi}, "position": pos(EXTUSE, off)}})
+r, _ = recv_id("definition", 23)
+loc = r.get("result") if r else None
+target = ""
+if isinstance(loc, dict):
+    target = loc.get("uri", "")
+elif isinstance(loc, list) and loc:
+    target = loc[0].get("uri", "")
+check("definition.vendor", "vendor" in target, str(loc)[:200])
 
 # 9 shutdown/exit
 send({"jsonrpc": "2.0", "id": 8, "method": "shutdown", "params": None})

@@ -9,6 +9,8 @@
 //       `X.`          → std 内建命名空间 / module 绑定的顶层 pub 声明 /
 //                       容器（struct/union/enum）的成员与方法（含实例推断：
 //                       `let v = Obj.init(...)` 后 `v.` 出 Obj 的成员）
+//       模块文件按**编译器的解析链**找：文件所在目录 → 工程根 → 工程根的
+//       vendor/ → zx.json 的 deps（顺序同 setup_search_paths，见 modDirsInto）
 //       其余          → 关键字 + 当前文件标识符 + 工作区标识符（TTL 缓存）
 //   - 定义跳转 / hover / 签名提示：声明语句文本扫描 + 类型初值推断。
 //   - 格式化：影子文件 → `zxc fmt` 原地格式化 → 读回 → 全文 TextEdit。
@@ -411,6 +413,88 @@ fn extractBraceMembers(text: []const u8, is_enum: bool, out: *std.ArrayList(Decl
     }
 }
 
+// ------------------------------------------------------------- 模块搜索目录
+//
+// 编译器的 module_load 只有一条解析链：**相对导入文件所在目录** → 打不开时
+// 依次退 <搜索路径>/<模块名>，搜索路径由 setup_search_paths 填成
+// 「vendor/ → zx.json 的 deps」。语言服务器以前只认前两个目录（文档目录、
+// 工程根），vendor/ 里的模块于是能编过、却补不出成员——同一条解析链在两侧
+// 各写一遍是这次 bug 的根源，现在 vendor/ 与 deps 在这里补齐。
+//
+// deps 是相对工程根写的，而 LSP 进程的 cwd 由宿主决定（Zed 里未必是工程根），
+// 所以这里一律拼成**绝对路径**。目录只在 initialize 后算一次——每次补全
+// 都重扫 zx.json 不划算；工程根的 zx.json 改了要重启语言服务器（与
+// 诊断用的 zx.json 读取口径一致）。
+
+var g_mod_dirs: [48][]const u8 = undefined;
+var g_mod_dir_n: usize = 0;
+
+fn joinPath(a: []const u8, b: []const u8) []const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    out.appendSlice(gpa, a) catch return "";
+    if (out.items.len > 0 and out.items[out.items.len - 1] != '/' and
+        out.items[out.items.len - 1] != '\\') out.append(gpa, '/') catch {};
+    out.appendSlice(gpa, b) catch {};
+    return out.items;
+}
+
+fn isAbsPath(p: []const u8) bool {
+    if (p.len == 0) return false;
+    if (p[0] == '/' or p[0] == '\\') return true;
+    return p.len >= 2 and p[1] == ':'; // C: 盘符
+}
+
+fn isDirPath(p: []const u8) bool {
+    if (p.len == 0) return false;
+    var d = Io.Dir.cwd().openDir(g_io, p, .{}) catch return false;
+    d.close(g_io);
+    return true;
+}
+
+/// 收一个搜索目录（接管 p 的所有权：没被收下就释放）
+fn addModDir(p: []const u8) void {
+    var keep = false;
+    defer if (!keep) gpa.free(p);
+    if (p.len == 0 or g_mod_dir_n >= g_mod_dirs.len) return;
+    for (g_mod_dirs[0..g_mod_dir_n]) |d| {
+        if (std.mem.eql(u8, d, p)) return;
+    }
+    if (!isDirPath(p)) return;
+    g_mod_dirs[g_mod_dir_n] = p;
+    g_mod_dir_n += 1;
+    keep = true;
+}
+
+/// initialize 之后调用一次：工程根的 vendor/ 与 zx.json 的 deps
+fn initModuleDirs() void {
+    g_mod_dir_n = 0;
+    const root = root_path orelse return;
+    addModDir(joinPath(root, "vendor"));
+    const cfg = joinPath(root, "zx.json");
+    defer gpa.free(cfg);
+    const txt = readFileSmall(cfg) orelse return;
+    defer gpa.free(txt);
+    const parsed = std.json.parseFromSlice(std.json.Value, gpa, txt, .{}) catch return;
+    defer parsed.deinit();
+    if (parsed.value != .object) return;
+    const deps = parsed.value.object.get("deps") orelse return;
+    if (deps != .array) return;
+    for (deps.array.items) |it| {
+        if (it != .string or it.string.len == 0) continue;
+        addModDir(if (isAbsPath(it.string)) dupe(it.string) else joinPath(root, it.string));
+    }
+}
+
+/// 模块解析目录，顺序：文件所在目录 → 工程根 → vendor/ → deps。
+/// 前两个每次现算（跟着文档走），后两个 initialize 时已定。
+fn modDirsInto(doc_dir: []const u8, out: *std.ArrayList([]const u8)) void {
+    out.append(gpa, doc_dir) catch return;
+    if (root_path) |r| {
+        if (!std.mem.eql(u8, r, doc_dir)) out.append(gpa, r) catch return;
+    }
+    for (g_mod_dirs[0..g_mod_dir_n]) |d| out.append(gpa, d) catch return;
+}
+
 /// module("…") 字符串 → 模块基名（去 .zx 后缀）。编译器两种形式都收：
 /// 裸名 "std"（解析 <d>/std.zx 或 <d>/std/std.zx）与路径 "std/str.zx"。
 fn moduleBase(m: []const u8) []const u8 {
@@ -418,20 +502,14 @@ fn moduleBase(m: []const u8) []const u8 {
     return m;
 }
 
-/// mod 名 → doc 目录 / root 下的 `<mod>.zx` 或 `<mod>/*.zx` 顶层声明
+/// mod 名 → 各搜索目录下的 `<mod>.zx` 或 `<mod>/<mod>.zx` 顶层声明
+/// （只收 pub；目录顺序见 modDirsInto，与编译器一致）
 fn moduleDecls(doc_dir: []const u8, mod: []const u8, out: *std.ArrayList(Decl)) void {
     const m = moduleBase(mod);
-    var dirs: [2][]const u8 = undefined;
-    var ndirs: usize = 0;
-    dirs[ndirs] = doc_dir;
-    ndirs += 1;
-    if (root_path) |r| {
-        if (!std.mem.eql(u8, r, doc_dir)) {
-            dirs[ndirs] = r;
-            ndirs += 1;
-        }
-    }
-    for (dirs[0..ndirs]) |d| {
+    var dirs: std.ArrayList([]const u8) = .empty;
+    defer dirs.deinit(gpa);
+    modDirsInto(doc_dir, &dirs);
+    for (dirs.items) |d| {
         var path: std.ArrayList(u8) = .empty;
         defer path.deinit(gpa);
         path.appendSlice(gpa, d) catch continue;
@@ -634,17 +712,10 @@ fn moduleStringAt(text: []const u8, off: usize) ?[]const u8 {
 fn resolveModuleFile(doc: *const Document, m_raw: []const u8) ?[]const u8 {
     const m = moduleBase(m_raw);
     const doc_dir = dirName(doc.path);
-    var dirs: [2][]const u8 = undefined;
-    var nd: usize = 0;
-    dirs[nd] = doc_dir;
-    nd += 1;
-    if (root_path) |r| {
-        if (!std.mem.eql(u8, r, doc_dir)) {
-            dirs[nd] = r;
-            nd += 1;
-        }
-    }
-    for (dirs[0..nd]) |d| {
+    var dirs: std.ArrayList([]const u8) = .empty;
+    defer dirs.deinit(gpa);
+    modDirsInto(doc_dir, &dirs);
+    for (dirs.items) |d| {
         var path: std.ArrayList(u8) = .empty;
         defer path.deinit(gpa);
         path.appendSlice(gpa, d) catch continue;
@@ -1719,6 +1790,17 @@ const Diag = struct {
     msg: []const u8,
 };
 
+/// zxc 子进程的工作目录：固定为工程根。编译器把 zx.json 的 deps 与 vendor/
+/// 当**相对 cwd** 的路径，宿主（Zed/VS Code）给的 cwd 不保证是工程根——
+/// 一旦不是，诊断里就会冒出"模块找不到"，而补全（走绝对路径）却正常。
+/// 两边口径统一到工程根。
+fn childCwd() std.process.Child.Cwd {
+    if (root_path) |r| {
+        if (r.len > 0 and isDirPath(r)) return .{ .path = r };
+    }
+    return .inherit;
+}
+
 /// 格式化：缓冲写影子文件 → `zxc fmt` 原地格式化 → 读回 → 全文 TextEdit。
 /// 复用诊断的影子文件机制（同目录保证 module(...) 解析路径一致）；影子名
 /// 用 .zxls-f 前缀与诊断的 .zxls- 错开，同一文档并发时互不踩。
@@ -1741,7 +1823,7 @@ fn formatDoc(doc: *const Document) ?[]const u8 {
     cmdline.appendSlice(gpa, shadow.items) catch return null;
     cmdline.appendSlice(gpa, " fmt") catch return null;
     const argv = [_][]const u8{ "C:\\Windows\\System32\\cmd.exe", "/c", cmdline.items };
-    _ = std.process.run(gpa, g_io, .{ .argv = &argv, .stderr_limit = .unlimited }) catch return null;
+    _ = std.process.run(gpa, g_io, .{ .argv = &argv, .stderr_limit = .unlimited, .cwd = childCwd() }) catch return null;
 
     const new_text = readFileSmall(shadow.items) orelse return null;
     if (std.mem.eql(u8, new_text, doc.text)) return "[]"; // 没变化，空编辑
@@ -1758,8 +1840,7 @@ fn formatDoc(doc: *const Document) ?[]const u8 {
     return j.buf.items;
 }
 
-fn runCheck(doc: *const Document, out_diags: *std.ArrayList(Diag)) void {
-    // 影子文件：把缓冲内容写到与源文件同目录的隐藏 .zx，zxc 检查它——
+fn runCheck(doc: *const Document, out_diags: *std.ArrayList(Diag)) void {    // 影子文件：把缓冲内容写到与源文件同目录的隐藏 .zx，zxc 检查它——
     // 诊断反映的是编辑器缓冲，而不是磁盘旧状态；同目录保证 module(...)
     // 的解析路径与真实文件一致。
     const dir = dirName(doc.path);
@@ -1772,7 +1853,6 @@ fn runCheck(doc: *const Document, out_diags: *std.ArrayList(Diag)) void {
     shadow.appendSlice(gpa, ".zx") catch return;
     Io.Dir.cwd().writeFile(g_io, .{ .sub_path = shadow.items, .data = doc.text }) catch return;
     defer Io.Dir.cwd().deleteFile(g_io, shadow.items) catch {};
-
     // 经 cmd /c 包装：zig 直接拉起 zxc 时，zxfe（zxc 的孙进程）的 stderr
     // 句柄继承会断链——诊断全部丢失，连好文件都会静默返回 1；
     // cmd 中转后句柄继承恢复正常（见 README M39 环境）。
@@ -1789,6 +1869,7 @@ fn runCheck(doc: *const Document, out_diags: *std.ArrayList(Diag)) void {
     const res = std.process.run(gpa, g_io, .{
         .argv = &argv,
         .stderr_limit = .unlimited,
+        .cwd = childCwd(),
     }) catch return;
     defer gpa.free(res.stdout);
     defer gpa.free(res.stderr);
@@ -1933,6 +2014,8 @@ fn handle(v: std.json.Value) ?[]const u8 {
         j.raw("{{\"jsonrpc\":\"2.0\",\"id\":", .{});
         writeId(&j, id);
         j.buf.appendSlice(gpa, ",\"result\":{\"capabilities\":{\"textDocumentSync\":{\"openClose\":true,\"change\":1},\"completionProvider\":{\"triggerCharacters\":[\".\",\"@\"]},\"definitionProvider\":true,\"hoverProvider\":true,\"signatureHelpProvider\":{\"triggerCharacters\":[\"(\",\",\"]},\"documentFormattingProvider\":true,\"documentSymbolProvider\":true,\"referencesProvider\":true}}}") catch @panic("oom");
+        // 工程根的 vendor/ 与 deps：补全/跳转/悬停都靠这张表找模块文件
+        initModuleDirs();
         return j.buf.items;
     }
     if (std.mem.eql(u8, method, "initialized")) return null;

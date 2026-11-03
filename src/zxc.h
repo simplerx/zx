@@ -10,6 +10,13 @@
 #include <stdbool.h>
 #include <assert.h>
 
+/* ---------- version ---------- */
+
+/* 唯一版本源：`zxc -v` / `zxc --version` 与生成的工程清单都读这里。
+ * 编号跟 README 的里程碑走：次版本 = 里程碑号（M49 → 0.49），修订号
+ * 留给同一里程碑里的修补。改这个数就顺手在 README 的「状态」里改一行。 */
+#define ZXC_VERSION "0.49.0"
+
 /* ---------- diagnostics ---------- */
 
 /* 错误码按阶段分段，消息内容决定具体码（见 zxc.c 的码表）：

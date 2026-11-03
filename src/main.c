@@ -1,6 +1,8 @@
 /* main.c — zxc 驱动：参数解析、文件读写、增量编译（每模块一个 .o）。
  *
  * 用法（见 README）：
+ *   zxc -h                   总览；zxc <子命令> -h 看该子命令细节
+ *   zxc -v                   版本（前端 / 后端工具链）
  *   zxc file.zx               lex + parse + 类型检查（默认）
  *   zxc file.zx --check       同上，显式写法
  *   zxc file.zx --tokens      打印 token 流
@@ -10,7 +12,7 @@
  *   zxc file.zx -o prog --release   发布档：-O2（默认 dev 档 -O0，迭代快）
  *
  * 工程级子命令（读 zx.json）：
- *   zxc init [name]     创建 zx 工程（源码在 src/）
+ *   zxc init [name]     创建 zx 工程（源码在 src/，外部模块根 vendor/）
  *   zxc build           构建：--exe(默认)/--lib × --static(默认)/--shared、--release
  *                       中间文件进 .zxc-cache/，最终产物进 out/
  *   zxc run [args]      build 后直接运行 out/<产物>.exe（-- 之后的参数传给程序）
@@ -21,7 +23,7 @@
  * "deps": ["vendor2", "../shared"] 是模块搜索目录——相对导入打不开时
  * 依次回退（工程根的 vendor/ 存在即自动加入）。
  *
- * 后端的 C 编译器由 ZX_CC 环境变量指定，缺省 .toolchain/zig.exe cc。
+ * 后端用的 C 编译器由 ZX_CC 环境变量指定，缺省 .toolchain/zig.exe cc。
  * -o 时每个模块一个 .c / .o，运行时函数体单独一个 _zxrt.c / .o：
  * 内容没变不重写（mtime 不动），.o 就不用重编；过期的 .o 并行重编。
  */
@@ -660,18 +662,148 @@ static void dump_toklist(Lexer *lx) {
 
 /* ---------------- main ---------------- */
 
-static void usage(void) {
-    fprintf(stderr,
-        "usage: zxc file.zx [--check|--tokens|--ast|--emit-c|--release] [-o prog]\n"
-        "       zxc init [name]     创建 zx 工程（源码放 src/）\n"
-        "       zxc check [file...] 静默检查（缺省当前目录，没有则扫 src/）\n"
-        "       zxc fmt [file...]   格式化 [--check]\n"
-        "       zxc build [--exe|--lib] [--static|--shared] [--release]\n"
-        "                           按 zx.json 构建；中间文件在 .zxc-cache/，产物在 out/\n"
-        "       zxc run [--release] [-- args...]\n"
-        "                           build 后直接运行 out/<产物>.exe\n"
-        "       zxc test [名字过滤] [--release]\n"
-        "                           运行 src/test/ 测试模块的用例\n");
+/* 用法 / 版本 / 逐个子命令帮助。
+ *
+ * 分层的理由：`-h` 是"我忘了怎么写"，要能一眼扫完；跑题了才去翻
+ * `zxc build -h` 这种细节。所以总览只留一行一条，子命令帮助才写旗标
+ * 语义与产物路径。两处都打到 stdout 并 rc=0——这是用户主动要的信息，
+ * 不是错误（参数写错时才走 stderr + rc=2）。 */
+static void usage(FILE *f) {
+    fprintf(f,
+        "zxc %s — Zx 语言编译器\n"
+        "\n"
+        "用法:\n"
+        "  zxc <file.zx> [选项]             解析 + 类型检查（默认）\n"
+        "  zxc <file.zx> -o <prog>          生成 C 并编成可执行文件\n"
+        "  zxc <子命令> [参数]              工程级操作（读当前目录的 zx.json）\n"
+        "\n"
+        "工程子命令:\n"
+        "  init [name]                      创建工程：src/ 源码、vendor/ 外部模块根、zx.json\n"
+        "  build [选项]                     按 zx.json 构建到 out/（中间文件在 .zxc-cache/）\n"
+        "  run [选项] [-- 程序参数...]      build 后直接运行\n"
+        "  test [名字过滤]                  运行 src/test/ 的用例（零参 pub 函数即用例）\n"
+        "  check [file...]                  静态检查（缺省当前目录，回落 src/、src/test/）\n"
+        "  fmt [file...] [--check]          格式化（--check 只报告不写回）\n"
+        "\n"
+        "单文件选项:\n"
+        "  --check        只做检查（默认行为，显式写法）\n"
+        "  --tokens       打印 token 流\n"
+        "  --ast          打印语法树（s-expression）\n"
+        "  --emit-c       只输出生成的 C 到 stdout\n"
+        "  -o <path>      输出可执行文件\n"
+        "  --release      -O2 发布档（默认 dev 档 -O0）\n"
+        "  --fe=zx|c      前端选择（默认 zx；c 仅用于交叉验证）\n"
+        "\n"
+        "通用:\n"
+        "  -h, --help     显示本帮助；带子命令看细节（zxc build -h）\n"
+        "  -v, --version  显示版本\n"
+        "  help [cmd]     同 -h / -h <cmd>\n"
+        "\n"
+        "环境变量:\n"
+        "  ZX_CC          C 编译器命令（缺省 zxc 同级的 ../.toolchain/zig.exe cc）\n"
+        "  ZX_VERBOSE=1   打印构建细节（cc 命令行、后端原始报错）\n",
+        ZXC_VERSION);
+}
+
+static void print_version(FILE *f) {
+    fprintf(f, "zxc %s — Zx 语言编译器\n", ZXC_VERSION);
+    fprintf(f, "  前端: zxfe（bootstrap/zxfe.zx 自举，默认 Zx 前端）\n");
+    fprintf(f, "  后端: %s（ZX_CC 可覆盖）\n", (g_cc && *g_cc) ? g_cc : "(未解析)");
+    fprintf(f, "  帮助: zxc -h\n");
+}
+
+/* 子命令级帮助。返回 0 = 认得的子命令，-1 = 没有这个子命令。 */
+static int help_sub(FILE *f, const char *cmd) {
+    if (!strcmp(cmd, "init")) {
+        fprintf(f,
+            "zxc init [name] — 创建 zx 工程\n"
+            "\n"
+            "  zxc init          在当前目录建（工程名取目录名）\n"
+            "  zxc init demo     新建 demo/ 并在其中建\n"
+            "\n"
+            "生成:\n"
+            "  src/main.zx       入口（示例：module(\"std\") + greet/main）\n"
+            "  zx.json           工程清单：name / version / main / out / deps\n"
+            "  vendor/           外部模块根（见下）\n"
+            "  README.md .gitignore\n"
+            "\n"
+            "vendor/:\n"
+            "  把第三方 *.zx 模块放进来就能被 module(\"名字\") 找到，例如\n"
+            "  vendor/ext.zx → module(\"ext\")、vendor/lib/util.zx → module(\"lib/util\")。\n"
+            "  搜索顺序：相对导入所在目录 → vendor/ → zx.json 的 deps；\n"
+            "  vendor/ 存在即自动参与搜索，不必写进 deps。\n"
+            "\n"
+            "建完会顺手检查一遍 src/main.zx，失败时返回 1。\n");
+        return 0;
+    }
+    if (!strcmp(cmd, "build")) {
+        fprintf(f,
+            "zxc build [选项] — 按 zx.json 构建\n"
+            "\n"
+            "  --exe        可执行文件（默认）\n"
+            "  --lib        库：默认静态 .a，配 --shared 出动态库 .dll/.so\n"
+            "  --static     静态库（默认）\n"
+            "  --shared     动态库（需配 --lib）\n"
+            "  --release    -O2 发布档；默认 dev 档 -O0（迭代快）\n"
+            "\n"
+            "产物: out/<out>（exe） / out/<out>.a / out/<out>.dll\n"
+            "中间文件: .zxc-cache/<产物名>_*.c|.o|.h（内容没变不重编）\n"
+            "失败时把后端 C 的报错翻回 zx 源码行列；ZX_VERBOSE=1 看原始输出。\n");
+        return 0;
+    }
+    if (!strcmp(cmd, "run")) {
+        fprintf(f,
+            "zxc run [--release] [-- 程序参数...] — 构建后立刻运行\n"
+            "\n"
+            "先做一次 build，再跑 out/<out>.exe；退出码是程序的退出码。\n"
+            "程序自己的参数必须写在 `--` 之后（否则会被当成 zxc 的旗标）。\n");
+        return 0;
+    }
+    if (!strcmp(cmd, "test")) {
+        fprintf(f,
+            "zxc test [名字过滤] [--release] — 运行测试用例\n"
+            "\n"
+            "约定: src/test/*.zx 里的每个零参 pub 函数都是一个用例（不需要\n"
+            "test_ 前缀；带参数/泛型的函数当辅助）。名字过滤是子串匹配。\n"
+            "失败判定: @trap、返回 false、返回非 0 整数、或 std.process.exit(非 0)。\n"
+            "每个用例独立进程，一个炸掉不影响后面的；测试引用工程源码用\n"
+            "module(\"../xxx.zx\")。\n");
+        return 0;
+    }
+    if (!strcmp(cmd, "check")) {
+        fprintf(f,
+            "zxc check [file...] — 静态检查（不产物）\n"
+            "\n"
+            "只做解析 + 类型检查。不给文件时：先看当前目录的 *.zx，没有\n"
+            "则回落 src/ 与 src/test/（工程模式会带上 deps / vendor 搜索路径，\n"
+            "有 zx.json 就自动读）。有错返回 1，否则 0——适合当提交前钩子。\n");
+        return 0;
+    }
+    if (!strcmp(cmd, "fmt")) {
+        fprintf(f,
+            "zxc fmt [file...] [--check] — 格式化\n"
+            "\n"
+            "规整缩进（4 空格）、去尾空白、连续空行压成 1、末尾补单个换行；\n"
+            "CRLF 保持 CRLF。只动空白，不改语义。\n"
+            "  --check   只报告哪些文件需要格式化，不写回（返回 1 表示有差异）\n");
+        return 0;
+    }
+    if (!strcmp(cmd, "version")) { print_version(f); return 0; }
+    fprintf(f, "zxc: no help for '%s'\n\n", cmd);
+    usage(f);
+    return -1;
+}
+
+/* 子命令参数里有没有 -h / -v（`--` 之后是程序参数，不算）。
+ * 返回 1 = 要帮助，2 = 要版本，0 = 都不是。 */
+static int arg_special_flag(int argc, char **argv, int from) {
+    for (int i = from; i < argc; i++) {
+        if (!strcmp(argv[i], "--")) break;
+        if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) return 1;
+        if (!strcmp(argv[i], "-v") || !strcmp(argv[i], "-V") ||
+            !strcmp(argv[i], "--version")) return 2;
+    }
+    return 0;
 }
 
 /* 默认工具链（`.toolchain/zig.exe cc`）钉在仓库根，而不是当前目录：
@@ -948,6 +1080,23 @@ static const char *INIT_GITIGNORE =
     ".zxls-*.zx\n"
     ".zc-cache/\n";
 
+/* vendor/ 是外部模块根：放进来就能被 module("名字") 找到。空目录进不了
+ * 版本控制，所以里面放一份说明——顺便把搜索顺序写在最容易被看到的地方。 */
+static const char *INIT_VENDOR_README =
+    "# vendor/ — 外部模块根\n"
+    "\n"
+    "把第三方 zx 模块（`*.zx`，可带子目录）放在这里，源码里直接引用：\n"
+    "\n"
+    "```zx\n"
+    "const ext = module(\"ext\");        // → vendor/ext.zx\n"
+    "const util = module(\"lib/util\");  // → vendor/lib/util.zx\n"
+    "```\n"
+    "\n"
+    "搜索顺序：相对导入所在的目录 → 工程根的 `vendor/` → `zx.json` 的\n"
+    "`\"deps\"` 数组。`vendor/` 存在即自动参与搜索，不用写进 deps。\n"
+    "\n"
+    "vendor/ 里的是源码依赖，应该提交进版本控制。\n";
+
 static const char *INIT_README =
     "# zx 项目\n"
     "\n"
@@ -968,6 +1117,11 @@ static const char *INIT_README =
     "`src/` 下的 `*.zx` 都是可用模块（与导入文件同目录即可）：\n"
     "`const m = module(\"m\");` 或 `module(\"m/inner.zx\")` 引子目录模块。\n"
     "标准库见 `std.zx`。\n"
+    "\n"
+    "第三方 / 外部模块放 `vendor/`（外部模块根，存在即自动参与搜索）：\n"
+    "`vendor/ext.zx` → `module(\"ext\")`；再多层目录写\n"
+    "`module(\"lib/util\")` → `vendor/lib/util.zx`。要额外的搜索目录，\n"
+    "把相对路径写进 `zx.json` 的 `\"deps\"` 数组。\n"
     "\n"
     "## 测试\n"
     "\n"
@@ -1034,6 +1188,14 @@ static int cmd_init(int argc, char **argv, int argi) {
     if (write_text_file(mainpath, INIT_MAIN) != 0) return 1;
     if (write_text_file(".gitignore", INIT_GITIGNORE) != 0) return 1;
     if (write_text_file("README.md", INIT_README) != 0) return 1;
+    /* vendor/：默认的外部模块根。setup_search_paths 见目录即自动加入
+     * 搜索路径，所以建了就有用，不用在 zx.json 里再写一遍。空目录进不了
+     * 版本控制，里面放一份说明顺带当文档。 */
+    if (mkdir_one("vendor") != 0) {
+        fprintf(stderr, "zxc: cannot create 'vendor/'\n");
+        return 1;
+    }
+    if (write_text_file("vendor/README.md", INIT_VENDOR_README) != 0) return 1;
     Buf zj;
     buf_init(&zj);
     buf_printf(&zj,
@@ -1048,7 +1210,7 @@ static int cmd_init(int argc, char **argv, int argi) {
     bool ok = root && g_error_count == 0;
     if (ok) sema_check(root);
     ok = ok && g_error_count == 0;
-    printf("zxc init: created src/main.zx, zx.json, README.md, .gitignore%s\n",
+    printf("zxc init: created src/main.zx, zx.json, README.md, .gitignore, vendor/%s\n",
            ok ? " (main.zx check ok)" : " (warning: main.zx check FAILED)");
     return ok ? 0 : 1;
 }
@@ -1535,6 +1697,12 @@ static int cmd_fmt(int argc, char **argv, int argi, bool check_only) {
 
 int main(int argc, char **argv) {
     sema_set_argv0(argv[0]);
+    /* zxfe.exe 与 zxc.exe 同目录，位置从 argv[0] 推——必须在这里就交给
+     * 前端。以前只有单文件模式设，子命令（check / build / run / test，
+     * 连 init 的建后自检）都在**没设**的状态下跑，于是 cmd 从 cwd 找
+     * zxfe.exe，在工程目录里一律"找不到指定的文件"：表现为 check 只报
+     * "1 of 1 file(s) failed"、build 直接失败，看起来就像子命令不生效。 */
+    fe_set_argv0(argv[0]);
 
     g_cc = getenv("ZX_CC");
     if (!g_cc || !*g_cc) g_cc = default_cc(argv[0]);
@@ -1551,14 +1719,36 @@ int main(int argc, char **argv) {
         return test_run1(argv[2], flt, rel);
     }
 
+    /* 通用 -h / -v（先于子命令：`zxc -v`、`zxc help build` 都不该被当成
+     * 文件或未知选项） */
+    if (argc >= 2) {
+        const char *a = argv[1];
+        if (!strcmp(a, "-h") || !strcmp(a, "--help")) { usage(stdout); return 0; }
+        if (!strcmp(a, "-v") || !strcmp(a, "-V") || !strcmp(a, "--version")) {
+            print_version(stdout);
+            return 0;
+        }
+        if (!strcmp(a, "version")) { print_version(stdout); return 0; }
+        if (!strcmp(a, "help")) {
+            if (argc < 3) { usage(stdout); return 0; }
+            help_sub(stdout, argv[2]);
+            return 0;      /* 不认识的子命令：help_sub 已打总览，仍算"看了帮助" */
+        }
+    }
+
     /* 子命令形式（file-first 旧语法不受影响） */
     if (argc >= 2 && argv[1][0] != '-') {
-        if (!strcmp(argv[1], "init"))  return cmd_init(argc, argv, 2);
-        if (!strcmp(argv[1], "check")) return cmd_check(argc, argv, 2);
-        if (!strcmp(argv[1], "fmt"))   return cmd_fmt(argc, argv, 2, false);
-        if (!strcmp(argv[1], "build")) return cmd_build(argc, argv, 2);
-        if (!strcmp(argv[1], "run"))   return cmd_run(argc, argv, 2);
-        if (!strcmp(argv[1], "test"))  return cmd_test(argc, argv, 2);
+        const char *sub = argv[1];
+        /* `zxc build -h` / `zxc build -v`：只看 `--` 之前的旗标 */
+        int special = arg_special_flag(argc, argv, 2);
+        if (special == 1) { help_sub(stdout, sub); return 0; }
+        if (special == 2) { print_version(stdout); return 0; }
+        if (!strcmp(sub, "init"))  return cmd_init(argc, argv, 2);
+        if (!strcmp(sub, "check")) return cmd_check(argc, argv, 2);
+        if (!strcmp(sub, "fmt"))   return cmd_fmt(argc, argv, 2, false);
+        if (!strcmp(sub, "build")) return cmd_build(argc, argv, 2);
+        if (!strcmp(sub, "run"))   return cmd_run(argc, argv, 2);
+        if (!strcmp(sub, "test"))  return cmd_test(argc, argv, 2);
     }
 
     const char *file = NULL, *out = NULL;
@@ -1571,6 +1761,14 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--emit-c")) emit_c = true;
         else if (!strcmp(argv[i], "--check"))  check = true;
         else if (!strcmp(argv[i], "--release")) release = true;
+        else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
+            usage(stdout);
+            return 0;
+        }
+        else if (!strcmp(argv[i], "-v") || !strcmp(argv[i], "--version")) {
+            print_version(stdout);
+            return 0;
+        }
         else if (!strncmp(argv[i], "--fe=", 5)) {
             /* 前端选择（自举阶段 3）：默认 Zx 前端，--fe=c 交叉验证 */
             if (!strcmp(argv[i] + 5, "zx"))       fe_set_mode(true);
@@ -1586,14 +1784,13 @@ int main(int argc, char **argv) {
         }
         else if (!strncmp(argv[i], "-o", 2) && argv[i][2]) out = argv[i] + 2;
         else if (argv[i][0] == '-' && argv[i][1]) {
-            fprintf(stderr, "zxc: unknown option '%s'\n", argv[i]);
-            usage();
+            fprintf(stderr, "zxc: unknown option '%s'\n\n", argv[i]);
+            usage(stderr);
             return 2;
         }
         else file = argv[i];
     }
-    if (!file) { usage(); return 2; }
-    fe_set_argv0(argv[0]);
+    if (!file) { usage(stderr); return 2; }
     g_cflags = release ? CC_REL : CC_DEV;
 
     g_srcpath = file;

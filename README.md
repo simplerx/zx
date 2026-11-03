@@ -20,6 +20,9 @@ sh test.sh           # 语法 + 语义 + 反例 + 运行 + 多文件 五组回�
 ## 用法
 
 ```sh
+bin/zxc.exe -h                    # 总览（子命令一览 + 单文件选项）
+bin/zxc.exe build -h              # 子命令细节（旗标语义、产物路径）
+bin/zxc.exe -v                    # 版本（前端 / 后端工具链）
 bin/zxc.exe file.zx               # lex + parse + 类型检查（默认）
 bin/zxc.exe file.zx --check       # 同上，显式写法
 bin/zxc.exe file.zx --tokens      # 打印 token 流
@@ -28,7 +31,7 @@ bin/zxc.exe file.zx --emit-c      # 只吐生成的 C
 bin/zxc.exe file.zx -o prog       # 生成 C 并调 zig cc 编成可执行文件
 
 # 工程级子命令（读 zx.json，`zxc init` 生成）
-bin/zxc.exe init [name]           # 创建工程：源码在 src/，配置 zx.json
+bin/zxc.exe init [name]           # 创建工程：src/ 源码、vendor/ 外部模块根、zx.json
 bin/zxc.exe build                 # 构建 src/ → out/<名>.exe；中间文件进 .zxc-cache/
 bin/zxc.exe build --lib           # 静态库 out/<名>.a
 bin/zxc.exe build --lib --shared  # 动态库 out/<名>.dll（非 Windows: .so）
@@ -38,6 +41,10 @@ bin/zxc.exe test [名字过滤]       # 运行 src/test/ 测试模块：零参 p
 bin/zxc.exe check                 # 静默检查 *.zx（当前目录，缺省回落 src/）
 bin/zxc.exe fmt [--check]         # 格式化
 ```
+
+`-h` 只给任务表，旗标语义与产物路径在子命令级的 `zxc build -h` 里；
+`help [cmd]` 与 `zxc <cmd> -h` 等价。帮助与版本都写 stdout、退出码 0
+（参数写错才是 stderr + 2）。
 
 后端用的 C 编译器是 `ZX_CC` 环境变量指定的命令，缺省是项目内的
 `.toolchain/zig.exe cc`。
@@ -56,9 +63,16 @@ bin/zxc.exe fmt [--check]         # 格式化
 }
 ```
 
-模块解析顺序：**相对导入文件所在目录** → 打不开时依次回退 `deps` 列表 →
-工程根的 `vendor/` 目录（存在即自动加入，无需写进 deps）。模块路径会先
-归一化（折叠 `..`/`.`）再查重，同一文件经不同相对路径引用只会编一份。
+模块解析顺序：**相对导入文件所在目录** → 打不开时依次回退
+工程根的 `vendor/` 目录（`zxc init` 默认建好，存在即自动加入，无需写进
+deps）→ `deps` 列表。模块名可以省 `.zx`（`module("ext")` 就是
+`vendor/ext.zx`，`module("lib/util")` 就是 `vendor/lib/util.zx`）。模块
+路径会先归一化（折叠 `..`/`.`）再查重，同一文件经不同相对路径引用只会
+编一份。
+
+`vendor/` 是**默认的外部模块根**：第三方源码依赖直接放进去就能用，它是
+源码的一部分，应该提交进版本控制；`deps` 留给「目录在工程外」的情况
+（例如 `["../shared"]`）。
 
 ## 开发环境（编辑器）
 
@@ -68,15 +82,15 @@ bin/zxc.exe fmt [--check]         # 格式化
 sh build.sh          # 三件套：bin/zxc.exe + bin/zxfe.exe + bin/zxls.exe
 ```
 
-- **zxls.exe（语言服务器）**是宿主工具，不走自举：用 anyzig 管理的
-  zig 0.17.0 编译（`zig 0.17.0 build-exe tools/zxls.zig -O ReleaseSafe`）。
-  vendored 0.15 的 std API 与 0.17 不兼容（`std.Io` 接口等），不要混用。
-  注意 anyzig 会被 `ZIG_GLOBAL_CACHE_DIR` 干扰（找不到已装版本）——
-  `build.sh` 里已在 subshell 中清掉该变量再调用。
-- **Zed 接入**零手工配置：`.zed/settings.json` 已随仓库提交
-  （`lsp.zx-lsp.binary.path = "bin/zxls.exe"`，相对路径相对 worktree 根
-  解析）。打开项目即生效；`.zed/tasks.json` 提供三个任务：构建三件套、
-  `zxc --check` 当前文件、编译并运行当前文件。
+- **zxls（语言服务器）**是宿主工具，不走自举：用仓库自带的
+  `.toolchain/zig.exe`（0.17.0）直接编，`build.sh` 已代劳。它用的是 0.17 的
+  `std.Io` 接口，和 0.15 的 std 不兼容——别混用别的工具链版本。
+- **Zed 接入**：`editor/zed/` 是扩展源码（语法高亮 + 大纲 + LSP 接线），
+  `sh editor/zed/install.sh` 装进 Zed 的扩展目录后立即生效。扩展自己返回
+  `<worktree>/bin/zxls[.exe]`，所以 `.zed/settings.json` **不写**二进制路径
+  覆盖——写死绝对路径后换个 checkout 位置就指向不存在的文件，LSP 会静默
+  不启动。安装、复用与排障见 `editor/README.md`；`.zed/tasks.json` 仍提供
+  三个任务：构建三件套、`zxc --check` 当前文件、编译并运行当前文件。
 - **诊断**：didOpen/didChange 后防抖 250ms，把**缓冲内容**写影子文件
   （同目录 `.zxls-<hash>.zx`）跑 `zxc --check`，解析 stderr 的
   `path:line:col: error[CODE]: msg` 推给编辑器。诊断与编译器 100% 同源。
@@ -86,6 +100,8 @@ sh build.sh          # 三件套：bin/zxc.exe + bin/zxfe.exe + bin/zxls.exe
   `std.<ns>.`（heap/file/io/process 成员）、`@`（18 个内建）、关键字、
   容器字段 / enum 变体、工作区标识符。词表与 `src/sema.c` 逐字对齐
   （注意 `@println` 不存在——打印是 `std.println`）。
+  模块成员按**编译器的解析链**找模块文件：文件所在目录 → 工程根 →
+  `vendor/` → zx.json 的 `deps`（改 zx.json 后需重启语言服务器）。
 - **排障**：zxls 会在 exe 同目录写 `zxls-lsp.log`（boot / didOpen /
   publish 各一行）；Zed 侧 LSP 不启动时先看这里有没有 boot。
 
@@ -597,6 +613,7 @@ zx_init_<stem>(void)  每模块一个初始化函数，main 按依赖倒序调�
 
 ## 状态
 
+当前版本 **0.49.0**（`zxc -v` 可查；次版本跟里程碑走）。
 - [x] M1 lexer —— 全部示例零错误
 - [x] M2 parser —— 全部示例零错误，`--ast` 可查结构
 - [x] M3 类型系统 + 语义分析
@@ -735,6 +752,31 @@ zx_init_<stem>(void)  每模块一个初始化函数，main 按依赖倒序调�
   后端 zig cc 平均 **2.81 s → 1.02 s**（近 3 倍），build.sh 的 anyzig
   特殊处理删除（vendored 0.17 直接编 zxls）。LSP 有了常驻冒烟测试
   `tools/lsptest.py`（10 项，stdio 会话模拟）。见 decisions **§78**。
+- [x] M47 **CLI：`-h` / `-v` + 子命令修复 + `init` 带 `vendor/`**：
+  `-h/--help/help [cmd]`（总览一屏 + `zxc build -h` 子命令细节）与
+  `-v/--version`（单一版本源 `ZXC_VERSION`），都打 stdout 且 rc 0；
+  **修**子命令从没把 `argv[0]` 交给前端——`check`/`build`/`run`/`test`
+  和 `init` 的建后自检在工程目录里一律找不到 `zxfe.exe`，`check` 只剩
+  一句 `1 of 1 file(s) failed`、零诊断；`module("x")` 可省 `.zx`（文档
+  一直这么写，实现没做，`vendor/` 因此走不通）；`init` 多建 `vendor/`
+  作外部模块根（存在即自动进搜索路径，内含 `README.md` 说明）。
+  `sh test.sh` **217 项 + 6 项 CLI 冒烟全过**。见 decisions **§79**。
+- [x] M48 **LSP 认 vendor/ 与 deps：能编过就必须补得出来**：
+  语言服务器的模块解析只查「文件所在目录 + 工程根」，`vendor/` 里的模块
+  编译通过、IDE 里却点不出成员（`ext.` 之后一片空白，跳转 / hover 同病）。
+  现在补全、跳转、hover、签名提示共用一条解析链，顺序与编译器的
+  `setup_search_paths` 一致：文件所在目录 → 工程根 → `vendor/` →
+  zx.json 的 `deps`（deps 拼成绝对路径，不受宿主 cwd 影响；zxc 子进程的
+  cwd 反而钉在工程根）。`tools/lsptest.py` 从 10 项扩到 **14 项**
+  （vendor 成员 / 带前缀 / deps 成员 / 跳到 vendor 文件），并首次并入
+  `sh test.sh` 2.6 节。见 decisions **§80**。
+- [x] M49 **v0.49 发布：编辑器资产收拢 + 手册 + 完成度盘点**：
+  编辑器相关全部收进 `editor/`（`zed/` 可直接安装，`tree-sitter-zx/` 是语法
+  源码）；扩展按平台取 `zxls[.exe]`；`.zed/settings.json` 去掉写死的绝对
+  路径；新增 `docs/manual.md`（命令 / 语法 / 标准库 / 注意项 / 完成度）；
+  清掉仓库里的一次性产物与旧工具链备份（`.tmp/` 7.7 GB、`.zc-cache/`
+  75 MB、`.toolchain-015-bak/` 693 MB、根目录 440 个 `b0_*` 残留），
+  根目录从 460 项降到 15 项。`zxc -v` 进入 **0.49.0**。
 - [x] M45 **std 扩容——fs / json / time 三模块（性能第一）**：
   `std.fs`（路径纯函数零分配、DirIter 流式零拷贝、stat/exists/目录增删）、
   `std.json`（零拷贝解析、u128 整数快路径、开放寻址 Obj 每槽缓存哈希、
@@ -1747,7 +1789,8 @@ zxc 用自己的 Zx 前端解析 zxfe.zx、序列化、装载、编译出**新 z
 
 ## M39：Zed 编辑器扩展——零代码语言插件 + 语法 wasm 的链接模型
 
-给 Zed 写 Zx 语言支持（`zed-extension/`），全程不带一行 Rust：
+给 Zed 写 Zx 语言支持（现在收在 `editor/zed/`）。宿主侧只有一层很薄的
+Rust——把 `bin/zxls` 注册成语言服务器——其余全是声明式文件：
 
 - **`grammars/tree-sitter-zx/grammar.js`**——从零写的 tree-sitter 语法，
   以 65 个真实文件（tests/good + bench + spec/examples + std）回归到
@@ -1975,3 +2018,117 @@ pool + 用户模块），Windows 上起一次 ~50 ms。M40 修掉的是 sema 本
 
 另：decisions **§9** 的 `undefined` 隐式分配旧语义已标记弃用、对齐
 R9/§44（M43 揪出示例写穿后欠的回填）。
+
+## M47：CLI 能被"问"了，子命令才真的能跑
+
+用户报的现象是"`zxc check` 好像不生效"。一查，`check`、`build`、`run`、
+`test`，连 `init` 建完后的自检，全都是坏的——而且同一个根因。
+
+**① 子命令从没把 `argv[0]` 交给前端。** `fe_set_argv0()` 只在单文件模式
+里调用过，子命令路径下 `g_fe_argv0` 是 NULL，前端于是退化成
+`system("zxfe.exe …")`——从**当前目录**找 zxfe.exe。在工程目录里跑就是
+cmd 的"系统找不到指定的文件"，而 `check` 只看退出码，把"前端没起来"
+记成了"文件有错"：屏幕上只剩一句 `1 of 1 file(s) failed`，一条诊断都
+没有。修法是把它当**进程属性**：`main()` 一进来就和 `sema_set_argv0()`
+并排设好，子命令不用记得这行。
+
+**② `module("x")` 省 `.zx` 是文档话。** README 和 `init` 生成的工程说明
+都写 `const m = module("m")`，实现只认完整路径——新建工程照说明写就报
+`cannot open module 'src/m'`。现在打不开原路径时补一次 `.zx` 再探（相对
+目录与搜索路径两侧都补），显式写 `.zx` 的老代码零影响。这条正是
+`vendor/` 能按文档用起来的前提。
+
+**③ `-h` / `-v` 分层。** 总览一屏看完（能做哪些事、产物在哪），细节下放
+到子命令：`zxc build -h` 才讲 `--static`/`--shared` 和 `.zxc-cache/` 的
+布局。`help [cmd]`、`-h/--help`、`-v/-V/--version/version` 全认；帮助与
+版本都打 **stdout + rc 0**（主动要的信息不是错误），参数写错才 stderr +
+rc 2。子命令里的 `-h` 只在 `--` 之前生效，`zxc run -- -h` 仍然是程序
+参数。版本号单一来源 `ZXC_VERSION`（次版本跟里程碑：M46 → 0.46）。
+
+**④ `init` 多建 `vendor/`。** 默认的外部模块根：放进去的 `*.zx` 直接
+`module("名字")` 可见，存在即自动加入搜索路径（不必写进 `deps`）。空
+目录进不了版本控制，里面放一份 `README.md`，把用法和搜索顺序写在最
+容易看到的地方。
+
+回归补了一组 **CLI 冒烟**（`test.sh` 2.5 节，6 项）：`-v` 有版本行、
+`-h` 有用法、`init` 出 `vendor/`、新工程 `check` 通过、坏文件报出
+`E0301`、`vendor/ext.zx` 被 `module("ext")` 找到。第五项是关键守门员
+——只断言"返回非 0"根本挡不住第 ① 个 bug。`sh test.sh` 217 项 + 6 项
+CLI 冒烟全过。取舍见 decisions **§79**。
+
+
+## M48：模块解析只有一条链——补全和编译器必须查同一批目录
+
+报上来的现象很短：「从 vendor 导进来的模块，点不出自动补全」。
+
+**根因不在补全逻辑里，在目录表里。** `moduleDecls()`（补全）和
+`resolveModuleFile()`（跳转 / hover / 签名提示）各自写了一份目录表，都是
+「文件所在目录 → 工程根」。而编译器的 `module_load` 是「文件所在目录 →
+`vendor/` → `deps`」——vendor 与 deps 从来没进过语言服务器的视野。于是
+`const ext = module("ext")` 编译通过、`ext.` 一片空白；跳转与 hover 同样
+失效。**同一条规则写两遍，第二遍必错**：上线 `vendor/` 时只改了编译器。
+
+**修法**：`initialize` 时算一张绝对路径目录表（`<root>/vendor`、每个
+`<root>/<dep>`，存在才算），`modDirsInto()` 统一拼出解析顺序——文件所在
+目录 → 工程根 → vendor → deps；两个入口函数都改成用它。顺序与
+`setup_search_paths` 一致，判据因此只有一条：**能编过 ⇔ 补得出来**。
+
+`deps` 相对工程根写，而 LSP 的 cwd 由宿主决定，所以这张表一律拼绝对路径；
+zxc 子进程恰恰相反，需要的是相对语义——把它的 cwd 显式钉在工程根，否则
+宿主换个 cwd 一跑，屏幕上就是"补全正常、诊断说模块找不到"。
+
+**只在 initialize 算一次**：每次补全重读 zx.json 不划算。代价是改 `deps`
+后要重启语言服务器——写进 README 了。
+
+**回归**：`tools/lsptest.py` 加一节 vendor/deps（10 项 → **14 项**）：
+`ext.` 出 `hello`/`VERSION`、`ext.h` 带前缀、`util.`（deps）出 `twice`、
+`ext.hello` 跳到 `vendor/ext.zx`。这套 LSP 冒烟此前**从没进过 `test.sh`**
+——"IDE 里没反应"只有常驻的 stdio 会话测试挡得住，所以并进 `sh test.sh`
+2.6 节（自己编 zxls 到临时名，不碰被编辑器锁着的 `bin/zxls.exe`）。
+`sh test.sh`：**217 项 + 6 项 CLI + 14 项 LSP 全过**。
+
+
+## M49：v0.49——把"编辑器资产"和"怎么用"一起交付
+
+这一版没有新语法，做的是**把已有的东西摆到能被用起来的位置**。
+
+**① 编辑器资产收进 `editor/`。** 之前语法、查询、扩展清单、wasm、安装脚本
+散在 `zed-extension/grammars/...` 三层里，`target/` 还跟着 325 MB。现在：
+
+```
+editor/
+├── README.md            安装 / 复用 / 重编 / 排障（一份文档讲完）
+├── zed/                 可直接安装的扩展
+│                        (extension.toml + zx.wasm + grammars/zx.wasm + languages/zx/*.scm)
+└── tree-sitter-zx/      语法源码（grammar.js + parser.c + build-wasm.sh）
+```
+
+`highlights.scm` 只留一份，放在**被消费的位置**（`editor/zed/languages/zx/`）；
+Neovim / Helix 要用就拷过去，不在语法目录再养一份副本——两份一定漂移。
+
+**② 扩展按平台取二进制。** 路径写死 `bin/zxls.exe` 的话，macOS / Linux 上
+表现是"能高亮、没有补全和诊断"：文件找不到时 Zed 只在日志里记一行，界面上
+什么都不说。现在按 `current_platform()` 挑 `zxls` / `zxls.exe`。
+
+**③ `.zed/settings.json` 去掉绝对路径覆盖。** 之前留着一行指向
+`E:\code\zed\zx\bin\zxls.exe` 的本地调试路径，换个 checkout 位置就指向
+不存在的文件，症状与"语言服务器根本没启动"完全一样。扩展已经返回 worktree
+内的路径，这行覆盖没有存在的理由——**能由扩展算出来的路径，就不要落到
+用户设置里**。
+
+**④ 仓库瘦身。** 根目录 460 个条目里 440 个是 `b0_*.o` / `*.pdb` 这类一次性
+构建残留；`.tmp/` 7.7 GB、`.zc-cache/` 75 MB、`.toolchain-015-bak/` 693 MB。
+全部删掉；`.gitignore` 补上 `*.pdb`、`out/`、`editor/zed/target/`、
+`zxls-lsp.log`；`bin/` 只留三件套（13 MB → 2 MB）。根目录的 `plan` 移到
+`spec/design-sketch.md`——那是语言的原始设计笔记，有留存价值，但不该躺在
+项目根。
+
+**⑤ 手册。** `docs/manual.md` 是"查"的那一本：命令、语言点、标准库、构建、
+编辑器、18 条陷阱、已知限制、完成度矩阵、错误码族。它和 `docs/guide.md`
+（教程）、`spec/zx-spec.md`（定义）的分工写在手册开头——**三份文档各答一个
+问题**，不要互相抄。
+
+**完成度结论**（手册 §9 有完整矩阵）：语言核心与工具链已经完整——词法 / 语法
+/ 类型 / 泛型 / 错误集 / C11 后端 / 自举四阶段 / LSP 全在跑，回归 217 + 6 +
+14 项守着。差的是生态三件套：**包管理、调试信息、并发库**；跨平台还停在
+"自备 `ZX_CC` 与工具链"的阶段。这个结论直接写在手册里，不粉饰。

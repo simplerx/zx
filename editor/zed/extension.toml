@@ -1,0 +1,23 @@
+id = "zx"
+name = "zx"
+version = "0.48.0"
+schema_version = 1
+authors = ["simplex"]
+description = "Zx language support: syntax highlighting, outline and the zxls language server."
+repository = "https://gitcode.com/simplex/zx"
+
+languages = ["languages/zx"]
+
+[lib]
+kind = "Rust"
+version = "0.7.0"
+
+[language_servers.zx-lsp]
+languages = ["Zx"]
+
+[grammars.zx]
+# 语法源码就在本仓库里（editor/tree-sitter-zx）；rev 指发布标签。
+# 本地 dev 安装不走这条下载路径——install.sh 直接拷 grammars/zx.wasm。
+repository = "https://gitcode.com/simplex/zx"
+rev = "v0.48.0"
+path = "editor/tree-sitter-zx"

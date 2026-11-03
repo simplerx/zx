@@ -2430,3 +2430,112 @@ clang 旗标）和 `zig ar`（0.17 仍在）；`ZX_CC` 环境变量是现成逃�
 **验证**：`sh test.sh` 217 项全过（0.17 下重跑两次）；LSP 冒烟
 `tools/lsptest.py` 10 项全过（capabilities/实例补全/带前缀点补全/
 大纲含 fn 声明/引用/格式化/定义跳转）。
+
+## 79. 子命令与前端位置：argv[0] 必须在 main 入口就交出去（M47）
+
+**症状与根因**：`zxc check` 在工程目录里只打印 `1 of 1 file(s) failed`，
+一条诊断都没有；`zxc build` 直接失败；`zxc init` 建完永远是
+`(warning: main.zx check FAILED)`。三者同一个根因——**子命令路径从来没
+调用 `fe_set_argv0()`**，那行只在单文件模式里有。前端于是退化成
+`system("zxfe.exe …")`，从**当前目录**找可执行文件；在工程目录里跑就是
+cmd 的"系统找不到指定的文件"，而 `check` 只看退出码，把"前端没起来"
+记成了"文件有错"。
+
+**裁定**：前端位置是进程属性，不是某条命令的属性——`main()` 一进来就
+`fe_set_argv0(argv[0])`，与 `sema_set_argv0(argv[0])` 并排，任何子命令
+都不必再自己设。**推论**：以后新增子命令不用记得这行；反过来，任何
+"某条命令能跑、另一条不能"的怪现象，先看进程级状态是不是只在一条路径
+上初始化过。
+
+**`-h` / `-v` 的分层**：总览一屏看完（任务表：能用哪些子命令、产物去
+哪），细节下放到子命令（`zxc build -h` 才讲 `--static`/`--shared` 与
+`.zxc-cache` 布局）。都打 **stdout + rc 0**——用户主动要的信息不是错误；
+参数写错才 stderr + rc 2。`help`、`-h/--help`、`-v/-V/--version/version`
+全认，子命令里的 `-h` 在 `--` 之前才生效（`zxc run -- -h` 是程序参数）。
+版本号单一来源 `ZXC_VERSION`（`src/zxc.h`），编号跟里程碑走：次版本 =
+里程碑号（M46 → 0.46），修订号留给同一里程碑内的修补。
+
+**`module("x")` 省 `.zx`**：文档（README、`init` 生成的工程说明）一直写
+`module("m")`，实现只认完整路径——新建的工程照着说明写就报
+`cannot open module 'src/m'`。现在 `module_load` 打不开原路径时补一次
+`.zx` 再探，相对目录与搜索路径两侧都补。**纯增量**：显式写 `.zx` 的
+老代码零影响；判定条件是 rel 末尾没有 `.zx`，与"路径里带不带点"无关
+（`lib/util` 也照样补）。这条是 `vendor/` 能按文档用起来的前提。
+
+**`init` 建 `vendor/`**：外部模块根，存在即由 `setup_search_paths`
+自动加入搜索路径（不用写进 `deps`，也不该写——`deps` 是为"目录在工程
+外"准备的）。空目录进不了版本控制，所以里面放一份 `README.md`，把
+"放进来 → `module("ext")` → `vendor/ext.zx`"和搜索顺序写在使用现场。
+
+**回归**：`test.sh` 新增 2.5 节 CLI 冒烟 6 项（版本行 / 用法行 + 子命令
+帮助 / init 出 `vendor/` / 新工程 check 通过 / 坏文件报出 `E0301` /
+`vendor/ext.zx` 被 `module("ext")` 找到）。第 5 项就是这次那个 bug 的
+守门员——只断言"返回非 0"根本挡不住它。
+
+## 80. 模块解析链只允许有一份（M48）
+
+**症状**：`vendor/` 里的模块能编过，IDE 里 `ext.` 什么都不出，跳转 / hover
+也点不动。**根因**：语言服务器有两处各自回退目录的循环（补全的
+`moduleDecls` 与跳转的 `resolveModuleFile`），两处都只查「文件所在目录 →
+工程根」。编译器的 `module_load` 查的是「文件所在目录 → 搜索路径」，而搜索
+路径由 `setup_search_paths` 填成「vendor/ → deps」。**vendor 与 deps 从来
+没进过 LSP 的视野**——加 `vendor/` 那次只改了编译器。
+
+**裁定**：模块解析链只在 `modDirsInto()` 里写一份，顺序与
+`setup_search_paths` 逐项对齐（文件所在目录 → 工程根 → vendor → deps），
+补全与跳转都从它取表。判据因此收敛成一句话：**能编过 ⇔ 补得出来**。以后
+往搜索路径里加目录（缓存目录、系统模块根……），只改这两处中的编译器那份
+和 `modDirsInto`，而**不是**去 grep 有多少个循环在拼目录。
+
+**两个方向相反的路径语义**，别混：
+- LSP 自己要的是**绝对路径**：`deps` 相对工程根写，而 LSP 的 cwd 由宿主
+  决定（Zed 里通常等于工程根，但不保证）。`initialize` 时把
+  `<root>/vendor`、`<root>/<dep>` 拼成绝对路径存进 `g_mod_dirs`，只算一次
+  ——每次补全都重读 zx.json 不划算。代价：改 `deps` 后要重启语言服务器。
+- 它拉起的 **zxc 子进程**要的恰恰是**相对语义**（编译器的搜索路径是相对
+  cwd 的），所以把子进程的 `.cwd` 显式钉在工程根。不钉的话宿主换个 cwd
+  一跑，屏幕上就是"补全正常、诊断说 `cannot open module`"——同一份规则在
+  两个进程里各有一套 cwd 基准，症状会拆成两半出现。
+
+**回归**：`tools/lsptest.py` 从 10 项扩到 **14 项**（`ext.` 出
+`hello`/`VERSION`、`ext.h` 带前缀、`util.`（deps）出 `twice`、`ext.hello`
+跳到 `vendor/ext.zx`），并**首次并入 `test.sh` 2.6 节**：它自己把
+`tools/zxls.zig` 编到临时名再跑，不碰可能被编辑器锁着的 `bin/zxls.exe`。
+这套 stdio 会话冒烟写了很久却一直只在手动跑——"IDE 里没反应"这类问题只有
+常驻的会话测试挡得住，命令行回归再全也看不见。
+
+## 81. 编辑器资产只有一个出口；能被算出来的路径不落设置（M49）
+
+**目录即部署单位。** `zed-extension/grammars/tree-sitter-zx/` 这种三层嵌套
+意味着"装一次要理解仓库布局"，而用户要的是"把这个目录拿走就能用"。改成
+`editor/zed/`（可直接安装的扩展）+ `editor/tree-sitter-zx/`（语法源码），
+一条 `install.sh` 说清六个文件的去向。wasm 入库、`target/` 不入库——**部署
+不该要求对方先装 Rust**；改源码的人才需要 cargo。代价是 1.3 MB 二进制进版本
+控制，换"clone 下来就能用"，值。
+
+**`highlights.scm` 只留一份，放在被消费的位置**（`editor/zed/languages/zx/`）。
+语法目录里再放一份给 Neovim 用，看起来体贴，实际是两个真源——改一处忘一处，
+症状是"Zed 里颜色对、Neovim 里不对"，这种 bug 没人会去查。复用就拷贝，
+文档写清楚拷哪一份。
+
+**宿主路径必须是算出来的，不是写死的。** `bin/zxls.exe` 在 Windows 对，
+到 macOS / Linux 就是"能高亮、没补全、没诊断"——文件不存在时 Zed 只在日志
+里记一行，界面上一个字都不说。按 `current_platform()` 挑后缀是一行代码的事，
+不做的代价是一类"静默半残"。同理，`.zed/settings.json` 里那个
+`lsp.zx-lsp.binary.path` 绝对路径（本地调试遗留）也该删：扩展已经返回
+`<worktree>/bin/zxls`，覆盖它只会让换个 checkout 位置就失效。**判据：能由
+程序在运行时算出来的路径，不要落到用户配置里。**
+
+**仓库瘦身按"一条命令能否再生"划线。** 根目录 460 项里 440 项是
+`b0_*.o` / `*.pdb`；`.tmp/` 7.7 GB、`.zc-cache/` 75 MB、
+`.toolchain-015-bak/` 693 MB。全删——它们都由 `sh build.sh` / `sh test.sh`
+再生。顺带改 `build.sh`：zxfe 的产物先落 `.zc-cache/` 再拷进 `bin/`，因为
+zxc 把每个模块的 `.c/.o` 写在输出文件旁边，直接编进 `bin/` 会堆三十多个
+中间文件；`bin/` 因此稳定只有三件套（13 MB → 2 MB）。原始设计笔记 `plan`
+不进垃圾堆，移到 `spec/design-sketch.md`——**"没用"和"不在正确位置"是两件事**。
+
+**手册是第三份文档，不是把前两份合起来。** `docs/guide.md` 教"怎么学"，
+`spec/zx-spec.md` 定"什么算对"，`docs/manual.md` 只负责"怎么查"：命令、
+标准库签名、18 条陷阱、已知限制、完成度矩阵、错误码族。完成度写进手册而不
+藏在 README 的里程碑里，因为**用户问"这语言能用了么"时不该让他读 2000 行
+日志**。结论要能一句话说清：核心与工具链完整，差包管理、调试信息、并发库。

@@ -64,6 +64,80 @@ if ! "$RUNNER" "$@" "$ZXCW" "$TMP" \
     fail=1
 fi
 
+# 2.5 CLI 冒烟：-h / -v / check 真的会检查 / init 带 vendor/
+# （这一组挡的是驱动层的事：子命令曾经因为没把 argv[0] 交给前端，从 cwd
+#   找不到 zxfe.exe，`check` 只打印 "1 of 1 file(s) failed"、一个诊断都没有）
+printf "\n== CLI 冒烟（-h / -v / check / init vendor/）\n"
+if $ZXC -v > "$TMP.cli.v" 2>&1 && grep -q "^zxc " "$TMP.cli.v"; then
+    printf "  ok   zxc -v\n"
+else
+    printf "  FAIL zxc -v\n"; fail=1
+fi
+if $ZXC --help > "$TMP.cli.h" 2>&1 && grep -q "用法" "$TMP.cli.h" \
+   && $ZXC build -h 2>&1 | grep -q "zxc build"; then
+    printf "  ok   zxc -h / zxc build -h\n"
+else
+    printf "  FAIL zxc -h\n"; fail=1
+fi
+pdir="$TMP.cli.proj"
+rm -rf "$pdir" 2>/dev/null || true
+mkdir -p "$pdir"
+if ( cd "$pdir" && "$ZXCW" init demo > "$TMP.cli.init" 2>&1 ); then
+    if [ -d "$pdir/demo/vendor" ] && [ -f "$pdir/demo/vendor/README.md" ]; then
+        printf "  ok   init 生成 vendor/\n"
+    else
+        printf "  FAIL init 没有生成 vendor/\n"; fail=1
+    fi
+    if ( cd "$pdir/demo" && "$ZXCW" check > "$TMP.cli.c1" 2>&1 ); then
+        printf "  ok   init 出来的工程 check 通过\n"
+    else
+        printf "  FAIL init 出来的工程 check 失败\n"; cat "$TMP.cli.c1"; fail=1
+    fi
+    # 坏文件必须报出真正的诊断（不只是"failed"）
+    printf 'const main = fn () i32 {\n    let x: i32 = "abc";\n    return 0;\n};\n' \
+        > "$pdir/demo/src/bad.zx"
+    if ( cd "$pdir/demo" && "$ZXCW" check > "$TMP.cli.c2" 2>&1 ); then
+        printf "  FAIL check 放过了类型错误\n"; fail=1
+    elif grep -q "E0301" "$TMP.cli.c2"; then
+        printf "  ok   check 报出类型错误（带诊断码）\n"
+    else
+        printf "  FAIL check 没有诊断输出\n"; cat "$TMP.cli.c2"; fail=1
+    fi
+    # vendor/ 是模块根：module("ext") → vendor/ext.zx（可省 .zx）
+    printf 'const std = module("std");\n\npub const hi = fn () void {\n    std.println("vendor ok");\n};\n' \
+        > "$pdir/demo/vendor/ext.zx"
+    printf 'const std = module("std");\nconst ext = module("ext");\n\nconst main = fn () i32 {\n    ext.hi();\n    return 0;\n};\n' \
+        > "$pdir/demo/src/main.zx"
+    rm -f "$pdir/demo/src/bad.zx"
+    if ( cd "$pdir/demo" && "$ZXCW" run > "$TMP.cli.r" 2>&1 ) && grep -q "vendor ok" "$TMP.cli.r"; then
+        printf "  ok   vendor/ 里的模块能被 module(\"ext\") 找到\n"
+    else
+        printf "  FAIL vendor/ 模块解析失败\n"; cat "$TMP.cli.r"; fail=1
+    fi
+else
+    printf "  FAIL zxc init\n"; cat "$TMP.cli.init"; fail=1
+fi
+rm -rf "$pdir" 2>/dev/null || true
+
+# 2.6 LSP 冒烟：语言服务器的模块解析必须和编译器**同一条链**（vendor/ +
+# zx.json 的 deps 都要认）。这条挡的是"能编过、IDE 里补不出来"的偏差：
+# 两侧各写一份解析链，缺一个目录就是一个点了没反应的句点。
+printf "\n== LSP 冒烟（tools/lsptest.py：补全/跳转 + vendor/ 与 deps）\n"
+if [ -x "$ZYG" ] && command -v python >/dev/null 2>&1; then
+    if $ZYG build-exe tools/zxls.zig -O ReleaseSafe -femit-bin="$TMP.zxls.exe" > "$TMP.zxls.log" 2>&1; then
+        if ZXLS_BIN="$TMP.zxls.exe" python tools/lsptest.py > "$TMP.lsp.log" 2>&1; then
+            printf "  ok   %s 项全过（含 vendor/ 与 deps 模块）\n" \
+                "$(grep -c '^ok' "$TMP.lsp.log" | tr -d ' ')"
+        else
+            printf "  FAIL LSP 冒烟\n"; tail -20 "$TMP.lsp.log"; fail=1
+        fi
+    else
+        printf "  FAIL zxls 编译失败\n"; tail -10 "$TMP.zxls.log"; fail=1
+    fi
+else
+    printf "  skip（未找到 .toolchain/zig.exe 或 python）\n"
+fi
+
 # 2. 增量编译：每个模块一个 .o，没改动的模块不重编
 printf "\n== 增量编译 (per-module .o)\n"
 ib="$TMP.inc"

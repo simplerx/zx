@@ -3606,18 +3606,45 @@ static const char *const *g_search_paths;
 
 void sema_set_search_paths(const char *const *dirs) { g_search_paths = dirs; }
 
+/* 模块名末尾带了 .zx 吗（决定要不要补后缀去探） */
+static bool has_zx_suffix(const char *p) {
+    size_t l = strlen(p);
+    return l >= 3 && !strcmp(p + l - 3, ".zx");
+}
+
+/* 探一个候选路径：原样打得开就用它；否则（模块名没写扩展名时）再试
+ * <候选>.zx。返回 malloc 的路径，都没找到返回 NULL。
+ *
+ * 为什么补后缀：`module("ext")` 比 `module("ext.zx")` 是文档里一直在写的
+ * 简写（README、init 生成的项目说明），但早期实现只认完整路径。补后缀
+ * 是纯增量——显式写了 .zx 的老代码一个字都不用改。 */
+static char *find_module_file(const char *cand, bool allow_zx) {
+    if (file_exists(cand)) return strdup(cand);
+    if (allow_zx) {
+        char *w = malloc(strlen(cand) + 4);
+        sprintf(w, "%s.zx", cand);
+        if (file_exists(w)) return w;
+        free(w);
+    }
+    return NULL;
+}
+
 static Module *module_load(const char *rel, int line, int col) {
     char *dir  = path_dup_dir(g_mod ? g_mod->path : g_srcpath);
-    char *full = path_join(dir, rel);
+    char *orig = path_join(dir, rel);
     free(dir);
-    /* 相对导入打不开 → 退到工程级搜索路径（deps）。 */
-    if (!file_exists(full) && g_search_paths) {
-        for (int i = 0; g_search_paths[i]; i++) {
-            char *cand = path_join(g_search_paths[i], rel);
-            if (file_exists(cand)) { free(full); full = cand; break; }
-            free(cand);
-        }
+    bool allow_zx = !has_zx_suffix(rel);
+
+    /* ① 相对导入所在目录 → ② 工程级搜索路径（vendor/、deps） */
+    char *full = find_module_file(orig, allow_zx);
+    for (int i = 0; !full && g_search_paths && g_search_paths[i]; i++) {
+        char *cand = path_join(g_search_paths[i], rel);
+        full = find_module_file(cand, allow_zx);
+        free(cand);
     }
+    if (!full) full = orig;               /* 没找到：留着原路径去报错 */
+    else free(orig);
+
     Module *m = module_load_full(full, line, col);
     return m;
 }
