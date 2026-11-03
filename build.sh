@@ -56,10 +56,13 @@ echo "built bin/zxfe.exe"
 
 # zxls：Zx 语言服务器（LSP over stdio），给 Zed / VS Code 提供诊断与补全。
 # zxls 是宿主工具（不走自举），代码用 0.17 的 std.Io 接口——别拿 0.15 编。
+# 缓存目录沿用上面的仓库内 .zc-cache：**不要**在这里 unset ZIG_*，否则它会
+# 退回用户全局缓存，在这台机器上读 toolchain 的 std.zig 会 AccessDenied
+# （旧写法就是在这一步偶发失败）。
 # 被编辑器占用时（Windows 上 lld-link 报 Permission denied）跳过，不算失败：
 # 编译器与前端已经更新，zxls 下次再编。其它失败要把日志打出来，别静默。
 ZXLS_LOG=".zc-cache/zxls-build.log"
-if (unset ZIG_GLOBAL_CACHE_DIR ZIG_LOCAL_CACHE_DIR; exec "$ZIG" build-exe tools/zxls.zig -O ReleaseSafe -femit-bin=bin/zxls.exe) > "$ZXLS_LOG" 2>&1; then
+if "$ZIG" build-exe tools/zxls.zig -O ReleaseSafe -femit-bin=bin/zxls.exe > "$ZXLS_LOG" 2>&1; then
     rm -f bin/zxls.pdb
     echo "built bin/zxls.exe"
 else
@@ -71,3 +74,6 @@ else
         tail -6 "$ZXLS_LOG" >&2
     fi
 fi
+
+# bin/ 只留三件套：pdb 与 zxfe 的中间文件（万一被写在输出旁边）一并清掉。
+rm -f bin/*.pdb bin/zxfe.exe_* bin/zxfe.exe.h bin/zxfe.exe.flags 2>/dev/null || true

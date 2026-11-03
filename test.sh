@@ -35,7 +35,10 @@ export ZIG_LOCAL_CACHE_DIR="$ROOTW/.zc-cache/local"
 export ZIG_GLOBAL_CACHE_DIR="$ROOTW/.zc-cache/global"
 mkdir -p "$ZIG_LOCAL_CACHE_DIR" "$ZIG_GLOBAL_CACHE_DIR"
 
-TMP="$ROOTW/.tmp/zxc_test.$$"
+# 临时前缀**不能**叫 TMP：TMP/TEMP 是环境里已导出的系统临时目录，覆盖它
+# 会把 "%TMP%\zig-xxxx" 这种路径传给子进程（zig/lld），链接时报
+# "unable to make temporary file: No such file or directory"。
+TPFX="$ROOTW/.tmp/zxc_test.$$"
 fail=0
 
 # 0. 用哪份编译器
@@ -51,7 +54,7 @@ ZXCW="$(printf '%s' "$ROOTW/${ZXC#./}" | tr '/' '\\')"
 
 # 1. runner 自己（编到本次运行的临时名下：两个人同时跑 test.sh 不会抢同一个 exe）
 printf "\n== 构建 runner（tools/runner.c）\n"
-RUNNER="$TMP.runner.exe"
+RUNNER="$TPFX.runner.exe"
 if ! $ZYG cc -std=c11 -O2 -o "$RUNNER" tools/runner.c; then
     printf "  FAIL runner 编译失败\n"
     exit 1
@@ -62,14 +65,16 @@ printf "\n== 构建 Zx 前端（bootstrap/zxfe.zx，由 zxc 自己编译——�
 # 自举阶段 4：zxfe 由 zxc 的 Zx 前端自己编（闭环）；无 zxfe.exe 时回退 --fe=c
 ZFE_FLAG=""
 if [ ! -f bin/zxfe.exe ]; then ZFE_FLAG="--fe=c"; fi
-if ! $ZXC bootstrap/zxfe.zx -o bin/zxfe.exe $ZFE_FLAG > "$TMP.zxfe.log" 2>&1; then
+if ! $ZXC bootstrap/zxfe.zx -o bin/zxfe.exe $ZFE_FLAG > "$TPFX.zxfe.log" 2>&1; then
     printf "  FAIL zxfe 编译失败\n"
-    cat "$TMP.zxfe.log"
+    cat "$TPFX.zxfe.log"
     exit 1
 fi
+# zxc 把每个模块的中间文件写在输出旁边——bin/ 只该留 zxfe.exe 本体
+rm -f bin/zxfe.exe_* bin/zxfe.exe.h bin/zxfe.exe.flags bin/*.pdb 2>/dev/null || true
 
 printf "\n== 文件类用例\n"
-if ! "$RUNNER" "$@" "$ZXCW" "$TMP" \
+if ! "$RUNNER" "$@" "$ZXCW" "$TPFX" \
         spec/examples/*.zx tests/good/*.zx tests/bad/*.zx \
         tests/multi/*/main.zx tests/multibad/*/main.zx; then
     fail=1
@@ -79,40 +84,40 @@ fi
 # （这一组挡的是驱动层的事：子命令曾经因为没把 argv[0] 交给前端，从 cwd
 #   找不到 zxfe.exe，`check` 只打印 "1 of 1 file(s) failed"、一个诊断都没有）
 printf "\n== CLI 冒烟（-h / -v / check / init vendor/）\n"
-if $ZXC -v > "$TMP.cli.v" 2>&1 && grep -q "^zxc " "$TMP.cli.v"; then
+if $ZXC -v > "$TPFX.cli.v" 2>&1 && grep -q "^zxc " "$TPFX.cli.v"; then
     printf "  ok   zxc -v\n"
 else
     printf "  FAIL zxc -v\n"; fail=1
 fi
-if $ZXC --help > "$TMP.cli.h" 2>&1 && grep -q "用法" "$TMP.cli.h" \
+if $ZXC --help > "$TPFX.cli.h" 2>&1 && grep -q "用法" "$TPFX.cli.h" \
    && $ZXC build -h 2>&1 | grep -q "zxc build"; then
     printf "  ok   zxc -h / zxc build -h\n"
 else
     printf "  FAIL zxc -h\n"; fail=1
 fi
-pdir="$TMP.cli.proj"
+pdir="$TPFX.cli.proj"
 rm -rf "$pdir" 2>/dev/null || true
 mkdir -p "$pdir"
-if ( cd "$pdir" && "$ZXCW" init demo > "$TMP.cli.init" 2>&1 ); then
+if ( cd "$pdir" && "$ZXCW" init demo > "$TPFX.cli.init" 2>&1 ); then
     if [ -d "$pdir/demo/vendor" ] && [ -f "$pdir/demo/vendor/README.md" ]; then
         printf "  ok   init 生成 vendor/\n"
     else
         printf "  FAIL init 没有生成 vendor/\n"; fail=1
     fi
-    if ( cd "$pdir/demo" && "$ZXCW" check > "$TMP.cli.c1" 2>&1 ); then
+    if ( cd "$pdir/demo" && "$ZXCW" check > "$TPFX.cli.c1" 2>&1 ); then
         printf "  ok   init 出来的工程 check 通过\n"
     else
-        printf "  FAIL init 出来的工程 check 失败\n"; cat "$TMP.cli.c1"; fail=1
+        printf "  FAIL init 出来的工程 check 失败\n"; cat "$TPFX.cli.c1"; fail=1
     fi
     # 坏文件必须报出真正的诊断（不只是"failed"）
     printf 'const main = fn () i32 {\n    let x: i32 = "abc";\n    return 0;\n};\n' \
         > "$pdir/demo/src/bad.zx"
-    if ( cd "$pdir/demo" && "$ZXCW" check > "$TMP.cli.c2" 2>&1 ); then
+    if ( cd "$pdir/demo" && "$ZXCW" check > "$TPFX.cli.c2" 2>&1 ); then
         printf "  FAIL check 放过了类型错误\n"; fail=1
-    elif grep -q "E0301" "$TMP.cli.c2"; then
+    elif grep -q "E0301" "$TPFX.cli.c2"; then
         printf "  ok   check 报出类型错误（带诊断码）\n"
     else
-        printf "  FAIL check 没有诊断输出\n"; cat "$TMP.cli.c2"; fail=1
+        printf "  FAIL check 没有诊断输出\n"; cat "$TPFX.cli.c2"; fail=1
     fi
     # vendor/ 是模块根：module("ext") → vendor/ext.zx（可省 .zx）
     printf 'const std = module("std");\n\npub const hi = fn () void {\n    std.println("vendor ok");\n};\n' \
@@ -120,13 +125,13 @@ if ( cd "$pdir" && "$ZXCW" init demo > "$TMP.cli.init" 2>&1 ); then
     printf 'const std = module("std");\nconst ext = module("ext");\n\nconst main = fn () i32 {\n    ext.hi();\n    return 0;\n};\n' \
         > "$pdir/demo/src/main.zx"
     rm -f "$pdir/demo/src/bad.zx"
-    if ( cd "$pdir/demo" && "$ZXCW" run > "$TMP.cli.r" 2>&1 ) && grep -q "vendor ok" "$TMP.cli.r"; then
+    if ( cd "$pdir/demo" && "$ZXCW" run > "$TPFX.cli.r" 2>&1 ) && grep -q "vendor ok" "$TPFX.cli.r"; then
         printf "  ok   vendor/ 里的模块能被 module(\"ext\") 找到\n"
     else
-        printf "  FAIL vendor/ 模块解析失败\n"; cat "$TMP.cli.r"; fail=1
+        printf "  FAIL vendor/ 模块解析失败\n"; cat "$TPFX.cli.r"; fail=1
     fi
 else
-    printf "  FAIL zxc init\n"; cat "$TMP.cli.init"; fail=1
+    printf "  FAIL zxc init\n"; cat "$TPFX.cli.init"; fail=1
 fi
 rm -rf "$pdir" 2>/dev/null || true
 
@@ -135,15 +140,15 @@ rm -rf "$pdir" 2>/dev/null || true
 # 两侧各写一份解析链，缺一个目录就是一个点了没反应的句点。
 printf "\n== LSP 冒烟（tools/lsptest.py：补全/跳转 + vendor/ 与 deps）\n"
 if [ -x "$ZYG" ] && command -v python >/dev/null 2>&1; then
-    if $ZYG build-exe tools/zxls.zig -O ReleaseSafe -femit-bin="$TMP.zxls.exe" > "$TMP.zxls.log" 2>&1; then
-        if ZXLS_BIN="$TMP.zxls.exe" python tools/lsptest.py > "$TMP.lsp.log" 2>&1; then
+    if $ZYG build-exe tools/zxls.zig -O ReleaseSafe -femit-bin="$TPFX.zxls.exe" > "$TPFX.zxls.log" 2>&1; then
+        if ZXLS_BIN="$TPFX.zxls.exe" python tools/lsptest.py > "$TPFX.lsp.log" 2>&1; then
             printf "  ok   %s 项全过（含 vendor/ 与 deps 模块）\n" \
-                "$(grep -c '^ok' "$TMP.lsp.log" | tr -d ' ')"
+                "$(grep -c '^ok' "$TPFX.lsp.log" | tr -d ' ')"
         else
-            printf "  FAIL LSP 冒烟\n"; tail -20 "$TMP.lsp.log"; fail=1
+            printf "  FAIL LSP 冒烟\n"; tail -20 "$TPFX.lsp.log"; fail=1
         fi
     else
-        printf "  FAIL zxls 编译失败\n"; tail -10 "$TMP.zxls.log"; fail=1
+        printf "  FAIL zxls 编译失败\n"; tail -10 "$TPFX.zxls.log"; fail=1
     fi
 else
     printf "  skip（未找到 .toolchain/zig.exe 或 python）\n"
@@ -151,7 +156,7 @@ fi
 
 # 2. 增量编译：每个模块一个 .o，没改动的模块不重编
 printf "\n== 增量编译 (per-module .o)\n"
-ib="$TMP.inc"
+ib="$TPFX.inc"
 rm -f "$ib"* 2>/dev/null || true
 $ZXC tests/multi/alias/main.zx -o "$ib" >/dev/null 2>&1 || true
 if [ -f "$ib.exe" ] || [ -f "$ib" ]; then
@@ -169,7 +174,7 @@ fi
 # 用例会在仓库根留下自己的临时文件：io_fmt.zx 写 io_fmt.tmp，stdfs.zx 建
 # fs_t_dir / fs_t_dir2。跑完统一带走——测试不该往工作区里堆东西。
 rm -rf io_fmt.tmp fs_t_dir fs_t_dir2 2>/dev/null || true
-rm -f "$TMP"* 2>/dev/null || true
+rm -f "$TPFX"* 2>/dev/null || true
 
 if [ $fail -ne 0 ]; then
     echo "FAILED"
