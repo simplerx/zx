@@ -240,7 +240,9 @@ const main = fn () u8 {
     withLock();                              // 结束后 g_depth == 0
     std.println("{}", deferred());           // 101
 
-    var scratch: *[4]u8 = undefined;
+    // R9 起 undefined 不再隐式分配存储（误用会撞空指针）；
+    // 要栈内存走 std.stackAlloc（见 decisions §9 / R9）
+    var scratch = std.stackAlloc(u8, 4);
     zeros(scratch[0..]);
 
     return 0;

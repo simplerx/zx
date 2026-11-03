@@ -15,7 +15,8 @@ ns() { date +%s%N; }
 
 run() {
     name=$1; file=$2
-    if ! $ZXC "$file" -o "$OUT/$name" >/dev/null 2>&1; then
+    # 基准量的是发布性能：--release（-O2）。dev 档默认 -O0，测不得。
+    if ! $ZXC "$file" -o "$OUT/$name" --release >/dev/null 2>&1; then
         printf "  %-8s build FAILED\n" "$name"
         return
     fi

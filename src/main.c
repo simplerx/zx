@@ -7,9 +7,11 @@
  *   zxc file.zx --ast         打印语法树（s-expression）
  *   zxc file.zx --emit-c      只吐生成的 C
  *   zxc file.zx -o prog       生成 C 并调 C 编译器编成可执行文件
+ *   zxc file.zx -o prog --release   发布档：-O2（默认 dev 档 -O0，迭代快）
  *
  * 后端的 C 编译器由 ZX_CC 环境变量指定，缺省 .toolchain/zig.exe cc。
- * -o 时每个模块一个 .c / .o：内容没变不重写（mtime 不动），.o 就不用重编。
+ * -o 时每个模块一个 .c / .o，运行时函数体单独一个 _zxrt.c / .o：
+ * 内容没变不重写（mtime 不动），.o 就不用重编；过期的 .o 并行重编。
  */
 #include "zxc.h"
 #include "ast.h"
@@ -24,11 +26,85 @@ typedef struct {
 } BUnit;
 
 void  backend_emit(Node *root, Buf *out);
-int   backend_emit_split(Node *root, Buf *header, BUnit *units, int maxunits);
+int   backend_emit_split(Node *root, Buf *header, Buf *rt, BUnit *units, int maxunits);
 void  sema_check(Node *root);
 
 static const char *g_cc;
-#define CC_FLAGS "-std=c11 -O1"
+static const char *g_cflags;
+/* dev 档 -O0：迭代速度优先（0.4s/unit 级）；--release 才上 -O2。
+ * 注意 zig cc 的 -O0 映射 Debug 会自带 UB 检查（曾把 arena 的未对齐
+ * 访问直接炸成 panic——那是个真问题，但在代码层修，不靠 dev 档暴露），
+ * 这里显式关掉，保持与 -O1 时代一致的语义。 */
+#define CC_DEV  "-std=c11 -O0 -fno-sanitize=undefined"
+#define CC_REL  "-std=c11 -O2"
+
+/* ---------------- 并行 cc ---------------- */
+
+typedef struct {
+    char cpath[2048];
+    char cmd[4096];
+    int  rc;
+} CCJob;
+
+static CCJob g_jobs[65];   /* 单元数上限 64 + zxrt */
+
+#ifdef _WIN32
+#include <windows.h>
+#include <process.h>
+
+static unsigned __stdcall cc_thread(void *p) {
+    CCJob *j = (CCJob *)p;
+    j->rc = (system(j->cmd) != 0);
+    return 0;
+}
+
+/* 并行编译：NUMBER_OF_PROCESSORS 路并发，超过 64 个句柄分批等。
+ * 一旦有失败就停止收新任务（出错路径马上要退出了）。 */
+static int run_cc_jobs(CCJob *jobs, int njobs) {
+    if (njobs <= 0) return 0;
+    int nproc = 4;
+    const char *np = getenv("NUMBER_OF_PROCESSORS");
+    if (np && atoi(np) > 0) nproc = atoi(np) > 16 ? 16 : atoi(np);
+    if (nproc <= 1 || njobs == 1) {
+        for (int i = 0; i < njobs; i++)
+            if (system(jobs[i].cmd) != 0) return 1;
+        return 0;
+    }
+    int rc = 0;
+    for (int i = 0; i < njobs && !rc; ) {
+        HANDLE h[64];
+        CCJob *jo[64];
+        int nh = 0;
+        while (i < njobs && nh < 64 && nh < nproc) {
+            uintptr_t th = _beginthreadex(NULL, 0, cc_thread, &jobs[i], 0, NULL);
+            if (!th) { jobs[i].rc = (system(jobs[i].cmd) != 0); i++; continue; }
+            h[nh] = (HANDLE)th;
+            jo[nh] = &jobs[i];
+            nh++;
+            i++;
+        }
+        if (nh == 0) break;
+        WaitForMultipleObjects((DWORD)nh, h, TRUE, INFINITE);
+        for (int k = 0; k < nh; k++) {
+            CloseHandle(h[k]);
+            if (jo[k]->rc) {
+                fprintf(stderr, "zxc: C compiler failed on %s\n", jo[k]->cpath);
+                rc = 1;
+            }
+        }
+    }
+    return rc;
+}
+#else
+static int run_cc_jobs(CCJob *jobs, int njobs) {
+    for (int i = 0; i < njobs; i++)
+        if (system(jobs[i].cmd) != 0) {
+            fprintf(stderr, "zxc: C compiler failed on %s\n", jobs[i].cpath);
+            return 1;
+        }
+    return 0;
+}
+#endif
 
 /* ---------------- 文件 ---------------- */
 
@@ -104,54 +180,74 @@ static bool stale(const char *opath, const char *cpath, const char *hpath) {
 /* ---------------- 构建可执行文件 ---------------- */
 
 static int build_program(Node *root, const char *out) {
-    Buf header;
+    Buf header, rt;
     buf_init(&header);
+    buf_init(&rt);
     BUnit units[64];
-    int n = backend_emit_split(root, &header, units, 64);
+    int n = backend_emit_split(root, &header, &rt, units, 64);
 
     char hpath[2048];
     snprintf(hpath, sizeof hpath, "%s.h", out);
     bool hchanged = write_file_if_changed(hpath, header.data, header.len);
 
+    const char *hbase = hpath;
+    for (const char *q = hpath; *q; q++)
+        if (*q == '/' || *q == '\\') hbase = q + 1;
+
     Buf objs;
     buf_init(&objs);
+    int njobs = 0;
 
-    for (int i = 0; i < n; i++) {
-        char cpath[2048], opath[2048], cmd[4096];
-        snprintf(cpath, sizeof cpath, "%s_%s.c", out, units[i].name);
-        snprintf(opath, sizeof opath, "%s_%s.o", out, units[i].name);
+    /* 编译参数（cc 路径 / dev-release 档）记个 stamp：参数变了，磁盘上
+     * 的旧 .o 全是别的参数编的，一律作废。首次没有 stamp 也算变了
+     * （顺带自愈"旧 .o 带着别的运行时符号"之类的脏状态）。 */
+    char fpath[2048], fstamp[512];
+    snprintf(fpath, sizeof fpath, "%s.flags", out);
+    snprintf(fstamp, sizeof fstamp, "%s|%s\n", g_cc, g_cflags);
+    bool fchanged = write_file_if_changed(fpath, fstamp, strlen(fstamp));
 
-        /* 每份 .c 都 include 共享头：类型、运行时、跨模块原型都在里面 */
-        const char *hbase = hpath;
-        for (const char *q = hpath; *q; q++)
-            if (*q == '/' || *q == '\\') hbase = q + 1;
+    /* 收集单元：先落盘 .c 并决定谁要重编（等全部落盘后并行开火） */
+    for (int pass = 0; pass <= n; pass++) {
+        const char *uname = (pass == 0) ? "zxrt" : units[pass - 1].name;
+        const char *src   = (pass == 0) ? (rt.data ? rt.data : "")
+                                        : (units[pass - 1].src.data ? units[pass - 1].src.data : "");
+        char cpath[2048], opath[2048];
+        snprintf(cpath, sizeof cpath, "%s_%s.c", out, uname);
+        snprintf(opath, sizeof opath, "%s_%s.o", out, uname);
+
+        /* 每份 .c 都 include 共享头：类型、运行时原型、跨模块原型都在里面 */
         Buf full;
         buf_init(&full);
         buf_printf(&full, "#include \"%s\"\n\n", hbase);
-        buf_puts(&full, units[i].src.data ? units[i].src.data : "");
+        buf_puts(&full, src);
         bool cchanged = write_file_if_changed(cpath, full.data ? full.data : "", full.len);
 
         /* 内容变了就直接作废旧 .o，不靠 mtime 判断：秒级时间戳在
          * 同一秒内重写 .c 时分不清新旧，会把上一轮的 .o 当新鲜的复用
-         * （曾表现为测试随机假失败）。 */
-        if (cchanged || hchanged) remove(opath);
+         * （曾表现为测试随机假失败）。编译参数变了同样全作废。 */
+        if (fchanged || cchanged || hchanged) remove(opath);
 
         if (stale(opath, cpath, hpath)) {
             if (getenv("ZX_VERBOSE")) fprintf(stderr, "  cc %s\n", cpath);
-            snprintf(cmd, sizeof cmd, "%s %s -c -o \"%s\" \"%s\"", g_cc, CC_FLAGS, opath, cpath);
-            if (system(cmd) != 0) {
-                fprintf(stderr, "zxc: C compiler failed on %s\n", cpath);
+            if (njobs >= (int)(sizeof g_jobs / sizeof g_jobs[0])) {
+                fprintf(stderr, "zxc: too many units\n");
                 return 1;
             }
+            CCJob *j = &g_jobs[njobs++];
+            snprintf(j->cpath, sizeof j->cpath, "%s", cpath);
+            snprintf(j->cmd, sizeof j->cmd, "%s %s -c -o \"%s\" \"%s\"",
+                     g_cc, g_cflags, opath, cpath);
         }
 
-        if (i) buf_puts(&objs, " ");
+        if (pass) buf_puts(&objs, " ");
         buf_printf(&objs, "\"%s\"", opath);
     }
 
+    if (run_cc_jobs(g_jobs, njobs) != 0) return 1;
+
     /* 链接（Windows 上 -o prog 会得 prog.exe） */
     char cmd[8192];
-    snprintf(cmd, sizeof cmd, "%s %s -o \"%s\" %s", g_cc, CC_FLAGS, out, objs.data);
+    snprintf(cmd, sizeof cmd, "%s %s -o \"%s\" %s", g_cc, g_cflags, out, objs.data);
     if (system(cmd) != 0) {
         fprintf(stderr, "zxc: link failed\n");
         return 1;
@@ -178,7 +274,7 @@ static void dump_toklist(Lexer *lx) {
 
 static void usage(void) {
     fprintf(stderr,
-        "usage: zxc file.zx [--check|--tokens|--ast|--emit-c] [-o prog]\n");
+        "usage: zxc file.zx [--check|--tokens|--ast|--emit-c|--release] [-o prog]\n");
 }
 
 /* 默认工具链（`.toolchain/zig.exe cc`）钉在仓库根，而不是当前目录：
@@ -206,12 +302,14 @@ int main(int argc, char **argv) {
 
     const char *file = NULL, *out = NULL;
     bool dump_tokens = false, dump_ast = false, emit_c = false, check = true;
+    bool release = false;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--tokens"))      dump_tokens = true;
         else if (!strcmp(argv[i], "--ast"))    dump_ast = true;
         else if (!strcmp(argv[i], "--emit-c")) emit_c = true;
         else if (!strcmp(argv[i], "--check"))  check = true;
+        else if (!strcmp(argv[i], "--release")) release = true;
         else if (!strncmp(argv[i], "--fe=", 5)) {
             /* 前端选择（自举阶段 3）：默认 Zx 前端，--fe=c 交叉验证 */
             if (!strcmp(argv[i] + 5, "zx"))       fe_set_mode(true);
@@ -235,6 +333,7 @@ int main(int argc, char **argv) {
     }
     if (!file) { usage(); return 2; }
     fe_set_argv0(argv[0]);
+    g_cflags = release ? CC_REL : CC_DEV;
 
     g_srcpath = file;
 

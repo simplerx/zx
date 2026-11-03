@@ -4580,9 +4580,56 @@ static void emit_init_fn(int mi) {
     g_nlate = 0;
 }
 
-/* 切开：header 收类型/运行时/原型，units 每项是一个模块的 .c 正文。
+/* 把 Buf 里列首的 "static " 摘掉：运行时原型/函数体从"头文件内联 static"
+ * 改为"外部链接 + 独立 zxrt 单元定义"。data_too=false 时带 '=' 的行
+ * （数据定义，如 zx_alloc_page）保持 static——数据仍按单元各留一份，
+ * 函数定义则必须全局只有一份。 */
+static void buf_destatic(Buf *b, bool data_too) {
+    if (!b->data || b->len == 0) return;
+    Buf nb;
+    buf_init(&nb);
+    char *p = b->data, *end = b->data + b->len;
+    while (p < end) {
+        char *nl = memchr(p, '\n', (size_t)(end - p));
+        size_t ll = nl ? (size_t)(nl - p) + 1 : (size_t)(end - p);
+        if (ll >= 7 && memcmp(p, "static ", 7) == 0 &&
+            (data_too || !memchr(p, '=', ll)))
+            buf_printf(&nb, "%.*s", (int)(ll - 7), p + 7);
+        else
+            buf_printf(&nb, "%.*s", (int)ll, p);
+        p += ll;
+    }
+    free(b->data);
+    *b = nb;
+}
+
+/* 从函数体缓冲提取原型（签名 = 定义首行到 '{' 之前）：运行时函数体搬去
+ * zxrt 单元后，用户单元能看到的只有头文件——那些"定义即声明"的运行时
+ * 函数（div 家族、unwrap 家族）必须自动补上原型，否则调用点成了隐式声明。
+ * 规则：列首行含 '(' ')' 且 '{' 在 ')' 之后 → 函数定义；其余（数据定义、
+ * #ifdef、空行）跳过。与显式原型重复的声明在 C 里合法。 */
+static void buf_protos_from(Buf *bodies, Buf *protos) {
+    if (!bodies->data) return;
+    char *p = bodies->data, *end = bodies->data + bodies->len;
+    while (p < end) {
+        char *nl = memchr(p, '\n', (size_t)(end - p));
+        size_t ll = nl ? (size_t)(nl - p) : (size_t)(end - p);
+        char *pa = memchr(p, '(', ll);
+        char *br = memchr(p, '{', ll);
+        if (ll > 0 && *p != ' ' && *p != '\t' && *p != '#' &&
+            pa && br && pa < br && memchr(pa, ')', (size_t)(br - pa))) {
+            size_t sl = (size_t)(br - p);
+            while (sl && p[sl - 1] == ' ') sl--;
+            buf_printf(protos, "%.*s;\n", (int)sl, p);
+        }
+        p += ll + (nl ? 1 : 0);
+    }
+}
+
+/* 切开：header 收类型/运行时原型/数据，units 每项是一个模块的 .c 正文，
+ * rt 收运行时函数体（main.c 把它落成独立的 _zxrt.c 单元，只编一次）。
  * 返回单元数。 */
-int backend_emit_split(Node *root, Buf *header, BUnit *units, int maxunits) {
+int backend_emit_split(Node *root, Buf *header, Buf *rt, BUnit *units, int maxunits) {
     buf_init(&g_btypes);
     buf_init(&g_bpub);
     buf_init(&g_bglobals);
@@ -4705,7 +4752,10 @@ int backend_emit_split(Node *root, Buf *header, BUnit *units, int maxunits) {
     }
 
     /* 运行时辅助：必须等所有函数体（含泛型实例）都发完，
-     * 否则"只有实例里用到的"运行时会被漏掉。它们进头文件，各单元共用一份源码。 */
+     * 否则"只有实例里用到的"运行时会被漏掉。原型进头文件（去 static，
+     * 外部链接），函数体统一落进独立 zxrt 单元——各用户单元不再
+     * 重复编译同一份 runtime。 */
+    buf_init(&g_bproto);
     buf_init(&g_bglobals);
     buf_init(&g_bbody);
     g_out = &g_bbody;
@@ -4753,23 +4803,36 @@ int backend_emit_split(Node *root, Buf *header, BUnit *units, int maxunits) {
     buf_putc(header, '\n');
     buf_puts(header, g_bany.data ? g_bany.data : "");
     buf_putc(header, '\n');
+    buf_destatic(&g_bproto, false);
+    buf_destatic(&g_bglobals, false);
+    buf_destatic(&g_bbody, true);
+    buf_protos_from(&g_bbody, &g_bproto);
     buf_puts(header, g_bproto.data ? g_bproto.data : "");
     buf_putc(header, '\n');
     buf_puts(header, g_bglobals.data ? g_bglobals.data : "");
     buf_putc(header, '\n');
-    buf_puts(header, g_bbody.data ? g_bbody.data : "");
+    /* 运行时函数体不再进共享头：main.c 把它们落成 _zxrt.c，单独编译一次。 */
+    if (rt) {
+        buf_init(rt);
+        buf_puts(rt, g_bbody.data ? g_bbody.data : "");
+    }
     buf_puts(header, "\n#endif /* ZX_GEN_H */\n");
 
     return nmods;
 }
 
-/* 单文件模式（--emit-c）：头文件 + 各单元拼成一份，方便肉眼检查 */
+/* 单文件模式（--emit-c）：头文件 + 运行时 + 各单元拼成一份，方便肉眼检查 */
 void backend_emit(Node *root, Buf *out) {
-    Buf header;
+    Buf header, rt;
     buf_init(&header);
+    buf_init(&rt);
     BUnit units[64];
-    int n = backend_emit_split(root, &header, units, 64);
+    int n = backend_emit_split(root, &header, &rt, units, 64);
     buf_puts(out, header.data);
+    if (rt.data && rt.len) {
+        buf_puts(out, "\n/* ======== runtime ======== */\n");
+        buf_puts(out, rt.data);
+    }
     for (int i = 0; i < n; i++) {
         buf_puts(out, "\n/* ======== unit ");
         buf_puts(out, units[i].name);

@@ -688,6 +688,13 @@ zx_init_<stem>(void)  每模块一个初始化函数，main 按依赖倒序调�
       诊断后（rustc 风格）；建议器三类——未知标识符（作用域链）、
       聚合成员（fields/methods/statics）、std 与模块成员；距离用
       **OSA**（换位错算 1 次）。取舍见 decisions **§74**。
+- [x] M43 **构建提速——runtime 拆单元 + 并行 cc + dev/release 分档**：
+      运行时函数体从共享头搬进独立的 `_zxrt.c/.o`（原型去 static 留头里，
+      从函数体自动提取缺失原型），各模块不再重复编译同一份 runtime；
+      过期 `.o` **并行重编**（Windows 线程池，`NUMBER_OF_PROCESSORS` 路）；
+      默认 dev 档 `-O0`、`--release` 才 `-O2`，编译参数记 stamp 防止
+      旧 `.o` 混链。dev 冷构建 5.83 s → **1.09 s**，release 冷构建
+      1.99 s。顺带揪出两处 `-O1` 优化器掩盖的潜伏问题（见 decisions **§75**）。
       C/Zx 两侧镜像同修；`sh test.sh` **200 项全过**、对拍 **61/61**。
       取舍见 decisions **§72**
 
@@ -1783,3 +1790,24 @@ demo.zx:4:5: error[E0401]: unknown identifier 'coutn'
 
 结果：`sh test.sh` **206 项全过**（新增 3 个 fix-it 反例）；
 `diff_ast.sh` **62/62**、`diff_lex.sh` **73/73** 全等。decisions **§74**。
+
+## M43：构建提速——runtime 拆单元 + 并行 cc + dev/release 分档
+
+先测量再动手：编 zxfe（1324 行 Zx → 10.6k 行 C）冷构建 5.83 s 里
+**93% 花在 cc**；增量命中 0.59 s 里 **60% 在前端**。换后端（QBE/自研
+x64）对"增量、快、高性能"三个目标一个都帮不上——瓶颈全在工程层。
+
+- **runtime 拆独立单元**：约 700 行运行时函数体从共享头搬进
+  `_zxrt.c/.o`，原型去 `static` 留头里（div/unwrap 等"定义即声明"
+  的家族由自动原型提取兜底）。各模块单元从此不再重复编译 runtime。
+- **并行重编**：过期 `.o` 先全部落盘再并行开火（`NUMBER_OF_PROCESSORS`
+  路），64 句柄分批等待。
+- **dev/release 分档**：默认 `-O0`（快迭代），`--release` 才 `-O2`；
+  bench 一律走 release 档。cc 路径与参数记 `<out>.flags` stamp，
+  参数变化全量作废旧 `.o`（防止检查版 `.o` 混进 release 链接）。
+- **顺带修掉**：spec 示例 `control.zx` 写穿 `undefined` 指针（R9 之后
+  就该撞空指针，一直被 `-O1` 死代码消除掩盖），改走 `std.stackAlloc`。
+
+效果：dev 冷构建 5.83 → **1.09 s**，release 冷构建 **1.99 s**，
+增量命中 **0.57 s**。`sh test.sh` **206 项全过**，对拍 62/62 + 73/73。
+取舍见 decisions **§75**。
