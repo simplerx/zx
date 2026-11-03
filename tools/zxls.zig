@@ -677,6 +677,483 @@ fn definitionAt(doc: *const Document, line: u32, character: u32) ?[]const u8 {
     return null;
 }
 
+// ---------------------------------------------------------------- hover / signature
+
+fn trimSl(s: []const u8) []const u8 {
+    var a: usize = 0;
+    var b: usize = s.len;
+    while (a < b and (s[a] == ' ' or s[a] == '\t' or s[a] == '\r' or s[a] == '\n')) a += 1;
+    while (b > a and (s[b - 1] == ' ' or s[b - 1] == '\t' or s[b - 1] == '\r' or s[b - 1] == '\n')) b -= 1;
+    return s[a..b];
+}
+
+/// 找 `const <name> = …`（含 pub）声明语句，返回从 const 到顶层 ';' 的整段。
+fn findDeclStmt(text: []const u8, name: []const u8) ?[]const u8 {
+    var from: usize = 0;
+    while (std.mem.indexOfPos(u8, text, from, "const ")) |c| {
+        from = c + 1;
+        if (c > 0 and isIdentChar(text[c - 1])) continue; // reconst 之类
+        var j = c + 6;
+        while (j < text.len and text[j] == ' ') j += 1;
+        const ns = j;
+        while (j < text.len and isIdentChar(text[j])) j += 1;
+        if (j == ns or !std.mem.eql(u8, text[ns..j], name)) continue;
+        while (j < text.len and text[j] == ' ') j += 1;
+        if (j >= text.len or text[j] != '=') continue;
+        var start = c;
+        if (start >= 4 and std.mem.eql(u8, text[start - 4 .. start], "pub ")) start -= 4;
+        // 到顶层 ';'（跳过字符串、跟踪嵌套深度）
+        var depth: usize = 0;
+        var in_str = false;
+        var k = j + 1;
+        while (k < text.len) : (k += 1) {
+            const ch = text[k];
+            if (in_str) {
+                if (ch == '\\') {
+                    k += 1;
+                    continue;
+                }
+                if (ch == '"') in_str = false;
+                continue;
+            }
+            switch (ch) {
+                '"' => in_str = true,
+                '{', '(', '[' => depth += 1,
+                '}', ')', ']' => {
+                    if (depth > 0) depth -= 1;
+                },
+                ';' => {
+                    if (depth == 0) return text[start .. k + 1];
+                },
+                else => {},
+            }
+        }
+        return text[start..];
+    }
+    return null;
+}
+
+/// fn 签名解析：`pub const Add = fn(a:i32,b:i32) i32{…};` →
+/// name="Add"、params=["a:i32","b:i32"]、ret="i32"（切片都指向 stmt）
+const FnSig = struct {
+    name: []const u8,
+    params: []const []const u8,
+    ret: []const u8,
+    is_fn: bool,
+};
+
+fn sigOfStmt(stmt: []const u8) FnSig {
+    var r = FnSig{ .name = "", .params = &.{}, .ret = "", .is_fn = false };
+    // name
+    if (std.mem.indexOf(u8, stmt, "const ")) |c| {
+        var j = c + 6;
+        while (j < stmt.len and stmt[j] == ' ') j += 1;
+        const ns = j;
+        while (j < stmt.len and isIdentChar(stmt[j])) j += 1;
+        r.name = stmt[ns..j];
+    }
+    // fn?
+    const fp = std.mem.indexOf(u8, stmt, "fn ") orelse std.mem.indexOf(u8, stmt, "fn(");
+    if (fp == null) return r;
+    const lp0 = std.mem.indexOfScalarPos(u8, stmt, fp.?, '(') orelse return r;
+    // 匹配 ')'
+    var depth: usize = 0;
+    var rp = lp0;
+    var in_str = false;
+    while (rp < stmt.len) : (rp += 1) {
+        const ch = stmt[rp];
+        if (in_str) {
+            if (ch == '\\') {
+                rp += 1;
+                continue;
+            }
+            if (ch == '"') in_str = false;
+            continue;
+        }
+        if (ch == '"') {
+            in_str = true;
+            continue;
+        }
+        if (ch == '(') depth += 1;
+        if (ch == ')') {
+            depth -= 1;
+            if (depth == 0) break;
+        }
+    }
+    if (rp >= stmt.len) return r;
+    r.is_fn = true;
+    // 参数：顶层逗号切分
+    var plist: std.ArrayList([]const u8) = .empty;
+    var seg: usize = lp0 + 1;
+    depth = 0;
+    in_str = false;
+    var q = lp0 + 1;
+    while (q < rp) : (q += 1) {
+        const ch = stmt[q];
+        if (in_str) {
+            if (ch == '\\') {
+                q += 1;
+                continue;
+            }
+            if (ch == '"') in_str = false;
+            continue;
+        }
+        if (ch == '"') {
+            in_str = true;
+            continue;
+        }
+        if (ch == '(' or ch == '[' or ch == '{') depth += 1;
+        if (ch == ')' or ch == ']' or ch == '}') {
+            if (depth > 0) depth -= 1;
+        }
+        if (ch == ',' and depth == 0) {
+            const t = trimSl(stmt[seg..q]);
+            if (t.len > 0) plist.append(gpa, t) catch {};
+            seg = q + 1;
+        }
+    }
+    {
+        const t = trimSl(stmt[seg..rp]);
+        if (t.len > 0) plist.append(gpa, t) catch {};
+    }
+    r.params = plist.items;
+    // 返回类型：')' 之后到 '{' 或 ';' 或行尾
+    var e = rp + 1;
+    while (e < stmt.len and (stmt[e] == ' ' or stmt[e] == '\t')) e += 1;
+    const rs = e;
+    while (e < stmt.len and stmt[e] != '{' and stmt[e] != ';' and stmt[e] != '\n') e += 1;
+    r.ret = trimSl(stmt[rs..e]);
+    return r;
+}
+
+/// 字面量/表达式 → 类型名。text 用于解析调用目标的声明；doc 用于模块解析。
+fn inferExprType(text: []const u8, doc: *const Document, expr: []const u8, depth: u8) ?[]const u8 {
+    const e = trimSl(expr);
+    if (e.len == 0) return null;
+    if (std.mem.startsWith(u8, e, "module(")) return null;
+    if (std.mem.startsWith(u8, e, "\"")) return "str";
+    if (std.mem.eql(u8, e, "true") or std.mem.eql(u8, e, "false")) return "bool";
+    // 数字
+    {
+        var all_digit = e.len > 0;
+        var has_dot = false;
+        for (e, 0..) |ch, idx| {
+            if (idx == 0 and ch == '-') continue;
+            if (ch == '.') {
+                has_dot = true;
+                continue;
+            }
+            if (ch < '0' or ch > '9') {
+                all_digit = false;
+                break;
+            }
+        }
+        if (all_digit) return if (has_dot) "f64" else "i32";
+    }
+    // 调用：path(args)
+    if (std.mem.indexOfScalar(u8, e, '(')) |lp| {
+        const tail = trimSl(e[e.len - 1 ..]);
+        if (std.mem.eql(u8, tail, ")")) {
+            var ps = lp;
+            while (ps > 0 and (isIdentChar(e[ps - 1]) or e[ps - 1] == '.')) ps -= 1;
+            const callee = trimSl(e[ps..lp]);
+            if (callee.len > 0) {
+                if (resolveCalleeRet(text, doc, callee)) |rt| return rt;
+            }
+            return null;
+        }
+    }
+    // 点路径：std.Allocator 这类类型名 → 原样当类型
+    if (std.mem.indexOfScalar(u8, e, '.') != null) {
+        var ok = true;
+        for (e) |ch| {
+            if (!isIdentChar(ch) and ch != '.') {
+                ok = false;
+                break;
+            }
+        }
+        if (ok) return e;
+    }
+    // 裸标识符：追一层别名（const b = a）
+    if (depth < 3 and isIdentChar(e[0]) and std.mem.indexOfScalar(u8, e, '.') == null) {
+        if (findDeclStmt(text, e)) |stmt2| {
+            const init2 = declInitOf(stmt2) orelse return null;
+            return inferExprType(text, doc, init2, depth + 1);
+        }
+    }
+    return null;
+}
+
+/// 声明语句 '=' 右侧（不含 ';'）
+fn declInitOf(stmt: []const u8) ?[]const u8 {
+    const eq = std.mem.indexOfScalar(u8, stmt, '=') orelse return null;
+    var body = stmt[eq + 1 ..];
+    if (body.len > 0 and body[body.len - 1] == ';') body = body[0 .. body.len - 1];
+    return trimSl(body);
+}
+
+/// 调用目标 → 返回类型。callee 可为 `Add`（本文件）、`other.Add`（模块成员）、
+/// `std.print`（编译器内建）。
+fn resolveCalleeRet(text: []const u8, doc: *const Document, callee: []const u8) ?[]const u8 {
+    // std 内建（编译器 seed，不在 std.zx 文本里）
+    if (std.mem.eql(u8, callee, "std.print") or std.mem.eql(u8, callee, "std.println")) return "void";
+    if (std.mem.eql(u8, callee, "std.format")) return "str";
+
+    if (std.mem.lastIndexOfScalar(u8, callee, '.')) |dot| {
+        const bind = callee[0..dot];
+        const member = callee[dot + 1 ..];
+        if (member.len == 0) return null;
+        var mm: ?[]const u8 = moduleOfBinding(text, bind);
+        if (mm == null and std.mem.eql(u8, bind, "std")) mm = "std";
+        const mod = mm orelse return null;
+        const p = resolveModuleFile(doc, mod) orelse return null;
+        const t = readFileSmall(p) orelse return null;
+        const stmt = findDeclStmt(t, member) orelse return null;
+        const sig = sigOfStmt(stmt);
+        if (sig.is_fn and sig.ret.len > 0) return sig.ret;
+        return null;
+    }
+    const stmt = findDeclStmt(text, callee) orelse return null;
+    const sig = sigOfStmt(stmt);
+    if (sig.is_fn and sig.ret.len > 0) return sig.ret;
+    return null;
+}
+
+/// 成员路径（a、other.Add、std.heap）全文扫描
+fn identPathBefore(text: []const u8, off: usize) []const u8 {
+    var s = off;
+    while (s > 0 and (isIdentChar(text[s - 1]) or text[s - 1] == '.')) s -= 1;
+    var e = off;
+    while (e < text.len and (isIdentChar(text[e]) or text[e] == '.')) e += 1;
+    return text[s..e];
+}
+
+fn hoverAt(doc: *const Document, line: u32, character: u32) ?[]const u8 {
+    const text = doc.text;
+    const off = posToOffset(text, line, character);
+
+    // module("…") 字符串内
+    if (moduleStringAt(text, off)) |m| {
+        var b: std.ArrayList(u8) = .empty;
+        b.print(gpa, "```zx\nmodule `{s}`\n```", .{m}) catch return null;
+        return hoverPayload(b.items);
+    }
+
+    const path = trimSl(identPathBefore(text, off));
+    if (path.len == 0) return null;
+
+    // 模块绑定名本身
+    var mb: ?[]const u8 = moduleOfBinding(text, path);
+    if (mb == null and std.mem.eql(u8, path, "std")) mb = "std";
+    if (mb) |mm| {
+        var b: std.ArrayList(u8) = .empty;
+        b.print(gpa, "```zx\nmodule `{s}`\n```", .{mm}) catch return null;
+        return hoverPayload(b.items);
+    }
+
+    // <module>.<member>
+    if (std.mem.lastIndexOfScalar(u8, path, '.')) |dot| {
+        const bind = path[0..dot];
+        const member = path[dot + 1 ..];
+        if (member.len > 0) {
+            var mm: ?[]const u8 = moduleOfBinding(text, bind);
+            if (mm == null and std.mem.eql(u8, bind, "std")) mm = "std";
+            if (mm) |mod| {
+                if (resolveModuleFile(doc, mod)) |p| {
+                    if (readFileSmall(p)) |t| {
+                        if (hoverMarkdownForDecl(t, member, doc)) |md|
+                            return hoverPayload(md);
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    // 当前文件声明
+    if (hoverMarkdownForDecl(text, path, doc)) |md| return hoverPayload(md);
+    return null;
+}
+
+fn hoverPayload(md: []const u8) []const u8 {
+    var j = Json{};
+    j.buf.appendSlice(gpa, "{\"contents\":{\"kind\":\"markdown\",\"value\":") catch return "";
+    j.str(md);
+    j.buf.appendSlice(gpa, "}}") catch return "";
+    return j.buf.items;
+}
+
+/// 名字 → markdown 悬停文本（```zx 代码块）。
+fn hoverMarkdownForDecl(text: []const u8, name: []const u8, doc: ?*const Document) ?[]const u8 {
+    const stmt = findDeclStmt(text, name) orelse return null;
+    const sig = sigOfStmt(stmt);
+    var b: std.ArrayList(u8) = .empty;
+    b.appendSlice(gpa, "```zx\n") catch return null;
+    if (sig.is_fn) {
+        // fn：显示完整签名
+        b.appendSlice(gpa, sig.name) catch {};
+        appendSigTail(&b, sig);
+    } else {
+        // 值声明：推断类型
+        const init = declInitOf(stmt) orelse return null;
+        if (doc) |d| {
+            if (inferExprType(text, d, init, 0)) |t| {
+                b.print(gpa, "const {s}: {s} = ", .{ name, t }) catch {};
+            } else {
+                b.print(gpa, "const {s} = ", .{ name }) catch {};
+            }
+        } else {
+            b.print(gpa, "const {s} = ", .{ name }) catch {};
+        }
+        b.appendSlice(gpa, if (init.len > 100) init[0..100] else init) catch {};
+    }
+    b.appendSlice(gpa, "\n```") catch {};
+    return b.items;
+}
+
+/// 调用处参数提示：光标在调用的括号内 → 签名 + activeParameter
+fn signatureHelpAt(doc: *const Document, line: u32, character: u32) ?[]const u8 {
+    const text = doc.text;
+    const off = posToOffset(text, line, character);
+    if (off == 0 or off > text.len) return null;
+
+    // 向后找未闭合的 '('（跳过字符串，跟踪括号嵌套）
+    var i = off;
+    var depth: usize = 0;
+    var in_str = false;
+    var lp: ?usize = null;
+    while (i > 0) {
+        i -= 1;
+        const ch = text[i];
+        if (in_str) {
+            if (ch == '"' and (i == 0 or text[i - 1] != '\\')) in_str = false;
+            continue;
+        }
+        switch (ch) {
+            '"' => in_str = true,
+            ')' => depth += 1,
+            '(' => {
+                if (depth == 0) {
+                    lp = i;
+                    break;
+                }
+                depth -= 1;
+            },
+            '\n' => {
+                // 跨行调用允许，但连着空行就放弃
+                var nl_count: u8 = 0;
+                var k = i;
+                while (k > 0 and nl_count < 8) : (k -= 1) {
+                    if (text[k] == '\n') nl_count += 1;
+                }
+                if (nl_count >= 8) return null;
+            },
+            else => {},
+        }
+    }
+    const lpp = lp orelse return null;
+
+    // activeParameter：'(' 到光标之间顶层逗号数
+    var ap: u32 = 0;
+    depth = 0;
+    in_str = false;
+    var q = lpp + 1;
+    while (q < off and q < text.len) : (q += 1) {
+        const ch = text[q];
+        if (in_str) {
+            if (ch == '\\') {
+                q += 1;
+                continue;
+            }
+            if (ch == '"') in_str = false;
+            continue;
+        }
+        if (ch == '"') {
+            in_str = true;
+            continue;
+        }
+        if (ch == '(' or ch == '[' or ch == '{') depth += 1;
+        if (ch == ')' or ch == ']' or ch == '}') {
+            if (depth > 0) depth -= 1;
+        }
+        if (ch == ',' and depth == 0) ap += 1;
+    }
+
+    // 被调方路径
+    var cs = lpp;
+    while (cs > 0 and (isIdentChar(text[cs - 1]) or text[cs - 1] == '.')) cs -= 1;
+    const callee = text[cs..lpp];
+    if (callee.len == 0) return null;
+
+    // 解析签名
+    var label: []const u8 = "";
+    var params: []const []const u8 = &.{};
+    var built: std.ArrayList(u8) = .empty;
+    if (std.mem.lastIndexOfScalar(u8, callee, '.')) |dot| {
+        const bind = callee[0..dot];
+        const member = callee[dot + 1 ..];
+        var mm: ?[]const u8 = moduleOfBinding(text, bind);
+        if (mm == null and std.mem.eql(u8, bind, "std")) mm = "std";
+        if (mm) |mod| {
+            if (resolveModuleFile(doc, mod)) |p| {
+                if (readFileSmall(p)) |t| {
+                    if (findDeclStmt(t, member)) |stmt| {
+                        const sig = sigOfStmt(stmt);
+                        if (sig.is_fn) {
+                            built.appendSlice(gpa, member) catch {};
+                            appendSigTail(&built, sig);
+                            label = built.items;
+                            params = sig.params;
+                        }
+                    }
+                }
+            }
+        }
+        if (label.len == 0) {
+            // std 内建：给个近似标签
+            if (std.mem.eql(u8, bind, "std")) {
+                built.appendSlice(gpa, callee) catch {};
+                built.appendSlice(gpa, "(…)") catch {};
+                label = built.items;
+            }
+        }
+    } else if (findDeclStmt(text, callee)) |stmt| {
+        const sig = sigOfStmt(stmt);
+        if (sig.is_fn) {
+            built.appendSlice(gpa, callee) catch {};
+            appendSigTail(&built, sig);
+            label = built.items;
+            params = sig.params;
+        }
+    }
+    if (label.len == 0) return null;
+
+    var j = Json{};
+    j.buf.appendSlice(gpa, "{\"signatures\":[{\"label\":") catch return null;
+    j.str(label);
+    j.buf.appendSlice(gpa, ",\"parameters\":[") catch return null;
+    for (params, 0..) |p, idx| {
+        if (idx > 0) j.buf.append(gpa, ',') catch {};
+        j.str(p);
+    }
+    j.buf.appendSlice(gpa, "]}]") catch return null;
+    j.raw(",\"activeSignature\":0,\"activeParameter\":{d}}}", .{ap});
+    return j.buf.items;
+}
+
+fn appendSigTail(out: *std.ArrayList(u8), sig: FnSig) void {
+    out.append(gpa, '(') catch {};
+    for (sig.params, 0..) |p, idx| {
+        if (idx > 0) out.appendSlice(gpa, ", ") catch {};
+        out.appendSlice(gpa, p) catch {};
+    }
+    out.append(gpa, ')') catch {};
+    if (sig.ret.len > 0) {
+        out.append(gpa, ' ') catch {};
+        out.appendSlice(gpa, sig.ret) catch {};
+    }
+}
+
 // ---------------------------------------------------------------- completion
 
 /// tier：0 上下文成员（std.* / @ 内建 / 容器字段）
@@ -1054,7 +1531,7 @@ fn handle(v: std.json.Value) ?[]const u8 {
         var j = Json{};
         j.raw("{{\"jsonrpc\":\"2.0\",\"id\":", .{});
         writeId(&j, id);
-        j.buf.appendSlice(gpa, ",\"result\":{\"capabilities\":{\"textDocumentSync\":{\"openClose\":true,\"change\":1},\"completionProvider\":{\"triggerCharacters\":[\".\",\"@\"]},\"definitionProvider\":true}}}") catch @panic("oom");
+        j.buf.appendSlice(gpa, ",\"result\":{\"capabilities\":{\"textDocumentSync\":{\"openClose\":true,\"change\":1},\"completionProvider\":{\"triggerCharacters\":[\".\",\"@\"]},\"definitionProvider\":true,\"hoverProvider\":true,\"signatureHelpProvider\":{\"triggerCharacters\":[\"(\",\",\"]}}}}") catch @panic("oom");
         return j.buf.items;
     }
     if (std.mem.eql(u8, method, "initialized")) return null;
@@ -1188,6 +1665,68 @@ fn handle(v: std.json.Value) ?[]const u8 {
             docs_mu.unlock(g_io);
             if (doc_copy) |d| {
                 result = definitionAt(&d, @intCast(ln_v.integer), @intCast(ch_v.integer));
+            }
+        }
+        var j = Json{};
+        j.raw("{{\"jsonrpc\":\"2.0\",\"id\":", .{});
+        writeId(&j, id);
+        j.raw(",\"result\":", .{});
+        if (result) |r| {
+            j.buf.appendSlice(gpa, r) catch {};
+        } else j.raw("null", .{});
+        j.raw("}}", .{});
+        return j.buf.items;
+    }
+
+    if (std.mem.eql(u8, method, "textDocument/hover")) {
+        var result: ?[]const u8 = null;
+        blk: {
+            const pm = params orelse break :blk;
+            if (pm != .object) break :blk;
+            const td = pm.object.get("textDocument") orelse break :blk;
+            const pos = pm.object.get("position") orelse break :blk;
+            if (td != .object or pos != .object) break :blk;
+            const uri_v = td.object.get("uri") orelse break :blk;
+            const ln_v = pos.object.get("line") orelse break :blk;
+            const ch_v = pos.object.get("character") orelse break :blk;
+            if (uri_v != .string or ln_v != .integer or ch_v != .integer) break :blk;
+            const path = uriToPath(uri_v.string);
+            docs_mu.lockUncancelable(g_io);
+            const doc_copy: ?Document = docs.get(path);
+            docs_mu.unlock(g_io);
+            if (doc_copy) |d| {
+                result = hoverAt(&d, @intCast(ln_v.integer), @intCast(ch_v.integer));
+            }
+        }
+        var j = Json{};
+        j.raw("{{\"jsonrpc\":\"2.0\",\"id\":", .{});
+        writeId(&j, id);
+        j.raw(",\"result\":", .{});
+        if (result) |r| {
+            j.buf.appendSlice(gpa, r) catch {};
+        } else j.raw("null", .{});
+        j.raw("}}", .{});
+        return j.buf.items;
+    }
+
+    if (std.mem.eql(u8, method, "textDocument/signatureHelp")) {
+        var result: ?[]const u8 = null;
+        blk: {
+            const pm = params orelse break :blk;
+            if (pm != .object) break :blk;
+            const td = pm.object.get("textDocument") orelse break :blk;
+            const pos = pm.object.get("position") orelse break :blk;
+            if (td != .object or pos != .object) break :blk;
+            const uri_v = td.object.get("uri") orelse break :blk;
+            const ln_v = pos.object.get("line") orelse break :blk;
+            const ch_v = pos.object.get("character") orelse break :blk;
+            if (uri_v != .string or ln_v != .integer or ch_v != .integer) break :blk;
+            const path = uriToPath(uri_v.string);
+            docs_mu.lockUncancelable(g_io);
+            const doc_copy: ?Document = docs.get(path);
+            docs_mu.unlock(g_io);
+            if (doc_copy) |d| {
+                result = signatureHelpAt(&d, @intCast(ln_v.integer), @intCast(ch_v.integer));
             }
         }
         var j = Json{};
