@@ -2386,3 +2386,47 @@ save/restore 保护里：
 
 `sh test.sh` 209 项全过；bench 新增 `bench/json.zx`（2 万次
 parse+stringify）。
+
+## 78. LSP 补全修复 + formatting/symbol/references + zig 0.17.0（M46）
+
+**三个修错的判定依据：**
+
+1. **点补全只认"光标紧贴点"**——`dotted` 判定是 `text[off-1]=='.' and
+   prefix.len==0`。输入 `std.p` 时 `full_prefix="p"`、`off-1` 是 `p`，
+   整条点补全链路被跳过。修法：判定改为"部分标识符起点前一个字符是
+   `.`"，即 `ps = off - full_prefix.len` 再查 `text[ps-1]`。
+2. **struct 方法被 prev-char 判定拒掉**——`extractBraceMembers` 要求
+   成员名的前一有效字符是 `{`/`,`/换行/`;`。方法 `const push = fn` 的
+   前一有效字符是 `const` 的 `t`，永远被拒。回扫跳 `const`/`pub const`
+   还不够：注释行让回扫落在注释文字里（`// bump\nconst bump = fn` 的
+   prev 变成 `p`）。最终形态：**正向扫描跳过 `//` 注释行与字符串**，
+   回扫"落点所在行是注释行就整行跳过" + 跳 `const`/`pub const` 前缀。
+   正向跳注释同时消灭了"注释掉的字段被当成员"的假阳性——两头都干净。
+3. **initialize 应答多一个 `}`**——加 provider 时收口括号数错，JSON
+   整体不合法，宿主静默拒收（LSP 客户端对坏 JSON 的典型表现就是无声
+   失败）。以后拼 JSON 字面量先用脚本验括号配平，别数。
+
+**实例推断的三形态**（`let o = …` 之后 `o.` 能出什么）：`X{…}` 字面量
+→ X；`X.static(...)` 且 X 是容器非模块 → X；同文件裸调用 `f(...)` →
+f 的返回类型（`sigOfStmt` 取 ret）。别名链递归 ≤3 层。跨模块工厂函数
+`other.make()` 需要 doc 上下文追模块文件，暂不做——同文件工厂是 Zx 代
+码里的主导形态（`DirIter.open`、`BufReader.open` 都在类型自身上）。
+
+**formatting 走影子文件**而非直接格式化磁盘文件：诊断已经用同一机制
+（缓冲内容写 `.zxls-<hash>.zx` → zxc 处理 → 删），格式化复用它拿到
+的是**编辑器缓冲**的格式化结果而不是磁盘旧状态；影子名 `.zxls-f` 与
+诊断的 `.zxls-` 错开，同一文档并发时互不踩。
+
+**zig 0.15.1 → 0.17.0 的取舍**：先盘点依赖面——运行期只有 `zig cc`
+（`-std=c11`/`-O0`/`-O2`/`-shared`/`-fno-sanitize=undefined` 全是稳定
+clang 旗标）和 `zig ar`（0.17 仍在）；`ZX_CC` 环境变量是现成逃生门，
+编译参数 stamp 保证换工具链后旧 `.o` 自动作废。实测：0.17 重编 zxc +
+`ZX_CC` 指向 0.17 跑全量 **217/217 过**，后端平均 2.81s → 1.02s。
+判定为小改，执行切换：旧链改名 `.toolchain-015-bak/` 保留回滚，清
+`.zc-cache` 防跨版本缓存污染，build.sh 的 anyzig 特殊处理删除
+（vendored 0.17 直接编 zxls，anyzig 那套是因为 0.15 编不了 0.17 API）。
+0.15 的 workaround（`-shared` 绝对 -o 路径）保留，无害。
+
+**验证**：`sh test.sh` 217 项全过（0.17 下重跑两次）；LSP 冒烟
+`tools/lsptest.py` 10 项全过（capabilities/实例补全/带前缀点补全/
+大纲含 fn 声明/引用/格式化/定义跳转）。

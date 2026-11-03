@@ -5,11 +5,15 @@
 //     解析 stderr 的 `path:line:col: error[CODE]: msg` 行 → publishDiagnostics。
 //     直接复用自举前端（zxfe），诊断与编译器 100% 同源。
 //   - 补全：
-//       `@` 前缀      → 顶层内建（@print/@typeInfo/…）
-//       `@ns.`        → 命名空间成员（heap/file/io/process）
-//       `std.` 等     → module 绑定对应的模块顶层声明（const/var/type）
-//       `Type.`       → struct/union 字段、enum 变体（扫描工作区声明）
-//       其余          → 关键字 + 工作区标识符
+//       `@` 前缀      → 顶层内建（@sizeOf/@typeInfo/…）
+//       `X.`          → std 内建命名空间 / module 绑定的顶层 pub 声明 /
+//                       容器（struct/union/enum）的成员与方法（含实例推断：
+//                       `let v = Obj.init(...)` 后 `v.` 出 Obj 的成员）
+//       其余          → 关键字 + 当前文件标识符 + 工作区标识符（TTL 缓存）
+//   - 定义跳转 / hover / 签名提示：声明语句文本扫描 + 类型初值推断。
+//   - 格式化：影子文件 → `zxc fmt` 原地格式化 → 读回 → 全文 TextEdit。
+//   - 大纲：第 0 列顶层声明的 DocumentSymbol。
+//   - 引用：当前文档 + 工作区文件词边界扫描（文本级，截 200 条）。
 //   - 工作区标识符从 root 目录（含子目录、≤2 层）的 .zx 文件扫描。
 //
 // 构建：zig 0.17.0 build-exe tools/zxls.zig -O ReleaseSafe -femit-bin=bin/zxls.exe
@@ -340,6 +344,16 @@ fn extractBraceMembers(text: []const u8, is_enum: bool, out: *std.ArrayList(Decl
     var i: usize = 1; // text[0] == '{'
     while (i < text.len) : (i += 1) {
         const c = text[i];
+        // 正向跳过 // 注释行与字符串——注释里的同名标识符绝不能当成员
+        if (c == '/' and i + 1 < text.len and text[i + 1] == '/') {
+            while (i < text.len and text[i] != '\n') i += 1;
+            continue;
+        }
+        if (c == '"') {
+            i += 1;
+            while (i < text.len and text[i] != '"' and text[i] != '\n') i += 1;
+            continue;
+        }
         if (c == '{') depth += 1;
         if (c == '}') {
             if (depth == 0) return;
@@ -352,12 +366,42 @@ fn extractBraceMembers(text: []const u8, is_enum: bool, out: *std.ArrayList(Decl
             while (k < text.len and (text[k] == ' ' or text[k] == '\t')) k += 1;
             var kind: ?DeclKind = null;
             if (!is_enum and k < text.len and text[k] == ':') kind = .field;
+            // `name = fn/struct/...`：方法与关联常量（Zx 的 struct 方法都这么写）
+            if (!is_enum and k < text.len and text[k] == '=') kind = .value;
             if (is_enum and k < text.len and (text[k] == ',' or text[k] == '}' or text[k] == '=' or text[k] == ':'))
                 kind = .variant;
             if (kind) |kd| {
-                // 前一个有效字符须是块起点/逗号/换行，避免收进类型里的 ident
+                // 前一个有效字符须是块起点/逗号/换行，避免收进类型里的 ident；
+                // 回扫跳空白、整行 // 注释，以及 const / pub const 前缀（方法声明）。
                 var b = i;
-                while (b > 1 and (text[b - 1] == ' ' or text[b - 1] == '\t' or text[b - 1] == '\n')) b -= 1;
+                var skipped = true;
+                while (skipped) {
+                    skipped = false;
+                    while (b > 1) {
+                        const c2 = text[b - 1];
+                        if (c2 == ' ' or c2 == '\t' or c2 == '\n' or c2 == '\r') {
+                            b -= 1;
+                            continue;
+                        }
+                        // 落点所在行若是 // 注释行，整行跳过
+                        var ls = b - 1;
+                        while (ls > 0 and text[ls - 1] != '\n') ls -= 1;
+                        var t = ls;
+                        while (t < text.len and (text[t] == ' ' or text[t] == '\t')) t += 1;
+                        if (t + 1 < b and text[t] == '/' and text[t + 1] == '/') {
+                            b = ls;
+                            continue;
+                        }
+                        break;
+                    }
+                    if (b >= 5 and std.mem.eql(u8, text[b - 5 .. b], "const")) {
+                        b -= 5;
+                        skipped = true;
+                    } else if (b >= 3 and std.mem.eql(u8, text[b - 3 .. b], "pub")) {
+                        b -= 3;
+                        skipped = true;
+                    }
+                }
                 const prev: u8 = if (b >= 2) text[b - 1] else '{';
                 if (prev == '{' or prev == ',' or prev == '\n' or prev == ';')
                     out.append(gpa, .{ .name = text[i..j], .kind = kd }) catch {};
@@ -428,7 +472,25 @@ fn moduleDecls(doc_dir: []const u8, mod: []const u8, out: *std.ArrayList(Decl)) 
     }
 }
 
-fn workspaceIdents(doc_dir: []const u8, set: *std.StringHashMapUnmanaged(void)) void {
+// 工作区标识符 TTL 缓存：全量扫盘每次几毫秒到上百毫秒，连续敲键的补全会
+// 反复付这笔钱。按 doc_dir 缓存 3 秒——同一轮编辑基本全命中；磁盘上的
+// 外部改动（新文件/别的编辑器）最多延迟 3 秒可见，可接受。
+var g_ws_mu: Io.Mutex = .init;
+var g_ws_cache_dir: []const u8 = "";
+var g_ws_cache_set: std.StringHashMapUnmanaged(void) = .empty;
+var g_ws_cache_stamp: Io.Timestamp = Io.Timestamp.zero;
+const WS_CACHE_TTL_NS: i96 = 3000 * std.time.ns_per_ms;
+
+fn workspaceIdents(doc_dir: []const u8) *std.StringHashMapUnmanaged(void) {
+    const now_ts = Io.Clock.awake.now(g_io);
+    g_ws_mu.lockUncancelable(g_io);
+    defer g_ws_mu.unlock(g_io);
+    if (std.mem.eql(u8, g_ws_cache_dir, doc_dir) and
+        now_ts.nanoseconds - g_ws_cache_stamp.nanoseconds < WS_CACHE_TTL_NS)
+    {
+        return &g_ws_cache_set;
+    }
+    g_ws_cache_set.clearRetainingCapacity();
     var searched: std.StringHashMapUnmanaged(void) = .empty;
     defer searched.deinit(gpa);
     var dirs: [2][]const u8 = undefined;
@@ -444,8 +506,12 @@ fn workspaceIdents(doc_dir: []const u8, set: *std.StringHashMapUnmanaged(void)) 
     for (dirs[0..nd]) |d| {
         if (searched.contains(d)) continue;
         searched.put(gpa, d, {}) catch {};
-        scanDirIdents(d, set, 0);
+        scanDirIdents(d, &g_ws_cache_set, 0);
     }
+    if (g_ws_cache_dir.len > 0) gpa.free(g_ws_cache_dir);
+    g_ws_cache_dir = dupe(doc_dir);
+    g_ws_cache_stamp = now_ts;
+    return &g_ws_cache_set;
 }
 
 fn scanDirIdents(dir_path: []const u8, set: *std.StringHashMapUnmanaged(void), depth: usize) void {
@@ -677,6 +743,230 @@ fn definitionAt(doc: *const Document, line: u32, character: u32) ?[]const u8 {
     return null;
 }
 
+// ---------------------------------------------------------------- symbols / references
+
+/// 大纲：第 0 列起的 `[pub] (const|var|type) NAME =`（缩进的 struct 方法不算，
+/// 那是成员不是顶层符号）。kind 按 '=' 右侧初值判。
+fn documentSymbols(doc: *const Document) []const u8 {
+    const text = doc.text;
+    var j = Json{};
+    j.buf.append(gpa, '[') catch {};
+    var first = true;
+    var ln: u32 = 0;
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |line_raw| : (ln += 1) {
+        const line = std.mem.trimEnd(u8, line_raw, " \t\r");
+        // 只收第 0 列的声明
+        var ci: usize = 0;
+        while (ci < line.len and (line[ci] == ' ' or line[ci] == '\t')) ci += 1;
+        if (ci != 0) continue;
+        var rest = line;
+        if (std.mem.startsWith(u8, rest, "pub ")) {
+            rest = std.mem.trimStart(u8, rest[4..], " \t");
+        }
+        // fn 直接声明（pub fn main(...)）：先于 const/var/type 检查
+        if (std.mem.startsWith(u8, rest, "fn ")) {
+            var t2: usize = 3;
+            while (t2 < rest.len and (rest[t2] == ' ' or rest[t2] == '\t')) t2 += 1;
+            var n2 = t2;
+            while (n2 < rest.len and isIdentChar(rest[n2])) n2 += 1;
+            if (n2 > t2 and n2 < rest.len and rest[n2] == '(') {
+                if (!first) j.buf.append(gpa, ',') catch {};
+                first = false;
+                j.buf.appendSlice(gpa, "{\"name\":") catch {};
+                j.str(rest[t2..n2]);
+                j.buf.appendSlice(gpa, ",\"kind\":12,\"range\":{\"start\":{\"line\":") catch {};
+                j.raw("{d}", .{ln});
+                j.buf.appendSlice(gpa, ",\"character\":0},\"end\":{\"line\":") catch {};
+                j.raw("{d}", .{ln});
+                j.buf.appendSlice(gpa, ",\"character\":") catch {};
+                j.raw("{d}", .{line.len});
+                j.buf.appendSlice(gpa, "}},\"selectionRange\":{\"start\":{\"line\":") catch {};
+                j.raw("{d}", .{ln});
+                j.buf.appendSlice(gpa, ",\"character\":") catch {};
+                j.raw("{d}", .{t2});
+                j.buf.appendSlice(gpa, "},\"end\":{\"line\":") catch {};
+                j.raw("{d}", .{ln});
+                j.buf.appendSlice(gpa, ",\"character\":") catch {};
+                j.raw("{d}", .{n2});
+                j.buf.appendSlice(gpa, "}}}") catch {};
+            }
+            continue;
+        }
+        const kws = [_][]const u8{ "const", "var", "type" };
+        var kwlen: usize = 0;
+        var is_var = false;
+        for (kws) |kw| {
+            if (rest.len > kw.len and std.mem.startsWith(u8, rest, kw) and
+                (rest[kw.len] == ' ' or rest[kw.len] == '\t'))
+            {
+                kwlen = kw.len + 1;
+                is_var = kw[0] == 'v';
+                break;
+            }
+        }
+        if (kwlen == 0) continue;
+        var t = kwlen;
+        while (t < rest.len and (rest[t] == ' ' or rest[t] == '\t')) t += 1;
+        var n = t;
+        while (n < rest.len and isIdentChar(rest[n])) n += 1;
+        if (n == t) continue;
+        const name = rest[t..n];
+        // 名字后（可隔类型注解）要接 '='
+        var q = n;
+        while (q < rest.len and (rest[q] == ' ' or rest[q] == '\t' or isIdentChar(rest[q]) or
+            rest[q] == ':' or rest[q] == '*' or rest[q] == '[' or rest[q] == ']')) q += 1;
+        if (q >= rest.len or rest[q] != '=') continue;
+        const after = rest[q..];
+        const kind: u32 = blk: {
+            if (std.mem.indexOf(u8, after, "fn ") != null or std.mem.indexOf(u8, after, "fn(") != null) break :blk 12; // Function
+            if (std.mem.indexOf(u8, after, "struct") != null or std.mem.indexOf(u8, after, "union") != null) break :blk 23; // Struct
+            if (std.mem.indexOf(u8, after, "enum") != null) break :blk 10; // Enum
+            if (std.mem.indexOf(u8, after, "module(") != null) break :blk 2; // Module
+            break :blk if (is_var) 13 else 21; // Variable / Constant
+        };
+        if (!first) j.buf.append(gpa, ',') catch {};
+        first = false;
+        j.buf.appendSlice(gpa, "{\"name\":") catch {};
+        j.str(name);
+        j.buf.appendSlice(gpa, ",\"kind\":") catch {};
+        j.raw("{d}", .{kind});
+        j.buf.appendSlice(gpa, ",\"range\":{\"start\":{\"line\":") catch {};
+        j.raw("{d}", .{ln});
+        j.buf.appendSlice(gpa, ",\"character\":0},\"end\":{\"line\":") catch {};
+        j.raw("{d}", .{ln});
+        j.buf.appendSlice(gpa, ",\"character\":") catch {};
+        j.raw("{d}", .{line.len});
+        j.buf.appendSlice(gpa, "}},\"selectionRange\":{\"start\":{\"line\":") catch {};
+        j.raw("{d}", .{ln});
+        j.buf.appendSlice(gpa, ",\"character\":") catch {};
+        j.raw("{d}", .{t});
+        j.buf.appendSlice(gpa, "},\"end\":{\"line\":") catch {};
+        j.raw("{d}", .{ln});
+        j.buf.appendSlice(gpa, ",\"character\":") catch {};
+        j.raw("{d}", .{n});
+        j.buf.appendSlice(gpa, "}}}") catch {};
+    }
+    j.buf.append(gpa, ']') catch {};
+    return j.buf.items;
+}
+
+/// 文本里 word 的词边界出现位置回调（行、列 0-based）。跳过 skip_line/skip_col
+/// 处的那一次（includeDeclaration=false 时用来剔声明本身）。
+fn eachWordUse(text: []const u8, word: []const u8, skip_line: ?u32, skip_col: ?usize, ctx: anytype, comptime cb: fn (@TypeOf(ctx), u32, usize) void) void {
+    var ln: u32 = 0;
+    var ls: usize = 0;
+    var i: usize = 0;
+    while (i <= text.len) : (i += 1) {
+        if (i == text.len or text[i] == '\n') {
+            const line = text[ls..i];
+            var p: usize = 0;
+            while (std.mem.indexOfPos(u8, line, p, word)) |hit| {
+                p = hit + 1;
+                if (hit > 0 and isIdentChar(line[hit - 1])) continue;
+                const end = hit + word.len;
+                if (end < line.len and isIdentChar(line[end])) continue;
+                if (skip_line != null and skip_line.? == ln and skip_col != null and skip_col.? == hit) continue;
+                cb(ctx, ln, hit);
+            }
+            ln += 1;
+            ls = i + 1;
+        }
+    }
+}
+
+const RefSink = struct {
+    j: *Json,
+    first: *bool,
+    uri: []const u8,
+    count: *usize,
+
+    fn add(self: RefSink, ln: u32, col: usize) void {
+        if (self.count.* >= 200) return;
+        self.count.* += 1;
+        if (!self.first.*) self.j.buf.append(gpa, ',') catch {};
+        self.first.* = false;
+        self.j.buf.appendSlice(gpa, "{\"uri\":") catch {};
+        self.j.str(self.uri);
+        self.j.buf.appendSlice(gpa, ",\"range\":{\"start\":{\"line\":") catch {};
+        self.j.raw("{d}", .{ln});
+        self.j.buf.appendSlice(gpa, ",\"character\":") catch {};
+        self.j.raw("{d}", .{col});
+        self.j.buf.appendSlice(gpa, "},\"end\":{\"line\":") catch {};
+        self.j.raw("{d}", .{ln});
+        self.j.buf.appendSlice(gpa, ",\"character\":") catch {};
+        self.j.raw("{d}", .{col + 1});
+        self.j.buf.appendSlice(gpa, "}}}") catch {};
+    }
+};
+
+/// 引用查找：当前文档 + 工作区 .zx 文件的词边界扫描。文本级（不做语义判别，
+/// 同名局部变量会混入），引用量大时截 200 条。
+fn referencesAt(doc: *const Document, line: u32, character: u32, include_decl: bool) ?[]const u8 {
+    const text = doc.text;
+    const off = posToOffset(text, line, character);
+    var ws = off;
+    while (ws > 0 and isIdentChar(text[ws - 1])) ws -= 1;
+    var we = off;
+    while (we < text.len and isIdentChar(text[we])) we += 1;
+    const word = text[ws..we];
+    if (word.len == 0) return null;
+
+    var j = Json{};
+    j.buf.append(gpa, '[') catch {};
+    var first = true;
+    var count: usize = 0;
+
+    // 当前文档；includeDeclaration=false 时剔掉声明位置那一处
+    var skip_line: ?u32 = null;
+    var skip_col: ?usize = null;
+    if (!include_decl) {
+        if (findDeclLine(text, word)) |dl| {
+            skip_line = dl.line;
+            skip_col = dl.col;
+        }
+    }
+    const sink = RefSink{ .j = &j, .first = &first, .uri = doc.uri, .count = &count };
+    eachWordUse(text, word, skip_line, skip_col, sink, RefSink.add);
+
+    // 工作区其他文件（同目录 + root，≤2 层，与补全同一套扫描）
+    const doc_dir = dirName(doc.path);
+    var searched: std.StringHashMapUnmanaged(void) = .empty;
+    defer searched.deinit(gpa);
+    var dirs: [2][]const u8 = undefined;
+    var nd: usize = 0;
+    dirs[nd] = doc_dir;
+    nd += 1;
+    if (root_path) |r| {
+        if (!std.mem.eql(u8, r, doc_dir)) {
+            dirs[nd] = r;
+            nd += 1;
+        }
+    }
+    const self_name = baseName(doc.path);
+    for (dirs[0..nd]) |d| {
+        if (searched.contains(d)) continue;
+        searched.put(gpa, d, {}) catch {};
+        var dir = Io.Dir.cwd().openDir(g_io, d, .{ .iterate = true }) catch continue;
+        defer dir.close(g_io);
+        var it = dir.iterate();
+        while (it.next(g_io) catch null) |entry| {
+            if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".zx")) continue;
+            if (std.mem.eql(u8, entry.name, self_name)) continue;
+            var fp: std.ArrayList(u8) = .empty;
+            defer fp.deinit(gpa);
+            fp.appendSlice(gpa, d) catch continue;
+            fp.append(gpa, '/') catch continue;
+            fp.appendSlice(gpa, entry.name) catch continue;
+            const txt = readFileSmall(fp.items) orelse continue;
+            const sink2 = RefSink{ .j = &j, .first = &first, .uri = pathToUri(fp.items), .count = &count };
+            eachWordUse(txt, word, null, null, sink2, RefSink.add);
+        }
+    }
+    j.buf.append(gpa, ']') catch {};
+    return j.buf.items;
+}
+
 // ---------------------------------------------------------------- hover / signature
 
 fn trimSl(s: []const u8) []const u8 {
@@ -687,48 +977,53 @@ fn trimSl(s: []const u8) []const u8 {
     return s[a..b];
 }
 
-/// 找 `const <name> = …`（含 pub）声明语句，返回从 const 到顶层 ';' 的整段。
+/// 找 `<name> = …` 声明语句，返回从关键字到顶层 ';' 的整段。
+/// const / let / var 都认（实例类型推断要找 `let v = Obj.init(...)`）；
+/// pub 前缀只对 const 有意义，也一并处理。
 fn findDeclStmt(text: []const u8, name: []const u8) ?[]const u8 {
-    var from: usize = 0;
-    while (std.mem.indexOfPos(u8, text, from, "const ")) |c| {
-        from = c + 1;
-        if (c > 0 and isIdentChar(text[c - 1])) continue; // reconst 之类
-        var j = c + 6;
-        while (j < text.len and text[j] == ' ') j += 1;
-        const ns = j;
-        while (j < text.len and isIdentChar(text[j])) j += 1;
-        if (j == ns or !std.mem.eql(u8, text[ns..j], name)) continue;
-        while (j < text.len and text[j] == ' ') j += 1;
-        if (j >= text.len or text[j] != '=') continue;
-        var start = c;
-        if (start >= 4 and std.mem.eql(u8, text[start - 4 .. start], "pub ")) start -= 4;
-        // 到顶层 ';'（跳过字符串、跟踪嵌套深度）
-        var depth: usize = 0;
-        var in_str = false;
-        var k = j + 1;
-        while (k < text.len) : (k += 1) {
-            const ch = text[k];
-            if (in_str) {
-                if (ch == '\\') {
-                    k += 1;
+    const kws = [_][]const u8{ "const ", "let ", "var " };
+    for (kws) |kw| {
+        var from: usize = 0;
+        while (std.mem.indexOfPos(u8, text, from, kw)) |c| {
+            from = c + 1;
+            if (c > 0 and isIdentChar(text[c - 1])) continue; // obsolete 之类
+            var j = c + kw.len;
+            while (j < text.len and text[j] == ' ') j += 1;
+            const ns = j;
+            while (j < text.len and isIdentChar(text[j])) j += 1;
+            if (j == ns or !std.mem.eql(u8, text[ns..j], name)) continue;
+            while (j < text.len and text[j] == ' ') j += 1;
+            if (j >= text.len or text[j] != '=') continue;
+            var start = c;
+            if (kw[0] == 'c' and start >= 4 and std.mem.eql(u8, text[start - 4 .. start], "pub ")) start -= 4;
+            // 到顶层 ';'（跳过字符串、跟踪嵌套深度）
+            var depth: usize = 0;
+            var in_str = false;
+            var k = j + 1;
+            while (k < text.len) : (k += 1) {
+                const ch = text[k];
+                if (in_str) {
+                    if (ch == '\\') {
+                        k += 1;
+                        continue;
+                    }
+                    if (ch == '"') in_str = false;
                     continue;
                 }
-                if (ch == '"') in_str = false;
-                continue;
+                switch (ch) {
+                    '"' => in_str = true,
+                    '{', '(', '[' => depth += 1,
+                    '}', ')', ']' => {
+                        if (depth > 0) depth -= 1;
+                    },
+                    ';' => {
+                        if (depth == 0) return text[start .. k + 1];
+                    },
+                    else => {},
+                }
             }
-            switch (ch) {
-                '"' => in_str = true,
-                '{', '(', '[' => depth += 1,
-                '}', ')', ']' => {
-                    if (depth > 0) depth -= 1;
-                },
-                ';' => {
-                    if (depth == 0) return text[start .. k + 1];
-                },
-                else => {},
-            }
+            return text[start..];
         }
-        return text[start..];
     }
     return null;
 }
@@ -926,6 +1221,59 @@ fn identPathBefore(text: []const u8, off: usize) []const u8 {
     var e = off;
     while (e < text.len and (isIdentChar(text[e]) or text[e] == '.')) e += 1;
     return text[s..e];
+}
+
+// ---- 实例变量点补全：变量 → 容器类型 ---------------------------------------
+
+/// base 是否是某个文件里的 struct/union/enum 容器（containerMembers 的存在性探针）
+fn isContainerIn(files: []const []const u8, base: []const u8) bool {
+    var tmp: std.ArrayList(Decl) = .empty;
+    defer tmp.deinit(gpa);
+    return containerMembers(files, base, &tmp);
+}
+
+/// 初始化表达式 → 容器类型名。识别三类：
+///   `X{…}` 字面量、`X.static(...)` 静态调用（X 是容器且不是模块绑定）、
+///   裸别名链（`const v = w` 递归追初始化）。识别不了返回 null。
+fn inferContainer(files: []const []const u8, text: []const u8, expr: []const u8, depth: u8) ?[]const u8 {
+    const e = trimSl(expr);
+    if (e.len == 0 or depth > 3) return null;
+    if (!isIdentChar(e[0]) or (e[0] >= '0' and e[0] <= '9')) return null;
+    var j: usize = 0;
+    while (j < e.len and isIdentChar(e[j])) j += 1;
+    if (j == 0) return null;
+    const head = e[0..j];
+    var k = j;
+    while (k < e.len and (e[k] == ' ' or e[k] == '\t')) k += 1;
+    if (k >= e.len) {
+        // 裸标识符：别名，追一层
+        if (findDeclStmt(text, head)) |s2| {
+            const init2 = declInitOf(s2) orelse return null;
+            return inferContainer(files, text, init2, depth + 1);
+        }
+        return null;
+    }
+    if (e[k] == '{' and isContainerIn(files, head)) return head; // X{…} 字面量
+    if (e[k] == '(') {
+        // 裸调用 f(...)：同文件函数的返回类型（let o = make() → Obj）。
+        // 跨模块的 other.make() 需要 doc，这里先不追。
+        if (findDeclStmt(text, head)) |s2| {
+            const sig = sigOfStmt(s2);
+            if (sig.is_fn and sig.ret.len > 0) return sig.ret;
+        }
+        return null;
+    }
+    if (e[k] == '.' and moduleOfBinding(text, head) == null and !std.mem.eql(u8, head, "std")) {
+        if (isContainerIn(files, head)) return head; // X.static(...) 静态调用
+    }
+    return null;
+}
+
+/// 实例名 → 容器类型名：找 `const/let/var NAME =` 的初始化交给 inferContainer。
+fn instanceContainerName(text: []const u8, name: []const u8) ?[]const u8 {
+    const s = findDeclStmt(text, name) orelse return null;
+    const init = declInitOf(s) orelse return null;
+    return inferContainer(&.{text}, text, init, 0);
 }
 
 fn hoverAt(doc: *const Document, line: u32, character: u32) ?[]const u8 {
@@ -1201,13 +1549,11 @@ fn addIdents(list: *Json, seen: *std.StringHashMapUnmanaged(void), doc_text: []c
         if (prefix.len == 0 or std.mem.startsWith(u8, k.*, prefix))
             addItem(list, seen, k.*, 6, "当前文件", 1);
     }
-    // 工作区（tier 3，带上限）
-    var ws: std.StringHashMapUnmanaged(void) = .empty;
-    defer ws.deinit(gpa);
-    workspaceIdents(doc_dir, &ws);
+    // 工作区（tier 3，带上限；缓存命中时零扫盘）
+    const ws = workspaceIdents(doc_dir);
     var count: usize = 0;
-    it = ws.keyIterator();
-    while (it.next()) |k| {
+    var wit = ws.keyIterator();
+    while (wit.next()) |k| {
         if (count >= MAX_WORKSPACE_COMPLETIONS) break;
         if (isKeywordWord(k.*)) continue;
         if (prefix.len == 0 or std.mem.startsWith(u8, k.*, prefix)) {
@@ -1239,11 +1585,15 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
     var seen: std.StringHashMapUnmanaged(void) = .empty;
     defer seen.deinit(gpa);
 
-    const dotted = off > 0 and text[off - 1] == '.' and (full_prefix.len == 0);
+    // 点补全：部分标识符前一个字符是 '.'。之前只认"光标紧贴点"，
+    // 输入 std.p 时走的是关键字分支，std 成员一个都不出——现在
+    // 空前缀（贴点）与带前缀（std.p / obj.fi）都走这条。
+    const ps = off - full_prefix.len;
+    const dotted = ps > 0 and text[ps - 1] == '.';
 
     if (dotted) {
         // 取 '.' 之前的完整路径（可含多级点：std / std.heap / obj.field）
-        const base_end = off - 1;
+        const base_end = ps - 1;
         var base_start = base_end;
         while (base_start > 0 and (isIdentChar(text[base_start - 1]) or text[base_start - 1] == '.')) base_start -= 1;
         const path = text[base_start..base_end];
@@ -1310,6 +1660,18 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                     }
                 }
                 if (containerMembers(files.items, container, &decls)) handled = decls.items.len > 0;
+                if (!handled) {
+                    // 不是模块/类型名——按实例变量处理：推断类型再补容器成员
+                    //（let v = Obj.init(...) → v. 出 Obj 的字段与方法）
+                    decls.clearRetainingCapacity();
+                    if (inferContainer(files.items, text, container, 0) orelse blk: {
+                        const s = findDeclStmt(text, container) orelse break :blk null;
+                        const init2 = declInitOf(s) orelse break :blk null;
+                        break :blk inferContainer(files.items, text, init2, 1);
+                    }) |ty| {
+                        if (containerMembers(files.items, ty, &decls)) handled = decls.items.len > 0;
+                    }
+                }
             }
             if (handled) {
                 for (decls.items) |dcl| {
@@ -1356,6 +1718,45 @@ const Diag = struct {
     code: []const u8,
     msg: []const u8,
 };
+
+/// 格式化：缓冲写影子文件 → `zxc fmt` 原地格式化 → 读回 → 全文 TextEdit。
+/// 复用诊断的影子文件机制（同目录保证 module(...) 解析路径一致）；影子名
+/// 用 .zxls-f 前缀与诊断的 .zxls- 错开，同一文档并发时互不踩。
+fn formatDoc(doc: *const Document) ?[]const u8 {
+    const dir = dirName(doc.path);
+    const h = std.hash.Wyhash.hash(0, doc.path);
+    var shadow: std.ArrayList(u8) = .empty;
+    defer shadow.deinit(gpa);
+    shadow.appendSlice(gpa, dir) catch return null;
+    shadow.appendSlice(gpa, "/.zxls-f") catch return null;
+    shadow.print(gpa, "{x}", .{h}) catch return null;
+    shadow.appendSlice(gpa, ".zx") catch return null;
+    Io.Dir.cwd().writeFile(g_io, .{ .sub_path = shadow.items, .data = doc.text }) catch return null;
+    defer Io.Dir.cwd().deleteFile(g_io, shadow.items) catch {};
+
+    var cmdline: std.ArrayList(u8) = .empty;
+    defer cmdline.deinit(gpa);
+    cmdline.appendSlice(gpa, zxc_path) catch return null;
+    cmdline.append(gpa, ' ') catch return null;
+    cmdline.appendSlice(gpa, shadow.items) catch return null;
+    cmdline.appendSlice(gpa, " fmt") catch return null;
+    const argv = [_][]const u8{ "C:\\Windows\\System32\\cmd.exe", "/c", cmdline.items };
+    _ = std.process.run(gpa, g_io, .{ .argv = &argv, .stderr_limit = .unlimited }) catch return null;
+
+    const new_text = readFileSmall(shadow.items) orelse return null;
+    if (std.mem.eql(u8, new_text, doc.text)) return "[]"; // 没变化，空编辑
+    var lines: u32 = 0;
+    for (doc.text) |c| {
+        if (c == '\n') lines += 1;
+    }
+    var j = Json{};
+    j.buf.appendSlice(gpa, "[{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":") catch return null;
+    j.raw("{d}", .{lines});
+    j.buf.appendSlice(gpa, ",\"character\":0},\"newText\":") catch return null;
+    j.str(new_text);
+    j.buf.appendSlice(gpa, "}]") catch return null;
+    return j.buf.items;
+}
 
 fn runCheck(doc: *const Document, out_diags: *std.ArrayList(Diag)) void {
     // 影子文件：把缓冲内容写到与源文件同目录的隐藏 .zx，zxc 检查它——
@@ -1531,7 +1932,7 @@ fn handle(v: std.json.Value) ?[]const u8 {
         var j = Json{};
         j.raw("{{\"jsonrpc\":\"2.0\",\"id\":", .{});
         writeId(&j, id);
-        j.buf.appendSlice(gpa, ",\"result\":{\"capabilities\":{\"textDocumentSync\":{\"openClose\":true,\"change\":1},\"completionProvider\":{\"triggerCharacters\":[\".\",\"@\"]},\"definitionProvider\":true,\"hoverProvider\":true,\"signatureHelpProvider\":{\"triggerCharacters\":[\"(\",\",\"]}}}}") catch @panic("oom");
+        j.buf.appendSlice(gpa, ",\"result\":{\"capabilities\":{\"textDocumentSync\":{\"openClose\":true,\"change\":1},\"completionProvider\":{\"triggerCharacters\":[\".\",\"@\"]},\"definitionProvider\":true,\"hoverProvider\":true,\"signatureHelpProvider\":{\"triggerCharacters\":[\"(\",\",\"]},\"documentFormattingProvider\":true,\"documentSymbolProvider\":true,\"referencesProvider\":true}}}") catch @panic("oom");
         return j.buf.items;
     }
     if (std.mem.eql(u8, method, "initialized")) return null;
@@ -1736,6 +2137,94 @@ fn handle(v: std.json.Value) ?[]const u8 {
         if (result) |r| {
             j.buf.appendSlice(gpa, r) catch {};
         } else j.raw("null", .{});
+        j.raw("}}", .{});
+        return j.buf.items;
+    }
+
+    if (std.mem.eql(u8, method, "textDocument/formatting")) {
+        var result: ?[]const u8 = null;
+        blk: {
+            const pm = params orelse break :blk;
+            if (pm != .object) break :blk;
+            const td = pm.object.get("textDocument") orelse break :blk;
+            if (td != .object) break :blk;
+            const uri_v = td.object.get("uri") orelse break :blk;
+            if (uri_v != .string) break :blk;
+            const path = uriToPath(uri_v.string);
+            docs_mu.lockUncancelable(g_io);
+            const doc_copy: ?Document = docs.get(path);
+            docs_mu.unlock(g_io);
+            if (doc_copy) |d| result = formatDoc(&d);
+        }
+        var j = Json{};
+        j.raw("{{\"jsonrpc\":\"2.0\",\"id\":", .{});
+        writeId(&j, id);
+        j.raw(",\"result\":", .{});
+        if (result) |r| {
+            j.buf.appendSlice(gpa, r) catch {};
+        } else j.raw("[]", .{});
+        j.raw("}}", .{});
+        return j.buf.items;
+    }
+
+    if (std.mem.eql(u8, method, "textDocument/documentSymbol")) {
+        var result: ?[]const u8 = null;
+        blk: {
+            const pm = params orelse break :blk;
+            if (pm != .object) break :blk;
+            const td = pm.object.get("textDocument") orelse break :blk;
+            if (td != .object) break :blk;
+            const uri_v = td.object.get("uri") orelse break :blk;
+            if (uri_v != .string) break :blk;
+            const path = uriToPath(uri_v.string);
+            docs_mu.lockUncancelable(g_io);
+            const doc_copy: ?Document = docs.get(path);
+            docs_mu.unlock(g_io);
+            if (doc_copy) |d| result = documentSymbols(&d);
+        }
+        var j = Json{};
+        j.raw("{{\"jsonrpc\":\"2.0\",\"id\":", .{});
+        writeId(&j, id);
+        j.raw(",\"result\":", .{});
+        if (result) |r| {
+            j.buf.appendSlice(gpa, r) catch {};
+        } else j.raw("[]", .{});
+        j.raw("}}", .{});
+        return j.buf.items;
+    }
+
+    if (std.mem.eql(u8, method, "textDocument/references")) {
+        var result: ?[]const u8 = null;
+        blk: {
+            const pm = params orelse break :blk;
+            if (pm != .object) break :blk;
+            const td = pm.object.get("textDocument") orelse break :blk;
+            const pos = pm.object.get("position") orelse break :blk;
+            const ctx = pm.object.get("context") orelse break :blk;
+            if (td != .object or pos != .object or ctx != .object) break :blk;
+            const uri_v = td.object.get("uri") orelse break :blk;
+            const ln_v = pos.object.get("line") orelse break :blk;
+            const ch_v = pos.object.get("character") orelse break :blk;
+            if (uri_v != .string or ln_v != .integer or ch_v != .integer) break :blk;
+            const inc: bool = if (ctx.object.get("includeDeclaration")) |iv|
+                (if (iv == .bool) iv.bool else true)
+            else
+                true;
+            const path = uriToPath(uri_v.string);
+            docs_mu.lockUncancelable(g_io);
+            const doc_copy: ?Document = docs.get(path);
+            docs_mu.unlock(g_io);
+            if (doc_copy) |d| {
+                result = referencesAt(&d, @intCast(ln_v.integer), @intCast(ch_v.integer), inc);
+            }
+        }
+        var j = Json{};
+        j.raw("{{\"jsonrpc\":\"2.0\",\"id\":", .{});
+        writeId(&j, id);
+        j.raw(",\"result\":", .{});
+        if (result) |r| {
+            j.buf.appendSlice(gpa, r) catch {};
+        } else j.raw("[]", .{});
         j.raw("}}", .{});
         return j.buf.items;
     }

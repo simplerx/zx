@@ -724,6 +724,17 @@ zx_init_<stem>(void)  每模块一个初始化函数，main 按依赖倒序调�
       默认 dev 档 `-O0`、`--release` 才 `-O2`，编译参数记 stamp 防止
       旧 `.o` 混链。dev 冷构建 5.83 s → **1.09 s**，release 冷构建
       1.99 s。顺带揪出两处 `-O1` 优化器掩盖的潜伏问题（见 decisions **§75**）。
+- [x] M46 **LSP 补全修复 + 格式化/大纲/引用 + zig 0.17.0**：
+  修**带前缀点补全**（`std.p` 之前只会出关键字）、struct **方法**进成员
+  列表（`const push = fn` 之前被注释/前缀判定拒掉）、**实例变量类型推
+  断**（`let o = make()` 后 `o.` 出 Obj 的字段与方法，识别 `X{…}` 字面
+  量 / `X.static(...)` / 同文件裸调用）；新增 `textDocument/formatting`
+  （影子文件 + `zxc fmt`）、`documentSymbol`（大纲）、`references`
+  （词边界扫描，截 200 条）；工作区标识符补全加 3s TTL 缓存（之前每
+  次按键全量扫盘）。工具链 **0.15.1 → 0.17.0**：全量 217 项回归全过，
+  后端 zig cc 平均 **2.81 s → 1.02 s**（近 3 倍），build.sh 的 anyzig
+  特殊处理删除（vendored 0.17 直接编 zxls）。LSP 有了常驻冒烟测试
+  `tools/lsptest.py`（10 项，stdio 会话模拟）。见 decisions **§78**。
 - [x] M45 **std 扩容——fs / json / time 三模块（性能第一）**：
   `std.fs`（路径纯函数零分配、DirIter 流式零拷贝、stat/exists/目录增删）、
   `std.json`（零拷贝解析、u128 整数快路径、开放寻址 Obj 每槽缓存哈希、
@@ -1857,6 +1868,49 @@ x64）对"增量、快、高性能"三个目标一个都帮不上——瓶颈全
 效果：dev 冷构建 5.83 → **1.09 s**，release 冷构建 **1.99 s**，
 增量命中 **0.57 s**。`sh test.sh` **206 项全过**，对拍 62/62 + 73/73。
 取舍见 decisions **§75**。
+
+## M46：LSP 补全修复 + 格式化 / 大纲 / 引用 + zig 0.17.0
+
+zxls（`tools/zxls.zig`，宿主侧 Zig 语言服务器）此轮四件事：修错、
+补能力、加缓存、换工具链。
+
+**修错三处（都有真实触发路径）：**
+
+- **带前缀的点补全全空**：`dotted` 判定要求光标紧贴 `.`，输入
+  `std.p` 时走的是"关键字+文件标识符"分支，`std.println` 一个不出。
+  改为"部分标识符前一个字符是 `.`"，空前缀与带前缀都走点补全。
+- **struct 方法不进成员列表**：`extractBraceMembers` 只认 `name: T`
+  字段，方法 `const push = fn` 的 prev-char 判定撞上注释/`const` 前缀
+  就拒。改为正向扫描跳过 `//` 注释行与字符串（注释里的同名标识符不再
+  有机会当成员），回扫跳空白、整行注释、`const`/`pub const` 前缀，
+  `name =` 记为成员。
+- **initialize 应答 JSON 多一个 `}`**：新增三个 provider 时少算了
+  收口括号——LSP 宿主直接静默拒收。教训：拼 JSON 的字符串字面量要用
+  括号配平脚本验证，人眼数不可靠。
+
+**实例变量类型推断**（点补全的大头）：`let o = make(); o.` 之前一个
+成员都不出。现在按声明语句的初始化表达式推断容器：`X{…}` 字面量、
+`X.static(...)`（X 是容器且非模块绑定）、同文件裸调用 `f(...)`（取函
+数返回类型）、裸别名链递归。跨模块工厂 `other.make()` 暂不追。
+
+**新能力**：`textDocument/formatting`（影子文件 + `zxc fmt` 原地格式
+化 → 读回 → 全文 TextEdit，与诊断共用影子机制、前缀错开防踩）、
+`documentSymbol`（第 0 列顶层声明，`fn` 直接声明也收）、`references`
+（当前文档+工作区词边界扫描，文本级、截 200 条）。工作区标识符补全
+加 3s TTL 缓存——之前每次按键全量扫盘。新增常驻冒烟测试
+`tools/lsptest.py`：起真实 server、模拟 stdio 会话，10 项断言
+（capabilities / 两类补全 / 大纲 / 引用 / 格式化 / 定义跳转）。
+
+**zig 0.15.1 → 0.17.0**：依赖面盘点只有 `zig cc`（标准 clang 旗标）+
+`zig ar`，`ZX_CC` 逃生门 + 编译参数 stamp 在。全量 217 项回归全过，
+后端 zig cc **平均 2.81 s → 1.02 s**（0.17 的 clang 更新更快）。0.15
+备份在 `.toolchain-015-bak/`（已 gitignore），回滚 = 改回目录名。
+build.sh 里 anyzig 特殊处理删除——vendored 0.17 直接编 zxls（0.15 的
+std.Io 接口编不了它）。已知的 0.15 特有 workaround（-shared 绝对 -o
+路径）保留未动，无碍。
+
+`sh test.sh` 217 项全过（0.17 下）；`python tools/lsptest.py` 10 项
+全过。取舍见 decisions **§78**。
 
 ## M45：std 扩容——fs / json / time（性能第一）
 
