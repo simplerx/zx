@@ -49,8 +49,12 @@ typedef struct {
 
 void  backend_emit(Node *root, Buf *out);
 int   backend_emit_split(Node *root, Buf *header, Buf *rt, BUnit *units, int maxunits);
+/* 生成的 .c 行 → 模块内 zx 行（供后端诊断翻译用；false = 该行没有映射） */
+bool  backend_map_lookup(int unit, int cline, int *zx_line, int *zx_col);
 void  sema_check(Node *root);
 void  sema_set_search_paths(const char *const *dirs);   /* deps 模块搜索路径 */
+const char *sema_module_path(int i);                    /* 模块 i 的源文件路径 */
+static char *read_source(const char *path, size_t *out_len);
 
 static const char *g_cc;
 static const char *g_cflags;
@@ -61,15 +65,221 @@ static const char *g_cflags;
 #define CC_DEV  "-std=c11 -O0 -fno-sanitize=undefined"
 #define CC_REL  "-std=c11 -O2"
 
+/* 链接失败的翻译：lld 会说 `undefined symbol: zx_main_foo`——模块前缀是
+ * 我们自己的编码，翻回 `模块/名字` 才对用户有意义。 */
+static void report_link_log(const char *logpath, int kind) {
+    size_t len = 0;
+    char *text = read_source(logpath, &len);
+    if (!text) { fprintf(stderr, "error[B2001]: link failed\n"); return; }
+    int nsym = 0;
+    char line[2048];
+    size_t i = 0;
+    while (i < len) {
+        size_t k = 0;
+        while (i < len && text[i] != '\n' && k + 1 < sizeof line) line[k++] = text[i++];
+        while (i < len && text[i] != '\n') i++;
+        if (i < len) i++;
+        line[k] = 0;
+
+        const char *sym = strstr(line, "undefined symbol:");
+        if (!sym) sym = strstr(line, "undefined reference to");
+        if (!sym) continue;
+        sym = strchr(sym, ':');
+        if (!sym) sym = strrchr(line, '`');
+        if (!sym) continue;
+        sym++;
+        while (*sym == ' ' || *sym == '`' || *sym == '\'') sym++;
+        char name[256];
+        size_t n = 0;
+        while (sym[n] && sym[n] != '\'' && sym[n] != '`' && sym[n] != ' ' &&
+               sym[n] != '\n' && n + 1 < sizeof name) { name[n] = sym[n]; n++; }
+        name[n] = 0;
+        if (!name[0]) continue;
+        if (nsym++ >= 5) continue;
+
+        /* zx_<模块stem>_<函数名> → 模块 / 函数 */
+        const char *mod = name, *fn = "";
+        char modbuf[128] = "";
+        if (!strncmp(name, "zx_", 3)) {
+            const char *u = strchr(name + 3, '_');
+            if (u && u - (name + 3) < (int)sizeof modbuf) {
+                snprintf(modbuf, sizeof modbuf, "%.*s", (int)(u - (name + 3)), name + 3);
+                mod = modbuf;
+                fn = u + 1;
+            }
+        }
+        if (fn[0])
+            fprintf(stderr, "error[B2001]: link failed: module `%s` has no definition for `%s`\n", mod, fn);
+        else
+            fprintf(stderr, "error[B2001]: link failed: undefined symbol `%s`\n", name);
+        fprintf(stderr, "  help: declared but never implemented (extern / unimplemented intrinsic),\n"
+                        "        or the module is not reachable through any import chain\n");
+    }
+    if (nsym == 0) {
+        /* 没有符号可翻：给出第一行非空输出，但去掉工具链绝对路径 */
+        for (size_t k = 0; k < len; k++) {
+            if (text[k] == '\n' || k == 0) {
+                const char *b = text + k + (k ? 1 : 0);
+                if (*b && *b != '\n') {
+                    char one[256];
+                    size_t m = 0;
+                    while (b[m] && b[m] != '\n' && m + 1 < sizeof one) { one[m] = b[m]; m++; }
+                    one[m] = 0;
+                    fprintf(stderr, "error[B2002]: link failed: %s\n", one);
+                    break;
+                }
+            }
+        }
+        if (nsym == 0 && !getenv("ZX_VERBOSE"))
+            fprintf(stderr, "  help: ZX_VERBOSE=1 zxc build shows the full linker output\n");
+    }
+    free(text);
+    (void)kind;
+}
+
 /* ---------------- 并行 cc ---------------- */
 
 typedef struct {
     char cpath[2048];
     char cmd[4096];
+    char log[2048];        /* C 编译器的输出重定向到这里，失败后再翻译 */
+    int  unit;             /* 单元下标（-1 = zxrt 运行时支持） */
     int  rc;
 } CCJob;
 
 static CCJob g_jobs[65];   /* 单元数上限 64 + zxrt */
+
+/* ---------------- 后端诊断的翻译 ----------------
+ *
+ * C 编译器的报错默认指向缓存目录里的 .c 第几百行、或者 zig 自带的 libc
+ * 头文件——那对写 zx 的人毫无意义。这里把它的输出收进日志，逐条翻成
+ * 「模块:行:列: error[Bxxxx]: 人话」，指回 zx 源码。
+ *
+ * 为什么会有 C 编译错误：zx 的类型检查已经过了，说明是**代码生成**产出
+ * 了 C 编译器不接受的东西——本质上是我们自己的缺陷。所以码段用 B 开头
+ * （Backend），并在 help 里明说要反馈。 */
+
+/* 从 "<path>:<line>:<col>: error: msg" 拆字段。Windows 盘符里也有冒号，
+ * 所以从右往左找最后一个能匹配 ":N:M:" 的冒号。 */
+static bool split_ccdiag(const char *s, char *path, size_t pcap,
+                         int *pline, int *pcol, const char **pmsg, int *psev) {
+    /* 从左往右找第一个 "行:列" 形式：Windows 盘符的 "C:" 后面不是数字，
+     * 不会误命中；而 ":12:3:" 里的 ":3:" 也在后面的位置，所以必须取
+     * 第一次命中（取最后一次会把行号吃进路径里）。 */
+    const char *found = NULL, *found1 = NULL;
+    for (const char *p = s; (p = strchr(p, ':')) != NULL; p++) {
+        int l = 0, c = 0;
+        if (sscanf(p, ":%d:%d:", &l, &c) == 2) { found = p; break; }
+        if (!found1 && sscanf(p, ":%d:", &l) == 1) found1 = p;
+    }
+    if (!found) found = found1;
+    if (!found) return false;
+    size_t n = (size_t)(found - s);
+    if (n == 0 || n >= pcap) return false;
+    memcpy(path, s, n);
+    path[n] = 0;
+
+    int consumed = 0, l = 0, c = 0;
+    if (sscanf(found, ":%d:%d:%n", &l, &c, &consumed) != 2) {
+        if (sscanf(found, ":%d:%n", &l, &consumed) != 1) return false;
+        c = 0;
+    }
+    *pline = l;
+    *pcol  = c;
+
+    const char *r = found + consumed;
+    while (*r == ' ') r++;
+    if (!strncmp(r, "fatal error:", 12))      { *psev = 2; *pmsg = r + 12; }
+    else if (!strncmp(r, "error:", 6))        { *psev = 2; *pmsg = r + 6;  }
+    else if (!strncmp(r, "warning:", 8))      { *psev = 1; *pmsg = r + 8;  }
+    else if (!strncmp(r, "note:", 5))         { *psev = 0; *pmsg = r + 5;  }
+    else return false;
+    while (**pmsg == ' ') (*pmsg)++;
+    return true;
+}
+
+static const char *base_name(const char *p) {
+    const char *b = p;
+    for (const char *q = p; *q; q++)
+        if (*q == '/' || *q == '\\') b = q + 1;
+    return b;
+}
+
+/* 同一条诊断只报一次（一个类型错误会让十几个单元同时炸，全打出来等于刷屏）。 */
+static char g_seen[32][256];
+static int  g_nseen;
+
+static bool seen_before(const char *key) {
+    for (int i = 0; i < g_nseen; i++)
+        if (!strcmp(g_seen[i], key)) return true;
+    if (g_nseen < 32) snprintf(g_seen[g_nseen++], 256, "%s", key);
+    return false;
+}
+
+/* 翻译一份 C 编译器日志。返回报出的错误条数。 */
+static int report_cc_log(CCJob *j, int mode) {
+    size_t len = 0;
+    char *text = read_source(j->log, &len);
+    if (!text) return 0;
+
+    int nerr = 0, nwarn = 0;
+    const char *cbase = base_name(j->cpath);
+    const char *mod = (j->unit >= 0) ? sema_module_path(j->unit) : NULL;
+
+    /* mode 0 只报"能定位到 zx 源码"的（对用户最有价值），mode 1 报剩下的。
+     * 调用方先跑完所有作业的 mode 0，再跑 mode 1——否则 zxrt 之类的
+     * 无定位报错会抢先把同一个根因的消息吃进去重表。 */
+    {
+        char line[2048];
+        size_t i = 0;
+        while (i < len) {
+            size_t k = 0;
+            while (i < len && text[i] != '\n' && k + 1 < sizeof line) line[k++] = text[i++];
+            while (i < len && text[i] != '\n') i++;
+            if (i < len) i++;
+            line[k] = 0;
+
+            char path[2048];
+            int ln = 0, col = 0, sev = 0;
+            const char *msg = NULL;
+            if (!split_ccdiag(line, path, sizeof path, &ln, &col, &msg, &sev)) continue;
+            if (sev == 0) continue;                       /* note: 挂在别的诊断后面，不单报 */
+            if (sev == 1) { nwarn++; continue; }   /* 生成代码的警告是噪音 */
+
+            /* 定位：本单元的 .c → 翻回 zx 行；共享头 / libc 头 → 只能定位到单元 */
+            int zl = 0, zc = 0;
+            bool mapped = false;
+            if (!strcmp(base_name(path), cbase) && j->unit >= 0)
+                mapped = backend_map_lookup(j->unit, ln - 2, &zl, &zc);
+
+            if (mode == 0 && !mapped) continue;
+            if (mode == 1 && mapped)  continue;
+            if (seen_before(msg)) continue;
+
+            if (j->unit < 0) {
+                fprintf(stderr, "error[B1003]: the bundled C runtime (zxrt) does not compile: %s\n", msg);
+                fprintf(stderr, "  help: this is the compiler's own support code, not your zx source —\n"
+                                "        check ZX_CC / .toolchain, or rerun with ZX_VERBOSE=1\n");
+            } else if (mapped && zl > 0) {
+                fprintf(stderr, "%s:%d:%d: error[B1001]: generated C was rejected by the C compiler: %s\n",
+                        mod ? mod : cbase, zl, zc > 0 ? zc : 1, msg);
+                fprintf(stderr, "  help: zx type checking passed, so this is a code-generation bug —\n"
+                                "        rerun with ZX_VERBOSE=1 to see the raw backend output\n");
+            } else {
+                fprintf(stderr, "error[B1002]: generated C for module `%s` does not compile "
+                                "(location not mappable to zx source): %s\n",
+                        mod ? mod : cbase, msg);
+                fprintf(stderr, "  help: usually comes from the shared type header; "
+                                "rerun with ZX_VERBOSE=1 and report it\n");
+            }
+            nerr++;
+        }
+    }
+    free(text);
+    if (getenv("ZX_VERBOSE") && nwarn)
+        fprintf(stderr, "zxc: (%d backend warning(s) hidden, see %s)\n", nwarn, j->log);
+    return nerr;
+}
 
 #ifdef _WIN32
 #include <windows.h>
@@ -110,22 +320,17 @@ static int run_cc_jobs(CCJob *jobs, int njobs) {
         WaitForMultipleObjects((DWORD)nh, h, TRUE, INFINITE);
         for (int k = 0; k < nh; k++) {
             CloseHandle(h[k]);
-            if (jo[k]->rc) {
-                fprintf(stderr, "zxc: C compiler failed on %s\n", jo[k]->cpath);
-                rc = 1;
-            }
+            if (jo[k]->rc) rc = 1;
         }
     }
     return rc;
 }
 #else
 static int run_cc_jobs(CCJob *jobs, int njobs) {
+    int rc = 0;
     for (int i = 0; i < njobs; i++)
-        if (system(jobs[i].cmd) != 0) {
-            fprintf(stderr, "zxc: C compiler failed on %s\n", jobs[i].cpath);
-            return 1;
-        }
-    return 0;
+        if (system(jobs[i].cmd) != 0) { jobs[i].rc = 1; rc = 1; }
+    return rc;
 }
 #endif
 
@@ -370,16 +575,35 @@ static int build_program(Node *root, const char *out, const char *cachedir, OutK
                 return 1;
             }
             CCJob *j = &g_jobs[njobs++];
+            j->unit = pass ? pass - 1 : -1;
             snprintf(j->cpath, sizeof j->cpath, "%s", cpath);
-            snprintf(j->cmd, sizeof j->cmd, "%s %s -c -o \"%s\" \"%s\"",
-                     g_cc, g_cflags, opath, cpath);
+            snprintf(j->log, sizeof j->log, "%s_%s.log", stem, uname);
+            /* 输出重定向到日志再翻译：生成的 C 的警告（libc 原型重声明之类）
+             * 与写 zx 的人无关，默认 -w 关掉；失败时的报错从这里翻回源码位置。 */
+            const char *warnflag = getenv("ZX_VERBOSE") ? "-Wall" : "-w";
+            snprintf(j->cmd, sizeof j->cmd,
+                     "%s %s %s -fno-caret-diagnostics -fno-color-diagnostics "
+                     "-c -o \"%s\" \"%s\" > \"%s\" 2>&1",
+                     g_cc, g_cflags, warnflag, opath, cpath, j->log);
         }
 
         if (pass) buf_puts(&objs, " ");
         buf_printf(&objs, "\"%s\"", opath);
     }
 
-    if (run_cc_jobs(g_jobs, njobs) != 0) return 1;
+    if (run_cc_jobs(g_jobs, njobs) != 0) {
+        /* 把 C 编译器的抱怨翻成 zx 侧诊断（模块 + 行 + 人话），逐条报出来 */
+        int nerr = 0;
+        for (int pass = 0; pass < 2; pass++)
+            for (int i = 0; i < njobs; i++)
+                if (g_jobs[i].rc) nerr += report_cc_log(&g_jobs[i], pass);
+        if (nerr == 0)
+            fprintf(stderr, "zxc: build failed in the C backend (rerun with ZX_VERBOSE=1 for raw output)\n");
+        else
+            fprintf(stderr, "zxc: build failed: %d code-generation error(s) "
+                            "(compiler bug, not a problem in your zx source)\n", nerr);
+        return 1;
+    }
 
     /* 链接 / 归档：exe 直接链；动态库 -shared；静态库用配套的 ar 收拢 .o。
      * 最终产物的 -o 一律用绝对路径：zig cc 0.15 的 -shared 模式下
@@ -400,9 +624,17 @@ static int build_program(Node *root, const char *out, const char *cachedir, OutK
         snprintf(cmd, sizeof cmd, "%s %s %s -o \"%s\" %s",
                  g_cc, g_cflags, shared, absout, objs.data);
     }
-    if (system(cmd) != 0) {
-        fprintf(stderr, "zxc: link failed\n");
-        return 1;
+    {
+        char llog[2048];
+        snprintf(llog, sizeof llog, "%s.link.log", stem);
+        char lcmd[8192 + 256];
+        snprintf(lcmd, sizeof lcmd, "%s > \"%s\" 2>&1", cmd, llog);
+        if (system(lcmd) != 0) {
+            report_link_log(llog, kind);
+            remove(llog);
+            return 1;
+        }
+        remove(llog);
     }
     return 0;
 }

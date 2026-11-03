@@ -39,6 +39,92 @@ static void mname(Buf *b, const char *s);
 static void dotname(Buf *b, const char *s);
 static void arrowname(Buf *b, const char *s);
 
+/* ======================================================================
+ *  行映射：生成的 C 行 → zx 源码位置
+ *
+ *  产物是 C，但用户写的是 zx。C 编译器一旦报错（后端生成了它不收的代码），
+ *  默认输出指向缓存目录里的 .c 第几百行——对用户毫无意义。这里在发射每个
+ *  语句/表达式时记一笔「当前输出行 ← 当前节点」，驱动层据此把 C 的
+ *  file:line 翻回 「模块:行:列」，诊断就不再泄漏后端细节。
+ *
+ *  只记最外层节点：ex() 是递归的，同一输出行进来的第一个（也就是最外层
+ *  那个语句）才是用户能认的位置。
+ * ====================================================================== */
+
+typedef struct { int unit, buf, line, zx_line, zx_col; } BMapEnt;
+
+static BMapEnt *g_bmap;
+static int      g_nbmap, g_cbmap;
+static int      g_cur_unit;                 /* 当前正在发射的模块下标 */
+/* 三个正文缓冲各自的增量扫描状态（内容只追加，所以可以增量数换行） */
+static size_t   g_scan_pos[3];
+static int      g_scan_lines[3];
+
+static int buf_slot(Buf *b) {
+    if (b == &g_bproto)   return 0;
+    if (b == &g_bglobals) return 1;
+    if (b == &g_bbody)    return 2;
+    return -1;                              /* 头文件 / 临时缓冲：不记 */
+}
+
+/* 该缓冲"下一条将被写入的行"（1 基） */
+static int buf_line_now(int slot) {
+    Buf *b = slot == 0 ? &g_bproto : slot == 1 ? &g_bglobals : &g_bbody;
+    if (g_scan_pos[slot] > b->len) { g_scan_pos[slot] = 0; g_scan_lines[slot] = 0; }
+    int nl = g_scan_lines[slot];
+    for (size_t i = g_scan_pos[slot]; i < b->len; i++)
+        if (b->data[i] == '\n') nl++;
+    g_scan_pos[slot] = b->len;
+    g_scan_lines[slot] = nl;
+    return nl + 1;
+}
+
+static int count_lines(const char *s) {
+    if (!s) return 0;
+    int n = 0;
+    for (const char *p = s; *p; p++) if (*p == '\n') n++;
+    /* 末尾没有换行符也算一行 */
+    size_t l = strlen(s);
+    if (l > 0 && s[l - 1] != '\n') n++;
+    return n;
+}
+
+static void bmap_note(Buf *b, Node *n) {
+    if (!n || n->line <= 0) return;
+    int slot = buf_slot(b);
+    if (slot < 0) return;
+    int ln = buf_line_now(slot);
+    if (g_nbmap > 0) {
+        BMapEnt *p = &g_bmap[g_nbmap - 1];
+        if (p->unit == g_cur_unit && p->buf == slot && p->line == ln) return;  /* 同一行只留最外层 */
+    }
+    if (g_nbmap == g_cbmap) {
+        g_cbmap = g_cbmap ? g_cbmap * 2 : 512;
+        g_bmap = realloc(g_bmap, sizeof(BMapEnt) * (size_t)g_cbmap);
+        if (!g_bmap) { fprintf(stderr, "zxc: out of memory\n"); exit(1); }
+    }
+    g_bmap[g_nbmap].unit    = g_cur_unit;
+    g_bmap[g_nbmap].buf     = slot;
+    g_bmap[g_nbmap].line    = ln;
+    g_bmap[g_nbmap].zx_line = n->line;
+    g_bmap[g_nbmap].zx_col  = n->col;
+    g_nbmap++;
+}
+
+/* 驱动层查询：生成的 .c 第 cline 行（含开头两行 include）对应哪个 zx 位置。
+ * 找到就填 *zx_line/*zx_col 并返回 true；没有映射则 false（调用方按
+ * "无法定位"处理，不要编造行号）。 */
+bool backend_map_lookup(int unit, int cline, int *zx_line, int *zx_col) {
+    if (getenv("ZX_TRACE_MAP")) fprintf(stderr, "[map] unit=%d cline=%d n=%d\n", unit, cline, g_nbmap);
+    int best = -1;
+    for (int i = 0; i < g_nbmap; i++)
+        if (g_bmap[i].unit == unit && g_bmap[i].line <= cline) best = i;
+    if (best < 0 || g_bmap[best].unit != unit) return false;
+    if (zx_line) *zx_line = g_bmap[best].zx_line;
+    if (zx_col)  *zx_col  = g_bmap[best].zx_col;
+    return true;
+}
+
 static void vfmt(Buf *b, const char *fmt, va_list ap) {
     va_list ap2;
     va_copy(ap2, ap);
@@ -2799,6 +2885,7 @@ static bool ex_ct_scalar(Buf *b, Node *n) {
 
 static void ex(Buf *b, Node *n) {
     if (!n) { buf_puts(b, "0"); return; }
+    bmap_note(b, n);
 
     /* 已折叠成标量的值：直接发字面量（`info.kind == .struct_` 这种
      * 泛型里的编译期判断要靠它，否则会发成读一块全零描述符）。
@@ -3474,6 +3561,7 @@ static void gen_switch(Node *n, const char *slot, Type *slot_ty);
 
 static void gen_stmt(Node *n) {
     if (!n) return;
+    bmap_note(g_out, n);
 
     switch (n->kind) {
     case NK_DECL:
@@ -4637,6 +4725,9 @@ int backend_emit_split(Node *root, Buf *header, Buf *rt, BUnit *units, int maxun
     buf_init(&g_bbody);
     g_out = &g_bbody;
     g_ind = 0;
+    g_nbmap = 0;
+    g_cur_unit = 0;
+    for (int k = 0; k < 3; k++) { g_scan_pos[k] = 0; g_scan_lines[k] = 0; }
 
     int nmods = sema_module_count();
     if (nmods <= 0) nmods = 1;
@@ -4675,6 +4766,7 @@ int backend_emit_split(Node *root, Buf *header, Buf *rt, BUnit *units, int maxun
     /* 逐模块发射正文 */
     for (int mi = 0; mi < nmods; mi++) {
         Node *mr = MOD_ROOT(mi);
+        g_cur_unit = mi;
         char stem[64];
         unit_stem(mi, stem, sizeof stem);
         units[mi].name = malloc(strlen(stem) + 1);
@@ -4725,6 +4817,19 @@ int backend_emit_split(Node *root, Buf *header, Buf *rt, BUnit *units, int maxun
             }
         }
         emit_init_fn(mi);
+
+        /* 组装顺序 (proto, globals, body) 决定三个缓冲在单元源文件里的
+         * 起始行；映射表里记的是"缓冲内行号"，这里换算成"单元内行号"
+         * （驱动层写 .c 时再补开头两行 include）。 */
+        int nproto   = count_lines(g_bproto.data);
+        int nglobals = count_lines(g_bglobals.data);
+        int base[3];
+        base[0] = 1;
+        base[1] = base[0] + nproto + 1;
+        base[2] = base[1] + nglobals + 1;
+        for (int k = 0; k < g_nbmap; k++)
+            if (g_bmap[k].unit == mi)
+                g_bmap[k].line = base[g_bmap[k].buf] + g_bmap[k].line - 1;
 
         buf_puts(&units[mi].src, g_bproto.data ? g_bproto.data : "");
         buf_putc(&units[mi].src, '\n');
