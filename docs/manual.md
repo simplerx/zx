@@ -34,6 +34,9 @@ sh test.sh         # 回归；退出码非 0 = 有失败
 ```
 
 - 编译器本身是 C11，用 `.toolchain/zig.exe cc` 编（zig 的 cc 就是 clang + 自带 libc）。
+- 首次 clone 时 `.toolchain/` 为空（360 MB，不入库）：放一份 zig 0.17.0 到
+  `.toolchain/zig.exe`，或 `ZIG=zig sh build.sh` / `ZIG=<路径> sh build.sh`
+  指定工具链。别用 0.15——`zxls` 依赖 0.17 的 `std.Io`。
 - `.toolchain/`、`.zc-cache/`、`bin/` 不入版本控制，换机器重新 `build.sh` 即可。
 - 后端 C 编译器可用 `ZX_CC` 换成系统的 `cc`/`clang`/`gcc`（见 §2.4）。
 

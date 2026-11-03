@@ -13,6 +13,10 @@ sh test.sh           # 语法 + 语义 + 反例 + 运行 + 多文件 五组回�
 编译器本身用 C11 写，构建工具链是项目内 vendored 的 zig（`.toolchain/zig.exe`，
 它的 `cc` 就是 clang + 自带 libc）。不依赖系统 gcc/clang。
 
+首次 clone 时 `.toolchain/` 是空的（360 MB，不入库）：把 **zig 0.17.0** 解到
+`.toolchain/zig.exe`，或者用 `ZIG=zig sh build.sh` 走 PATH 上的 zig（zxls 用
+0.17 的 `std.Io`，0.15 编不过）。脚本里的三件套缺一个都不算成功。
+
 > 为什么把 zig 拷进项目：这台机器上 anyzig 的 `zig cc` 存在缓存/权限问题
 > （`CacheCheckFailed`、`unable to load tlcsprng.zig: AccessDenied`），
 > 复制工具链到本地盘并显式指定 `ZIG_LOCAL_CACHE_DIR` / `ZIG_GLOBAL_CACHE_DIR`
