@@ -1,0 +1,60 @@
+// errorset.zx —— 声明式错误集（`error{a, b}!T`）
+//
+// `!T` 是 anyerror：任何码都收，也任何码都能往外抛，编译器无从检查。
+// `error{a, b}!T` 把"这个函数只会带这些错误出来"写进返回类型，于是
+// 编译器能守两件事：
+//   ① `return error.x` / `return f()` 的码必须在声明的集合里（E0901）
+//   ② `try` 往上抛的码必须都在集合里（E0902）；anyerror 的 `!T` 抛进
+//      声明了集合的函数是 E0903——集合是承诺，不能偷偷放宽
+//
+// 钉住四件事：
+//   ① 集合内的传播一路通畅；码在编译期自动编号，从 1 起
+//   ② 宽集合函数可以返回窄集合的值（集合协变：{open} ⊆ {open,read}）
+//   ③ `error.x` 可以直接和码比较、可以直接返回；`!T` 与 `E!T` 在内存里一样
+//   ④ `?T` 的 `try` 抛保留码 error.null(65535)：`error{null}` 写不出来
+//      （null 是关键字、码是保留的），所以带集合的函数不能 `try` 可选值——
+//      这正是"空值当错误"要么全用 anyerror、要么就地处理的边界
+// expect-output
+// open=1 read=2 write=3
+// ok 101
+// err 1
+// wide ok 101
+// legacy -1
+const std = module("std");
+
+const IoError  = error{ open, read, write };
+const Wider    = error{ open, read, write, seek };
+// `null` 是关键字，且 65535 是 error.null 的保留码：集合里写不出它
+
+
+const open_file = fn (p: []const u8) IoError!i32 {
+    if (p.len == 0) { return error.open; }
+    return 100;
+};
+
+const read_it = fn (p: []const u8) IoError!i32 {
+    let fd = try open_file(p);        // {open} ⊆ {open, read, write}
+    return fd + 1;
+};
+
+// 宽集合可以承接窄集合：返回值协变
+const wide = fn (p: []const u8) Wider!i32 {
+    return try read_it(p);
+};
+
+// `!T` 是 anyerror：不检查，但仍然可用（存量代码不用改）
+const legacy = fn () !i32 {
+    return error.read;
+};
+
+const main = fn () i32 {
+    std.println("open={} read={} write={}", error.open, error.read, error.write);
+
+    if (read_it("x")) v { std.println("ok {}", v); } else e { std.println("err {}", e); }
+    if (read_it("")) v { std.println("ok {}", v); } else e { std.println("err {}", e); }
+    if (wide("x")) v { std.println("wide ok {}", v); } else e { std.println("wide err {}", e); }
+
+    let r = legacy() orelse -1;
+    std.println("legacy {}", r);
+    return 0;
+};

@@ -245,9 +245,22 @@ static Node *parse_type_primary(P *p) {
         return base;
     }
 
-    case TOK_KW_ERROR:
+    case TOK_KW_ERROR: {
         advance(p);
+        if (at(p, TOK_LBRACE)) {                 /* error{a, b}：错误集类型 */
+            advance(p);
+            Node *n = node_new(NK_ERR_SET, t->line, t->col);
+            while (!at(p, TOK_RBRACE) && !at(p, TOK_EOF_)) {
+                Node *m = node_new(NK_PAIR, cur(p)->line, cur(p)->col);
+                m->name = take_ident(p);
+                push(n, m);
+                if (!accept(p, TOK_COMMA)) break;
+            }
+            expect(p, TOK_RBRACE);
+            return n;
+        }
         return type_ident("error", t->line, t->col);
+    }
 
     case TOK_KW_TYPE:
         advance(p);
@@ -417,7 +430,24 @@ static Node *parse_type_primary(P *p) {
     }
 }
 
+static Node *parse_type_prefix(P *p);
+
+/* `E!T`：先把前缀类型读完，再看后面有没有 `!`——有就说明左边那个是
+ * 错误集（`error{open}`、或它的别名），右边是载荷类型。`!T`（没有集合）
+ * 仍然走前缀分支，两条写法共用 NK_ERR_TYPE，区别只看 b 有没有值。 */
 static Node *parse_type(P *p) {
+    Node *t = parse_type_prefix(p);
+    if (at(p, TOK_BANG)) {
+        Token *b = advance(p);
+        Node *n = node_new(NK_ERR_TYPE, b->line, b->col);
+        n->a = t;
+        n->b = parse_type(p);
+        return n;
+    }
+    return t;
+}
+
+static Node *parse_type_prefix(P *p) {
     Token *t = cur(p);
 
     switch (t->kind) {
@@ -1651,6 +1681,7 @@ static const char *nk_name(NodeKind k) {
     case NK_ENUM_TYPE: return "enum";
     case NK_OPT_TYPE: return "opt";
     case NK_ERR_TYPE: return "err";
+    case NK_ERR_SET:  return "errset";
     case NK_ROOT: return "root";
     }
     return "?";

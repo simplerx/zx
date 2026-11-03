@@ -689,6 +689,33 @@ const main = fn () !void {
 | ---------------------------------------------- | - | --- |
 | （0 成功）；`?T` → 有值 0 空 1。错误码直接对得上 shell 的 \`&& / |   | \`。 |
 
+### 8.3 错误集：把"只会出这些错"写进类型
+
+`!T` 是 anyerror——任何码都收，编译器帮不上忙。给返回类型加一个错误集，
+承诺就变成了检查：
+
+```zx
+const IoError = error{ open, read, write };   // 集合；码按名字自动编号
+
+const open_file = fn (p: []const u8) IoError!i32 {
+    if (p.len == 0) { return error.open; }    // error.open 就是那个码
+    return 100;
+};
+
+const read_it = fn (p: []const u8) IoError!i32 {
+    let fd = try open_file(p);                // {open} ⊆ IoError ✓
+    return fd + 1;
+};
+```
+
+- **集合协变**：`{open} ⊆ {open, read}`，窄集合的值可以交给宽集合；反过来不行。
+- 编译器守三件事：`return` 的码（E0901）、`try` 可能抛的码（E0902）、
+  anyerror 抛进声明了集合的函数（E0903，必须显式放宽返回类型）。
+- **不改变布局**：`E!T` 和 `!T` 在内存里一模一样，只多一份编译期信息；
+  所以存量代码不用改，`(error)Err.x` 旧写法照旧可用。
+- `?T` 的 `try` 抛保留码 `error.null`（65535），而 `error{null}` 写不出来
+  ——所以带集合的函数不能 `try` 可选值，要么就地 `if` / `orelse` 处理。
+
 ---
 
 ## 9. 函数

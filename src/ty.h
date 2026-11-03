@@ -38,6 +38,7 @@ typedef enum {
     TY_ENUM,               /* 就是整数，elem 是底层类型 */
     TY_OPT,                /* ?T  = {payload T @0, tag bool @sizeof(T)} */
     TY_ERR,                /* !T  = {payload T @0, tag error @sizeof(T)} */
+    TY_ERRORSET,           /* error{a, b}：编译期类型，运行时就是 error(u16) */
     TY_FN,                 /* 8 字节代码指针 */
 } TyKind;
 
@@ -91,6 +92,8 @@ struct Type {
 
     Node       *decl;       /* struct/union/enum 的名义身份 */
     const char *name;       /* 显示名，可空 */
+    void       *eset;       /* TY_ERRORSET 的错误集（ErrSet*）；TY_ERR 上表示
+                             * "这个 !T 只会带这些错误码"（NULL = anyerror） */
 
     int         size;       /* 记忆化，-1 = 未算 */
     int         align;
@@ -125,6 +128,25 @@ Type *ty_err(Type *elem);
 Type *ty_fn(Type **params, int n, Type *ret);
 Type *ty_generic_fn(void);       /* 泛型函数还没单态化时的占位类型 */
 Type *ty_agg(TyKind kind, Node *decl, const char *name);
+
+/* ---------- 错误集（error{a, b}） ---------- */
+/* 错误码是 u16；名字首次出现时分配码（1..65534，65535 留给 error.null）。
+ * 集合在编译期才有意义，运行时就是普通 error 值——TY_ERR 上挂不挂集合
+ * 都不改变布局，只改变检查强度。 */
+uint16_t    ty_err_code(const char *name);          /* 名字 → 码（首次出现即分配） */
+const char *ty_err_name(uint16_t code);             /* 码 → 名字；未知返回 NULL */
+void       *ty_errset_of(const char **names, int n);/* 名字集合 → interned 集合 */
+void       *ty_errset_one(const char *name);        /* 单元素集合 */
+bool        ty_errset_has(const void *set, uint16_t code);
+bool        ty_errset_subset(const void *a, const void *b);   /* a ⊆ b? */
+void       *ty_errset_union(const void *a, const void *b);     /* a ∪ b */
+int         ty_errset_size(const void *set);
+const char *ty_errset_name_at(const void *set, int i);
+uint16_t    ty_errset_code_at(const void *set, int i);
+const char *ty_errset_str(const void *set);         /* "error{a, b}"（interned） */
+Type       *ty_errset_type(void *set);              /* TY_ERRORSET 的类型对象 */
+Type       *ty_err_set(Type *elem, void *set);      /* 带错误集的 !T */
+void       *ty_type_errset(Type *t);                /* TY_ERRORSET → ErrSet*，否则 NULL */
 
 /* ---------- 查询 ---------- */
 bool  ty_eq(Type *a, Type *b);          /* 结构判等（指针相等或同构） */

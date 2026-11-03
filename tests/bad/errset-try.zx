@@ -1,0 +1,15 @@
+// `try` 会把被调函数的错误集原样往上传：它必须落在当前函数的集合里。
+// expect: `try` may propagate `seek`, which is not in the declared error set of this function (error{open})
+// expect-code: E0902
+// expect-count: 1
+const Narrow = error{ open };
+
+const wider = fn () error{ open, seek }!i32 {
+    return error.seek;
+};
+
+const f = fn () Narrow!i32 {
+    return try wider();
+};
+
+const main = fn () i32 { return 0; };

@@ -34,8 +34,14 @@ static bool same(const Type *a, const Type *b) {
         return a->is_const == b->is_const && same(a->elem, b->elem);
 
     case TY_OPT:
-    case TY_ERR:
         return same(a->elem, b->elem);
+    case TY_ERR:
+        /* 集合参与 intern 身份（`!i32` 与 `error{open}!i32` 是两个类型对象，
+         * 这样 ty_str 才写得出声明的集合），但 ty_eq 会忽略它——运行时
+         * 表示完全一样，赋值/传参不该因为集合宽窄而失败。 */
+        return same(a->elem, b->elem) && a->eset == b->eset;
+    case TY_ERRORSET:
+        return a->eset == b->eset;
 
     case TY_TUPLE:
         if (a->nfields != b->nfields) return false;
@@ -121,6 +127,171 @@ Type *ty_err(Type *elem) {
     return intern(t);
 }
 
+/* 带错误集的 !T：`error{open}!i32`。布局与 !T 完全一致，只是多带了
+ * "允许哪些码"这份编译期信息。 */
+Type *ty_err_set(Type *elem, void *set) {
+    if (!set) return ty_err(elem);
+    Type *t = ty_new(TY_ERR);
+    t->elem = elem;
+    t->eset = set;
+    return intern(t);
+}
+
+/* ---------------- 错误集 ---------------- */
+
+/* 名字 → 码的登记表：码就是 u16 值，首次出现分配，进程内稳定。
+ * 65535 保留给 error.null（§5），命名码从 1 起到 65534。 */
+#define ZX_ERRCODE_MAX 1024
+static const char *g_errnames[ZX_ERRCODE_MAX + 1];   /* 下标 = 码 */
+static int g_nerrcodes;
+
+uint16_t ty_err_code(const char *name) {
+    if (!name || !*name) return 0;
+    for (int i = 0; i < g_nerrcodes; i++)
+        if (!strcmp(g_errnames[i], name)) return (uint16_t)(i + 1);
+    if (g_nerrcodes >= ZX_ERRCODE_MAX)
+        return 65534;                  /* 表满：共用一个码，别崩 */
+    g_errnames[g_nerrcodes] = strdup(name);
+    return (uint16_t)(++g_nerrcodes);
+}
+
+const char *ty_err_name(uint16_t code) {
+    if (code == 0 || code > g_nerrcodes) return NULL;
+    return g_errnames[code - 1];
+}
+
+/* 集合本体：错误码升序数组 + 同名数组。集合都很小，线性查找足够，
+ * 关键是可以按内容 intern —— 于是"两个集合相等"就是指针相等。 */
+typedef struct ErrSet {
+    int       n;
+    uint16_t  codes[64];
+    const char *names[64];
+} ErrSet;
+
+static ErrSet *g_esets;
+static int     g_nesets, g_cesets;
+
+static ErrSet *eset_intern(ErrSet *s) {
+    for (int i = 0; i < g_nesets; i++) {
+        ErrSet *o = &g_esets[i];
+        if (o->n != s->n) continue;
+        bool eq = true;
+        for (int k = 0; k < s->n; k++)
+            if (o->codes[k] != s->codes[k]) { eq = false; break; }
+        if (eq) return o;
+    }
+    if (g_nesets == g_cesets) {
+        g_cesets = g_cesets ? g_cesets * 2 : 32;
+        g_esets = realloc(g_esets, sizeof(ErrSet) * (size_t)g_cesets);
+        if (!g_esets) { fprintf(stderr, "zxc: out of memory\n"); exit(1); }
+    }
+    g_esets[g_nesets] = *s;
+    return &g_esets[g_nesets++];
+}
+
+void *ty_errset_of(const char **names, int n) {
+    ErrSet s;
+    memset(&s, 0, sizeof s);
+    for (int i = 0; i < n && s.n < 64; i++) {
+        if (!names[i]) continue;
+        uint16_t c = ty_err_code(names[i]);
+        if (c == 0) continue;
+        /* 插入排序去重：集合小，写起来最省事 */
+        int k = s.n;
+        while (k > 0 && s.codes[k - 1] > c) {
+            s.codes[k] = s.codes[k - 1];
+            s.names[k] = s.names[k - 1];
+            k--;
+        }
+        if (k > 0 && s.codes[k - 1] == c) continue;      /* 重复成员 */
+        s.codes[k] = c;
+        s.names[k] = ty_err_name(c);
+        s.n++;
+    }
+    return eset_intern(&s);
+}
+
+void *ty_errset_one(const char *name) { return ty_errset_of(&name, 1); }
+
+int ty_errset_size(const void *set) {
+    return set ? ((const ErrSet *)set)->n : 0;
+}
+
+const char *ty_errset_name_at(const void *set, int i) {
+    if (!set || i < 0 || i >= ((const ErrSet *)set)->n) return NULL;
+    return ((const ErrSet *)set)->names[i];
+}
+
+uint16_t ty_errset_code_at(const void *set, int i) {
+    if (!set || i < 0 || i >= ((const ErrSet *)set)->n) return 0;
+    return ((const ErrSet *)set)->codes[i];
+}
+
+bool ty_errset_has(const void *set, uint16_t code) {
+    if (!set) return true;                  /* 未声明集合 = 什么都收 */
+    const ErrSet *s = set;
+    for (int i = 0; i < s->n; i++) if (s->codes[i] == code) return true;
+    return false;
+}
+
+bool ty_errset_subset(const void *a, const void *b) {
+    if (!a) return b == NULL;               /* a 是 anyerror：只有 b 也是 anyerror 才成立 */
+    if (!b) return true;
+    const ErrSet *x = a, *y = b;
+    for (int i = 0; i < x->n; i++)
+        if (!ty_errset_has(y, x->codes[i])) return false;
+    return true;
+}
+
+void *ty_errset_union(const void *a, const void *b) {
+    ErrSet r;
+    memset(&r, 0, sizeof r);
+    for (int side = 0; side < 2; side++) {
+        const ErrSet *x = side == 0 ? (const ErrSet *)a : (const ErrSet *)b;
+        if (!x) continue;
+        for (int i = 0; i < x->n && r.n < 64; i++) {
+            if (ty_errset_has(&r, x->codes[i])) continue;   /* 已收 */
+            r.codes[r.n] = x->codes[i];
+            r.names[r.n] = x->names[i];
+            r.n++;
+        }
+    }
+    /* 排序，保证 intern 判等按内容生效 */
+    for (int i = 1; i < r.n; i++) {
+        uint16_t c = r.codes[i];
+        const char *nm = r.names[i];
+        int k = i - 1;
+        while (k >= 0 && r.codes[k] > c) { r.codes[k + 1] = r.codes[k]; r.names[k + 1] = r.names[k]; k--; }
+        r.codes[k + 1] = c;
+        r.names[k + 1] = nm;
+    }
+    return eset_intern(&r);
+}
+
+const char *ty_errset_str(const void *set) {
+    static char bufs[8][256];
+    static int rot;
+    char *b = bufs[rot++ & 7];
+    if (!set) { snprintf(b, 256, "error{*}"); return b; }
+    const ErrSet *s = set;
+    size_t k = 0;
+    k += (size_t)snprintf(b + k, 256 - k, "error{");
+    for (int i = 0; i < s->n && k < 240; i++)
+        k += (size_t)snprintf(b + k, 256 - k, "%s%s", i ? ", " : "", s->names[i]);
+    snprintf(b + k, 256 - k, "}");
+    return b;
+}
+
+Type *ty_errset_type(void *set) {
+    Type *t = ty_new(TY_ERRORSET);
+    t->eset = set;
+    return intern(t);
+}
+
+void *ty_type_errset(Type *t) {
+    return (t && t->kind == TY_ERRORSET) ? t->eset : NULL;
+}
+
 Type *ty_fn(Type **params, int n, Type *ret) {
     Type *t = ty_new(TY_FN);
     t->nparams = n;
@@ -177,6 +348,9 @@ Type *ty_f64(void)           { return ty_float(64); }
 bool ty_eq(Type *a, Type *b) {
     if (!a || !b) return false;
     if (a->kind == TY_INVALID || b->kind == TY_INVALID) return true;
+    /* 错误集合是检查用的元数据，不是表示的一部分：`!i32` 与
+     * `error{open}!i32` 在内存里一模一样，赋值/传参按后者相等处理。 */
+    if (a->kind == TY_ERR && b->kind == TY_ERR) return ty_eq(a->elem, b->elem);
     return a == b || same(a, b);
 }
 
@@ -255,6 +429,7 @@ int ty_align(Type *t) {
     int a = 1;
     switch (t->kind) {
     case TY_INVALID: case TY_VOID: case TY_NORETURN: case TY_TYPE:
+    case TY_ERRORSET:
     case TY_COMPTIME_INT: case TY_COMPTIME_FLOAT: case TY_NULL: case TY_UNDEF:
         a = 1; break;
     case TY_BOOL:  a = 1; break;
@@ -314,6 +489,7 @@ int ty_size(Type *t) {
     int s = 0;
     switch (t->kind) {
     case TY_INVALID: case TY_VOID: case TY_NORETURN: case TY_TYPE:
+    case TY_ERRORSET:                  /* 编译期类型：没有运行时大小 */
         s = 0; break;
     case TY_COMPTIME_INT: case TY_COMPTIME_FLOAT:
         s = -1; break;                 /* 还没有运行时宽度 */
@@ -444,7 +620,14 @@ static void ty_print_into(Buf *b, Type *t, int depth) {
         return;
 
     case TY_OPT: buf_putc(b, '?'); ty_print_into(b, t->elem, depth + 1); return;
-    case TY_ERR: buf_putc(b, '!'); ty_print_into(b, t->elem, depth + 1); return;
+    case TY_ERRORSET:
+        buf_puts(b, ty_errset_str(t->eset));
+        return;
+    case TY_ERR:
+        if (t->eset) { buf_puts(b, ty_errset_str(t->eset)); buf_putc(b, '!'); }
+        else buf_putc(b, '!');
+        ty_print_into(b, t->elem, depth + 1);
+        return;
 
     case TY_FN:
         buf_puts(b, "fn(");
@@ -567,6 +750,7 @@ const char *ty_kind_name(TyKind k) {
     case TY_NORETURN: return "noreturn";
     case TY_BOOL: return "bool";
     case TY_ERROR: return "error";
+    case TY_ERRORSET: return "error set";
     case TY_TYPE: return "type";
     case TY_INT: return "int";
     case TY_FLOAT: return "float";

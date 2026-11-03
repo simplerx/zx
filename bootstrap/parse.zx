@@ -124,6 +124,7 @@ pub const NK = enum {
     builtin, module_, decl, fn_, param,
     t_ident, ptr, sliceT, tupleT, struct_, union_, enum_, opt, err,
     root,
+    err_set,          // error{a, b} —— 追加在末尾，老编号不漂移
 };
 
 pub const Node = struct {
@@ -203,6 +204,7 @@ const nk_name = fn (k: NK) []const u8 {
         .opt: "opt",
         .err: "err",
         .root: "root",
+        .err_set: "errset",
     };
 };
 
@@ -720,6 +722,22 @@ pub const Parser = struct {
 
         if (t.kind == lex.Kind.kw_error) {
             self.advance();
+            if (self.at(lex.Kind.lbrace)) {
+                // error{a, b}：错误集类型
+                self.advance();
+                let n = self.new_at(NK.err_set, t);
+                var go = true;
+                while (go) {
+                    if (self.at(lex.Kind.rbrace)) { go = false; } else {
+                        let m = self.new(NK.pair);
+                        m.name = try self.take_ident();
+                        self.push_item(n, m);
+                        if (!self.accept(lex.Kind.comma)) { go = false; }
+                    }
+                }
+                try self.expect(lex.Kind.rbrace);
+                return n;
+            }
             return self.type_ident("error", t);
         }
 
@@ -906,7 +924,8 @@ pub const Parser = struct {
         return (error)Fail.f;
     };
 
-    const parse_type = fn (self: *Parser) !*Node {
+    // 前缀部分：*T / []T / ?T / !T / fn(…) / 各种聚合体
+    const parse_type_prefix = fn (self: *Parser) !*Node {
         let t = self.cur();
 
         if (t.kind == lex.Kind.star) {
@@ -981,6 +1000,19 @@ pub const Parser = struct {
         }
 
         return self.parse_type_primary();
+    };
+
+    // E!T：前缀读完再看有没有 `!`——左边是错误集，右边是载荷。
+    // `!T`（无集合）走前缀分支，两者共用 NK.err，区别只看 b 有没有值。
+    const parse_type = fn (self: *Parser) !*Node {
+        let t = try self.parse_type_prefix();
+        if (!self.at(lex.Kind.bang)) { return t; }
+        let bt = self.cur();
+        self.advance();
+        let n = self.new_at(NK.err, bt);
+        n.a = t;
+        n.b = try self.parse_type();
+        return n;
     };
 
     // ---- 表达式 ----

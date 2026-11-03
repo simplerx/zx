@@ -1,0 +1,11 @@
+// 返回类型声明了错误集，函数体里返回集合外的码——承诺兑现不了。
+// expect: this returns `seek`, which is not in the declared error set error{open}
+// expect-code: E0901
+// expect-count: 1
+const Narrow = error{ open };
+
+const f = fn () Narrow!i32 {
+    return error.seek;
+};
+
+const main = fn () i32 { return 0; };

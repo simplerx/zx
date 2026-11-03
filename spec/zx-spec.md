@@ -947,6 +947,59 @@ const main = fn () !void {
 
 ---
 
+### 5.2 错误集：`error{a, b}!T`
+
+`!T` 是 **anyerror**：任何错误码都能出来，编译器无从检查。把"这个函数
+只会带这些错误出来"写进返回类型，编译器才能守承诺：
+
+```
+E!T            // E 是错误集：只有 E 里的码能从这条返回路径出去
+error{a, b}    // 集合字面量；也可以起名：const IoError = error{open, read};
+```
+
+- **码在编译期按名字自动编号**，从 1 起、进程内稳定；`65535` 永远是
+  `error.null`，命名码不许占用（E0508 不变）。`error.open` 是一个值，
+  类型就是 `error`（u16）——集合只是编译期信息，**不改布局**。
+- **`!T` 与 `E!T` 在内存里完全一样**（§5 的 `!T` 布局）。赋值、传参、
+  `orelse`、`if` 捕获都按后者一视同仁；差别只在**能不能通过检查**。
+- **集合协变**：`{open} ⊆ {open, read}`，所以窄集合的值可以交给宽集合。
+  反过来不行——放宽承诺必须显式改返回类型。
+
+三处检查：
+
+| 位置 | 规则 | 码 |
+|---|---|---|
+| `return error.x` / `return f()` | 值的集合 ⊆ 声明的集合 | **E0901** |
+| `try e`（`e: E!T`） | E ⊆ 当前函数声明的集合 | **E0902** |
+| `try e`（`e: !T` 或 `?T`） | anyerror 抛进声明了集合的函数 | **E0903** |
+
+`?T` 的 `try` 抛保留码 `error.null`（65535），而 `error{null}` 写不出来
+（`null` 是关键字、65535 保留）——所以**带集合的函数不能 `try` 可选值**。
+要"没有"当错误用 anyerror（`!T`），要么就地 `if` / `orelse` 处理掉。
+
+```zx
+const IoError = error{ open, read, write };
+
+const open_file = fn (p: []const u8) IoError!i32 {
+    if (p.len == 0) { return error.open; }    // ✓ open ∈ IoError
+    return 100;
+};
+
+const read_it = fn (p: []const u8) IoError!i32 {
+    let fd = try open_file(p);                // ✓ {open} ⊆ IoError
+    return fd + 1;
+};
+
+const leak = fn () IoError!i32 {
+    return error.seek;                        // ✗ E0901：seek ∉ IoError
+};
+```
+
+存量代码不必改：`!T` 仍然是 anyerror，`(error)Err.x` 那种旧写法照旧能用
+（看得出名字的地方才检查，看不出就放行）。
+
+---
+
 ## 6. 变量：三种绑定
 
 | 形式 | 求值时机 | 存储 | 可写 | 取地址得到 |
@@ -2293,7 +2346,9 @@ file.zx:12:9: error[E0403]: cannot assign to 'n': it is not a `var`
 | E06xx | 模块 | E0601 找不到模块 / 循环依赖 / 私有成员 |
 | E07xx | 泛型 | E0701 泛型参数与单态化 |
 | E08xx | 内建与格式串 | E0802 格式动词与实参不匹配 |
-| E09xx | 驱动/内部 | E0900 兜底 |
+| E09xx | 错误集 | E0901 返回的错误码不在声明的集合里；E0902 `try` 可能抛的码不在集合里；E0903 anyerror 抛进声明了集合的函数。E0900 是兜底 |
+| B1xxx | 后端·代码生成 | 生成的 C 被 C 编译器拒绝（**编译器缺陷**）：B1001 能定位到 zx 源码；B1002 只能定位到模块（多半来自共享类型头）；B1003 编译器自带的运行时支持代码 |
+| B2xxx | 后端·链接 | B2001 符号没有定义（`模块/名字` 已还原）；B2002 其他链接错误 |
 
 码段留了余量：新增诊断在段内递增，**已发布的码不改含义**。
 

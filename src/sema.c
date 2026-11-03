@@ -1250,7 +1250,32 @@ static Type *resolve_type(Node *n) {
         return ty_opt(e);
     }
 
+    case NK_ERR_SET: {
+        const char *names[64];
+        int k = 0;
+        for (int i = 0; i < n->nitems && k < 64; i++) {
+            Node *m = n->items[i];
+            if (!m || !m->name) continue;
+            names[k++] = m->name;
+        }
+        return ty_errset_type(ty_errset_of(names, k));
+    }
+
     case NK_ERR_TYPE: {
+        if (n->b) {                       /* E!T：左边是错误集，右边是载荷 */
+            Type *st = resolve_type(n->a);
+            Type *e  = resolve_type(n->b);
+            if (e->kind == TY_OPT || e->kind == TY_ERR) {
+                BAD(n, "?T / !T cannot nest (got %s!%s)", ty_str(st), ty_str(e));
+                return ty_invalid();
+            }
+            if (st->kind != TY_ERRORSET) {
+                BAD(n->a, "the left side of `!` must be an error set "
+                          "(e.g. `error{open, read}!i32`), found `%s`", ty_str(st));
+                return ty_invalid();
+            }
+            return ty_err_set(e, ty_type_errset(st));
+        }
         Type *e = resolve_type(n->a);
         if (e->kind == TY_OPT || e->kind == TY_ERR) {
             BAD(n, "?T / !T cannot nest (got %s)", ty_str(e));
@@ -2021,6 +2046,40 @@ static Type *check_cast(Node *n) {
 }
 
 /* 成员访问：base.name / base.N */
+/* 当前函数声明的错误集（NULL = 返回类型是 `!T`，即 anyerror，不检查）。 */
+static void *cur_errset(void) {
+    return (g_ret && g_ret->kind == TY_ERR) ? g_ret->eset : NULL;
+}
+
+/* 表达式可能抛出的错误集：
+ *   - 类型是 `E!T` → E
+ *   - `error.name` 字面量 → {name}
+ *   - 其余（`!T` anyerror、`(error)Enum.x` 旧写法）→ NULL（未知，不检查） */
+static void *expr_errset(Node *e, Type *t) {
+    if (t && t->kind == TY_ERR) return t->eset;
+    if (e && e->kind == NK_FIELD && e->name && e->a &&
+        e->a->kind == NK_TYPE_IDENT && e->a->name && !strcmp(e->a->name, "error"))
+        return ty_errset_one(e->name);
+    return NULL;
+}
+
+/* 把集合 A 里不在 B 的名字拼成 "read, write"（诊断用；静态轮转缓冲）。 */
+static const char *errset_missing(const void *a, const void *b) {
+    static char bufs[4][256];
+    static int rot;
+    char *out = bufs[rot++ & 3];
+    size_t k = 0;
+    out[0] = 0;
+    for (int i = 0; i < ty_errset_size(a); i++) {
+        uint16_t c = ty_errset_code_at(a, i);
+        if (ty_errset_has(b, c)) continue;
+        const char *nm = ty_errset_name_at(a, i);
+        k += (size_t)snprintf(out + k, 256 - k, "%s%s", k ? ", " : "", nm ? nm : "?");
+        if (k > 200) break;
+    }
+    return out;
+}
+
 static Type *check_field(Node *n) {
     Node *base = n->a;
     /* 投机类型解析会把 `@typeName(f.ty)` 的实参吃成 TYPE_IDENT(f).ty；
@@ -2038,6 +2097,13 @@ static Type *check_field(Node *n) {
     /* 类型值上的成员：Color.red / Counter.n / ShapeTag.circle */
     if (bt && bt->kind == TY_TYPE) {
         Type *tv = base->type_val ? base->type_val : ty_invalid();
+        /* error.open：错误码字面量。类型是 error（运行时就是一个 u16），
+         * 值在编译期折成常量，集合信息（单元素）留在节点上供 try/return 检查。 */
+        if (tv->kind == TY_ERROR && n->name) {
+            uint16_t code = ty_err_code(n->name);
+            n->ct = val_int(ty_error(), code, false);
+            return type_of(n, ty_error());
+        }
         if (n->name) {
             Field *f = ty_field(tv, n->name);
             if (!f) f = ty_static_member(tv, n->name);   /* 枚举体的 const 成员 */
@@ -2941,6 +3007,31 @@ static Type *check_expr_raw(Node *n, Type *expect) {
             return BAD(n, "`try` inside a function that cannot return an error — "
                           "declare it `!%s` or handle the error here (`if` capture / `orelse`)",
                        ty_str(t->elem));
+        /* 声明了错误集就得守住：往上抛的码必须都在集合里（§5.2）。 */
+        void *want = cur_errset();
+        if (want) {
+            if (t->kind == TY_OPT) {
+                if (!ty_errset_has(want, 65535))
+                    return BAD_CODE("E0902", n,
+                        "`try` on `?T` throws the reserved code `error.null`, "
+                        "which is not in this function's error set %s",
+                        ty_errset_str(want));
+            } else if (!t->eset) {
+                return BAD_CODE("E0903", n,
+                    "this `try` can propagate any error (`!%s`), but the function declares %s — "
+                    "widen the return type to `!%s`, or handle the error here",
+                    ty_str(t->elem), ty_errset_str(want), ty_str(t->elem));
+            } else if (!ty_errset_subset(t->eset, want)) {
+                diag_help("add `%s` to the return type: `%s!%s`",
+                          errset_missing(t->eset, want),
+                          ty_errset_str(ty_errset_union(want, t->eset)),
+                          ty_str(t->elem));
+                return BAD_CODE("E0902", n,
+                    "`try` may propagate `%s`, which is not in the declared error set of this "
+                    "function (%s)",
+                    errset_missing(t->eset, want), ty_errset_str(want));
+            }
+        }
         return type_of(n, t->elem);
     }
 
@@ -3043,7 +3134,8 @@ static Type *check_expr_raw(Node *n, Type *expect) {
     case NK_UNION_TYPE:
     case NK_ENUM_TYPE:
     case NK_OPT_TYPE:
-    case NK_ERR_TYPE: {
+    case NK_ERR_TYPE:
+    case NK_ERR_SET: {
         Type *t = resolve_type(n);
         n->type_val = t;
         return type_of(n, ty_type());
@@ -3798,6 +3890,23 @@ static void check_stmt(Node *n) {
         }
         Type *got = check_expr(n->a, want);
         coerce_node(n->a, got, want, "return value");
+        /* 返回类型写了错误集（`E!T`）时，返回的错误码必须落在集合里。
+         * 只看得出集合的情况：`return error.x`（单元素）、`return f()`（f 的集合）。
+         * `(error)Enum.x` 这种旧写法看不出名字，跳过——那是 v0.2x 的码，
+         * 由任何集合都收（不然升级会挡住存量代码）。 */
+        if (want->kind == TY_ERR && want->eset) {
+            void *gs = expr_errset(n->a, got);
+            if (gs && !ty_errset_subset(gs, want->eset)) {
+                diag_help("add `%s` to the return type: `%s!%s`",
+                          errset_missing(gs, want->eset),
+                          ty_errset_str(ty_errset_union(want->eset, gs)),
+                          ty_str(want->elem));
+                diag_code_at("E0901", n->a->line, n->a->col,
+                    "this returns `%s`, which is not in the declared error set %s",
+                    errset_missing(gs, want->eset), ty_errset_str(want->eset));
+                return;
+            }
+        }
         /* 逃逸检查（decisions §44）：不许把指向当前栈帧的指针带出去 */
         if ((want->kind == TY_PTR || want->kind == TY_SLICE) && expr_frame(n->a))
             err_at(n->a->line, n->a->col,
@@ -5334,7 +5443,7 @@ static Value *ct_eval(Node *n) {
     /* 类型表达式：struct{…} / *[N]T / Ident —— 类型是值 */
     case NK_TYPE_IDENT: case NK_PTR_TYPE: case NK_SLICE_TYPE:
     case NK_TUPLE_TYPE: case NK_STRUCT_TYPE: case NK_UNION_TYPE:
-    case NK_ENUM_TYPE:  case NK_OPT_TYPE:   case NK_ERR_TYPE:
+    case NK_ENUM_TYPE:  case NK_OPT_TYPE:   case NK_ERR_TYPE:  case NK_ERR_SET:
         if (n->type_val) v = val_type(n->type_val);
         break;
 

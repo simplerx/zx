@@ -1,0 +1,13 @@
+// `!T` 是 anyerror：抛进声明了具体集合的函数，等于偷偷放宽承诺。
+// expect: this `try` can propagate any error (`!i32`), but the function declares error{open}
+// expect-code: E0903
+// expect-count: 1
+const Narrow = error{ open };
+
+const anyerr = fn () !i32 { return error.open; };
+
+const f = fn () Narrow!i32 {
+    return try anyerr();
+};
+
+const main = fn () i32 { return 0; };

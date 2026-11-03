@@ -49,8 +49,11 @@ typedef enum {
     NK_UNION_TYPE,      /* tagged if any member is tuple-typed */
     NK_ENUM_TYPE,       /* a = backing type */
     NK_OPT_TYPE,        /* ?elem */
-    NK_ERR_TYPE,        /* !elem */
+    NK_ERR_TYPE,        /* !elem；带集合时 a=错误集, b=elem（`error{a}!elem`） */
     NK_ROOT,            /* file */
+    /* 追加在末尾：kind 编号在自举前端（bootstrap/parse.zx 的 NK）里是
+     * 同序镜像，插在中间会让所有旧编号漂移。 */
+    NK_ERR_SET,         /* error{a, b}：items = NK_PAIR（name 即成员名） */
 } NodeKind;
 
 struct Node;
