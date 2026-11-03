@@ -14,7 +14,12 @@
  *   zxc build           构建：--exe(默认)/--lib × --static(默认)/--shared、--release
  *                       中间文件进 .zxc-cache/，最终产物进 out/
  *   zxc run [args]      build 后直接运行 out/<产物>.exe（-- 之后的参数传给程序）
+ *   zxc test [过滤]     运行 *_test.zx 里的 test_* 用例（每用例一个进程）
  *   zxc check / fmt     检查 / 格式化
+ *
+ * zx.json：工程清单（init 生成）。name/version/main/out 之外，
+ * "deps": ["vendor2", "../shared"] 是模块搜索目录——相对导入打不开时
+ * 依次回退（工程根的 vendor/ 存在即自动加入）。
  *
  * 后端的 C 编译器由 ZX_CC 环境变量指定，缺省 .toolchain/zig.exe cc。
  * -o 时每个模块一个 .c / .o，运行时函数体单独一个 _zxrt.c / .o：
@@ -45,6 +50,7 @@ typedef struct {
 void  backend_emit(Node *root, Buf *out);
 int   backend_emit_split(Node *root, Buf *header, Buf *rt, BUnit *units, int maxunits);
 void  sema_check(Node *root);
+void  sema_set_search_paths(const char *const *dirs);   /* deps 模块搜索路径 */
 
 static const char *g_cc;
 static const char *g_cflags;
@@ -203,10 +209,10 @@ typedef enum {
 } OutKind;
 
 static bool fexists(const char *p) {
-    FILE *f = fopen(p, "rb");
-    if (!f) return false;
-    fclose(f);
-    return true;
+    /* stat 而不是 fopen：Windows 上 fopen 打不开目录，vendor/ 这类
+     * 目录存在性探测会被误判成不存在 */
+    struct stat st;
+    return stat(p, &st) == 0;
 }
 
 /* 取路径最后一段（"out/app.exe" → "app.exe"） */
@@ -427,7 +433,9 @@ static void usage(void) {
         "       zxc build [--exe|--lib] [--static|--shared] [--release]\n"
         "                           按 zx.json 构建；中间文件在 .zxc-cache/，产物在 out/\n"
         "       zxc run [--release] [-- args...]\n"
-        "                           build 后直接运行 out/<产物>.exe\n");
+        "                           build 后直接运行 out/<产物>.exe\n"
+        "       zxc test [名字过滤] [--release]\n"
+        "                           运行 *_test.zx 里的 pub test_* 用例\n");
 }
 
 /* 默认工具链（`.toolchain/zig.exe cc`）钉在仓库根，而不是当前目录：
@@ -624,9 +632,25 @@ static char *fmt_transform(const char *src) {
 
 /* ---- 子命令实现 ---- */
 
+/* 工程清单（zx.json）。定义放前面：check 段也要读 deps。 */
+struct Proj {
+    bool ok;
+    char name[256];     /* 工程名 */
+    char main[1024];    /* 入口源文件 */
+    char out[256];      /* 产物名（缺省 = 工程名） */
+    char *deps[16];     /* "deps" 数组：模块搜索目录（相对工程根） */
+    int  ndeps;
+};
+typedef struct Proj Proj;
+static bool proj_load(Proj *pj);
+static void setup_search_paths(const Proj *pj);
+
 static int cmd_check(int argc, char **argv, int argi) {
     int nfiles = 0;
     char **files = NULL;
+    /* 有 zx.json 就把 deps 搜索路径带上（检查也走模块解析） */
+    Proj pj;
+    if (proj_load(&pj)) setup_search_paths(&pj);
     if (argi < argc) {
         nfiles = argc - argi;
         files = argv + argi;
@@ -688,6 +712,7 @@ static const char *INIT_README =
     "zxc build --release   # 发布档 -O2\n"
     "zxc build --lib       # 静态库 out/<名>.a；--lib --shared 动态库 .dll/.so\n"
     "zxc run               # build 后直接运行（-- 之后的参数传给程序）\n"
+    "zxc test              # 运行 *_test.zx 里的 test_* 用例\n"
     "zxc check             # 静默检查全部 *.zx（src/ 下也扫）\n"
     "zxc fmt               # 格式化全部 *.zx\n"
     "```\n"
@@ -762,13 +787,6 @@ static int cmd_init(int argc, char **argv, int argi) {
  * 不再散落在工程根（注意别和 build.sh 自用的 .zc-cache/ 撞名）。 */
 #define ZX_CACHE_DIR ".zxc-cache"
 
-typedef struct {
-    bool ok;
-    char name[256];     /* 工程名 */
-    char main[1024];    /* 入口源文件 */
-    char out[256];      /* 产物名（缺省 = 工程名） */
-} Proj;
-
 /* 抠 "key": "value"——zx.json 由 zxc init 生成、字段就这几个，
  * 不值得为此拖一个真 JSON 解析器进来。 */
 static bool json_get_str(const char *text, const char *key, char *out, size_t cap) {
@@ -783,6 +801,37 @@ static bool json_get_str(const char *text, const char *key, char *out, size_t ca
     while (*p && *p != '"' && i + 1 < cap) out[i++] = *p++;
     out[i] = 0;
     return *p == '"';
+}
+
+/* 抠 "key": [ "a", "b" ] 字符串数组（deps 字段用） */
+static int json_get_str_array(const char *text, const char *key,
+                              char **out, int max) {
+    char pat[64];
+    snprintf(pat, sizeof pat, "\"%s\"", key);
+    const char *p = strstr(text, pat);
+    if (!p) return 0;
+    p = strchr(p + strlen(pat), '[');
+    if (!p) return 0;
+    p++;
+    int n = 0;
+    while (*p && *p != ']' && n < max) {
+        if (*p == '"') {
+            p++;
+            const char *e = strchr(p, '"');
+            if (!e) break;
+            size_t l = (size_t)(e - p);
+            if (l > 0) {
+                char *s = malloc(l + 1);
+                memcpy(s, p, l);
+                s[l] = 0;
+                out[n++] = s;
+            }
+            p = e + 1;
+        } else {
+            p++;
+        }
+    }
+    return n;
 }
 
 static bool proj_load(Proj *pj) {
@@ -801,7 +850,19 @@ static bool proj_load(Proj *pj) {
     if (!json_get_str(text, "main", pj->main, sizeof pj->main) || !pj->main[0])
         snprintf(pj->main, sizeof pj->main,
                  fexists("src/main.zx") ? "src/main.zx" : "main.zx");
+    pj->ndeps = json_get_str_array(text, "deps", pj->deps, 16);
     return true;
+}
+
+/* deps 搜索路径：工程根的 vendor/（存在即默认加入）+ zx.json "deps" 数组。
+ * 注入给 sema：相对导入打不开时依次回退这些目录。 */
+static const char *g_search[48];
+static void setup_search_paths(const Proj *pj) {
+    int n = 0;
+    if (fexists("vendor") && n < 47) g_search[n++] = "vendor";
+    for (int i = 0; i < pj->ndeps && n < 47; i++) g_search[n++] = pj->deps[i];
+    g_search[n] = NULL;
+    sema_set_search_paths(g_search);
 }
 
 /* 构建 + 产物路径写回 outpath。返回 0 成功。 */
@@ -812,6 +873,7 @@ static int do_build(Proj *pj, bool release, OutKind kind, char *outpath, size_t 
     }
     mkdir_p(ZX_CACHE_DIR);
     mkdir_p("out");
+    setup_search_paths(pj);
 
     const char *base = pj->out;
     if (kind == OUT_EXE) {
@@ -937,6 +999,160 @@ static int cmd_run(int argc, char **argv, int argi) {
 #endif
 }
 
+/* ---- test：约定 src/（或工程根）下的 *_test.zx，里面的 pub test_* 函数即用例
+ * ----（跨模块调用要求 pub，编译器强制；用例失败 = 断言 @trap（注意编译期
+ * 可达的 @trap 会变成编译错误）、std.process.exit(非 0)，或返回非 0 整数/false。
+ * 每个测试文件编一个 runner 小程序（.zxc-cache/<stem>_runner.zx 生成），
+ * main 按命令行参数分发到单个 test_* 函数：驱动逐个拉起进程、汇总
+ * PASS/FAIL。进程隔离——一个用例炸掉不影响后面的用例。 */
+
+/* 扫顶层声明收集 test_ 函数。要求空参、非泛型；返回值决定失败语义：
+ * void → 执行完即过；bool → false 即败；整型 → 非 0 即败；其余类型忽略返回值。 */
+static int collect_test_fns(Node *root, Node **fns, const char **names, int max) {
+    int n = 0;
+    for (int i = 0; root && i < root->nitems && n < max; i++) {
+        Node *d = root->items[i];
+        const char *name = NULL;
+        Node *fn = NULL;
+        if (d->kind == NK_DECL && d->name && !strncmp(d->name, "test_", 5)) {
+            name = d->name;
+            fn = (d->b && d->b->kind == NK_FN) ? d->b : NULL;   /* NK_DECL: b = 初值 */
+        } else if (d->kind == NK_FN && d->name && !strncmp(d->name, "test_", 5)) {
+            name = d->name;
+            fn = d;
+        }
+        if (!fn || sema_fn_is_generic(fn)) continue;
+        Type *ft = (fn->ty && fn->ty->kind == TY_TYPE) ? fn->type_val : NULL;
+        if (ft && ft->kind == TY_FN && ft->nparams != 0) continue;   /* 需要实参，跳过 */
+        fns[n] = fn;
+        names[n] = name;
+        n++;
+    }
+    return n;
+}
+
+/* 生成 runner 的单个调用语句（按返回类型选失败语义） */
+static void gen_test_call(Buf *b, const char *name, const Type *ft) {
+    Type *ret = (ft && ft->kind == TY_FN) ? ft->ret : NULL;
+    if (ret && ret->kind == TY_BOOL) {
+        buf_printf(b, "        if (!t.%s()) { std.process.exit(1); }\n", name);
+    } else if (ret && ty_is_int(ret) && ret->kind != TY_COMPTIME_INT) {
+        buf_printf(b, "        if (t.%s() != 0) { std.process.exit(1); }\n", name);
+    } else {
+        buf_printf(b, "        t.%s();\n", name);
+    }
+}
+
+static int cmd_test(int argc, char **argv, int argi) {
+    const char *filter = NULL;             /* 名字子串过滤 */
+    bool release = false;
+    for (int i = argi; i < argc; i++) {
+        if (!strcmp(argv[i], "--release")) { release = true; continue; }
+        if (argv[i][0] == '-' && argv[i][1]) {
+            fprintf(stderr, "zxc: unknown test option '%s'\n", argv[i]);
+            return 2;
+        }
+        if (!filter) filter = argv[i];
+    }
+    Proj pj;
+    if (!proj_load(&pj)) {
+        fprintf(stderr, "zxc: zx.json not found here (cd into a project or 'zxc init')\n");
+        return 2;
+    }
+    setup_search_paths(&pj);
+    mkdir_p(ZX_CACHE_DIR);
+    mkdir_p("out");
+
+    int nfiles = 0;
+    char **files = collect_zx_files_smart(&nfiles);
+    int total = 0, failed = 0;
+    for (int fi = 0; fi < nfiles; fi++) {
+        const char *f = files[fi];
+        size_t l = strlen(f);
+        if (l < 8 || strcmp(f + l - 8, "_test.zx") != 0) continue;
+
+        g_error_count = 0;
+        g_diag_shown = 0;
+        g_srcpath = f;
+        Node *root = fe_parse_file(f);
+        if (!root || g_error_count) { failed++; continue; }
+        sema_check(root);
+        if (g_error_count) { failed++; continue; }
+
+        Node *fns[256];
+        const char *names[256];
+        int nt = collect_test_fns(root, fns, names, 256);
+        if (nt == 0) continue;             /* *_test.zx 没有用例：当共享辅助文件 */
+
+        char stem[256], rpath[2048], bpath[2048], modrel[2100];
+        path_basename(f, stem, sizeof stem);
+        path_strip_ext(stem);
+        snprintf(rpath, sizeof rpath, ZX_CACHE_DIR "/%s_runner.zx", stem);
+        snprintf(bpath, sizeof bpath, "out/test_%s.exe", stem);
+        snprintf(modrel, sizeof modrel, "../%s", f);
+
+        /* runner 落盘（内容没变 mtime 不动，后续构建命中缓存） */
+        Buf b;
+        buf_init(&b);
+        buf_puts(&b, "// zxc test 自动生成的 runner —— 勿手改\n");
+        buf_printf(&b, "const t = module(\"%s\");\n", modrel);
+        buf_puts(&b, "const std = module(\"std\");\n\n");
+        buf_puts(&b, "const main = fn () i32 {\n");
+        buf_puts(&b, "    let a = std.process.args();\n");   /* 不含程序名：a[0] 即测试名 */
+        buf_puts(&b, "    if (a.len < 1) { std.process.exit(2); }\n");
+        for (int i = 0; i < nt; i++) {
+            Type *ft = (fns[i]->ty && fns[i]->ty->kind == TY_TYPE)
+                       ? fns[i]->type_val : NULL;
+            buf_printf(&b, "    if (std.str.eq(a[0], \"%s\")) {\n", names[i]);
+            gen_test_call(&b, names[i], ft);
+            buf_puts(&b, "        return 0;\n");
+            buf_puts(&b, "    }\n");
+        }
+        buf_puts(&b, "    std.process.exit(2);\n");
+        buf_puts(&b, "};\n");
+        if (write_text_file(rpath, b.data ? b.data : "") != 0) { failed++; continue; }
+
+        g_error_count = 0;
+        g_diag_shown = 0;
+        g_srcpath = rpath;
+        Node *rr = fe_parse_file(rpath);
+        if (!rr || g_error_count) {
+            fprintf(stderr, "zxc test: runner for '%s' failed to build\n", f);
+            failed++;
+            continue;
+        }
+        sema_check(rr);
+        if (g_error_count) { failed++; continue; }
+        g_cflags = release ? CC_REL : CC_DEV;
+        if (build_program(rr, bpath, ZX_CACHE_DIR, OUT_EXE) != 0) { failed++; continue; }
+
+        for (int ti = 0; ti < nt; ti++) {
+            if (filter && !strstr(names[ti], filter)) continue;
+            total++;
+            char cmd[2200];
+            snprintf(cmd, sizeof cmd, "\"\"%s\" \"%s\"\"", bpath, names[ti]);
+            for (char *p = cmd; *p; p++) if (*p == '/') *p = '\\';
+            int rc = system(cmd);
+#ifndef _WIN32
+            rc = WIFEXITED(rc) ? WEXITSTATUS(rc) : 1;
+#endif
+            if (rc == 0) {
+                printf("PASS  %s.%s\n", stem, names[ti]);
+            } else {
+                printf("FAIL  %s.%s\n", stem, names[ti]);
+                failed++;
+            }
+        }
+    }
+    if (files) { for (int i = 0; i < nfiles; i++) free(files[i]); free(files); }
+    if (total == 0 && failed == 0) {
+        printf("zxc test: no test_ functions in any *_test.zx\n");
+        return 0;
+    }
+    printf("zxc test: %d ran, %d failed\n", total, failed);
+    return failed ? 1 : 0;
+}
+
 static int cmd_fmt(int argc, char **argv, int argi, bool check_only) {
     int nfiles = 0;
     char **files = NULL;
@@ -1005,6 +1221,7 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[1], "fmt"))   return cmd_fmt(argc, argv, 2, false);
         if (!strcmp(argv[1], "build")) return cmd_build(argc, argv, 2);
         if (!strcmp(argv[1], "run"))   return cmd_run(argc, argv, 2);
+        if (!strcmp(argv[1], "test"))  return cmd_test(argc, argv, 2);
     }
 
     const char *file = NULL, *out = NULL;

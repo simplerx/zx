@@ -2312,6 +2312,8 @@ static void check_fmt_args(Node *call, int first, int nargs) {
     if (!p) return;
 
     int argi = 0;
+    int hi = -1;              /* 已用到的最大实参下标：纯 {N} 索引的格式串
+                                 位置游标不走，多给与否得看这个 */
     for (int i = 0; i < len; i++) {
         if (p[i] == '{' && i + 1 < len && p[i + 1] == '{') { i++; continue; }
         if (p[i] == '}' && i + 1 < len && p[i + 1] == '}') { i++; continue; }
@@ -2338,8 +2340,15 @@ static void check_fmt_args(Node *call, int first, int nargs) {
             err_at(fmt->line, fmt->col, "not enough arguments for the format string");
         else if (verb != 0)
             check_fmt_verb(fmt, call->items[first + 1 + which], verb);
+        if (which > hi) hi = which;
         i = j;
     }
+    /* 多给的实参以前是静默吞掉的——格式串少写一个 {} 会把后面全部错位，
+     * 这种错位在运行期几乎无法排查（stdfs 测试踩过一次）。多给 = 报错。 */
+    if (hi + 1 < nargs)
+        err_at(fmt->line, fmt->col,
+               "too many arguments for the format string: %d given, %d needed",
+               nargs, hi + 1);
 }
 
 /* 取地址的实参位置：只有"放在那儿的东西"才有地址。
@@ -3382,8 +3391,53 @@ static void ensure_raw(Symbol *s) {
 
 /* ---------------- 模块（一个文件 = 一个模块） ---------------- */
 
-static char *path_dup_dir(const char *path) {
-    const char *s1 = strrchr(path, '/');
+/* 路径归一化：折叠 //、/./ 与 /../，分隔符统一成 '/'。
+ * 模块查重靠字符串精确比较（module_find），不归一化的话同一文件经
+ * "util.zx" 和 "../proj/util.zx" 两条路径进来会被当成两个模块各编一份，
+ * 链接时符号重复定义。 */
+static char *path_normalize(const char *p) {
+    char prefix[8] = {0};              /* "" | "/" | "X:/" | "X:" */
+    const char *body = p;
+    if (((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z')) && p[1] == ':') {
+        prefix[0] = p[0]; prefix[1] = ':';
+        body = p + 2;
+        if (*body == '/' || *body == '\\') { prefix[2] = '/'; body++; }
+    } else if (*p == '/' || *p == '\\') {
+        prefix[0] = '/';
+        body = p + 1;
+        while (*body == '/' || *body == '\\') body++;
+    }
+    bool rooted = (prefix[0] == '/' && (!prefix[1] || prefix[2] == '/')) ||
+                  (prefix[1] == ':' && prefix[2] == '/');
+    const char *segs[400];
+    int slens[400], nseg = 0, up = 0;  /* up：根之上无处可去的前导 ".." */
+    while (*body) {
+        const char *e = body;
+        while (*e && *e != '/' && *e != '\\') e++;
+        int l = (int)(e - body);
+        if (!(l == 1 && body[0] == '.')) {
+            if (l == 2 && body[0] == '.' && body[1] == '.') {
+                if (nseg > 0) nseg--;
+                else if (!rooted) up++;
+            } else if (nseg < 400) {
+                segs[nseg] = body; slens[nseg] = l; nseg++;
+            }
+        }
+        body = e;
+        while (*body == '/' || *body == '\\') body++;
+    }
+    Buf b; buf_init(&b);
+    buf_puts(&b, prefix);
+    for (int i = 0; i < up; i++) { buf_puts(&b, ".."); buf_putc(&b, '/'); }
+    for (int i = 0; i < nseg; i++) {
+        buf_putn(&b, segs[i], (size_t)slens[i]);
+        if (i + 1 < nseg) buf_putc(&b, '/');
+    }
+    if (b.len == 0) buf_puts(&b, prefix[0] ? prefix : ".");
+    return b.data;
+}
+
+static char *path_dup_dir(const char *path) {    const char *s1 = strrchr(path, '/');
     const char *s2 = strrchr(path, '\\');
     const char *s = (!s1 || (s2 && s2 > s1)) ? s2 : s1;
     if (!s) return strdup(".");
@@ -3440,13 +3494,32 @@ static Module *module_find(const char *path) {
     return NULL;
 }
 
+static bool file_exists(const char *p);
+
+/* 工程级模块搜索路径（zx.json 的 "deps"，由 main.c 注入）：相对导入
+ * 打不开时依次尝试 <搜索路径>/<模块名>。NULL 结尾，可为空。 */
+static const char *const *g_search_paths;
+
+void sema_set_search_paths(const char *const *dirs) { g_search_paths = dirs; }
+
 static Module *module_load(const char *rel, int line, int col) {
     char *dir  = path_dup_dir(g_mod ? g_mod->path : g_srcpath);
     char *full = path_join(dir, rel);
-    return module_load_full(full, line, col);
+    free(dir);
+    /* 相对导入打不开 → 退到工程级搜索路径（deps）。 */
+    if (!file_exists(full) && g_search_paths) {
+        for (int i = 0; g_search_paths[i]; i++) {
+            char *cand = path_join(g_search_paths[i], rel);
+            if (file_exists(cand)) { free(full); full = cand; break; }
+            free(cand);
+        }
+    }
+    Module *m = module_load_full(full, line, col);
+    return m;
 }
 
-static Module *module_load_full(const char *full, int line, int col) {
+static Module *module_load_full(const char *full_in, int line, int col) {
+    char *full = path_normalize(full_in);   /* 查重前先归一化（见 path_normalize） */
     Module *old = module_find(full);
     if (old) {
         if (old->loading) {
@@ -4551,6 +4624,15 @@ void sema_check(Node *root) {
     m0->path = g_srcpath;
     m0->stem = "main";
     m0->root = root;
+    /* 多文件驱动（zxc check 一个进程查多个文件）会反复进这里：模块表
+     * 和待查体队列必须清零重来。否则 g_mods 换了新数组而 g_nmods 还
+     * 带着上一轮的计数——module_find 一访问 g_mods[0] 就是空指针。
+     * std 的跨轮缓存一并作废：缓存里的 Module 不在新模块表里，它连带
+     * 导入的 str/map/pool 都不会登记，后端这轮就看不到这些单元了
+     * （AST 有内容哈希缓存，重载 std 的解析成本可以忽略）。 */
+    g_nmods = 0;
+    g_npending = 0;
+    g_std_mod = NULL;
     g_cmods = 8;
     g_mods = calloc((size_t)g_cmods, sizeof(Module *));
     g_mods[g_nmods++] = m0;

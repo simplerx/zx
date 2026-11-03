@@ -34,12 +34,31 @@ bin/zxc.exe build --lib           # 静态库 out/<名>.a
 bin/zxc.exe build --lib --shared  # 动态库 out/<名>.dll（非 Windows: .so）
 bin/zxc.exe build --release       # 发布档 -O2
 bin/zxc.exe run [-- args...]      # build 后直接运行（-- 之后的参数传给程序）
+bin/zxc.exe test [名字过滤]       # 运行 *_test.zx 里的 pub test_* 用例（每用例一个进程）
 bin/zxc.exe check                 # 静默检查 *.zx（当前目录，缺省回落 src/）
 bin/zxc.exe fmt [--check]         # 格式化
 ```
 
 后端用的 C 编译器是 `ZX_CC` 环境变量指定的命令，缺省是项目内的
 `.toolchain/zig.exe cc`。
+
+## 工程配置（zx.json）与模块搜索路径
+
+`zxc init` 生成的 `zx.json` 是工程清单：
+
+```json
+{
+  "name": "demo",
+  "version": "0.1.0",
+  "main": "src/main.zx",
+  "out": "demo",
+  "deps": ["vendor2", "../shared"]
+}
+```
+
+模块解析顺序：**相对导入文件所在目录** → 打不开时依次回退 `deps` 列表 →
+工程根的 `vendor/` 目录（存在即自动加入，无需写进 deps）。模块路径会先
+归一化（折叠 `..`/`.`）再查重，同一文件经不同相对路径引用只会编一份。
 
 ## 开发环境（编辑器）
 
