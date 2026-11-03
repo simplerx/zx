@@ -26,6 +26,16 @@ bin/zxc.exe file.zx --tokens      # 打印 token 流
 bin/zxc.exe file.zx --ast         # 打印语法树（s-expression）
 bin/zxc.exe file.zx --emit-c      # 只吐生成的 C
 bin/zxc.exe file.zx -o prog       # 生成 C 并调 zig cc 编成可执行文件
+
+# 工程级子命令（读 zx.json，`zxc init` 生成）
+bin/zxc.exe init [name]           # 创建工程：源码在 src/，配置 zx.json
+bin/zxc.exe build                 # 构建 src/ → out/<名>.exe；中间文件进 .zxc-cache/
+bin/zxc.exe build --lib           # 静态库 out/<名>.a
+bin/zxc.exe build --lib --shared  # 动态库 out/<名>.dll（非 Windows: .so）
+bin/zxc.exe build --release       # 发布档 -O2
+bin/zxc.exe run [-- args...]      # build 后直接运行（-- 之后的参数传给程序）
+bin/zxc.exe check                 # 静默检查 *.zx（当前目录，缺省回落 src/）
+bin/zxc.exe fmt [--check]         # 格式化
 ```
 
 后端用的 C 编译器是 `ZX_CC` 环境变量指定的命令，缺省是项目内的

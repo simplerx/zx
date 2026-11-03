@@ -9,6 +9,13 @@
  *   zxc file.zx -o prog       生成 C 并调 C 编译器编成可执行文件
  *   zxc file.zx -o prog --release   发布档：-O2（默认 dev 档 -O0，迭代快）
  *
+ * 工程级子命令（读 zx.json）：
+ *   zxc init [name]     创建 zx 工程（源码在 src/）
+ *   zxc build           构建：--exe(默认)/--lib × --static(默认)/--shared、--release
+ *                       中间文件进 .zxc-cache/，最终产物进 out/
+ *   zxc run [args]      build 后直接运行 out/<产物>.exe（-- 之后的参数传给程序）
+ *   zxc check / fmt     检查 / 格式化
+ *
  * 后端的 C 编译器由 ZX_CC 环境变量指定，缺省 .toolchain/zig.exe cc。
  * -o 时每个模块一个 .c / .o，运行时函数体单独一个 _zxrt.c / .o：
  * 内容没变不重写（mtime 不动），.o 就不用重编；过期的 .o 并行重编。
@@ -20,6 +27,9 @@
 #include <stdarg.h>
 #include <sys/stat.h>
 #include <errno.h>
+#ifndef _WIN32
+#include <sys/wait.h>                       /* run 子进程退出码 */
+#endif
 #ifdef _WIN32
 #include <windows.h>
 #include <process.h>
@@ -184,9 +194,122 @@ static bool stale(const char *opath, const char *cpath, const char *hpath) {
     return o < fmtime(cpath) || o < fmtime(hpath);
 }
 
-/* ---------------- 构建可执行文件 ---------------- */
+/* ---------------- 构建可执行文件 / 库 ---------------- */
 
-static int build_program(Node *root, const char *out) {
+typedef enum {
+    OUT_EXE,        /* 可执行文件（默认） */
+    OUT_STATIC,     /* 静态库 .a */
+    OUT_SHARED,     /* 动态库 .dll / .so */
+} OutKind;
+
+static bool fexists(const char *p) {
+    FILE *f = fopen(p, "rb");
+    if (!f) return false;
+    fclose(f);
+    return true;
+}
+
+/* 取路径最后一段（"out/app.exe" → "app.exe"） */
+static void path_basename(const char *p, char *out, size_t cap) {
+    const char *b = p;
+    for (const char *q = p; *q; q++)
+        if (*q == '/' || *q == '\\') b = q + 1;
+    snprintf(out, cap, "%s", b);
+}
+
+/* 去掉最后一个扩展名（"app.exe" → "app"）；只认最后一个分隔符之后的点 */
+static void path_strip_ext(char *s) {
+    char *dot = strrchr(s, '.');
+    char *sl = strrchr(s, '/'), *bs = strrchr(s, '\\');
+    char *sep = (sl && bs) ? (sl > bs ? sl : bs) : (sl ? sl : bs);
+    if (dot && (!sep || dot > sep)) *dot = 0;
+}
+
+static int mkdir_one(const char *d) {
+#ifdef _WIN32
+    if (_mkdir(d) != 0 && errno != EEXIST) return -1;
+#else
+    if (mkdir(d, 0755) != 0 && errno != EEXIST) return -1;
+#endif
+    return 0;
+}
+
+/* 逐级建目录（"out"、".zxc-cache" 这类构建目录） */
+static int mkdir_p(const char *path) {
+    if (!path || !*path) return 0;
+    char tmp[2048];
+    snprintf(tmp, sizeof tmp, "%s", path);
+    for (char *p = tmp; *p; p++) if (*p == '\\') *p = '/';
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = 0;
+            if (mkdir_one(tmp) != 0) return -1;
+            *p = '/';
+        }
+    }
+    return mkdir_one(tmp);
+}
+
+/* 相对路径 → 绝对路径（已是绝对路径则原样返回） */
+static void path_abs(const char *p, char *out, size_t cap) {
+    bool isabs = (p[0] == '/' || p[0] == '\\');
+    if ((p[0] >= 'A' && p[0] <= 'Z') || (p[0] >= 'a' && p[0] <= 'z'))
+        if (p[1] == ':') isabs = true;
+    if (isabs) { snprintf(out, cap, "%s", p); return; }
+#ifdef _WIN32
+    if (_getcwd(out, (int)cap) != NULL) {
+        size_t l = strlen(out);
+        snprintf(out + l, cap - l, "\\%s", p);
+        for (char *q = out; *q; q++) if (*q == '/') *q = '\\';
+        return;
+    }
+#endif
+    snprintf(out, cap, "%s", p);
+}
+
+/* 归档器跟编译器配套："…zig.exe cc" → "…zig.exe ar"，"… gcc" → "… gcc-ar"，
+ * 其余交给 PATH 里的 ar。静态库归档用。 */
+static const char *archiver_of(const char *cc) {
+    static char buf[2048];
+    size_t l = strlen(cc);
+    if (l > 3 && !strcmp(cc + l - 3, " cc")) {
+        snprintf(buf, sizeof buf, "%.*s ar", (int)(l - 3), cc);
+        return buf;
+    }
+    if (l > 5 && !strcmp(cc + l - 5, " gcc")) {
+        snprintf(buf, sizeof buf, "%.*s gcc-ar", (int)(l - 5), cc);
+        return buf;
+    }
+    return "ar";
+}
+
+/* cachedir 非空：中间文件（.h/.c/.o/.flags）全部落进 cachedir/，
+ * out 是最终产物路径；cachedir 为空则维持旧行为——中间文件挨着 out 放。 */
+static int build_program(Node *root, const char *out, const char *cachedir, OutKind kind) {
+#ifdef _WIN32
+    /* zig cc -o 不补 .exe：产物没有扩展名时 cmd / 资源管理器都跑不了
+     * （表现为"程序明明在却没有任何输出"），这里统一补上。 */
+    static char outexe[2048];
+    if (kind == OUT_EXE) {
+        size_t l = strlen(out);
+        if (l < 4 || _stricmp(out + l - 4, ".exe") != 0) {
+            snprintf(outexe, sizeof outexe, "%s.exe", out);
+            out = outexe;
+        }
+    }
+#endif
+
+    /* 中间文件前缀：有缓存目录就用 "缓存目录/产物名（去扩展名）" */
+    char stem[2048];
+    if (cachedir && *cachedir) {
+        char base[1024];
+        path_basename(out, base, sizeof base);
+        path_strip_ext(base);
+        snprintf(stem, sizeof stem, "%s/%s", cachedir, base);
+    } else {
+        snprintf(stem, sizeof stem, "%s", out);
+    }
+
     Buf header, rt;
     buf_init(&header);
     buf_init(&rt);
@@ -194,7 +317,7 @@ static int build_program(Node *root, const char *out) {
     int n = backend_emit_split(root, &header, &rt, units, 64);
 
     char hpath[2048];
-    snprintf(hpath, sizeof hpath, "%s.h", out);
+    snprintf(hpath, sizeof hpath, "%s.h", stem);
     bool hchanged = write_file_if_changed(hpath, header.data, header.len);
 
     const char *hbase = hpath;
@@ -209,7 +332,7 @@ static int build_program(Node *root, const char *out) {
      * 的旧 .o 全是别的参数编的，一律作废。首次没有 stamp 也算变了
      * （顺带自愈"旧 .o 带着别的运行时符号"之类的脏状态）。 */
     char fpath[2048], fstamp[512];
-    snprintf(fpath, sizeof fpath, "%s.flags", out);
+    snprintf(fpath, sizeof fpath, "%s.flags", stem);
     snprintf(fstamp, sizeof fstamp, "%s|%s\n", g_cc, g_cflags);
     bool fchanged = write_file_if_changed(fpath, fstamp, strlen(fstamp));
 
@@ -219,8 +342,8 @@ static int build_program(Node *root, const char *out) {
         const char *src   = (pass == 0) ? (rt.data ? rt.data : "")
                                         : (units[pass - 1].src.data ? units[pass - 1].src.data : "");
         char cpath[2048], opath[2048];
-        snprintf(cpath, sizeof cpath, "%s_%s.c", out, uname);
-        snprintf(opath, sizeof opath, "%s_%s.o", out, uname);
+        snprintf(cpath, sizeof cpath, "%s_%s.c", stem, uname);
+        snprintf(opath, sizeof opath, "%s_%s.o", stem, uname);
 
         /* 每份 .c 都 include 共享头：类型、运行时原型、跨模块原型都在里面 */
         Buf full;
@@ -252,9 +375,25 @@ static int build_program(Node *root, const char *out) {
 
     if (run_cc_jobs(g_jobs, njobs) != 0) return 1;
 
-    /* 链接（Windows 上 -o prog 会得 prog.exe） */
+    /* 链接 / 归档：exe 直接链；动态库 -shared；静态库用配套的 ar 收拢 .o。
+     * 最终产物的 -o 一律用绝对路径：zig cc 0.15 的 -shared 模式下
+     * 相对子目录路径（out/x.dll）会报 "No such file or directory"
+     * （exe / ar 无此毛病，绝对路径统一绕开）。 */
+    char absout[2048];
+    path_abs(out, absout, sizeof absout);
     char cmd[8192];
-    snprintf(cmd, sizeof cmd, "%s %s -o \"%s\" %s", g_cc, g_cflags, out, objs.data);
+    if (kind == OUT_STATIC) {
+        snprintf(cmd, sizeof cmd, "%s rcs \"%s\" %s", archiver_of(g_cc), absout, objs.data);
+    } else {
+        const char *shared = "";
+#ifdef _WIN32
+        if (kind == OUT_SHARED) shared = "-shared";
+#else
+        if (kind == OUT_SHARED) shared = "-shared -fPIC";
+#endif
+        snprintf(cmd, sizeof cmd, "%s %s %s -o \"%s\" %s",
+                 g_cc, g_cflags, shared, absout, objs.data);
+    }
     if (system(cmd) != 0) {
         fprintf(stderr, "zxc: link failed\n");
         return 1;
@@ -282,9 +421,13 @@ static void dump_toklist(Lexer *lx) {
 static void usage(void) {
     fprintf(stderr,
         "usage: zxc file.zx [--check|--tokens|--ast|--emit-c|--release] [-o prog]\n"
-        "       zxc init [name]     当前目录（或 name/ 子目录）创建 zx 工程\n"
-        "       zxc check [file...] 静默检查（缺省检查当前目录全部 *.zx）\n"
-        "       zxc fmt [file...]   格式化 [--check]（缺省全部 *.zx）\n");
+        "       zxc init [name]     创建 zx 工程（源码放 src/）\n"
+        "       zxc check [file...] 静默检查（缺省当前目录，没有则扫 src/）\n"
+        "       zxc fmt [file...]   格式化 [--check]\n"
+        "       zxc build [--exe|--lib] [--static|--shared] [--release]\n"
+        "                           按 zx.json 构建；中间文件在 .zxc-cache/，产物在 out/\n"
+        "       zxc run [--release] [-- args...]\n"
+        "                           build 后直接运行 out/<产物>.exe\n");
 }
 
 /* 默认工具链（`.toolchain/zig.exe cc`）钉在仓库根，而不是当前目录：
@@ -306,18 +449,27 @@ static const char *default_cc(const char *argv0) {
 
 /* ---------------- init / check / fmt 子命令 ---------------- */
 
-/* 收集目录里的 *.zx（跳过隐藏文件与 .zxls- 影子文件），返回 malloc 的路径数组 */
+/* 收集目录里的 *.zx（跳过隐藏文件与 .zxls- 影子文件），返回 malloc 的路径数组。
+ * dir 为 NULL/空串表示当前目录。 */
 #ifdef _WIN32
-static char **collect_zx_files(int *out_n) {
+static char **collect_zx_files(const char *dir, int *out_n) {
+    char pat[2048];
+    snprintf(pat, sizeof pat, "%s/*.zx", (dir && *dir) ? dir : ".");
     WIN32_FIND_DATAA fd;
-    HANDLE h = FindFirstFileA("*.zx", &fd);
+    HANDLE h = FindFirstFileA(pat, &fd);
     if (h == INVALID_HANDLE_VALUE) { *out_n = 0; return NULL; }
     char **list = NULL;
     int n = 0, cap = 0;
     do {
         if (fd.cFileName[0] == '.') continue;               /* 隐藏/.zxls- 影子 */
         if (cap == n) { cap = cap ? cap * 2 : 16; list = realloc(list, cap * sizeof *list); }
-        list[n++] = strdup(fd.cFileName);
+        if (dir && *dir) {
+            char full[2048];
+            snprintf(full, sizeof full, "%s/%s", dir, fd.cFileName);
+            list[n++] = strdup(full);
+        } else {
+            list[n++] = strdup(fd.cFileName);
+        }
     } while (FindNextFileA(h, &fd));
     FindClose(h);
     *out_n = n;
@@ -325,8 +477,8 @@ static char **collect_zx_files(int *out_n) {
 }
 #else
 #include <dirent.h>
-static char **collect_zx_files(int *out_n) {
-    DIR *d = opendir(".");
+static char **collect_zx_files(const char *dir, int *out_n) {
+    DIR *d = opendir((dir && *dir) ? dir : ".");
     if (!d) { *out_n = 0; return NULL; }
     char **list = NULL;
     int n = 0, cap = 0;
@@ -335,13 +487,26 @@ static char **collect_zx_files(int *out_n) {
         size_t l = strlen(e->d_name);
         if (e->d_name[0] == '.' || l < 3 || strcmp(e->d_name + l - 3, ".zx") != 0) continue;
         if (cap == n) { cap = cap ? cap * 2 : 16; list = realloc(list, cap * sizeof *list); }
-        list[n++] = strdup(e->d_name);
+        if (dir && *dir) {
+            char full[2048];
+            snprintf(full, sizeof full, "%s/%s", dir, e->d_name);
+            list[n++] = strdup(full);
+        } else {
+            list[n++] = strdup(e->d_name);
+        }
     }
     closedir(d);
     *out_n = n;
     return list;
 }
 #endif
+
+/* 目录收集：先看当前目录，没有 .zx 再看 src/（配合 init 的 src/ 布局） */
+static char **collect_zx_files_smart(int *out_n) {
+    char **files = collect_zx_files(NULL, out_n);
+    if (files) return files;
+    return collect_zx_files("src", out_n);
+}
 
 /* ---- fmt：词法感知的行格式化（缩进/尾空白/空行规整），保守不动内容 ---- */
 
@@ -358,6 +523,9 @@ static int fmt_scan_line(const char *s, FmtState *st, size_t *first_ns) {
     bool seen_ns = false;
     for (size_t i = 0; s[i]; i++) {
         char c = s[i];
+        size_t ci = i;      /* switch 里可能 i++（块注释开头），首个非空白
+                             * 下标必须用本字符的原始位置，否则块注释行
+                             * 的开头两个字符会被当缩进丢掉 */
         if (st->in_block) {
             if (c == '*' && s[i + 1] == '/') { st->in_block = false; i++; }
             continue;
@@ -383,7 +551,7 @@ static int fmt_scan_line(const char *s, FmtState *st, size_t *first_ns) {
             case '}': delta--; break;
             default: break;
         }
-        if (!seen_ns && !(c == ' ' || c == '\t')) { seen_ns = true; *first_ns = i; }
+        if (!seen_ns && !(c == ' ' || c == '\t')) { seen_ns = true; *first_ns = ci; }
     }
     return delta;
 }
@@ -463,7 +631,7 @@ static int cmd_check(int argc, char **argv, int argi) {
         nfiles = argc - argi;
         files = argv + argi;
     } else {
-        files = collect_zx_files(&nfiles);
+        files = collect_zx_files_smart(&nfiles);
         if (nfiles == 0) {
             fprintf(stderr, "zxc: no .zx files in current directory\n");
             return 2;
@@ -502,13 +670,9 @@ static const char *INIT_MAIN =
 
 static const char *INIT_GITIGNORE =
     "# 构建产物\n"
-    "app\n"
-    "app.exe\n"
-    "app_*.c\n"
-    "app_*.o\n"
-    "app.h\n"
-    "app.flags\n"
-    "*.o\n"
+    "out/\n"
+    "# 中间文件（生成的 C / 目标文件）\n"
+    ".zxc-cache/\n"
     "# 编译器临时文件\n"
     ".zxfe-*.ast\n"
     ".zxls-*.zx\n"
@@ -520,15 +684,19 @@ static const char *INIT_README =
     "## 构建 / 运行\n"
     "\n"
     "```sh\n"
-    "zxc main.zx -o app        # 编译（产物 app / app.exe）\n"
-    "zxc check                 # 静默检查全部 *.zx\n"
-    "zxc fmt                   # 格式化全部 *.zx\n"
+    "zxc build             # 编译 src/ → out/<产物名>.exe（中间文件在 .zxc-cache/）\n"
+    "zxc build --release   # 发布档 -O2\n"
+    "zxc build --lib       # 静态库 out/<名>.a；--lib --shared 动态库 .dll/.so\n"
+    "zxc run               # build 后直接运行（-- 之后的参数传给程序）\n"
+    "zxc check             # 静默检查全部 *.zx（src/ 下也扫）\n"
+    "zxc fmt               # 格式化全部 *.zx\n"
     "```\n"
     "\n"
     "## 模块\n"
     "\n"
-    "同目录的 `*.zx` 都是可用模块：`const m = module(\"m\");` 或\n"
-    "`module(\"m/inner.zx\")` 引子目录模块。标准库见 `std.zx`。\n";
+    "`src/` 下的 `*.zx` 都是可用模块（与导入文件同目录即可）：\n"
+    "`const m = module(\"m\");` 或 `module(\"m/inner.zx\")` 引子目录模块。\n"
+    "标准库见 `std.zx`。\n";
 
 static int write_text_file(const char *path, const char *content) {
     FILE *f = fopen(path, "wb");
@@ -556,27 +724,217 @@ static int cmd_init(int argc, char **argv, int argi) {
             return 1;
         }
     }
-    if (access("main.zx", 0) == 0) {
-        fprintf(stderr, "zxc: main.zx already exists, aborting init\n");
+    if (access("zx.json", 0) == 0 || access("main.zx", 0) == 0) {
+        fprintf(stderr, "zxc: project already exists here, aborting init\n");
         return 1;
     }
-    if (write_text_file("main.zx", INIT_MAIN) != 0) return 1;
+    /* 源码统一放 src/：工程根只留 zx.json、README、.gitignore 和产物目录 */
+    if (mkdir_one("src") != 0) {
+        fprintf(stderr, "zxc: cannot create 'src/'\n");
+        return 1;
+    }
+    const char *mainpath = "src/main.zx";
+    if (write_text_file(mainpath, INIT_MAIN) != 0) return 1;
     if (write_text_file(".gitignore", INIT_GITIGNORE) != 0) return 1;
     if (write_text_file("README.md", INIT_README) != 0) return 1;
     Buf zj;
     buf_init(&zj);
-    buf_printf(&zj, "{\n  \"name\": \"%s\",\n  \"version\": \"0.1.0\",\n  \"main\": \"main.zx\",\n  \"out\": \"%s\"\n}\n", name, name);
+    buf_printf(&zj,
+        "{\n  \"name\": \"%s\",\n  \"version\": \"0.1.0\",\n"
+        "  \"main\": \"src/main.zx\",\n  \"out\": \"%s\"\n}\n",
+        name, name);
     write_text_file("zx.json", zj.data ? zj.data : "{}\n");
 
-    /* 自检：刚写的 main.zx 必须能过编译检查 */
-    g_srcpath = "main.zx";
-    Node *root = fe_parse_file("main.zx");
+    /* 自检：刚写的 src/main.zx 必须能过编译检查 */
+    g_srcpath = mainpath;
+    Node *root = fe_parse_file(mainpath);
     bool ok = root && g_error_count == 0;
     if (ok) sema_check(root);
     ok = ok && g_error_count == 0;
-    printf("zxc init: created main.zx, zx.json, README.md, .gitignore%s\n",
+    printf("zxc init: created src/main.zx, zx.json, README.md, .gitignore%s\n",
            ok ? " (main.zx check ok)" : " (warning: main.zx check FAILED)");
     return ok ? 0 : 1;
+}
+
+/* ---- build / run：读 zx.json 的工程级构建 ---- */
+
+/* 工程中间文件目录：生成的 .c/.o、共享头、编译参数 stamp 都收在这，
+ * 不再散落在工程根（注意别和 build.sh 自用的 .zc-cache/ 撞名）。 */
+#define ZX_CACHE_DIR ".zxc-cache"
+
+typedef struct {
+    bool ok;
+    char name[256];     /* 工程名 */
+    char main[1024];    /* 入口源文件 */
+    char out[256];      /* 产物名（缺省 = 工程名） */
+} Proj;
+
+/* 抠 "key": "value"——zx.json 由 zxc init 生成、字段就这几个，
+ * 不值得为此拖一个真 JSON 解析器进来。 */
+static bool json_get_str(const char *text, const char *key, char *out, size_t cap) {
+    char pat[64];
+    snprintf(pat, sizeof pat, "\"%s\"", key);
+    const char *p = strstr(text, pat);
+    if (!p) return false;
+    p = strchr(p + strlen(pat), '"');
+    if (!p) return false;
+    p++;
+    size_t i = 0;
+    while (*p && *p != '"' && i + 1 < cap) out[i++] = *p++;
+    out[i] = 0;
+    return *p == '"';
+}
+
+static bool proj_load(Proj *pj) {
+    memset(pj, 0, sizeof *pj);
+    FILE *f = fopen("zx.json", "rb");
+    if (!f) return false;
+    char text[8192];
+    size_t n = fread(text, 1, sizeof text - 1, f);
+    fclose(f);
+    text[n] = 0;
+    pj->ok = true;
+    if (!json_get_str(text, "name", pj->name, sizeof pj->name) || !pj->name[0])
+        snprintf(pj->name, sizeof pj->name, "app");
+    if (!json_get_str(text, "out", pj->out, sizeof pj->out) || !pj->out[0])
+        snprintf(pj->out, sizeof pj->out, "%s", pj->name);
+    if (!json_get_str(text, "main", pj->main, sizeof pj->main) || !pj->main[0])
+        snprintf(pj->main, sizeof pj->main,
+                 fexists("src/main.zx") ? "src/main.zx" : "main.zx");
+    return true;
+}
+
+/* 构建 + 产物路径写回 outpath。返回 0 成功。 */
+static int do_build(Proj *pj, bool release, OutKind kind, char *outpath, size_t cap) {
+    if (!fexists(pj->main)) {
+        fprintf(stderr, "zxc: entry source '%s' not found\n", pj->main);
+        return 1;
+    }
+    mkdir_p(ZX_CACHE_DIR);
+    mkdir_p("out");
+
+    const char *base = pj->out;
+    if (kind == OUT_EXE) {
+#ifdef _WIN32
+        snprintf(outpath, cap, "out/%s.exe", base);
+#else
+        snprintf(outpath, cap, "out/%s", base);
+#endif
+    } else if (kind == OUT_STATIC) {
+        snprintf(outpath, cap, "out/%s.a", base);
+    } else {
+#ifdef _WIN32
+        snprintf(outpath, cap, "out/%s.dll", base);
+#else
+        snprintf(outpath, cap, "out/%s.so", base);
+#endif
+    }
+
+    g_cflags = release ? CC_REL : CC_DEV;
+    g_srcpath = pj->main;
+    Node *root = fe_parse_file(pj->main);
+    if (!root || g_error_count) return 1;
+    sema_check(root);
+    if (g_error_count) {
+        if (g_error_count > g_diag_shown)
+            fprintf(stderr, "zxc: %d error(s) (first %d shown)\n",
+                    g_error_count, g_diag_shown);
+        return 1;
+    }
+    return build_program(root, outpath, ZX_CACHE_DIR, kind);
+}
+
+/* build 旗标：--exe / --lib × --static / --shared、--release */
+static int parse_kind(int argc, char **argv, int argi, bool *release, OutKind *kind) {
+    bool want_lib = false, shared = false;
+    *kind = OUT_EXE;
+    for (int i = argi; i < argc; i++) {
+        if      (!strcmp(argv[i], "--exe"))    want_lib = false;
+        else if (!strcmp(argv[i], "--lib"))    want_lib = true;
+        else if (!strcmp(argv[i], "--static")) shared = false;
+        else if (!strcmp(argv[i], "--shared")) shared = true;
+        else if (!strcmp(argv[i], "--release")) *release = true;
+        else {
+            fprintf(stderr, "zxc: unknown build option '%s'\n", argv[i]);
+            return -1;
+        }
+    }
+    if (want_lib) {
+        *kind = shared ? OUT_SHARED : OUT_STATIC;
+    } else if (shared) {
+        fprintf(stderr, "zxc: --shared needs --lib (an exe is a program, not a library)\n");
+        return -1;
+    }
+    return 0;
+}
+
+static int cmd_build(int argc, char **argv, int argi) {
+    bool release = false;
+    OutKind kind;
+    if (parse_kind(argc, argv, argi, &release, &kind) != 0) return 2;
+    Proj pj;
+    if (!proj_load(&pj)) {
+        fprintf(stderr, "zxc: zx.json not found here (cd into a project or 'zxc init')\n");
+        return 2;
+    }
+    char outpath[2048];
+    if (do_build(&pj, release, kind, outpath, sizeof outpath) != 0) return 1;
+    printf("zxc build: %s\n", outpath);
+    return 0;
+}
+
+/* run = build + 运行。子进程用 system() 拉起：同一个控制台，
+ * stdout/stderr 原样落在这份终端里。 */
+static int cmd_run(int argc, char **argv, int argi) {
+    bool release = false;
+    int first_prog = argc;
+    for (int i = argi; i < argc; i++) {
+        if (!strcmp(argv[i], "--"))        { first_prog = i + 1; break; }
+        if (!strcmp(argv[i], "--release")) { release = true; first_prog = i + 1; continue; }
+        if (argv[i][0] == '-' && argv[i][1]) {
+            fprintf(stderr, "zxc: unknown run option '%s' "
+                            "(program args go after '--')\n", argv[i]);
+            return 2;
+        }
+        first_prog = i;                    /* 第一个非旗标：程序参数起点 */
+        break;
+    }
+    Proj pj;
+    if (!proj_load(&pj)) {
+        fprintf(stderr, "zxc: zx.json not found here (cd into a project or 'zxc init')\n");
+        return 2;
+    }
+    char outpath[2048];
+    if (do_build(&pj, release, OUT_EXE, outpath, sizeof outpath) != 0) return 1;
+
+    Buf cmd;
+    buf_init(&cmd);
+#ifdef _WIN32
+    /* system() 走 cmd.exe，有两个坑：
+     * ① 路径分隔符必须是反斜杠（"out/x.exe" 的斜杠会被 cmd 当开关拆掉）；
+     * ② /c 的引号剥离规则会吃掉首尾引号，带参命令行得整体再包一对引号
+     *    （""exe" "a" "b"" 形态，CMake/npm 同款处理）。 */
+    buf_puts(&cmd, "\"");
+    buf_printf(&cmd, "\"%s\"", outpath);
+    for (char *p = cmd.data; p && *p; p++)
+        if (*p == '/') *p = '\\';
+    for (int i = first_prog; i < argc; i++)
+        buf_printf(&cmd, " \"%s\"", argv[i]);
+    buf_puts(&cmd, "\"");
+#else
+    buf_printf(&cmd, "\"%s\"", outpath);
+    for (int i = first_prog; i < argc; i++)
+        buf_printf(&cmd, " \"%s\"", argv[i]);
+#endif
+    int rc = system(cmd.data ? cmd.data : "");
+    if (cmd.data) free(cmd.data);
+#ifdef _WIN32
+    return rc;                             /* cmd.exe 透传子进程退出码 */
+#else
+    if (WIFEXITED(rc)) return WEXITSTATUS(rc);
+    fprintf(stderr, "zxc: program terminated abnormally\n");
+    return 1;
+#endif
 }
 
 static int cmd_fmt(int argc, char **argv, int argi, bool check_only) {
@@ -591,7 +949,7 @@ static int cmd_fmt(int argc, char **argv, int argi, bool check_only) {
         nfiles = argc - argi;
         files = argv + argi;
     } else {
-        files = collect_zx_files(&nfiles);
+        files = collect_zx_files_smart(&nfiles);
         owned = true;
         if (nfiles == 0) {
             fprintf(stderr, "zxc: no .zx files in current directory\n");
@@ -645,6 +1003,8 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[1], "init"))  return cmd_init(argc, argv, 2);
         if (!strcmp(argv[1], "check")) return cmd_check(argc, argv, 2);
         if (!strcmp(argv[1], "fmt"))   return cmd_fmt(argc, argv, 2, false);
+        if (!strcmp(argv[1], "build")) return cmd_build(argc, argv, 2);
+        if (!strcmp(argv[1], "run"))   return cmd_run(argc, argv, 2);
     }
 
     const char *file = NULL, *out = NULL;
@@ -707,7 +1067,7 @@ int main(int argc, char **argv) {
         if (check && g_error_count == 0) sema_check(root);
         if ((emit_c || out) && g_error_count == 0) {
             if (out) {
-                if (build_program(root, out) != 0) return 1;
+                if (build_program(root, out, NULL, OUT_EXE) != 0) return 1;
             } else {
                 Buf csrc;
                 buf_init(&csrc);
