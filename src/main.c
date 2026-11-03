@@ -19,6 +19,13 @@
 #include "val.h"
 #include <stdarg.h>
 #include <sys/stat.h>
+#include <errno.h>
+#ifdef _WIN32
+#include <windows.h>
+#include <process.h>
+#include <io.h>
+#include <direct.h>
+#endif
 
 typedef struct {
     const char *name;
@@ -274,7 +281,10 @@ static void dump_toklist(Lexer *lx) {
 
 static void usage(void) {
     fprintf(stderr,
-        "usage: zxc file.zx [--check|--tokens|--ast|--emit-c|--release] [-o prog]\n");
+        "usage: zxc file.zx [--check|--tokens|--ast|--emit-c|--release] [-o prog]\n"
+        "       zxc init [name]     当前目录（或 name/ 子目录）创建 zx 工程\n"
+        "       zxc check [file...] 静默检查（缺省检查当前目录全部 *.zx）\n"
+        "       zxc fmt [file...]   格式化 [--check]（缺省全部 *.zx）\n");
 }
 
 /* 默认工具链（`.toolchain/zig.exe cc`）钉在仓库根，而不是当前目录：
@@ -294,11 +304,348 @@ static const char *default_cc(const char *argv0) {
     return g_ccbuf;
 }
 
+/* ---------------- init / check / fmt 子命令 ---------------- */
+
+/* 收集目录里的 *.zx（跳过隐藏文件与 .zxls- 影子文件），返回 malloc 的路径数组 */
+#ifdef _WIN32
+static char **collect_zx_files(int *out_n) {
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA("*.zx", &fd);
+    if (h == INVALID_HANDLE_VALUE) { *out_n = 0; return NULL; }
+    char **list = NULL;
+    int n = 0, cap = 0;
+    do {
+        if (fd.cFileName[0] == '.') continue;               /* 隐藏/.zxls- 影子 */
+        if (cap == n) { cap = cap ? cap * 2 : 16; list = realloc(list, cap * sizeof *list); }
+        list[n++] = strdup(fd.cFileName);
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+    *out_n = n;
+    return list;
+}
+#else
+#include <dirent.h>
+static char **collect_zx_files(int *out_n) {
+    DIR *d = opendir(".");
+    if (!d) { *out_n = 0; return NULL; }
+    char **list = NULL;
+    int n = 0, cap = 0;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        size_t l = strlen(e->d_name);
+        if (e->d_name[0] == '.' || l < 3 || strcmp(e->d_name + l - 3, ".zx") != 0) continue;
+        if (cap == n) { cap = cap ? cap * 2 : 16; list = realloc(list, cap * sizeof *list); }
+        list[n++] = strdup(e->d_name);
+    }
+    closedir(d);
+    *out_n = n;
+    return list;
+}
+#endif
+
+/* ---- fmt：词法感知的行格式化（缩进/尾空白/空行规整），保守不动内容 ---- */
+
+typedef struct {
+    bool in_str;        /* "…" */
+    bool in_chr;        /* '…' */
+    bool in_block;      /* 斜杠星注释 */
+} FmtState;
+
+/* 单行扫描：返回花括号净变化，记 first_ns（首个非空白下标） */
+static int fmt_scan_line(const char *s, FmtState *st, size_t *first_ns) {
+    int delta = 0;
+    *first_ns = 0;
+    bool seen_ns = false;
+    for (size_t i = 0; s[i]; i++) {
+        char c = s[i];
+        if (st->in_block) {
+            if (c == '*' && s[i + 1] == '/') { st->in_block = false; i++; }
+            continue;
+        }
+        if (st->in_str) {
+            if (c == '\\') { i++; continue; }
+            if (c == '"') st->in_str = false;
+            continue;
+        }
+        if (st->in_chr) {
+            if (c == '\\') { i++; continue; }
+            if (c == '\'') st->in_chr = false;
+            continue;
+        }
+        switch (c) {
+            case '"': st->in_str = true; break;
+            case '\'': st->in_chr = true; break;
+            case '/':
+                if (s[i + 1] == '/') return delta;      /* 行注释：后面不用看 */
+                if (s[i + 1] == '*') { st->in_block = true; i++; }
+                break;
+            case '{': delta++; break;
+            case '}': delta--; break;
+            default: break;
+        }
+        if (!seen_ns && !(c == ' ' || c == '\t')) { seen_ns = true; *first_ns = i; }
+    }
+    return delta;
+}
+
+/* 格式化整个源码：4 空格缩进、去尾空白、连续空行压 1、末尾单换行。
+ * CRLF 文档保持 CRLF。返回 malloc 的新文本。 */
+static char *fmt_transform(const char *src) {
+    bool had_cr = strstr(src, "\r\n") != NULL;
+    /* 拆行（\n） */
+    size_t cap = 64, n = 0;
+    char **ls = malloc(cap * sizeof *ls);
+    {
+        const char *p = src;
+        while (*p) {
+            const char *q = strchr(p, '\n');
+            size_t len = q ? (size_t)(q - p) : strlen(p);
+            if (n + 1 >= cap) { cap *= 2; ls = realloc(ls, cap * sizeof *ls); }
+            char *line = malloc(len + 1);
+            memcpy(line, p, len);
+            line[len] = 0;
+            ls[n++] = line;
+            if (!q) break;
+            p = q + 1;
+        }
+    }
+
+    FmtState st = {0};
+    Buf out;
+    buf_init(&out);
+    int depth = 0;
+    int blank_run = 0;
+    bool any_content = false;
+
+    for (size_t i = 0; i < n; i++) {
+        char *raw = ls[i];
+        /* 去尾空白 */
+        size_t len = strlen(raw);
+        while (len > 0 && (raw[len - 1] == ' ' || raw[len - 1] == '\t' || raw[len - 1] == '\r')) raw[--len] = 0;
+        if (len == 0 && !st.in_block) {
+            blank_run++;
+            if (blank_run > 1 || !any_content) { free(raw); continue; }  /* 压空行，去首空行 */
+            buf_puts(&out, "\n");
+            free(raw);
+            continue;
+        }
+        size_t first = 0;
+        /* 该行净变化先按“不含本行”的 depth 算缩进：先扫描副本避免状态污染 */
+        FmtState probe = st;
+        int delta = fmt_scan_line(raw, &probe, &first);
+        bool dedent = (raw[first] == '}');
+        int ind = depth - (dedent ? 1 : 0);
+        if (ind < 0) ind = 0;
+        if (!st.in_block) {
+            for (int k = 0; k < ind; k++) buf_puts(&out, "    ");
+            buf_puts(&out, raw + first);                    /* 原始前导空白丢弃 */
+        } else {
+            buf_puts(&out, raw);                            /* 块注释延续行保留原样 */
+        }
+        buf_puts(&out, had_cr ? "\r\n" : "\n");
+        any_content = true;
+        blank_run = 0;
+        depth += delta;
+        if (depth < 0) depth = 0;
+        st = probe;
+        free(raw);
+    }
+    free(ls);
+    return out.data ? out.data : strdup("");
+}
+
+/* ---- 子命令实现 ---- */
+
+static int cmd_check(int argc, char **argv, int argi) {
+    int nfiles = 0;
+    char **files = NULL;
+    if (argi < argc) {
+        nfiles = argc - argi;
+        files = argv + argi;
+    } else {
+        files = collect_zx_files(&nfiles);
+        if (nfiles == 0) {
+            fprintf(stderr, "zxc: no .zx files in current directory\n");
+            return 2;
+        }
+    }
+    int bad = 0;
+    for (int i = 0; i < nfiles; i++) {
+        g_error_count = 0;
+        g_diag_shown = 0;
+        g_srcpath = files[i];
+        Node *root = fe_parse_file(files[i]);
+        if (!root || g_error_count) { bad++; continue; }
+        sema_check(root);
+        if (g_error_count) bad++;
+        if (bad && argi >= argc) break;                     /* 全目录模式：报一个就够 */
+    }
+    if (bad) {
+        fprintf(stderr, "zxc: %d of %d file(s) failed\n", bad, nfiles);
+        return 1;
+    }
+    return 0;
+}
+
+static const char *INIT_MAIN =
+    "/* main.zx — 工程入口。module(\"std\") 引标准库，自建模块放同目录 *.zx。 */\n"
+    "const std = module(\"std\");\n"
+    "\n"
+    "const greet = fn (name: []const u8) void {\n"
+    "    std.println(\"hello, {}!\", name);\n"
+    "};\n"
+    "\n"
+    "const main = fn () i32 {\n"
+    "    greet(\"zx\");\n"
+    "    return 0;\n"
+    "};\n";
+
+static const char *INIT_GITIGNORE =
+    "# 构建产物\n"
+    "app\n"
+    "app.exe\n"
+    "app_*.c\n"
+    "app_*.o\n"
+    "app.h\n"
+    "app.flags\n"
+    "*.o\n"
+    "# 编译器临时文件\n"
+    ".zxfe-*.ast\n"
+    ".zxls-*.zx\n"
+    ".zc-cache/\n";
+
+static const char *INIT_README =
+    "# zx 项目\n"
+    "\n"
+    "## 构建 / 运行\n"
+    "\n"
+    "```sh\n"
+    "zxc main.zx -o app        # 编译（产物 app / app.exe）\n"
+    "zxc check                 # 静默检查全部 *.zx\n"
+    "zxc fmt                   # 格式化全部 *.zx\n"
+    "```\n"
+    "\n"
+    "## 模块\n"
+    "\n"
+    "同目录的 `*.zx` 都是可用模块：`const m = module(\"m\");` 或\n"
+    "`module(\"m/inner.zx\")` 引子目录模块。标准库见 `std.zx`。\n";
+
+static int write_text_file(const char *path, const char *content) {
+    FILE *f = fopen(path, "wb");
+    if (!f) { fprintf(stderr, "zxc: cannot write '%s'\n", path); return -1; }
+    fwrite(content, 1, strlen(content), f);
+    fclose(f);
+    return 0;
+}
+
+static int cmd_init(int argc, char **argv, int argi) {
+    const char *name = "app";
+    /* `zxc init` → 当前目录；`zxc init name` → 创建 name/ 子目录并进入 */
+    if (argi < argc) {
+        name = argv[argi];
+#ifdef _WIN32
+        if (_mkdir(name) != 0 && errno != EEXIST) {
+#else
+        if (mkdir(name, 0755) != 0 && errno != EEXIST) {
+#endif
+            fprintf(stderr, "zxc: cannot create directory '%s'\n", name);
+            return 1;
+        }
+        if (chdir(name) != 0) {
+            fprintf(stderr, "zxc: cannot enter '%s'\n", name);
+            return 1;
+        }
+    }
+    if (access("main.zx", 0) == 0) {
+        fprintf(stderr, "zxc: main.zx already exists, aborting init\n");
+        return 1;
+    }
+    if (write_text_file("main.zx", INIT_MAIN) != 0) return 1;
+    if (write_text_file(".gitignore", INIT_GITIGNORE) != 0) return 1;
+    if (write_text_file("README.md", INIT_README) != 0) return 1;
+    Buf zj;
+    buf_init(&zj);
+    buf_printf(&zj, "{\n  \"name\": \"%s\",\n  \"version\": \"0.1.0\",\n  \"main\": \"main.zx\",\n  \"out\": \"%s\"\n}\n", name, name);
+    write_text_file("zx.json", zj.data ? zj.data : "{}\n");
+
+    /* 自检：刚写的 main.zx 必须能过编译检查 */
+    g_srcpath = "main.zx";
+    Node *root = fe_parse_file("main.zx");
+    bool ok = root && g_error_count == 0;
+    if (ok) sema_check(root);
+    ok = ok && g_error_count == 0;
+    printf("zxc init: created main.zx, zx.json, README.md, .gitignore%s\n",
+           ok ? " (main.zx check ok)" : " (warning: main.zx check FAILED)");
+    return ok ? 0 : 1;
+}
+
+static int cmd_fmt(int argc, char **argv, int argi, bool check_only) {
+    int nfiles = 0;
+    char **files = NULL;
+    bool owned = false;
+    /* fmt 自己的 --check 旗标 */
+    for (int i = argi; i < argc; i++) {
+        if (!strcmp(argv[i], "--check")) { check_only = true; argv[i] = NULL; }
+    }
+    if (argi < argc) {
+        nfiles = argc - argi;
+        files = argv + argi;
+    } else {
+        files = collect_zx_files(&nfiles);
+        owned = true;
+        if (nfiles == 0) {
+            fprintf(stderr, "zxc: no .zx files in current directory\n");
+            return 2;
+        }
+    }
+    int changed = 0, bad = 0;
+    for (int i = 0; i < nfiles; i++) {
+        if (!files[i]) continue;
+        /* 复用 zxc 的读文件；失败即跳过 */
+        FILE *f = fopen(files[i], "rb");
+        if (!f) { fprintf(stderr, "zxc: cannot open '%s'\n", files[i]); bad++; continue; }
+        fseek(f, 0, SEEK_END);
+        long sz = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        char *src = malloc((size_t)sz + 1);
+        if (sz > 0 && fread(src, 1, (size_t)sz, f) != (size_t)sz) { fclose(f); free(src); bad++; continue; }
+        src[sz] = 0;
+        fclose(f);
+
+        char *newtext = fmt_transform(src);
+        if (strcmp(src, newtext) != 0) {
+            changed++;
+            printf("fmt: %s\n", files[i]);
+            if (!check_only) {
+                f = fopen(files[i], "wb");
+                if (!f) { fprintf(stderr, "zxc: cannot write '%s'\n", files[i]); bad++; free(src); continue; }
+                fwrite(newtext, 1, strlen(newtext), f);
+                fclose(f);
+            }
+        }
+        free(src);
+    }
+    if (owned && files) { for (int i = 0; i < nfiles; i++) free(files[i]); free(files); }
+    if (check_only) {
+        if (changed) { fprintf(stderr, "zxc fmt: %d file(s) need formatting\n", changed); return 1; }
+        return 0;
+    }
+    printf("zxc fmt: %d of %d file(s) formatted\n", changed, nfiles);
+    return bad ? 1 : 0;
+}
+
 int main(int argc, char **argv) {
     sema_set_argv0(argv[0]);
 
     g_cc = getenv("ZX_CC");
     if (!g_cc || !*g_cc) g_cc = default_cc(argv[0]);
+
+    /* 子命令形式（file-first 旧语法不受影响） */
+    if (argc >= 2 && argv[1][0] != '-') {
+        if (!strcmp(argv[1], "init"))  return cmd_init(argc, argv, 2);
+        if (!strcmp(argv[1], "check")) return cmd_check(argc, argv, 2);
+        if (!strcmp(argv[1], "fmt"))   return cmd_fmt(argc, argv, 2, false);
+    }
 
     const char *file = NULL, *out = NULL;
     bool dump_tokens = false, dump_ast = false, emit_c = false, check = true;

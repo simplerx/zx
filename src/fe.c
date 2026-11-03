@@ -11,6 +11,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #include "ast.h"
 #include "zxc.h"
@@ -58,14 +61,37 @@ static Node *fe_parse_zx(const char *path) {
     char *dir = fe_exe_path();
     if (!dir) return NULL;
 
-    /* 临时文件：TEMP（或当前目录）+ 时间/地址混合键，避免并发互踩 */
+    /* 临时文件：优先 TEMP 环境变量（老行为，MSYS 下 TMP 可能是 test.sh
+     * 沙箱前缀这类不存在的目录，GetTempPath 会优先吃 TMP 而踩坑），
+     * TEMP 缺失时退 GetTempPath（Zed 拉起的进程链里 TEMP 可能缺失，
+     * 回退 "." 会把 .zxfe-*.ast 写进项目根，触发文件监视报错刷屏）；
+     * 时间/地址/进程号混合键防互踩 */
+    char tmpdirbuf[1024];
     const char *tmpdir = getenv("TEMP");
-    if (!tmpdir || !*tmpdir) tmpdir = ".";
+    if (!tmpdir || !*tmpdir) {
+#ifdef _WIN32
+        DWORD n = GetTempPathA(sizeof tmpdirbuf, tmpdirbuf);
+        if (n > 0 && n < sizeof tmpdirbuf) tmpdir = tmpdirbuf;
+#endif
+    }
+    if (!tmpdir || !*tmpdir) {
+        const char *t = getenv("TMPDIR");
+        tmpdir = (t && *t) ? t : ".";
+    }
     unsigned long long key = (unsigned long long)time(NULL)
                            ^ (unsigned long long)(uintptr_t)dir;
-    char tmp[1024];
-    snprintf(tmp, sizeof tmp, "%s\\.zxfe-%llu.ast", tmpdir, key);
-    char cmd[2600];
+#ifdef _WIN32
+    key ^= (unsigned long long)GetCurrentProcessId() << 32;
+#else
+    key ^= (unsigned long long)getpid() << 32;
+#endif
+    char tmp[1200];
+    size_t tl = strlen(tmpdir);
+    if (tl > 0 && (tmpdir[tl - 1] == '\\' || tmpdir[tl - 1] == '/'))
+        snprintf(tmp, sizeof tmp, "%s.zxfe-%llu.ast", tmpdir, key);
+    else
+        snprintf(tmp, sizeof tmp, "%s\\.zxfe-%llu.ast", tmpdir, key);
+    char cmd[2800];
     int rc;
     if (*dir) {
         /* 注意：Windows 的 system() 会让 cmd /c 吃掉首尾引号——命令行
