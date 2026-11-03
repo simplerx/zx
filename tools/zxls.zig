@@ -365,8 +365,16 @@ fn extractBraceMembers(text: []const u8, is_enum: bool, out: *std.ArrayList(Decl
     }
 }
 
+/// module("…") 字符串 → 模块基名（去 .zx 后缀）。编译器两种形式都收：
+/// 裸名 "std"（解析 <d>/std.zx 或 <d>/std/std.zx）与路径 "std/str.zx"。
+fn moduleBase(m: []const u8) []const u8 {
+    if (std.mem.endsWith(u8, m, ".zx")) return m[0 .. m.len - 3];
+    return m;
+}
+
 /// mod 名 → doc 目录 / root 下的 `<mod>.zx` 或 `<mod>/*.zx` 顶层声明
 fn moduleDecls(doc_dir: []const u8, mod: []const u8, out: *std.ArrayList(Decl)) void {
+    const m = moduleBase(mod);
     var dirs: [2][]const u8 = undefined;
     var ndirs: usize = 0;
     dirs[ndirs] = doc_dir;
@@ -383,7 +391,7 @@ fn moduleDecls(doc_dir: []const u8, mod: []const u8, out: *std.ArrayList(Decl)) 
         path.appendSlice(gpa, d) catch continue;
         path.append(gpa, '/') catch continue;
         const dirlen = path.items.len;
-        path.appendSlice(gpa, mod) catch continue;
+        path.appendSlice(gpa, m) catch continue;
         path.appendSlice(gpa, ".zx") catch continue;
         if (readFileSmall(path.items)) |txt| {
             // 跨模块引用只收 pub 声明（非 pub 是模块内部实现细节）
@@ -392,16 +400,16 @@ fn moduleDecls(doc_dir: []const u8, mod: []const u8, out: *std.ArrayList(Decl)) 
         }
         // 目录型模块（如 std → std/std.zx）：编译器只读 <mod>/<mod>.zx，
         // 补全也只对齐这个语义，绝不扫目录里其他文件的内部声明。
-        path.items.len = dirlen + mod.len;
+        path.items.len = dirlen + m.len;
         path.append(gpa, '/') catch continue;
-        path.appendSlice(gpa, mod) catch continue;
+        path.appendSlice(gpa, m) catch continue;
         path.appendSlice(gpa, ".zx") catch continue;
         if (readFileSmall(path.items)) |txt| {
             topLevelDecls(txt, out, true);
             continue;
         }
         // 目录里没有 <mod>/<mod>.zx 才退回全目录扫描（同样只收 pub）
-        path.items.len = dirlen + mod.len;
+        path.items.len = dirlen + m.len;
         var dir = Io.Dir.cwd().openDir(g_io, path.items, .{ .iterate = true }) catch continue;
         defer dir.close(g_io);
         var it = dir.iterate();
@@ -555,7 +563,8 @@ fn moduleStringAt(text: []const u8, off: usize) ?[]const u8 {
 }
 
 /// 模块名 → 真实文件路径（<dir>/<m>.zx 或 <dir>/<m>/<m>.zx）
-fn resolveModuleFile(doc: *const Document, m: []const u8) ?[]const u8 {
+fn resolveModuleFile(doc: *const Document, m_raw: []const u8) ?[]const u8 {
+    const m = moduleBase(m_raw);
     const doc_dir = dirName(doc.path);
     var dirs: [2][]const u8 = undefined;
     var nd: usize = 0;
@@ -606,6 +615,25 @@ fn definitionAt(doc: *const Document, line: u32, character: u32) ?[]const u8 {
     // 1) 当前文档声明
     if (findDeclLine(text, word)) |loc|
         return makeLocation(doc.uri, loc.line, loc.col, loc.col + @as(u32, @intCast(word.len)));
+
+    // 1.5) <module>.<member>：光标停在成员上 → 模块文件的顶层声明
+    if (ws > 0 and text[ws - 1] == '.') {
+        var bs = ws - 1;
+        while (bs > 0 and (isIdentChar(text[bs - 1]) or text[bs - 1] == '.')) bs -= 1;
+        const base = text[bs .. ws - 1];
+        if (base.len > 0) {
+            var mm: ?[]const u8 = moduleOfBinding(text, base);
+            if (mm == null and std.mem.eql(u8, base, "std")) mm = "std";
+            if (mm) |mod_name| {
+                if (resolveModuleFile(doc, mod_name)) |p| {
+                    if (readFileSmall(p)) |t| {
+                        if (findDeclLine(t, word)) |loc|
+                            return makeLocation(pathToUri(p), loc.line, loc.col, loc.col + @as(u32, @intCast(word.len)));
+                    }
+                }
+            }
+        }
+    }
 
     // 2) 模块绑定名 / std → 模块文件
     var m = moduleOfBinding(text, word);
