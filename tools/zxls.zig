@@ -212,7 +212,9 @@ fn posToOffset(text: []const u8, line: u32, character: u32) usize {
         if (text[i] == '\n') ln += 1;
     }
     var units: u32 = 0;
-    while (i < text.len and text[i] != '\n' and units < character) {
+    // '\r' 视为行终止符的一部分（CRLF 文档）：客户端位置不含行尾，
+    // 越界 clamp 时不能把 '\r' 吃进来，否则 off-1 落在 '\r' 上破坏点补全判定。
+    while (i < text.len and text[i] != '\n' and text[i] != '\r' and units < character) {
         const n = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
         const end = @min(i + n, text.len);
         const cp = std.unicode.utf8Decode(text[i..end]) catch {
