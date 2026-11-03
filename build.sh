@@ -9,6 +9,7 @@
 # 把 zig 0.17.0 解到 .toolchain/zig.exe，或直接用 ZIG= 指过去。
 set -e
 ROOT="$(cd "$(dirname "$0")" && pwd)"
+ROOTW="$(cd "$ROOT" && pwd -W 2>/dev/null || echo "$ROOT")"
 cd "$ROOT"
 
 # 工具链解析：显式 ZIG > 仓库内 vendored > PATH 上的 zig
@@ -25,8 +26,10 @@ if ! command -v "$ZIG" >/dev/null 2>&1; then
 fi
 echo "toolchain: $ZIG"
 
-export ZIG_LOCAL_CACHE_DIR="$ROOT/.zc-cache/local"
-export ZIG_GLOBAL_CACHE_DIR="$ROOT/.zc-cache/global"
+# 用 Windows 形式（ROOTW）传缓存目录：POSIX 的 "/e/..." 交给 zig/lld 会被
+# 当成没有盘符的路径，链接时报 "unable to make temporary file"。
+export ZIG_LOCAL_CACHE_DIR="$ROOTW/.zc-cache/local"
+export ZIG_GLOBAL_CACHE_DIR="$ROOTW/.zc-cache/global"
 mkdir -p bin .zc-cache/local .zc-cache/global
 
 "$ZIG" cc -std=c11 -Wall -Wextra -O1 -o bin/zxc.exe \

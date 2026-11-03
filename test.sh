@@ -24,6 +24,17 @@ ZYG=./.toolchain/zig.exe
 ZXC=./bin/zxc.exe
 ROOTW="$(cd "$ROOT" && pwd -W 2>/dev/null || echo "$ROOT")"
 mkdir -p "$ROOT/.tmp" "$ROOT/bin"
+
+# 所有子进程（runner → zxc → zig cc）统一用仓库内缓存，理由有两条：
+# ① 不往用户 home 里的 zig 缓存塞东西；② 避免多份 zig 抢同一个全局缓存
+# 锁——抢锁时表现为"某一次 backend compile 卡到 60s 超时"，每次卡的文件
+# 还不一样，看起来像随机 flaky。
+# 注意用 ROOTW（Windows 形式）：POSIX 形式的 "/e/..." 交给 zig/lld 会被当成
+# 无盘符路径，链接时报 "unable to make temporary file"。
+export ZIG_LOCAL_CACHE_DIR="$ROOTW/.zc-cache/local"
+export ZIG_GLOBAL_CACHE_DIR="$ROOTW/.zc-cache/global"
+mkdir -p "$ZIG_LOCAL_CACHE_DIR" "$ZIG_GLOBAL_CACHE_DIR"
+
 TMP="$ROOTW/.tmp/zxc_test.$$"
 fail=0
 
