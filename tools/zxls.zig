@@ -257,12 +257,17 @@ const DeclKind = enum { value, field, variant };
 const Decl = struct { name: []const u8, kind: DeclKind };
 
 /// 顶层声明：`[pub] (const|var|type) NAME =`
-fn topLevelDecls(text: []const u8, out: *std.ArrayList(Decl)) void {
+fn topLevelDecls(text: []const u8, out: *std.ArrayList(Decl), pub_only: bool) void {
     var it = std.mem.splitScalar(u8, text, '\n');
     while (it.next()) |line_raw| {
         const line = std.mem.trim(u8, line_raw, " \t\r");
         var rest = line;
-        if (std.mem.startsWith(u8, rest, "pub ")) rest = std.mem.trimStart(u8, rest[4..], " \t");
+        var is_pub = false;
+        if (std.mem.startsWith(u8, rest, "pub ")) {
+            is_pub = true;
+            rest = std.mem.trimStart(u8, rest[4..], " \t");
+        }
+        if (pub_only and !is_pub) continue;
         const prefixes = [_][]const u8{ "const ", "var ", "type " };
         for (prefixes) |p| {
             if (std.mem.startsWith(u8, rest, p)) {
@@ -381,9 +386,21 @@ fn moduleDecls(doc_dir: []const u8, mod: []const u8, out: *std.ArrayList(Decl)) 
         path.appendSlice(gpa, mod) catch continue;
         path.appendSlice(gpa, ".zx") catch continue;
         if (readFileSmall(path.items)) |txt| {
-            topLevelDecls(txt, out);
+            // 跨模块引用只收 pub 声明（非 pub 是模块内部实现细节）
+            topLevelDecls(txt, out, true);
             continue;
         }
+        // 目录型模块（如 std → std/std.zx）：编译器只读 <mod>/<mod>.zx，
+        // 补全也只对齐这个语义，绝不扫目录里其他文件的内部声明。
+        path.items.len = dirlen + mod.len;
+        path.append(gpa, '/') catch continue;
+        path.appendSlice(gpa, mod) catch continue;
+        path.appendSlice(gpa, ".zx") catch continue;
+        if (readFileSmall(path.items)) |txt| {
+            topLevelDecls(txt, out, true);
+            continue;
+        }
+        // 目录里没有 <mod>/<mod>.zx 才退回全目录扫描（同样只收 pub）
         path.items.len = dirlen + mod.len;
         var dir = Io.Dir.cwd().openDir(g_io, path.items, .{ .iterate = true }) catch continue;
         defer dir.close(g_io);
@@ -396,7 +413,7 @@ fn moduleDecls(doc_dir: []const u8, mod: []const u8, out: *std.ArrayList(Decl)) 
             fp.appendSlice(gpa, path.items) catch continue;
             fp.append(gpa, '/') catch continue;
             fp.appendSlice(gpa, entry.name) catch continue;
-            if (readFileSmall(fp.items)) |txt| topLevelDecls(txt, out);
+            if (readFileSmall(fp.items)) |txt| topLevelDecls(txt, out, true);
         }
     }
 }
