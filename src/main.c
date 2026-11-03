@@ -732,6 +732,7 @@ static int write_text_file(const char *path, const char *content) {
 }
 
 static int cmd_init(int argc, char **argv, int argi) {
+    char namebuf[256];
     const char *name = "app";
     /* `zxc init` → 当前目录；`zxc init name` → 创建 name/ 子目录并进入 */
     if (argi < argc) {
@@ -748,6 +749,25 @@ static int cmd_init(int argc, char **argv, int argi) {
             fprintf(stderr, "zxc: cannot enter '%s'\n", name);
             return 1;
         }
+    }
+    /* "zxc init ." 在当前目录落脚：工程名不能照抄 "."（产物会成 "..exe"），
+     * 取当前目录的 basename，取不到就回落 "app" */
+    if (argi < argc && (!strcmp(name, ".") || !strcmp(name, ".."))) {
+#ifdef _WIN32
+        if (_getcwd(namebuf, sizeof namebuf)) {
+#else
+        if (getcwd(namebuf, sizeof namebuf)) {
+#endif
+            const char *base = strrchr(namebuf, '/');
+#ifdef _WIN32
+            const char *b2 = strrchr(namebuf, '\\');
+            if (b2 && (!base || b2 > base)) base = b2;
+#endif
+            name = (base && base[1]) ? base + 1 : "app";
+        } else {
+            name = "app";
+        }
+        if (!name[0] || !strcmp(name, ".") || !strcmp(name, "..")) name = "app";
     }
     if (access("zx.json", 0) == 0 || access("main.zx", 0) == 0) {
         fprintf(stderr, "zxc: project already exists here, aborting init\n");
@@ -1043,6 +1063,102 @@ static void gen_test_call(Buf *b, const char *name, const Type *ft) {
     }
 }
 
+/* ---- test：约定 src/（或工程根）下的 *_test.zx，里面的 test_* 函数即用例 ----
+ *
+ * `zxc test` 外层只做轻量 parse 数用例；每个测试文件的 sema/构建/运行
+ * 都在独立子进程（--test-run1 内部入口）里完成。为什么开子进程：
+ * 匿名 struct 的 C 名字按全局递增的类型 id 生成（ZxS<id>），单进程内
+ * 对多个文件逐轮 sema+emit 时 std 会被重新加载、类型 id 漂移，生成的
+ * 头文件与函数签名引用对不上号；每文件一个进程回到"单进程一次 emit"
+ * 的既有假设，顺带获得崩溃隔离——一个文件把编译器搞炸不影响其余文件。 */
+static int test_run1(const char *file, const char *filter, bool release) {
+    /* 父进程经 cmd.exe 传参会把 '/' 换成 '\\'；runner 源码里 module("…")
+     * 的反斜杠会被当转义序列，词法直接报错——统一换回正斜杠 */
+    char fbuf[2048];
+    snprintf(fbuf, sizeof fbuf, "%s", file);
+    for (char *p = fbuf; *p; p++) if (*p == '\\') *p = '/';
+    file = fbuf;
+
+    Proj pj;
+    if (!proj_load(&pj)) return 200;
+    setup_search_paths(&pj);
+    mkdir_p(ZX_CACHE_DIR);
+    mkdir_p("out");
+
+    g_error_count = 0;
+    g_diag_shown = 0;
+    g_srcpath = file;
+    Node *root = fe_parse_file(file);
+    if (!root || g_error_count) return 200;
+    sema_check(root);
+    if (g_error_count) return 200;
+
+    Node *fns[256];
+    const char *names[256];
+    int nt = collect_test_fns(root, fns, names, 256);
+    if (nt == 0) return 0;             /* *_test.zx 没有用例：当共享辅助文件 */
+
+    char stem[256], rpath[2048], bpath[2048], modrel[2100];
+    path_basename(file, stem, sizeof stem);
+    path_strip_ext(stem);
+    snprintf(rpath, sizeof rpath, ZX_CACHE_DIR "/%s_runner.zx", stem);
+    snprintf(bpath, sizeof bpath, "out/test_%s.exe", stem);
+    snprintf(modrel, sizeof modrel, "../%s", file);
+
+    /* runner 落盘（内容没变 mtime 不动，后续构建命中缓存） */
+    Buf b;
+    buf_init(&b);
+    buf_puts(&b, "// zxc test 自动生成的 runner —— 勿手改\n");
+    buf_printf(&b, "const t = module(\"%s\");\n", modrel);
+    buf_puts(&b, "const std = module(\"std\");\n\n");
+    buf_puts(&b, "const main = fn () i32 {\n");
+    buf_puts(&b, "    let a = std.process.args();\n");   /* 不含程序名：a[0] 即测试名 */
+    buf_puts(&b, "    if (a.len < 1) { std.process.exit(2); }\n");
+    for (int i = 0; i < nt; i++) {
+        Type *ft = (fns[i]->ty && fns[i]->ty->kind == TY_TYPE)
+                   ? fns[i]->type_val : NULL;
+        buf_printf(&b, "    if (std.str.eq(a[0], \"%s\")) {\n", names[i]);
+        gen_test_call(&b, names[i], ft);
+        buf_puts(&b, "        return 0;\n");
+        buf_puts(&b, "    }\n");
+    }
+    buf_puts(&b, "    std.process.exit(2);\n");
+    buf_puts(&b, "};\n");
+    if (write_text_file(rpath, b.data ? b.data : "") != 0) return 200;
+
+    g_error_count = 0;
+    g_diag_shown = 0;
+    g_srcpath = rpath;
+    Node *rr = fe_parse_file(rpath);
+    if (!rr || g_error_count) {
+        fprintf(stderr, "zxc test: runner for '%s' failed to build\n", file);
+        return 200;
+    }
+    sema_check(rr);
+    if (g_error_count) return 200;
+    g_cflags = release ? CC_REL : CC_DEV;
+    if (build_program(rr, bpath, ZX_CACHE_DIR, OUT_EXE) != 0) return 200;
+
+    int failed = 0;
+    for (int ti = 0; ti < nt; ti++) {
+        if (filter && !strstr(names[ti], filter)) continue;
+        char cmd[2200];
+        snprintf(cmd, sizeof cmd, "\"\"%s\" \"%s\"\"", bpath, names[ti]);
+        for (char *p = cmd; *p; p++) if (*p == '/') *p = '\\';
+        int rc = system(cmd);
+#ifndef _WIN32
+        rc = WIFEXITED(rc) ? WEXITSTATUS(rc) : 1;
+#endif
+        if (rc == 0) {
+            printf("PASS  %s.%s\n", stem, names[ti]);
+        } else {
+            printf("FAIL  %s.%s\n", stem, names[ti]);
+            failed++;
+        }
+    }
+    return failed > 199 ? 199 : failed;   /* 200 留给"文件本身没编过" */
+}
+
 static int cmd_test(int argc, char **argv, int argi) {
     const char *filter = NULL;             /* 名字子串过滤 */
     bool release = false;
@@ -1054,14 +1170,6 @@ static int cmd_test(int argc, char **argv, int argi) {
         }
         if (!filter) filter = argv[i];
     }
-    Proj pj;
-    if (!proj_load(&pj)) {
-        fprintf(stderr, "zxc: zx.json not found here (cd into a project or 'zxc init')\n");
-        return 2;
-    }
-    setup_search_paths(&pj);
-    mkdir_p(ZX_CACHE_DIR);
-    mkdir_p("out");
 
     int nfiles = 0;
     char **files = collect_zx_files_smart(&nfiles);
@@ -1071,77 +1179,35 @@ static int cmd_test(int argc, char **argv, int argi) {
         size_t l = strlen(f);
         if (l < 8 || strcmp(f + l - 8, "_test.zx") != 0) continue;
 
+        /* 父进程只轻量 parse 数用例（不碰 sema/后端），决定要不要拉子进程 */
         g_error_count = 0;
         g_diag_shown = 0;
         g_srcpath = f;
         Node *root = fe_parse_file(f);
-        if (!root || g_error_count) { failed++; continue; }
-        sema_check(root);
-        if (g_error_count) { failed++; continue; }
-
         Node *fns[256];
         const char *names[256];
-        int nt = collect_test_fns(root, fns, names, 256);
-        if (nt == 0) continue;             /* *_test.zx 没有用例：当共享辅助文件 */
+        int nt = (root && !g_error_count) ? collect_test_fns(root, fns, names, 256) : -1;
+        int matched = 0;
+        if (nt > 0)
+            for (int i = 0; i < nt; i++)
+                if (!filter || strstr(names[i], filter)) matched++;
+        if (nt == 0) continue;         /* 没有用例：共享辅助文件 */
+        if (nt > 0 && matched == 0) continue;
+        total += (nt > 0) ? matched : 1;
 
-        char stem[256], rpath[2048], bpath[2048], modrel[2100];
-        path_basename(f, stem, sizeof stem);
-        path_strip_ext(stem);
-        snprintf(rpath, sizeof rpath, ZX_CACHE_DIR "/%s_runner.zx", stem);
-        snprintf(bpath, sizeof bpath, "out/test_%s.exe", stem);
-        snprintf(modrel, sizeof modrel, "../%s", f);
-
-        /* runner 落盘（内容没变 mtime 不动，后续构建命中缓存） */
-        Buf b;
-        buf_init(&b);
-        buf_puts(&b, "// zxc test 自动生成的 runner —— 勿手改\n");
-        buf_printf(&b, "const t = module(\"%s\");\n", modrel);
-        buf_puts(&b, "const std = module(\"std\");\n\n");
-        buf_puts(&b, "const main = fn () i32 {\n");
-        buf_puts(&b, "    let a = std.process.args();\n");   /* 不含程序名：a[0] 即测试名 */
-        buf_puts(&b, "    if (a.len < 1) { std.process.exit(2); }\n");
-        for (int i = 0; i < nt; i++) {
-            Type *ft = (fns[i]->ty && fns[i]->ty->kind == TY_TYPE)
-                       ? fns[i]->type_val : NULL;
-            buf_printf(&b, "    if (std.str.eq(a[0], \"%s\")) {\n", names[i]);
-            gen_test_call(&b, names[i], ft);
-            buf_puts(&b, "        return 0;\n");
-            buf_puts(&b, "    }\n");
-        }
-        buf_puts(&b, "    std.process.exit(2);\n");
-        buf_puts(&b, "};\n");
-        if (write_text_file(rpath, b.data ? b.data : "") != 0) { failed++; continue; }
-
-        g_error_count = 0;
-        g_diag_shown = 0;
-        g_srcpath = rpath;
-        Node *rr = fe_parse_file(rpath);
-        if (!rr || g_error_count) {
-            fprintf(stderr, "zxc test: runner for '%s' failed to build\n", f);
-            failed++;
-            continue;
-        }
-        sema_check(rr);
-        if (g_error_count) { failed++; continue; }
-        g_cflags = release ? CC_REL : CC_DEV;
-        if (build_program(rr, bpath, ZX_CACHE_DIR, OUT_EXE) != 0) { failed++; continue; }
-
-        for (int ti = 0; ti < nt; ti++) {
-            if (filter && !strstr(names[ti], filter)) continue;
-            total++;
-            char cmd[2200];
-            snprintf(cmd, sizeof cmd, "\"\"%s\" \"%s\"\"", bpath, names[ti]);
-            for (char *p = cmd; *p; p++) if (*p == '/') *p = '\\';
-            int rc = system(cmd);
+        char cmd[2400];
+        snprintf(cmd, sizeof cmd, "\"\"%s\" --test-run1 \"%s\" \"%s\"%s\"",
+                 argv[0], f, filter ? filter : "", release ? " --release" : "");
+        for (char *p = cmd; *p; p++) if (*p == '/') *p = '\\';
+        int rc = system(cmd);
 #ifndef _WIN32
-            rc = WIFEXITED(rc) ? WEXITSTATUS(rc) : 1;
+        rc = WIFEXITED(rc) ? WEXITSTATUS(rc) : 1;
 #endif
-            if (rc == 0) {
-                printf("PASS  %s.%s\n", stem, names[ti]);
-            } else {
-                printf("FAIL  %s.%s\n", stem, names[ti]);
-                failed++;
-            }
+        if (rc == 200) {
+            printf("FAIL  %s (file failed to build)\n", f);
+            failed++;
+        } else if (rc > 0) {
+            failed += rc;
         }
     }
     if (files) { for (int i = 0; i < nfiles; i++) free(files[i]); free(files); }
@@ -1213,6 +1279,18 @@ int main(int argc, char **argv) {
 
     g_cc = getenv("ZX_CC");
     if (!g_cc || !*g_cc) g_cc = default_cc(argv[0]);
+
+    /* 内部入口（先于一切参数解析）：每个 *_test.zx 的构建+运行跑在
+     * 独立子进程里（见 test_run1 注释） */
+    if (argc >= 4 && !strcmp(argv[1], "--test-run1")) {
+        bool rel = false;
+        const char *flt = NULL;
+        for (int i = 3; i < argc; i++) {
+            if (!strcmp(argv[i], "--release")) { rel = true; continue; }
+            if (!flt) flt = argv[i];
+        }
+        return test_run1(argv[2], flt, rel);
+    }
 
     /* 子命令形式（file-first 旧语法不受影响） */
     if (argc >= 2 && argv[1][0] != '-') {
