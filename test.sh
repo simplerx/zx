@@ -155,6 +155,9 @@ else
     printf "  FAIL 增量编译用例没编出二进制\n"; fail=1
 fi
 
+# 用例会在仓库根留下自己的临时文件：io_fmt.zx 写 io_fmt.tmp，stdfs.zx 建
+# fs_t_dir / fs_t_dir2。跑完统一带走——测试不该往工作区里堆东西。
+rm -rf io_fmt.tmp fs_t_dir fs_t_dir2 2>/dev/null || true
 rm -f "$TMP"* 2>/dev/null || true
 
 if [ $fail -ne 0 ]; then

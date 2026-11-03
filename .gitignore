@@ -20,6 +20,10 @@ out/
 # Zed 扩展的 cargo 产物（wasm 本身入库，target 不入库）
 editor/zed/target/
 
+# 用例自己产生的临时文件（正常跑完会被 test.sh 清掉，这里是兜底）
+io_fmt.tmp
+fs_t_dir*/
+
 # 一次性探测文件
 err_probe.zx
 
