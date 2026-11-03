@@ -1,6 +1,7 @@
 # zxc — Zx 语言编译器
 
 Zx 的参考实现。规格见 `spec/zx-spec.md`，文法见 `spec/zx.ebnf`，裁定记录见 `spec/decisions.md`。
+仓库：<https://gitcode.com/simplex/zx>　·　手册：`docs/manual.md`　·　教程：`docs/guide.md`
 
 ## 构建
 
@@ -2132,3 +2133,7 @@ Neovim / Helix 要用就拷过去，不在语法目录再养一份副本——�
 / 类型 / 泛型 / 错误集 / C11 后端 / 自举四阶段 / LSP 全在跑，回归 217 + 6 +
 14 项守着。差的是生态三件套：**包管理、调试信息、并发库**；跨平台还停在
 "自备 `ZX_CC` 与工具链"的阶段。这个结论直接写在手册里，不粉饰。
+
+## 许可
+
+MIT，见 `LICENSE`。
