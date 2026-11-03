@@ -14,7 +14,7 @@
  *   zxc build           构建：--exe(默认)/--lib × --static(默认)/--shared、--release
  *                       中间文件进 .zxc-cache/，最终产物进 out/
  *   zxc run [args]      build 后直接运行 out/<产物>.exe（-- 之后的参数传给程序）
- *   zxc test [过滤]     运行 *_test.zx 里的 test_* 用例（每用例一个进程）
+ *   zxc test [过滤]     运行 src/test/ 测试模块（零参 pub 函数即用例）
  *   zxc check / fmt     检查 / 格式化
  *
  * zx.json：工程清单（init 生成）。name/version/main/out 之外，
@@ -435,7 +435,7 @@ static void usage(void) {
         "       zxc run [--release] [-- args...]\n"
         "                           build 后直接运行 out/<产物>.exe\n"
         "       zxc test [名字过滤] [--release]\n"
-        "                           运行 *_test.zx 里的 pub test_* 用例\n");
+        "                           运行 src/test/ 测试模块的用例\n");
 }
 
 /* 默认工具链（`.toolchain/zig.exe cc`）钉在仓库根，而不是当前目录：
@@ -509,11 +509,21 @@ static char **collect_zx_files(const char *dir, int *out_n) {
 }
 #endif
 
-/* 目录收集：先看当前目录，没有 .zx 再看 src/（配合 init 的 src/ 布局） */
+/* 目录收集：先看当前目录，没有 .zx 再看 src/（配合 init 的 src/ 布局）；
+ * src/ 之外再补上 src/test/（测试模块也要被 check/fmt 覆盖）。
+ * collect_zx_files 返回的路径已带目录前缀，直接拼接即可。 */
 static char **collect_zx_files_smart(int *out_n) {
     char **files = collect_zx_files(NULL, out_n);
     if (files) return files;
-    return collect_zx_files("src", out_n);
+    files = collect_zx_files("src", out_n);
+    int n = *out_n, k = 0;
+    char **sub = collect_zx_files("src/test", &k);
+    if (!sub) return files;
+    files = realloc(files, (size_t)(n + k) * sizeof *files);
+    for (int i = 0; i < k; i++) files[n++] = sub[i];   /* 已带 src/test/ 前缀 */
+    free(sub);
+    *out_n = n;
+    return files;
 }
 
 /* ---- fmt：词法感知的行格式化（缩进/尾空白/空行规整），保守不动内容 ---- */
@@ -712,7 +722,7 @@ static const char *INIT_README =
     "zxc build --release   # 发布档 -O2\n"
     "zxc build --lib       # 静态库 out/<名>.a；--lib --shared 动态库 .dll/.so\n"
     "zxc run               # build 后直接运行（-- 之后的参数传给程序）\n"
-    "zxc test              # 运行 *_test.zx 里的 test_* 用例\n"
+    "zxc test              # 运行 src/test/ 里的测试（零参 pub 函数即用例）\n"
     "zxc check             # 静默检查全部 *.zx（src/ 下也扫）\n"
     "zxc fmt               # 格式化全部 *.zx\n"
     "```\n"
@@ -721,7 +731,13 @@ static const char *INIT_README =
     "\n"
     "`src/` 下的 `*.zx` 都是可用模块（与导入文件同目录即可）：\n"
     "`const m = module(\"m\");` 或 `module(\"m/inner.zx\")` 引子目录模块。\n"
-    "标准库见 `std.zx`。\n";
+    "标准库见 `std.zx`。\n"
+    "\n"
+    "## 测试\n"
+    "\n"
+    "`src/test/` 下的 `*.zx` 都是测试模块：里面的零参 `pub` 函数全部是用例\n"
+    "（不用 test_ 前缀；带参数/泛型的函数可当辅助）。引用工程源码用\n"
+    "`module(\"../xxx.zx\")`。`zxc test [名字过滤]` 运行，每个用例独立进程。\n";
 
 static int write_text_file(const char *path, const char *content) {
     FILE *f = fopen(path, "wb");
@@ -1019,25 +1035,34 @@ static int cmd_run(int argc, char **argv, int argi) {
 #endif
 }
 
-/* ---- test：约定 src/（或工程根）下的 *_test.zx，里面的 pub test_* 函数即用例
- * ----（跨模块调用要求 pub，编译器强制；用例失败 = 断言 @trap（注意编译期
- * 可达的 @trap 会变成编译错误）、std.process.exit(非 0)，或返回非 0 整数/false。
- * 每个测试文件编一个 runner 小程序（.zxc-cache/<stem>_runner.zx 生成），
- * main 按命令行参数分发到单个 test_* 函数：驱动逐个拉起进程、汇总
- * PASS/FAIL。进程隔离——一个用例炸掉不影响后面的用例。 */
+/* ---- test：约定 src/test/ 目录下的 *.zx 都是测试模块，里面的 pub 零参
+ * 非泛型函数全部是用例（不需要 test_ 前缀；带参数/泛型函数天然被排除，
+ * 可当辅助函数用）。用例失败 = 断言 @trap（注意编译期可达的 @trap 会变成
+ * 编译错误）、std.process.exit(非 0)，或返回非 0 整数/false。每个测试文件
+ * 编一个 runner 小程序（.zxc-cache/<stem>_runner.zx 生成），main 按命令行
+ * 参数分发到单个用例：驱动逐个拉起进程、汇总 PASS/FAIL。进程隔离——
+ * 一个用例炸掉不影响后面的用例。测试文件引用工程源码用
+ * module("../xxx.zx")（测试目录的上一级就是 src/）。 * ---- */
 
-/* 扫顶层声明收集 test_ 函数。要求空参、非泛型；返回值决定失败语义：
- * void → 执行完即过；bool → false 即败；整型 → 非 0 即败；其余类型忽略返回值。 */
+/* 收集 src/test/*.zx。返回 malloc 的路径数组。 */
+static char **collect_test_files(int *out_n) {
+    return collect_zx_files("src/test", out_n);
+}
+
+/* 扫顶层声明收集用例。测试模块里所有零参非泛型函数都是用例，不需要
+ * test_ 前缀；带参数/泛型函数天然被排除，可当辅助函数用。返回值决定
+ * 失败语义：void → 执行完即过；bool → false 即败；整型 → 非 0 即败；
+ * 其余类型忽略返回值。 */
 static int collect_test_fns(Node *root, Node **fns, const char **names, int max) {
     int n = 0;
     for (int i = 0; root && i < root->nitems && n < max; i++) {
         Node *d = root->items[i];
         const char *name = NULL;
         Node *fn = NULL;
-        if (d->kind == NK_DECL && d->name && !strncmp(d->name, "test_", 5)) {
+        if (d->kind == NK_DECL && d->name && d->b && d->b->kind == NK_FN) {
             name = d->name;
-            fn = (d->b && d->b->kind == NK_FN) ? d->b : NULL;   /* NK_DECL: b = 初值 */
-        } else if (d->kind == NK_FN && d->name && !strncmp(d->name, "test_", 5)) {
+            fn = d->b;                                          /* NK_DECL: b = 初值 */
+        } else if (d->kind == NK_FN && d->name) {
             name = d->name;
             fn = d;
         }
@@ -1172,12 +1197,10 @@ static int cmd_test(int argc, char **argv, int argi) {
     }
 
     int nfiles = 0;
-    char **files = collect_zx_files_smart(&nfiles);
+    char **files = collect_test_files(&nfiles);
     int total = 0, failed = 0;
     for (int fi = 0; fi < nfiles; fi++) {
         const char *f = files[fi];
-        size_t l = strlen(f);
-        if (l < 8 || strcmp(f + l - 8, "_test.zx") != 0) continue;
 
         /* 父进程只轻量 parse 数用例（不碰 sema/后端），决定要不要拉子进程 */
         g_error_count = 0;
@@ -1212,7 +1235,7 @@ static int cmd_test(int argc, char **argv, int argi) {
     }
     if (files) { for (int i = 0; i < nfiles; i++) free(files[i]); free(files); }
     if (total == 0 && failed == 0) {
-        printf("zxc test: no test_ functions in any *_test.zx\n");
+        printf("zxc test: no test modules in src/test/ (or no zero-arg pub fns)\n");
         return 0;
     }
     printf("zxc test: %d ran, %d failed\n", total, failed);

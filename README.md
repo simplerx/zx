@@ -34,7 +34,7 @@ bin/zxc.exe build --lib           # 静态库 out/<名>.a
 bin/zxc.exe build --lib --shared  # 动态库 out/<名>.dll（非 Windows: .so）
 bin/zxc.exe build --release       # 发布档 -O2
 bin/zxc.exe run [-- args...]      # build 后直接运行（-- 之后的参数传给程序）
-bin/zxc.exe test [名字过滤]       # 运行 *_test.zx 里的 pub test_* 用例（每用例一个进程）
+bin/zxc.exe test [名字过滤]       # 运行 src/test/ 测试模块：零参 pub 函数即用例（每用例一个进程）
 bin/zxc.exe check                 # 静默检查 *.zx（当前目录，缺省回落 src/）
 bin/zxc.exe fmt [--check]         # 格式化
 ```
