@@ -7,14 +7,14 @@ const std = module("std");
 var pool: *[256]u8 = undefined;
 var used: usize = 0;
 
-const bump = fn (n: usize) ?*u8 {
+const bump = fn (ctx: ?*u8, n: usize) ?*u8 {
     if (used + n > pool.len) { return null; }
     let p = pool[0..].ptr + used;
     used = used + n;
     return p;
 };
 
-const noop = fn (p: *u8, n: usize) void { };
+const noop = fn (ctx: ?*u8, p: *u8, n: usize) void { };
 
 const main = fn () i32 {
     let al = std.heap.page;
@@ -33,7 +33,7 @@ const main = fn () i32 {
     xs.deinit();
 
     // ---- 同一个 ArrayList 配自建的 arena（泛型 + 自定义分配器）----
-    let arena = std.Allocator{ .alloc = bump, .free = noop };
+    let arena = std.Allocator{ .ctx = null, .alloc = bump, .free = noop };
     var ys = std.ArrayList(i32).init(arena);
     var j: usize = 0;
     while (j < 20) {

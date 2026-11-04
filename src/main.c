@@ -512,13 +512,18 @@ static int build_program(Node *root, const char *out, const char *cachedir, OutK
     }
 #endif
 
-    /* 中间文件前缀：有缓存目录就用 "缓存目录/产物名（去扩展名）" */
+    /* 中间文件前缀：有缓存目录就用 "缓存目录/产物名（去扩展名）"。
+     * 前缀里带上优化档位（-dev / -rel）：dev 与 release 的 .o 本来就
+     * 互不兼容（优化级别不同，.flags 盖章也不同），过去共用一个前缀
+     * 意味着 `--release` 和 `zxc run`（-O0）来回切一次就全量重编
+     * 11 个 TU。分开放之后两边各留一份，切换零成本。 */
     char stem[2048];
     if (cachedir && *cachedir) {
         char base[1024];
         path_basename(out, base, sizeof base);
         path_strip_ext(base);
-        snprintf(stem, sizeof stem, "%s/%s", cachedir, base);
+        const char *mtag = (g_cflags == CC_REL) ? "-rel" : "-dev";
+        snprintf(stem, sizeof stem, "%s/%s%s", cachedir, base, mtag);
     } else {
         snprintf(stem, sizeof stem, "%s", out);
     }
@@ -540,6 +545,7 @@ static int build_program(Node *root, const char *out, const char *cachedir, OutK
     Buf objs;
     buf_init(&objs);
     int njobs = 0;
+    long long maxobj = 0;      /* 全部 .o 里最新的 mtime（判"要不要重链"） */
 
     /* 编译参数（cc 路径 / dev-release 档）记个 stamp：参数变了，磁盘上
      * 的旧 .o 全是别的参数编的，一律作废。首次没有 stamp 也算变了
@@ -557,6 +563,10 @@ static int build_program(Node *root, const char *out, const char *cachedir, OutK
         char cpath[2048], opath[2048];
         snprintf(cpath, sizeof cpath, "%s_%s.c", stem, uname);
         snprintf(opath, sizeof opath, "%s_%s.o", stem, uname);
+        {
+            long long om = fmtime(opath);
+            if (om > maxobj) maxobj = om;
+        }
 
         /* 每份 .c 都 include 共享头：类型、运行时原型、跨模块原型都在里面 */
         Buf full;
@@ -611,12 +621,27 @@ static int build_program(Node *root, const char *out, const char *cachedir, OutK
         return 1;
     }
 
+    /* 一个单元都没重编、产物又比所有 .o 新：整体已经是最新的，别动链接器。
+     * 链接是"无改动重建"里最贵的一步——zig cc 每次调用有约 200 ms 固定开销
+     * （驱动启动 + lld + 自带 libc），占掉这条路线的七成。
+     *
+     * 判据必须挂在 njobs == 0 上，不能只看时间戳：Windows 的 st_mtime 是秒级，
+     * 同一秒内重编出的 .o 与产物无法分先后（见上面 remove(opath) 那段注释）。
+     * 有重编就一定重链，宁可多跑一次也不发旧二进制。 */
+    char absout[2048];
+    path_abs(out, absout, sizeof absout);
+    if (njobs == 0) {
+        long long om = fmtime(absout);
+        if (om > 0 && om >= maxobj) {
+            if (getenv("ZX_VERBOSE")) fprintf(stderr, "  link skipped (up to date: %s)\n", out);
+            return 0;
+        }
+    }
+
     /* 链接 / 归档：exe 直接链；动态库 -shared；静态库用配套的 ar 收拢 .o。
      * 最终产物的 -o 一律用绝对路径：zig cc 0.15 的 -shared 模式下
      * 相对子目录路径（out/x.dll）会报 "No such file or directory"
      * （exe / ar 无此毛病，绝对路径统一绕开）。 */
-    char absout[2048];
-    path_abs(out, absout, sizeof absout);
     char cmd[8192];
     if (kind == OUT_STATIC) {
         snprintf(cmd, sizeof cmd, "%s rcs \"%s\" %s", archiver_of(g_cc), absout, objs.data);

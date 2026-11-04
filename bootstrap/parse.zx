@@ -441,7 +441,7 @@ pub const Parser = struct {
     const dup_msg = fn (self: *Parser) []const u8 {
         let items = self.msgb.items();
         let n = items.len;
-        if (self.al.alloc(n)) p {
+        if (self.al.alloc(self.al.ctx, n)) p {
             var dst = p[0..n];
             var i: usize = 0;
             while (i < n) {
@@ -542,7 +542,7 @@ pub const Parser = struct {
     // ---- 节点构造 ----
 
     const new = fn (self: *Parser, k: NK) *Node {
-        let raw = self.al.alloc(@sizeOf(Node));
+        let raw = self.al.alloc(self.al.ctx, @sizeOf(Node));
         if (raw) p {
             let n = (*Node)p;
             n.kind = k;

@@ -183,6 +183,10 @@ typedef struct Module {
 static Module **g_mods;
 static int      g_nmods, g_cmods;
 static Module  *g_mod;
+/* 正在检查文件根的语句列表（模块加载 / 入口根）。文件根上的惰性模块
+ * 声明才允许推迟解析；函数体、comptime 块里的 decl 一律当场算。
+ * check_block 进块时清掉它——嵌套块里的 decl 不得享受文件根的豁免。 */
+static bool g_root_stmts;
 static bool g_ct_stuck;
 static int  g_ct_exec;
 /* 一个 Comptime 栈帧：返回值 / 收割都靠它往上冒 */
@@ -452,14 +456,19 @@ Type *sema_allocator_type(void) {
 
     t = ty_agg(TY_STRUCT, &id, "Allocator");
     if (!t->fields) {
-        Type *ap[1] = { ty_usize() };
-        Type *fp[2] = { ty_ptr(ty_u8(), false, false, 0), ty_usize() };
-        t->nfields = 2;
-        t->fields = calloc(2, sizeof(Field));
-        t->fields[0].name = "alloc";
-        t->fields[0].ty = ty_fn(ap, 1, ty_opt(ty_ptr(ty_u8(), false, false, 0)));
-        t->fields[1].name = "free";
-        t->fields[1].ty = ty_fn(fp, 2, ty_void());
+        /* 首字段 ctx：有状态分配器（arena / 池 / 计数器）的载体。
+         * 没有它，arena 只能靠全局变量绕——v0.58 之前就是这么凑合的。 */
+        Type *ap[2] = { ty_opt(ty_ptr(ty_u8(), false, false, 0)), ty_usize() };
+        Type *fp[3] = { ty_opt(ty_ptr(ty_u8(), false, false, 0)),
+                        ty_ptr(ty_u8(), false, false, 0), ty_usize() };
+        t->nfields = 3;
+        t->fields = calloc(3, sizeof(Field));
+        t->fields[0].name = "ctx";
+        t->fields[0].ty  = ty_opt(ty_ptr(ty_u8(), false, false, 0));
+        t->fields[1].name = "alloc";
+        t->fields[1].ty = ty_fn(ap, 2, ty_opt(ty_ptr(ty_u8(), false, false, 0)));
+        t->fields[2].name = "free";
+        t->fields[2].ty = ty_fn(fp, 3, ty_void());
     }
     return t;
 }
@@ -2439,7 +2448,11 @@ static Symbol *ns_member_symbol(Node *field) {
     /* 表达式位置 base 是 IDENT，类型位置（std.HashMap(i32)）是 TYPE_IDENT */
     if (field->a->kind != NK_IDENT && field->a->kind != NK_TYPE_IDENT) return NULL;
     Symbol *ns = lookup(field->a->name);
-    if (!ns || ns->kind != SK_NS || !ns->mod) return NULL;
+    if (!ns) return NULL;
+    /* 惰性模块别名此刻可能还是未解析的 SK_CONST（文件根声明推迟了
+     * module("…") 的加载），先按需解析成 SK_NS 再看成员。 */
+    ensure(ns);
+    if (ns->kind != SK_NS || !ns->mod) return NULL;
     return module_member(ns->mod, field->name);
 }
 
@@ -3445,6 +3458,36 @@ static Symbol *module_member(Module *m, const char *name) {
     return NULL;
 }
 
+/* 顶层 const 的初值是不是"惰性模块引用"：module("…") 本身，或者指向
+ * 这类别名的成员链（std.zx 顶层的 `pub const HashMap = map.HashMap;`
+ * 就是后者）。
+ *
+ * 为什么要惰性：模块加载走的是 check_stmts(m->root) → 每条顶层 decl
+ * 都 ensure 一遍，于是 `pub const str = module("str.zx")` 在 std 一被
+ * 加载时就把 str/map/pool/fs/json/time/task 全部拉进编译——哪怕程序
+ * 只用了 std.println。惰性声明不做这次急切解析，真正被引用时 ensure
+ * 会沿原有路径（NK_MODULE 分支 / 别名 sym_link）照常解析并加载文件。
+ * 没人用的模块根本不进 g_mods：后端少发射几个单元、链接器少收几个 .o。
+ *
+ * 代价是诊断时机的变化：一个从未被引用的坏模块不再报错。这是取舍而
+ * 不是缺陷——和"没人调用的泛型不实例化就不检查"是同一条哲学。 */
+static bool decl_is_lazy_module(Node *d) {
+    if (!d || d->kind != NK_DECL || d->a || !d->b || d->c) return false;
+    Node *init = d->b;
+    if (init->kind == NK_MODULE) return true;
+    if (init->kind != NK_FIELD) return false;
+    /* 成员链：根标识符必须解析到"初值是 module(...) 的 const 别名"，
+     * 普通 `const X = someStruct.field;` 不在此列，维持急切解析。 */
+    Node *root = init;
+    while (root->kind == NK_FIELD && root->a) root = root->a;
+    if (root->kind != NK_IDENT || !root->name) return false;
+    Symbol *s = root->sym;
+    if (!s && g_mod) s = module_member(g_mod, root->name);
+    if (!s || s->kind != SK_CONST || !s->decl) return false;
+    Node *sd = s->decl;
+    return !sd->a && sd->b && sd->b->kind == NK_MODULE;
+}
+
 static void hoist(Scope *sc, Node *blk) {
     bool file_scope = (g_mod && sc == &g_mod->scope);
 
@@ -3906,7 +3949,9 @@ static Module *module_load_full(const char *full_in, int line, int col) {
     m->ns->mod = m;
 
     hoist(&m->scope, m->root);
+    g_root_stmts = true;
     check_stmts(m->root);
+    g_root_stmts = false;
 
     g_srcpath = save_p;
     g_scope = save_s;
@@ -4066,7 +4111,10 @@ static Type *check_block(Node *n) {
     Label *lb = n->label ? label_push(n->label, false) : NULL;
 
     hoist(&sc, n);
+    bool save_root = g_root_stmts;
+    g_root_stmts = false;
     check_stmts(n);
+    g_root_stmts = save_root;
 
     Type *t = ty_void();
     if (lb) t = lb->has ? lb->ty : ty_void();
@@ -4080,6 +4128,9 @@ static void check_stmt(Node *n) {
     if (!n) return;
     switch (n->kind) {
     case NK_DECL:
+        /* 文件作用域的惰性模块声明：不急切解析（见 decl_is_lazy_module）。
+         * 函数体里的 decl 不在此列——那是真正的运行时绑定，必须当场算。 */
+        if (g_root_stmts && decl_is_lazy_module(n)) return;
         if (n->c) {
             for (int k = 0; k < n->c->nitems; k++) ensure(n->c->items[k]->sym);
         } else if (n->sym) {
@@ -5014,7 +5065,9 @@ void sema_check(Node *root) {
     g_scope = &m0->scope;
     m0->scope.is_module = true;
     hoist(&m0->scope, root);
+    g_root_stmts = true;
     check_stmts(root);
+    g_root_stmts = false;
 
     /* 函数体：每个都回到它所属模块的作用域里检查。
      * 检查过程中可能又冒出新的待检查体（泛型实例、模块里的函数），

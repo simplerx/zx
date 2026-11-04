@@ -144,7 +144,7 @@ const main = fn () i32 {
     // ---- 错误处理：语法错 / 深度 / trailing / 行列定位 ----
     // 520 层嵌套必超 MAX_DEPTH=512
     var bad_depth_ok = false;
-    let depraw = al.alloc(1040);
+    let depraw = al.alloc(al.ctx, 1040);
     if (depraw) dp {
         var di: usize = 0;
         while (di < 520) { (dp + di).0 = '['; di = di + 1; }

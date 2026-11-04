@@ -47,7 +47,7 @@ const ATTR_HIDDEN: u32 = 2;        // FILE_ATTRIBUTE_HIDDEN
 // NUL 结尾的副本（extern 调用都要 C 串）。返回切片不含 NUL，
 // 但分配里 NUL 就紧随其后（str.concat 同一约定）。
 const zpath = fn (alloc: Allocator, p: []const u8) ?[]u8 {
-    let raw = alloc.alloc(p.len + 1);
+    let raw = alloc.alloc(alloc.ctx, p.len + 1);
     if (raw) q {
         let whole = q[0..p.len + 1];
         var i: usize = 0;
@@ -139,7 +139,7 @@ pub const join = fn (alloc: Allocator, a: []const u8, b: []const u8) ?[]u8 {
     if (a.len == 0) { return zpath(alloc, b); }
     if (b.len == 0) { return zpath(alloc, a); }
     let need = a.len + b.len + 2;        // 可能的分隔符 + NUL
-    let raw = alloc.alloc(need);
+    let raw = alloc.alloc(alloc.ctx, need);
     if (raw) q {
         let whole = q[0..need];
         var n: usize = 0;
@@ -167,17 +167,17 @@ pub const Stat = struct {
 pub const stat = fn (alloc: Allocator, path: []const u8) ?Stat {
     let zp = zpath(alloc, path);
     if (zp) z {
-        let buf = alloc.alloc(FD_BUF);
+        let buf = alloc.alloc(alloc.ctx, FD_BUF);
         if (buf) b {
             let fd = (*u8)b;
             let h = FindFirstFileA((*const u8)z.ptr, fd);
             if (h != INVALID_HANDLE) {
                 let s = statFrom(fd);
                 FindClose(h);
-                alloc.free(fd, FD_BUF);
+                alloc.free(alloc.ctx, fd, FD_BUF);
                 return s;
             }
-            alloc.free(fd, FD_BUF);
+            alloc.free(alloc.ctx, fd, FD_BUF);
         }
     }
     return null;
@@ -242,7 +242,7 @@ pub const DirIter = struct {
     const open = fn (alloc: Allocator, path: []const u8) ?Self {
         // 通配 pattern：path + "\\*"（path 末尾已有分隔符就不加）
         let need = path.len + 3;
-        let raw = alloc.alloc(need);
+        let raw = alloc.alloc(alloc.ctx, need);
         if (raw) r {
             let pat = r[0..need];
             var n: usize = 0;
@@ -252,16 +252,16 @@ pub const DirIter = struct {
             pat[n] = '*'; n = n + 1;
             pat[n] = 0;
 
-            let wbuf = alloc.alloc(FD_BUF);
+            let wbuf = alloc.alloc(alloc.ctx, FD_BUF);
             if (wbuf) b {
                 let fd = (*u8)b;
                 let h = FindFirstFileA((*const u8)pat.ptr, fd);
-                alloc.free((*u8)r, need);
+                alloc.free(alloc.ctx, (*u8)r, need);
                 if (h != INVALID_HANDLE) {
                     return Self{ .h = h, .buf = fd, .first = true, .done = false,
                                  .alloc = alloc };
                 }
-                alloc.free(fd, FD_BUF);
+                alloc.free(alloc.ctx, fd, FD_BUF);
             }
         }
         return null;
@@ -272,7 +272,7 @@ pub const DirIter = struct {
         if (self.h != INVALID_HANDLE) {
             FindClose(self.h);
             self.h = INVALID_HANDLE;
-            self.alloc.free(self.buf, FD_BUF);
+            self.alloc.free(self.alloc.ctx, self.buf, FD_BUF);
         }
         self.done = true;
     };
@@ -348,7 +348,7 @@ const List = struct {
         if (self.len == self.cap) {
             var ncap = self.cap * 2;
             if (ncap < 16) { ncap = 16; }
-            let raw = self.alloc.alloc(ncap * @sizeOf([]const u8));
+            let raw = self.alloc.alloc(self.alloc.ctx, ncap * @sizeOf([]const u8));
             if (raw) r {
                 let dst = (*[]const u8)r;
                 var i: usize = 0;
@@ -357,7 +357,7 @@ const List = struct {
                     i = i + 1;
                 }
                 if (self.cap > 0) {
-                    self.alloc.free((*u8)self.items, self.cap * @sizeOf([]const u8));
+                    self.alloc.free(self.alloc.ctx, (*u8)self.items, self.cap * @sizeOf([]const u8));
                 }
                 self.items = dst;
                 self.cap = ncap;
@@ -374,7 +374,7 @@ const List = struct {
 
     const deinit = fn (self: *Self) void {
         if (self.cap > 0) {
-            self.alloc.free((*u8)self.items, self.cap * @sizeOf([]const u8));
+            self.alloc.free(self.alloc.ctx, (*u8)self.items, self.cap * @sizeOf([]const u8));
         }
         self.items = undefined;
         self.len = 0;

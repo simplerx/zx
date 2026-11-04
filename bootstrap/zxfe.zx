@@ -28,7 +28,7 @@ const utos = fn (al: std.Allocator, v: u64) []const u8 {
     }
     let items = buf.items();
     let n = items.len;
-    if (al.alloc(n)) p {
+    if (al.alloc(al.ctx, n)) p {
         var dst = p[0..n];
         var i: usize = 0;
         while (i < n) {

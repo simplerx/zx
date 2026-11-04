@@ -109,7 +109,7 @@ const make_key = fn (store: *u8, n: usize) []const u8 {
 };
 
 const key_store = fn (n: usize) *u8 {
-    let p = std.heap.page.alloc(n * KEY_MAX);
+    let p = std.heap.page.alloc(std.heap.page.ctx, n * KEY_MAX);
     if (p) q { return q; }
     @trap();
 };
@@ -119,7 +119,7 @@ const bench_map_put = fn (seed: u64) u64 {
     var m = std.HashMap(u64).init(std.heap.page);
     defer m.deinit();
     let store = key_store(KN);
-    defer std.heap.page.free(store, KN * KEY_MAX);
+    defer std.heap.page.free(std.heap.page.ctx, store, KN * KEY_MAX);
     var i: usize = 0;
     while (i < KN) {
         let k = make_key(store, i);
@@ -146,7 +146,7 @@ const bench_map_get = fn (seed: u64) u64 {
     defer m.deinit();
     // 存储区多备 65536 个槽：未命中探测键的编号在 KN 之外
     let store = key_store(KN + 65_536);
-    defer std.heap.page.free(store, (KN + 65_536) * KEY_MAX);
+    defer std.heap.page.free(std.heap.page.ctx, store, (KN + 65_536) * KEY_MAX);
     var i: usize = 0;
     while (i < KN) {
         let k = make_key(store, i);

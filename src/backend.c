@@ -1727,7 +1727,7 @@ static void emit_heapalloc_runtime(void) {
     g_ind = 0;
     buf_printf(g_out,
         "static void *zx_heapalloc(%s al, %s n) {\n"
-        "    %s r = al.alloc(n);\n"
+        "    %s r = al.alloc(al.ctx, n);\n"
         "    if (!r.tag) { fputs(\"zx: out of memory\\n\", stderr); abort(); }\n"
         "    return r.payload;\n"
         "}\n\n",
@@ -1778,7 +1778,7 @@ static void emit_file_runtime(void) {
         "    long n = ftell(f);\n"
         "    if (n < 0) { fclose(f); return r; }\n"
         "    rewind(f);\n"
-        "    %s mem = al.alloc((%s)n + 1);\n"
+        "    %s mem = al.alloc(al.ctx, (%s)n + 1);\n"
         "    if (!mem.tag) { fclose(f); return r; }\n"
         "    %s got = fread(mem.payload, 1, (%s)n, f);\n"
         "    fclose(f);\n"
@@ -2834,9 +2834,9 @@ static void emit_fmt_runtime(void) {
             "                 unsigned __int128 u; const ZxAnyType *ty; } ZxFmtArg;\n\n");
 
     if (g_need_page) {
-        buf_printf(&g_bglobals, "static %s zx_page_alloc(%s n);\n", on.data, un.data);
-        buf_printf(&g_bglobals, "static void zx_page_free(%s p, %s n);\n", u8p.data, un.data);
-        buf_printf(&g_bglobals, "static %s zx_alloc_page = { zx_page_alloc, zx_page_free };\n\n",
+        buf_printf(&g_bglobals, "static %s zx_page_alloc(%s ctx, %s n);\n", on.data, on.data, un.data);
+        buf_printf(&g_bglobals, "static void zx_page_free(%s ctx, %s p, %s n);\n", on.data, u8p.data, un.data);
+        buf_printf(&g_bglobals, "static %s zx_alloc_page = { { 0, 0 }, zx_page_alloc, zx_page_free };\n\n",
                    an.data);
 
         Buf *sv = g_out;
@@ -2844,14 +2844,15 @@ static void emit_fmt_runtime(void) {
         g_out = &g_bbody;
         g_ind = 0;
         buf_printf(g_out,
-            "static %s zx_page_alloc(%s n) {\n"
+            "static %s zx_page_alloc(%s ctx, %s n) {\n"
+            "    (void)ctx;                 /* malloc 后端无状态 */\n"
             "    %s r;\n"
             "    r.payload = (%s)malloc(n ? n : 1);\n"
             "    r.tag = (r.payload != 0);   /* ?T：tag 为真表示有值 */\n"
             "    return r;\n"
             "}\n\n"
-            "static void zx_page_free(%s p, %s n) { (void)n; free(p); }\n\n",
-            on.data, un.data, on.data, u8p.data, u8p.data, un.data);
+            "static void zx_page_free(%s ctx, %s p, %s n) { (void)ctx; (void)n; free(p); }\n\n",
+            on.data, on.data, un.data, on.data, u8p.data, on.data, u8p.data, un.data);
         g_out = sv;
         g_ind = si;
     }
@@ -2998,7 +2999,7 @@ static void emit_fmt_runtime(void) {
             "    m.fp = 0; m.buf = 0; m.cap = 0; m.len = 0;\n"
             "    zx_fmt(&m, fmt, args, nargs);\n"
             "    need = m.len + 1;\n"
-            "    mem = al.alloc(need);\n"
+            "    mem = al.alloc(al.ctx, need);\n"
             "    if (!mem.tag) { r.payload.ptr = 0; r.payload.len = 0; r.tag = 1; return r; }\n"
             "    w.fp = 0; w.buf = mem.payload; w.cap = need; w.len = 0;\n"
             "    zx_fmt(&w, fmt, args, nargs);\n"
@@ -5679,7 +5680,10 @@ int backend_emit_split(Node *root, Buf *header, Buf *rt, BUnit *units, int maxun
                 if (it->c) { gen_global(it, false); continue; }
                 if (!it->b) continue;
                 if (it->b->kind == NK_FN || it->b->kind == NK_MODULE) continue;
-                if (it->b->ty && it->b->ty->kind == TY_TYPE) continue;
+                /* 惰性模块声明没被引用就没解析（b->ty 为空）：它只是
+                 * 一个名字别名，不占存储、不进初始化表 */
+                if (!it->b->ty) continue;
+                if (it->b->ty->kind == TY_TYPE) continue;
                 /* 同函数：模块全局也要能被（发射到别处的）方法体引用 */
                 bool exported = (mi != 0);
                 gen_global(it, exported);

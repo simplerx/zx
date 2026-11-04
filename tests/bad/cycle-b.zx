@@ -1,1 +1,3 @@
 const a = module("cycle-a.zx");
+
+pub const VALUE = a.getNumber();

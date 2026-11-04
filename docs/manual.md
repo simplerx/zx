@@ -430,7 +430,7 @@ extern fn GetTickCount64() u64;                   // Win32（大小写敏感）
 | --- | --- |
 | `std.print(fmt, …)` / `std.println` | 格式化到 stdout |
 | `std.format(alloc, fmt, …)` | `![]u8`，堆上格式化 |
-| `std.heap.page` | 默认分配器（`Allocator`） |
+| `std.heap.page` | 默认分配器（`Allocator`：`{ ctx, alloc, free }`；`a.alloc(a.ctx, n)` / `a.free(a.ctx, p, n)`。`ctx` 让 arena 等有状态分配器不用再靠全局变量实现） |
 | `std.file` | `read(al, path)`、`write(path, data)`、`append`、`exists`、`remove` |
 | `std.io` | `openRead/openWrite/openAppend(path)`、`read/write/seek/tell/close/flush`、`stdin/stdout/stderr`、`print/println` |
 | `std.process` | `args()`、`getEnv(name)`、`setEnv`、`exit(code)` |

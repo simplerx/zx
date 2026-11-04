@@ -32,12 +32,12 @@ const main = fn () u8 {
     var r = std.format(alloc, "n={} s={s}", 42, "hi");
     if (r) s {
         std.println("[{}] len={}", s, s.len);
-        alloc.free(s.ptr, s.len);
+        alloc.free(alloc.ctx, s.ptr, s.len);
     }
     var q = build(alloc, 5);
     if (q) s2 {
         std.println("{}", s2);
-        alloc.free(s2.ptr, s2.len);
+        alloc.free(alloc.ctx, s2.ptr, s2.len);
     }
     return 0;
 };

@@ -95,8 +95,8 @@ const classGrow = fn (c: *Class, gpa: Allocator) bool {
     if (n < 4096) { c.batch = n * 2; }
     let bytes = n * c.slotSize;
 
-    if (gpa.alloc(bytes)) base {
-        if (gpa.alloc(@sizeOf(Region))) rraw {
+    if (gpa.alloc(gpa.ctx, bytes)) base {
+        if (gpa.alloc(gpa.ctx, @sizeOf(Region))) rraw {
             let r = (*Region)rraw;
             r.next = c.region;
             r.base = base;
@@ -117,7 +117,7 @@ const classGrow = fn (c: *Class, gpa: Allocator) bool {
             return true;
         }
         // Region 结构分配失败：把刚要来的槽区还回去
-        gpa.free(base, bytes);
+        gpa.free(gpa.ctx, base, bytes);
     }
     return false;
 };
@@ -128,7 +128,7 @@ pub const Pool = struct {
 
     // 档位表运行期铺出来（线性段 + 2 的幂段）。
     const init = fn (gpa: Allocator) ?Pool {
-        if (gpa.alloc(classCount * @sizeOf(Class))) p {
+        if (gpa.alloc(gpa.ctx, classCount * @sizeOf(Class))) p {
             let cs = (*Class)p;
             var idx: usize = 0;
             var s: usize = 16;
@@ -170,15 +170,15 @@ pub const Pool = struct {
             while (running) {
                 if (r) rr {
                     let nxt = rr.next;
-                    self.gpa.free(rr.base, rr.bytes);
-                    self.gpa.free((*u8)rr, @sizeOf(Region));
+                    self.gpa.free(self.gpa.ctx, rr.base, rr.bytes);
+                    self.gpa.free(self.gpa.ctx, (*u8)rr, @sizeOf(Region));
                     r = nxt;
                 } else {
                     running = false;
                 }
             }
         }
-        self.gpa.free((*u8)self.classes, classCount * @sizeOf(Class));
+        self.gpa.free(self.gpa.ctx, (*u8)self.classes, classCount * @sizeOf(Class));
         self.classes = undefined;
     };
 
@@ -200,7 +200,7 @@ pub const Pool = struct {
         if (ci == classCount) {
             // 大块：直接向分配器要 [头][负载]，格式与池内块一致
             let total = HDR + size;
-            if (self.gpa.alloc(total)) b {
+            if (self.gpa.alloc(self.gpa.ctx, total)) b {
                 let hp = (*Header)b;
                 hp.len = (u32)size;
                 hp.gen = 0;
@@ -231,7 +231,7 @@ pub const Pool = struct {
         let ha = a - HDR;
         let hp = (*Header)ha;
         if (hp.flags == F_EXTERNAL) {
-            self.gpa.free((*u8)ha, HDR + (usize)hp.len);
+            self.gpa.free(self.gpa.ctx, (*u8)ha, HDR + (usize)hp.len);
             return true;
         }
         if (hp.flags != F_LIVE) { return false; }  // FREED / 未知状态

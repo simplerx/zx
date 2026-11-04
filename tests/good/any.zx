@@ -78,7 +78,7 @@ const main = fn () u8 {
     var out = std.format(alloc, "fmt={}", l);
     if (out) str {
         std.println("{}", str);
-        alloc.free(str.ptr, str.len);
+        alloc.free(alloc.ctx, str.ptr, str.len);
     }
     return 0;
 };

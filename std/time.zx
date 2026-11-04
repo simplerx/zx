@@ -126,7 +126,7 @@ const two = fn (buf: *u8, off: usize, v: u64) void {
 // Unix 毫秒 → "2026-11-03T06:31:49.123Z"（ISO 8601 UTC，固定 24 字节）。
 // 一次精确分配，逐字节写位，不经过格式化机器。
 pub const formatUtc = fn (alloc: Allocator, ms: u64) ?[]u8 {
-    let raw = alloc.alloc(24);
+    let raw = alloc.alloc(alloc.ctx, 24);
     if (raw) b {
         let dt = fromUnixMs(ms);
         two(b, 0, dt.year / 100);

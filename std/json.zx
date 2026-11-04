@@ -50,14 +50,14 @@ pub const Arr = struct {
         if (self.len == self.cap) {
             var ncap = self.cap * 2;
             if (ncap < 4) { ncap = 4; }
-            let raw = self.alloc.alloc(ncap * @sizeOf(Value));
+            let raw = self.alloc.alloc(self.alloc.ctx, ncap * @sizeOf(Value));
             if (raw) r {
                 let dst = (*Value)r;
                 if (self.len > 0) {
                     @memcpy((*u8)dst, (*u8)self.items, self.len * @sizeOf(Value));
                 }
                 if (self.cap > 0) {
-                    self.alloc.free((*u8)self.items, self.cap * @sizeOf(Value));
+                    self.alloc.free(self.alloc.ctx, (*u8)self.items, self.cap * @sizeOf(Value));
                 }
                 self.items = dst;
                 self.cap = ncap;
@@ -134,11 +134,11 @@ pub const Obj = struct {
 
     // 扩容重排：哈希已缓存，不用重算、不用比键——第一个空槽放下即可。
     const grow = fn (self: *Self, ncap: usize) bool {
-        let kb = self.alloc.alloc(ncap * @sizeOf([]const u8));
+        let kb = self.alloc.alloc(self.alloc.ctx, ncap * @sizeOf([]const u8));
         if (kb) k2 {
-            let hb = self.alloc.alloc(ncap * @sizeOf(u64));
+            let hb = self.alloc.alloc(self.alloc.ctx, ncap * @sizeOf(u64));
             if (hb) h2 {
-                let vb = self.alloc.alloc(ncap * @sizeOf(Value));
+                let vb = self.alloc.alloc(self.alloc.ctx, ncap * @sizeOf(Value));
                 if (vb) v2 {
                     let nk = (*[]const u8)k2;
                     let nh = (*u64)h2;
@@ -159,9 +159,9 @@ pub const Obj = struct {
                         i = i + 1;
                     }
                     if (self.cap > 0) {
-                        self.alloc.free((*u8)self.keys, self.cap * @sizeOf([]const u8));
-                        self.alloc.free((*u8)self.hashes, self.cap * @sizeOf(u64));
-                        self.alloc.free((*u8)self.vals, self.cap * @sizeOf(Value));
+                        self.alloc.free(self.alloc.ctx, (*u8)self.keys, self.cap * @sizeOf([]const u8));
+                        self.alloc.free(self.alloc.ctx, (*u8)self.hashes, self.cap * @sizeOf(u64));
+                        self.alloc.free(self.alloc.ctx, (*u8)self.vals, self.cap * @sizeOf(Value));
                     }
                     self.keys = nk;
                     self.hashes = nh;
@@ -169,9 +169,9 @@ pub const Obj = struct {
                     self.cap = ncap;
                     return true;
                 }
-                self.alloc.free((*u8)h2, ncap * @sizeOf(u64));
+                self.alloc.free(self.alloc.ctx, (*u8)h2, ncap * @sizeOf(u64));
             }
-            self.alloc.free((*u8)k2, ncap * @sizeOf([]const u8));
+            self.alloc.free(self.alloc.ctx, (*u8)k2, ncap * @sizeOf([]const u8));
         }
         return false;
     };
@@ -307,7 +307,7 @@ const Parser = struct {
 
     const arrValue = fn (self: *Self, d: u32) !Value {
         self.adv();                                  // 吃 '['
-        let raw = self.alloc.alloc(@sizeOf(Arr));
+        let raw = self.alloc.alloc(self.alloc.ctx, @sizeOf(Arr));
         if (raw) rb {
             let a = (*Arr)rb;
             a.items = undefined;
@@ -346,7 +346,7 @@ const Parser = struct {
 
     const objValue = fn (self: *Self, d: u32) !Value {
         self.adv();                                  // 吃 '{'
-        let raw = self.alloc.alloc(@sizeOf(Obj));
+        let raw = self.alloc.alloc(self.alloc.ctx, @sizeOf(Obj));
         if (raw) rb {
             let o = (*Obj)rb;
             o.keys = undefined;
@@ -476,7 +476,7 @@ const Parser = struct {
 
         // 第二遍：解码进精确大小的分配（转义串里没有裸换行，
         // 整段同行，列号由结尾的 adv 一跳到位）。
-        let raw = self.alloc.alloc(outLen);
+        let raw = self.alloc.alloc(self.alloc.ctx, outLen);
         if (raw) r2 {
             let dst = r2[0..outLen];
             var w: usize = 0;
@@ -643,7 +643,7 @@ const Parser = struct {
 pub const parse = fn (alloc: Allocator, src: []const u8) !Value {
     errLine = 0;
     errCol = 0;
-    let nb = alloc.alloc(NUM_SCRATCH);
+    let nb = alloc.alloc(alloc.ctx, NUM_SCRATCH);
     if (nb) n2 {
         var p = Parser{ .src = src, .pos = 0, .line = 1, .col = 1,
                         .alloc = alloc, .nbuf = (*u8)n2 };
@@ -676,12 +676,12 @@ const Buf = struct {
         var ncap = self.cap * 2;
         if (ncap < 64) { ncap = 64; }
         while (ncap < self.len + need) { ncap = ncap * 2; }
-        let raw = self.alloc.alloc(ncap);
+        let raw = self.alloc.alloc(self.alloc.ctx, ncap);
         if (raw) r {
             let dst = (*u8)r;
             var i: usize = 0;
             while (i < self.len) { (dst + i).0 = (self.data + i).0; i = i + 1; }
-            if (self.cap > 0) { self.alloc.free(self.data, self.cap); }
+            if (self.cap > 0) { self.alloc.free(self.alloc.ctx, self.data, self.cap); }
             self.data = dst;
             self.cap = ncap;
             return;
@@ -869,7 +869,7 @@ const writeFloat = fn (b: *Buf, v: f64) void {
         if (1.0 / v < 0.0) { b.bytes("-0.0"); } else { b.bytes("0.0"); }
         return;
     }
-    let raw = b.alloc.alloc(48);                      // 候选串暂存（最长 ~26）
+    let raw = b.alloc.alloc(b.alloc.ctx, 48);                      // 候选串暂存（最长 ~26）
     if (raw) r3 {
         let cand = (*u8)r3;
         var ndig: i32 = 1;
@@ -886,7 +886,7 @@ const writeFloat = fn (b: *Buf, v: f64) void {
             let back = strtod((*const u8)cand, &endp);
             if (back == v && (usize)endp - (usize)cand == len) {
                 b.bytes(cand[0..len]);
-                b.alloc.free(cand, 48);
+                b.alloc.free(b.alloc.ctx, cand, 48);
                 return;
             }
             ndig = ndig + 1;
@@ -897,7 +897,7 @@ const writeFloat = fn (b: *Buf, v: f64) void {
         let digits = _ecvt(v, 17, &decpt, &sign);
         let len = fmtFloatInto(cand, digits, 17, decpt, sign != 0);
         b.bytes(cand[0..len]);
-        b.alloc.free(cand, 48);
+        b.alloc.free(b.alloc.ctx, cand, 48);
         return;
     }
     b.failed = true;

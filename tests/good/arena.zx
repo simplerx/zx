@@ -9,14 +9,14 @@ const Node = struct { value: i32, next: ?*Node };
 var pool: *[128]u8 = undefined;
 var used: usize = 0;
 
-const bump = fn (n: usize) ?*u8 {
+const bump = fn (ctx: ?*u8, n: usize) ?*u8 {
     if (used + n > pool.len) { return null; }
     let p = pool[0..].ptr + used;
     used = used + n;
     return p;
 };
 
-const noop = fn (p: *u8, n: usize) void { };
+const noop = fn (ctx: ?*u8, p: *u8, n: usize) void { };
 
 // 分配器可以当普通参数传下去
 const render = fn (a: Allocator, n: i32) ![]u8 {
@@ -25,7 +25,7 @@ const render = fn (a: Allocator, n: i32) ![]u8 {
 
 // 在 arena 上造一个节点：把字节地址当成 *Node 用
 const push = fn (head: ?*Node, v: i32) ?*Node {
-    let mem = bump(16);                 // @sizeOf(Node) == 16
+    let mem = bump(null, 16);                 // @sizeOf(Node) == 16
     if (mem) raw {
         let node = (*Node)raw;
         node.value = v;
@@ -37,7 +37,7 @@ const push = fn (head: ?*Node, v: i32) ?*Node {
 };
 
 const main = fn () u8 {
-    const arena = Allocator{ .alloc = bump, .free = noop };
+    const arena = Allocator{ .ctx = null, .alloc = bump, .free = noop };
 
     var a = std.format(arena, "x={} y={}", 1, 2);
     if (a) sa {
