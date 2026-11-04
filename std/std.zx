@@ -25,6 +25,12 @@ pub const fs = module("fs.zx");
 // JSON（json.zx）。零拷贝解析、最短 round-trip 序列化，arena 友好。
 pub const json = module("json.zx");
 
+// Arena（arena.zx）。一次性批量分配：`std.ArenaAllocator.init(std.heap.page)`
+// 造出 Allocator 喂给 json.parse / ArrayList / 任何吃 Allocator 的东西，
+// deinit 一次全释放。ctx 机制下 arena 是有状态分配器的标准实现。
+pub const arena = module("arena.zx");
+pub const ArenaAllocator = arena.ArenaAllocator;
+
 // 时间（time.zx）。QPC 单调钟（nsBetween 测耗时）、墙钟、ISO 8601 格式化。
 pub const time = module("time.zx");
 

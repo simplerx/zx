@@ -390,3 +390,24 @@ const List = struct {
         return out;
     };
 };
+
+// ---- 批量整块读写 -----------------------------------------------------------
+// std.file.* 魔法（编译器运行时 zx_file_*）的模块级入口，名字对齐"一次调用、
+// 整块传输"的批量语义。实现上每次调用独立 fopen/fread(rite)/fclose，无共享
+// 可变状态——多 Task 并发调用是安全的；前提是传入的分配器本身线程安全
+// （heap.page 是 malloc，OK；ArenaAllocator 不是，别跨任务共享）。
+
+// 整块读入：一次 fopen+ftell+fread，返回的切片带一个 NUL 结尾（当 C 串用也安全）。
+pub const readAll = fn (alloc: Allocator, path: []const u8) ?[]const u8 {
+    return file.read(alloc, path);
+};
+
+// 整块写出：一次 fopen+fwrite，成功返回 true。
+pub const writeAll = fn (path: []const u8, data: []const u8) bool {
+    return file.write(path, data);
+};
+
+// 整块追加：同 writeAll，追加模式。
+pub const appendAll = fn (path: []const u8, data: []const u8) bool {
+    return file.append(path, data);
+};

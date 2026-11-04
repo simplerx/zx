@@ -1,0 +1,28 @@
+// extern fn 互操作：libc 数学函数 + Zx 函数当 C 回调。
+// math.h 现在进生成头（M24 前 pow 这类只在 libc_declared 名单里、
+// 头里却没有声明，编译必然失败）；回调参数经 (void*) 显式中转。
+extern fn pow(x: f64, y: f64) f64;
+extern fn qsort(base: *u8, n: usize, w: usize, cmp: fn (*const u8, *const u8) i32) void;
+extern fn abs(x: i32) i32;
+
+const cmp_i32 = fn (a: *const u8, b: *const u8) i32 {
+    let pa = (*i32)a;
+    let pb = (*i32)b;
+    return pa.0 - pb.0;
+};
+
+const main = fn () u8 {
+    if (abs(-42) != 42) { return 1; }
+
+    let p = pow(2.0, 10.0);
+    if ((i64)p != 1024) { return 2; }
+
+    var arr: *[8]i32 = &.{ 5, 3, 8, 1, 9, 2, 7, 4 };
+    qsort((*u8)arr, 8, @sizeOf(i32), cmp_i32);
+    if (arr[0] != 1 || arr[7] != 9) { return 3; }
+
+    std.println("externcb ok: sorted {} {}", arr[0], arr[7]);
+    return 0;
+};
+
+const std = module("std");

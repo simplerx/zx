@@ -417,6 +417,13 @@ extern fn GetTickCount64() u64;                   // Win32（大小写敏感）
 - `extern fn` 只声明、无函数体；符号名就是声明名（不做名字修饰）。
 - 参数/返回值只用 C ABI 兼容类型；`*u8` ↔ `char*`，`[]const u8` 不保证 NUL 结尾。
 - **没有 `extern "C" { … }` 块**，逐条声明。
+- **C 回调**：Zx 函数可以直接当函数指针传给 extern（如 `qsort` 的比较器）。
+  调用点经 `(void*)` 显式中转，规避 Zx 签名与 C 原型（`const void*`）的
+  文本差异；C 侧按 Zx 生成签名调用，指针宽度一致即 ABI 兼容。
+- math.h 已进生成头：`pow`/`sqrt`/`sin` 等 libc_declared 名单里的数学函数
+  真正可用（M24 前名单有名字、头里没声明，编译必失败）。
+- 编译器魔法（`print`/`file`/`io`/`Allocator`/`stackAlloc`…）种进**每个**
+  模块的作用域——std.zx 之外也能裸用 `file.read`；模块自己的同名声明优先。
 
 ---
 
@@ -454,8 +461,9 @@ extern fn GetTickCount64() u64;                   // Win32（大小写敏感）
 | 模块 | 主要函数 |
 | --- | --- |
 | `std.str` | `eq`、`startsWith`、`endsWith`、`indexOf`、`indexOfFrom`、`contains`、`trim`、`trimStart`、`trimEnd`、`parseInt`、`concat`、`split`、`freeSplit` |
-| `std.fs` | `isAbs`、`basename`、`dirname`、`ext`、`stem`、`join`、`stat`、`exists`、`createDir`、`removeFile`、`removeDir`、`DirIter`、`readDir` |
+| `std.fs` | `isAbs`、`basename`、`dirname`、`ext`、`stem`、`join`、`stat`、`exists`、`createDir`、`removeFile`、`removeDir`、`DirIter`、`readDir`；批量整块读写 `readAll(al, path)` / `writeAll(path, data)` / `appendAll`（每次调用独立 FILE*，多 Task 并发安全——分配器得用线程安全的那份，如 `heap.page`；Arena 别跨任务共享） |
 | `std.json` | `parse(al, src)` → `!Value`、`stringify(al, v)`；`Value` 是 `union(enum)`；`member/item/text` 取值；`errLine/errCol` 定位 |
+| `std.ArenaAllocator` | 有状态 arena：`init(backing)` 返回 `?Allocator`，可直接喂给 `json.parse` / `ArrayList` 等；`alloc` O(1) 16 对齐，`free` no-op，`reset` 帧重置（保留块、指针归零），`deinit` 总清算 |
 | `std.time` | `counter()`/`freq()`/`nsSince()` 计时；`unixMs/unixSecs/unixNs`；`fromUnixMs`、`formatUtc` |
 
 `std.fs` 与 `std.file` 有分工：`std.file` 是编译器种下的最小读写集（不依赖分配器），

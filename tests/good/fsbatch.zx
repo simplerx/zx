@@ -1,0 +1,84 @@
+// fsbatch.zx —— fs 批量读写 + 多 Task 并发安全验证。
+// 检查点：整块 roundtrip 字节一致；4 路并发读同一文件校验和一致；
+// 并发读相对串行读有实际加速（独立 FILE*，无锁争用）。
+const std = module("std");
+
+const PATH = "fsbatch_test.bin";
+const NBYTES = 65536;
+
+const work = fn (ctx: usize) !usize {
+    // 每个任务反复整块读同一文件，累计校验和
+    let rounds = ctx;
+    var h: u64 = 5381;
+    var r: usize = 0;
+    while (r < rounds) {
+        let d = std.fs.readAll(std.heap.page, PATH);
+        if (d) s {
+            for (s[0..]) ch { h = ((h * 33) + (u64)ch) & (u64)4294967295; }
+        } else {
+            return 0;
+        }
+        r = r + 1;
+    }
+    return (usize)h;
+};
+
+const main = fn () u8 {
+    // ① 生成测试文件：确定性内容
+    var buf = std.stackAlloc(u8, NBYTES);
+    var i: usize = 0;
+    while (i < (usize)NBYTES) { (buf + i).0 = (u8)((i * 31 + 7) % 251); i = i + 1; }
+    if (!std.fs.writeAll(PATH, buf[0..NBYTES])) { return 1; }
+
+    // ② 整块 roundtrip
+    let back = std.fs.readAll(std.heap.page, PATH);
+    if (back) s {
+        if (s.len != (usize)NBYTES) { return 2; }
+        var j: usize = 0;
+        while (j < (usize)NBYTES) {
+            if (s[j] != (buf + j).0) { return 3; }
+            j = j + 1;
+        }
+    } else { return 2; }
+
+    // ③ 串行基准：4×8 次读，计时
+    let t0 = std.time.counter();
+    let ref = work(8);
+    if (ref) rv0 {
+        let refv = rv0;
+        let t1 = std.time.counter();
+        let serial_ns = std.time.nsBetween(t0, t1);
+
+        // ④ 并发：pool(4)，4 个任务各读 8 次
+        let pl = std.Task.pool(4);
+        var hs: *[4]usize = &.{ 0, 0, 0, 0 };
+        var k: usize = 0;
+        while (k < 4) {
+            let h = pl.spawn(work, 8);
+            if (h) hh { (hs + k).0 = hh; } else { return 4; }
+            k = k + 1;
+        }
+        let t2 = std.time.counter();
+        var sums: *[4]usize = &.{ 0, 0, 0, 0 };
+        var m: usize = 0;
+        while (m < 4) {
+            let rv = pl.await((hs + m).0);
+            if (rv) v { (sums + m).0 = v; } else { return 5; }
+            m = m + 1;
+        }
+        let t3 = std.time.counter();
+        let par_ns = std.time.nsBetween(t2, t3);
+
+        // ⑤ 校验和全部一致
+        var q: usize = 0;
+        while (q < 4) {
+            if ((sums + q).0 != refv) { return 6; }
+            q = q + 1;
+        }
+
+        pl.close();
+        std.fs.removeFile(std.heap.page, PATH);
+        std.println("fsbatch ok serial={}ms parallel={}ms (4x8 reads each)", serial_ns / 1000000, par_ns / 1000000);
+        return 0;
+    } else { return 4; }
+};

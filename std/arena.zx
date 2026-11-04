@@ -1,0 +1,127 @@
+// arena.zx —— 有状态 Arena 分配器。
+//
+// Allocator 现在带 ctx（v0.59 起），arena 终于可以做成"真"分配器：
+// 状态存在堆上，ctx 指着它，函数指针通过 ctx 找回状态。用法：
+//
+//   var ar = std.ArenaAllocator.init(std.heap.page);
+//   if (ar) a {
+//       let v = std.json.parse(a, doc);        // json 全程走 arena
+//       std.ArenaAllocator.deinit(a);           // 一次性释放全部
+//   }
+//
+// 语义：
+//   alloc  —— bump 指针推进，O(1)，16 字节对齐；
+//   free   —— no-op（arena 语义：不单笔回收，deinit 一起算总账）；
+//   deinit —— 释放所有块和状态本身。
+// 适合解析器、关卡加载这类"齐上齐下"的负载；不适合频繁可变长的
+// 长生命周期对象（那是 heap.page / Pool 的活）。
+//
+// 实现注记：Block/State 提在模块级——struct 体内嵌套命名 struct
+// 目前过不了 C 发射（类型检查能过），std 的惯例是模块级私有类型。
+
+// 块头放在数据前面，头 + 数据一次 backing 分配搞定。
+// HDR 钉 32：3 个字段 24 字节 + 补到 16 对齐的数据起点。
+const Block = struct {
+    next: ?*Block,
+    used: usize,
+    cap: usize,        // 本块数据容量
+};
+
+const HDR: usize = 32;
+const ALIGN: usize = 16;
+const MIN_BLOCK: usize = 4096;   // 常规块大小
+
+const State = struct {
+    backing: Allocator,
+    head: ?*Block,
+    nblocks: usize,
+};
+
+const alignUp = fn (n: usize) usize {
+    return ((n + ALIGN - 1) / ALIGN) * ALIGN;
+};
+
+// ---- 两个函数指针：Allocator 的本体 ----
+
+const bumpAlloc = fn (ctx: ?*u8, n: usize) ?*u8 {
+    if (ctx) c {
+        let st = (*State)c;
+
+        // 快路径：当前块还装得下，推 bump 指针。
+        if (st.0.head) h {
+            let data = ((*u8)h) + HDR;
+            if (h.0.used + n <= h.0.cap) {
+                let p = data + h.0.used;
+                h.0.used = h.0.used + alignUp(n);
+                return p;
+            }
+        }
+
+        // 慢路径：新开一块。头部和数据一块儿要。
+        var bcap = MIN_BLOCK;
+        let need = HDR + alignUp(n);
+        if (need > bcap) { bcap = need; }
+        let raw = st.0.backing.alloc(st.0.backing.ctx, bcap);
+        if (raw) q {
+            let blk = (*Block)q;
+            blk.0 = Block{ .next = st.0.head, .used = alignUp(n), .cap = bcap - HDR };
+            st.0.head = blk;
+            st.0.nblocks = st.0.nblocks + 1;
+            return ((*u8)q) + HDR;
+        }
+    }
+    return null;
+};
+
+// arena 不单笔回收。参数按 Allocator 形状收全但都用不上；
+// Zx 未使用参数不告警，这里不用 `_ =` 丢弃（它不是赋值目标）。
+const bumpFree = fn (ctx: ?*u8, p: *u8, n: usize) void {
+};
+
+pub const ArenaAllocator = struct {
+    // 造一个 arena 分配器。状态本身从 backing 里出。
+    const init = fn (backing: Allocator) ?Allocator {
+        let sb = backing.alloc(backing.ctx, @sizeOf(State));
+        if (sb) q {
+            let st = (*State)q;
+            st.0 = State{ .backing = backing, .head = null, .nblocks = 0 };
+            return Allocator{ .ctx = (*u8)st, .alloc = bumpAlloc, .free = bumpFree };
+        }
+        return null;
+    };
+
+    // 帧重置：保留已开的块，只把 bump 指针归零。游戏主循环一帧一
+    // reset，峰值内存恒定，块永不还给系统。
+    const reset = fn (a: Allocator) void {
+        if (a.ctx) c {
+            let st = (*State)c;
+            var h = st.0.head;
+            var i: usize = 0;
+            while (i < st.0.nblocks) {
+                if (h) hb {
+                    hb.0.used = 0;
+                    h = hb.0.next;
+                }
+                i = i + 1;
+            }
+        }
+    };
+
+    // 总清算：所有块 + 状态本身。
+    const deinit = fn (a: Allocator) void {
+        if (a.ctx) c {
+            let st = (*State)c;
+            var h = st.0.head;
+            var i: usize = 0;
+            while (i < st.0.nblocks) {
+                if (h) hb {
+                    let nxt = hb.0.next;
+                    st.0.backing.free(st.0.backing.ctx, (*u8)hb, hb.0.cap + HDR);
+                    h = nxt;
+                }
+                i = i + 1;
+            }
+            st.0.backing.free(st.0.backing.ctx, (*u8)st, @sizeOf(State));
+        }
+    };
+};

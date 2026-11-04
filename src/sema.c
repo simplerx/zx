@@ -3949,6 +3949,17 @@ static Module *module_load_full(const char *full_in, int line, int col) {
     m->ns->mod = m;
 
     hoist(&m->scope, m->root);
+    /* 编译器内建名字并进每个模块的作用域（print/file/io/Allocator…）。
+     * 之前只种 std——std.zx 里能用裸 `io.`，fs.zx 里想转发 std.file
+     * 却得绕。模块自己声明了同名：以它为准（scope_add 返回 NULL）。 */
+    for (int i = 0; g_std_seeded[i]; i++) {
+        Symbol *b = std_builtin(g_std_seeded[i]);
+        if (!b) continue;
+        Symbol *s2 = scope_add(&m->scope, b->name, b->kind);
+        if (!s2) continue;
+        sym_copy(s2, b, b->name);
+        s2->is_pub = true;
+    }
     g_root_stmts = true;
     check_stmts(m->root);
     g_root_stmts = false;

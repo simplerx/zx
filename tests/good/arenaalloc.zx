@@ -1,0 +1,48 @@
+// std.ArenaAllocator：有状态分配器（ctx 机制）的功能与生命周期。
+// 检查点：bump 快路径、跨块慢路径、reset 后复用、deinit 总清算。
+const std = module("std");
+
+const main = fn () u8 {
+    var ar = std.ArenaAllocator.init(std.heap.page);
+    if (ar) a {
+        // 写入验证：对齐、内容正确
+        let p1 = a.alloc(a.ctx, 100);
+        if (p1) pb {
+            var i: usize = 0;
+            while (i < 100) { (pb + i).0 = (u8)(i % 251); i = i + 1; }
+
+            // 跨块：600 × 64B 累计 > 4096，逼出慢路径
+            var k: usize = 0;
+            while (k < 600) {
+                let p = a.alloc(a.ctx, 64);
+                if (p) q {
+                    (q + 0).0 = 1;
+                    k = k + 1;
+                } else {
+                    std.ArenaAllocator.deinit(a);
+                    return 2;
+                }
+            }
+
+            // 第一块数据没被踩（arena 不搬家）
+            if ((pb + 99).0 != (u8)(99 % 251)) {
+                std.ArenaAllocator.deinit(a);
+                return 3;
+            }
+
+            // reset：指针归零后还能继续分配
+            std.ArenaAllocator.reset(a);
+            let p2 = a.alloc(a.ctx, 32);
+            if (p2) q2 { (q2 + 0).0 = 9; } else {
+                std.ArenaAllocator.deinit(a);
+                return 4;
+            }
+
+            std.ArenaAllocator.deinit(a);
+            std.println("arenaalloc ok");
+            return 0;
+        }
+        return 1;
+    }
+    return 5;
+};
