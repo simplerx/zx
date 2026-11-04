@@ -160,6 +160,11 @@ bool  ty_is_agg(Type *t);
 int   ty_size(Type *t);                 /* -1 = 编译期类型，没有运行时大小 */
 int   ty_align(Type *t);
 
+/* `?*T`（载荷是指针）＝无标签 optional：null 就是 0 指针，C 表示直接
+ * 用 `T *`，不套 { payload, tag } 结构体（M26，Zig 同款优化）。
+ * 布局相关的每一条路径（size/align/发射/解包）都必须问它。 */
+bool  ty_opt_flat(Type *t);
+
 /* "放宽"的布局：comptime_int / comptime_float 按 R7 的默认宽度（i32 / f64）算。
  * 元组的 .size 和 @sizeOf 都要用这个，而不是 ty_size——后者对
  * `{1, "two", 3.0}` 这种含字面量的元组会返回 -1。 */

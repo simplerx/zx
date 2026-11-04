@@ -324,6 +324,12 @@ static void ensure_type(Type *t) {
         break;
     }
     case TY_OPT: {
+        if (ty_opt_flat(t)) {
+            /* ?*T（M26）：无标签 optional，C 表示就是 T*，没有 typedef。
+             * 只要保证指过去的类型名在。 */
+            ensure_type(t->elem);
+            break;
+        }
         if (t->elem->kind == TY_PTR &&
             (t->elem->elem->kind == TY_STRUCT || t->elem->elem->kind == TY_UNION)) {
             /* 同 SLICE：`?*T` 的载荷是 `T *`，只要名字。
@@ -545,6 +551,10 @@ static void ctype(Buf *b, Type *t) {
         break;
     case TY_SLICE: case TY_OPT: case TY_ERR: case TY_TUPLE:
     case TY_FN: case TY_STRUCT: case TY_UNION: case TY_ENUM: {
+        if (t->kind == TY_OPT && ty_opt_flat(t)) {   /* ?*T：C 表示就是 T* */
+            ctype(b, t->elem);
+            return;
+        }
         ensure_type(t);
         Buf n; buf_init(&n);
         tn(&n, t);
@@ -695,6 +705,7 @@ static InstEnt *g_itab;
 static int      g_nitab, g_citab;
 
 static bool g_need_bin;      /* 用过 {b} 就要带上二进制打印辅助函数 */
+static bool g_need_pad;      /* 用过 {:0>2} / {:^7} 这类非 printf 原生填充 */
 static bool g_need_fmt;      /* fmt 不是编译期常量 → 带上运行时格式化器 */
 static bool g_need_allocfmt; /* 用过 std.format → 还要带上 zx_format */
 static bool g_need_file;    /* 用过 std.file → 带上 zx_file_* */
@@ -838,6 +849,7 @@ static void main_exit(const char *expr) {
     Type *t = g_cur_ret;
     if (!expr) { line("return 0;"); return; }
     if (t && t->kind == TY_ERR)       line("return (int)((%s).tag);", expr);
+    else if (t && t->kind == TY_OPT && ty_opt_flat(t)) line("return (%s) ? 0 : 1;", expr);
     else if (t && t->kind == TY_OPT)  line("return ((%s).tag) ? 0 : 1;", expr);
     else                              line("return (int)(%s);", expr);
 }
@@ -1026,8 +1038,12 @@ static void lvalue(Buf *b, Node *n) {
             }
         }
         if (bt && (bt->kind == TY_OPT || bt->kind == TY_ERR)) {
+            bool flat = bt->kind == TY_OPT && ty_opt_flat(bt);
             ex(b, n->a);
-            buf_puts(b, n->name && !strcmp(n->name, "tag") ? ".tag" : ".payload");
+            if (flat)
+                buf_puts(b, n->name && !strcmp(n->name, "tag") ? " != 0" : "");
+            else
+                buf_puts(b, n->name && !strcmp(n->name, "tag") ? ".tag" : ".payload");
             return;
         }
         if (bt && bt->kind == TY_UNION && n->name && strcmp(n->name, "tag")) {
@@ -1064,12 +1080,16 @@ static void coerce(Buf *b, Node *e, Type *to) {
 
     /* null / undefined 需要目标类型 */
     if (e->kind == NK_NULL) {
-        if (to->kind == TY_OPT) { ensure_type(to); buf_puts(b, "(("); Buf n; buf_init(&n); ctype(&n, to);
-            buf_printf(b, "%s){0})", n.data); return; }
+        if (to->kind == TY_OPT) {
+            if (ty_opt_flat(to)) { buf_puts(b, "0"); return; }   /* null 指针 */
+            ensure_type(to); buf_puts(b, "(("); Buf n; buf_init(&n); ctype(&n, to);
+            buf_printf(b, "%s){0})", n.data); return;
+        }
         buf_puts(b, "false");
         return;
     }
     if (e->kind == NK_UNDEF) {
+        if (to->kind == TY_OPT && ty_opt_flat(to)) { buf_puts(b, "0"); return; }
         ensure_type(to);
         Buf n; buf_init(&n); ctype(&n, to);
         buf_printf(b, "((%s){0})", n.data);
@@ -1118,6 +1138,10 @@ static void coerce(Buf *b, Node *e, Type *to) {
     /* T → ?T */
     if (to->kind == TY_OPT) {
         if (from->kind == TY_OPT) { ex(b, e); return; }
+        if (ty_opt_flat(to)) {       /* ?*T：值即指针，null 即 0 */
+            coerce(b, e, to->elem);
+            return;
+        }
         ensure_type(to);
         Buf n; buf_init(&n); tn(&n, to);
         buf_printf(b, "((%s){ ", n.data);
@@ -1229,14 +1253,24 @@ static void ex_builtin(Buf *b, Node *n) {
         buf_printf(b, "((size_t)%llu)", (unsigned long long)n->ival);
         return;
     }
+    if (!strcmp(nm, "embedFile")) {
+        /* sema 已把文件字节放进 n->str/n->str_len；按字符串字面量同款发射
+         * （cstr 转义成 C 串，NUL 也安全），结果是 ZxSlice_u8 视图。 */
+        ensure_type(ty_slice(ty_u8(), true));
+        Buf s; buf_init(&s);
+        cstr(&s, n->str ? n->str : "", n->str_len);
+        buf_printf(b, "((ZxSlice_u8){ (uint8_t*)%s, %d })", s.data, n->str_len);
+        return;
+    }
     if (!strcmp(nm, "typeName")) {
         /* sema 已经把名字算进 n->str 了（@typeName(@typeOf(x)) 这种套娃
          * 只能靠它——取 items[0]->ty 会拿到外层那个 `type`） */
         const char *p = n->str;
         int len = n->str_len;
         if (!p && n->nitems && n->items[0]->ty) { p = ty_str(n->items[0]->ty); }
-        if (!p) { buf_puts(b, "((ZxSlice_u8){0})"); return; }
+        if (!p) { ensure_type(ty_slice(ty_u8(), true)); buf_puts(b, "((ZxSlice_u8){0})"); return; }
         if (len <= 0) len = (int)strlen(p);
+        ensure_type(ty_slice(ty_u8(), true));
         Buf s; buf_init(&s);
         cstr(&s, p, len);
         buf_printf(b, "((ZxSlice_u8){(uint8_t*)%s, %d})", s.data, len);
@@ -1261,8 +1295,9 @@ static void ex_builtin(Buf *b, Node *n) {
         /* 和 typeName 一样：sema 已把名字算进 n->str，直接发字面量切片 */
         const char *p = n->str;
         int len = n->str_len;
-        if (!p) { buf_puts(b, "((ZxSlice_u8){0})"); return; }
+        if (!p) { ensure_type(ty_slice(ty_u8(), true)); buf_puts(b, "((ZxSlice_u8){0})"); return; }
         if (len <= 0) len = (int)strlen(p);
+        ensure_type(ty_slice(ty_u8(), true));
         Buf s; buf_init(&s);
         cstr(&s, p, len);
         buf_printf(b, "((ZxSlice_u8){(uint8_t*)%s, %d})", s.data, len);
@@ -1272,6 +1307,7 @@ static void ex_builtin(Buf *b, Node *n) {
         /* 路径 / 函数名在编译期就定死了：直接发 C 字符串字面量切片，零开销 */
         const char *p = n->str ? n->str : "";
         int len = n->str_len > 0 ? n->str_len : (int)strlen(p);
+        ensure_type(ty_slice(ty_u8(), true));
         Buf s; buf_init(&s);
         cstr(&s, p, len);
         buf_printf(b, "((ZxSlice_u8){(uint8_t*)%s, %d})", s.data, len);
@@ -1341,11 +1377,84 @@ static bool ct_int_big(Node *a) {
     return false;
 }
 
-static void fmt_spec(Buf *spec, Buf *args, Node *a, int verb, bool *need_bin) {
+/* ---- 宽度/填充/对齐（M26）----
+ *
+ * 语法：{[idx][verb]:[fill][align][width][.prec]}
+ *   {:>8}   右对齐宽 8（数字默认右）
+ *   {:0>2}  零填充（只对数字有意义）
+ *   {:*^7}  自定义填充 + 居中
+ *   {:<6}   左对齐（字符串默认左）
+ *   {:.3}   浮点精度（定点，%f 语义）
+ *
+ * 空格填充直接映射 printf 旗标（零运行时成本）；零填充+右对齐用
+ * printf 的 '0' 旗标；其余（自定义填充、居中）走 pad 助手。 */
+typedef struct {
+    char fill;    /* 默认 ' ' */
+    char align;   /* '<' '^' '>'；0 = 未指定（数字右、字符串左） */
+    int  width;   /* 0 = 不限 */
+    int  prec;    /* -1 = 不限，只对浮点生效 */
+} FmtOpt;
+
+/* 解析 `:` 后面的选项段。语法不对报 E 并返回 false。 */
+static bool fmt_parse_opts(const char *s, int n, FmtOpt *o, Node *fmt) {
+    o->fill = ' '; o->align = 0; o->width = 0; o->prec = -1;
+    int end = n;
+    /* 精度在尾巴上：.N（必须在剥宽度之前看，否则 .2 的 2 会被当宽度） */
+    if (end > 0 && s[end - 1] >= '0' && s[end - 1] <= '9') {
+        int k = end;
+        while (k > 0 && s[k - 1] >= '0' && s[k - 1] <= '9') k--;
+        if (k > 0 && s[k - 1] == '.') { o->prec = atoi(s + k); end = k - 1; }
+    }
+    /* 宽度：紧邻的数字段 */
+    int wk = end;
+    while (wk > 0 && s[wk - 1] >= '0' && s[wk - 1] <= '9') wk--;
+    for (int k = wk; k < end; k++) o->width = o->width * 10 + (s[k] - '0');
+    end = wk;
+    if (o->width > 256) {
+        err_at(fmt->line, fmt->col, "format width %d is out of range (max 256)", o->width);
+        return false;
+    }
+    if (end > 0 && (s[end - 1] == '<' || s[end - 1] == '^' || s[end - 1] == '>')) {
+        o->align = s[end - 1];
+        end--;
+        if (end > 0) { o->fill = s[end - 1]; end--; }
+    }
+    if (end != 0) {
+        err_at(fmt->line, fmt->col, "unknown format option `{:%.*s}`", n, s);
+        return false;
+    }
+    return true;
+}
+
+/* 非空格填充/居中的发射都内联在 fmt_spec 各分支里（数值/字符串形态
+ * 的实参构成不同，抽公共函数反而要传表达式）。 */
+
+static void fmt_spec(Buf *spec, Buf *args, Node *a, int verb, bool *need_bin, const FmtOpt *o) {
     Type *t = a->ty ? a->ty : ty_i32();
+    bool pad = o && o->width > 0 &&
+               (o->fill != ' ' || o->align == '^');   /* printf 旗标覆盖不了的情况 */
+    bool zerofill = o && o->fill == '0' && (o->align == 0 || o->align == '>');
 
     if (verb == 's' || t->kind == TY_SLICE) {
-        buf_puts(spec, "%.*s");
+        if (pad) {
+            /* 字符串：ptr/len 直通助手，不经过 printf，长串不截断不了——
+             * 上限 512 内安全；超长串请别配填充。 */
+            g_need_pad = true;
+            buf_puts(spec, "%s");
+            buf_puts(args, ", zx_fmt_pads((char[512]){0}, 512, (const char*)(");
+            ex(args, a);
+            buf_puts(args, ").ptr, (int)(");
+            ex(args, a);
+            buf_printf(args, ").len, '%c', %d, '%c')",
+                       o->fill, o->width, o->align ? o->align : '<');
+            return;
+        }
+        if (o && o->width > 0) {
+            char al = o->align ? o->align : '<';       /* 字符串默认左 */
+            buf_printf(spec, al == '<' ? "%%-%d.*s" : "%%%d.*s", o->width);
+        } else {
+            buf_puts(spec, "%.*s");
+        }
         buf_puts(args, ", (int)(");
         ex(args, a);
         buf_puts(args, ").len, (char*)(");
@@ -1354,28 +1463,77 @@ static void fmt_spec(Buf *spec, Buf *args, Node *a, int verb, bool *need_bin) {
         return;
     }
     if (verb == 'c') {
-        buf_puts(spec, "%c");
+        if (pad) {
+            g_need_pad = true;
+            buf_puts(spec, "%s");
+            buf_printf(args, ", zx_fmt_pad((char[512]){0}, 512, '%c', %d, '%c', \"%%c\", (int)(",
+                       o->fill, o->width, o->align ? o->align : '>');
+            ex(args, a);
+            buf_puts(args, "))");
+            return;
+        }
+        if (o && o->width > 0) {
+            char al = o->align ? o->align : '>';
+            buf_printf(spec, al == '<' ? "%%-%dc" : "%%%dc", o->width);
+        } else {
+            buf_puts(spec, "%c");
+        }
         buf_puts(args, ", (int)(");
         ex(args, a);
         buf_puts(args, ")");
         return;
     }
     if (t->kind == TY_BOOL && verb != 'd' && verb != 'x' && verb != 'b') {
-        buf_puts(spec, "%s");
+        if (pad) {
+            g_need_pad = true;
+            buf_puts(spec, "%s");
+            buf_printf(args, ", zx_fmt_pad((char[512]){0}, 512, '%c', %d, '%c', \"%%s\", (",
+                       o->fill, o->width, o->align ? o->align : '>');
+            ex(args, a);
+            buf_puts(args, ") ? \"true\" : \"false\")");
+            return;
+        }
+        if (o && o->width > 0) {
+            char al = o->align ? o->align : '>';
+            buf_printf(spec, al == '<' ? "%%-%ds" : "%%%ds", o->width);
+        } else {
+            buf_puts(spec, "%s");
+        }
         buf_puts(args, ", (");
         ex(args, a);
         buf_puts(args, ") ? \"true\" : \"false\"");
         return;
     }
     if (ty_is_float(t)) {
-        buf_puts(spec, "%g");
+        if (pad) {
+            char cf[16];
+            if (o->prec >= 0) snprintf(cf, sizeof cf, "%%.%df", o->prec);
+            else snprintf(cf, sizeof cf, "%%g");
+            g_need_pad = true;
+            buf_puts(spec, "%s");
+            buf_printf(args, ", zx_fmt_pad((char[512]){0}, 512, '%c', %d, '%c', \"%s\", (double)(",
+                       o->fill, o->width, o->align ? o->align : '>', cf);
+            ex(args, a);
+            buf_puts(args, "))");
+            return;
+        }
+        if (o && (o->width > 0 || o->prec >= 0)) {
+            char al = o->align ? o->align : '>';
+            const char *neg = al == '<' ? "-" : (zerofill ? "0" : "");
+            if (o->prec >= 0)
+                buf_printf(spec, "%%%s%d.%df", neg, o->width, o->prec);
+            else
+                buf_printf(spec, "%%%s%dg", neg, o->width);
+        } else {
+            buf_puts(spec, "%g");
+        }
         buf_puts(args, ", (double)(");
         ex(args, a);
         buf_puts(args, ")");
         return;
     }
     if (verb == 'b') {
-        /* printf 没有二进制：记号交给生成的辅助函数 */
+        /* printf 没有二进制：记号交给生成的辅助函数（宽度/填充先不管） */
         *need_bin = true;
         buf_puts(args, ", (uint64_t)(");
         ex(args, a);
@@ -1388,8 +1546,20 @@ static void fmt_spec(Buf *spec, Buf *args, Node *a, int verb, bool *need_bin) {
         if (t->kind == TY_ENUM && t->elem) sgn = t->elem->is_signed;
         if ((t->kind == TY_INT && t->bits == 128) ||
             (t->kind == TY_COMPTIME_INT && verb != 'x' && verb != 'b' && ct_int_big(a))) {
-            /* printf 没有 128 位动词：转成十进制字符串再 %s（M19） */
+            /* printf 没有 128 位动词：转成十进制字符串再 %s（M19）。
+             * 有宽度时垫一层 pad（值 ≤ 40 字符，缓冲内安全）。 */
             g_need_i128 = true;
+            if (pad) {
+                g_need_pad = true;
+                buf_puts(spec, "%s");
+                buf_printf(args, ", zx_fmt_pad((char[512]){0}, 512, '%c', %d, '%c', \"%%s\", ",
+                           o->fill, o->width, o->align ? o->align : '>');
+                buf_puts(args, sgn ? "zx_i128_str((char[48]){0}, (__int128)("
+                                   : "zx_u128_str((char[48]){0}, (unsigned __int128)(");
+                ex(args, a);
+                buf_puts(args, "))");
+                return;
+            }
             buf_puts(spec, "%s");
             buf_puts(args, sgn ? ", zx_i128_str((char[48]){0}, (__int128)("
                                : ", zx_u128_str((char[48]){0}, (unsigned __int128)(");
@@ -1397,14 +1567,27 @@ static void fmt_spec(Buf *spec, Buf *args, Node *a, int verb, bool *need_bin) {
             buf_puts(args, "))");
             return;
         }
-        if (verb == 'x') {
-            buf_puts(spec, "%llx");
-            buf_puts(args, ", (unsigned long long)(");
+        const char *cf = verb == 'x' ? "%llx" : (sgn ? "%lld" : "%llu");
+        if (pad) {
+            g_need_pad = true;
+            buf_puts(spec, "%s");
+            buf_printf(args, ", zx_fmt_pad((char[512]){0}, 512, '%c', %d, '%c', \"%s\", ",
+                       o->fill, o->width, o->align ? o->align : '>', cf);
+            buf_puts(args, sgn ? "(long long)(" : "(unsigned long long)(");
             ex(args, a);
-            buf_puts(args, ")");
+            buf_puts(args, "))");
             return;
         }
-        buf_puts(spec, sgn ? "%lld" : "%llu");
+        if (o && o->width > 0) {
+            const char *fl = zerofill ? "0" : (o->align == '<' ? "-" : "");
+            if (verb == 'x')
+                buf_printf(spec, "%%%s%dllx", fl, o->width);
+            else
+                buf_printf(spec, sgn ? "%%%s%dlld" : "%%%s%dllu", fl, o->width);
+        } else {
+            if (verb == 'x') buf_puts(spec, "%llx");
+            else buf_puts(spec, sgn ? "%lld" : "%llu");
+        }
         buf_puts(args, sgn ? ", (long long)(" : ", (unsigned long long)(");
         ex(args, a);
         buf_puts(args, ")");
@@ -1552,6 +1735,11 @@ static int any_desc(Type *t) {
         size = 16;
         break;
     case TY_OPT:
+        if (ty_opt_flat(t)) {           /* ?*T：按指针展开（M26） */
+            kind = AK_PTR;
+            size = 8;
+            break;
+        }
         kind = AK_OPT;
         elem = any_desc(t->elem);
         break;
@@ -1749,13 +1937,14 @@ static void emit_heapalloc_runtime(void) {
     int si = g_ind;
     g_out = &g_bbody;
     g_ind = 0;
+    Buf mt; buf_init(&mt); ctype(&mt, op8);   /* ?*u8 的 C 类型：指针 */
     buf_printf(g_out,
         "static void *zx_heapalloc(%s al, %s n) {\n"
         "    %s r = al.alloc(al.ctx, n);\n"
-        "    if (!r.tag) { fputs(\"zx: out of memory\\n\", stderr); abort(); }\n"
-        "    return r.payload;\n"
+        "    if (!r) { fputs(\"zx: out of memory\\n\", stderr); abort(); }\n"
+        "    return r;\n"
         "}\n\n",
-        an.data, un.data, on.data);
+        an.data, un.data, mt.data);
     g_out = sv;
     g_ind = si;
 }
@@ -1767,10 +1956,11 @@ static void emit_file_runtime(void) {
     Type *al  = sema_allocator_type();
     ensure_type(s8); ensure_type(os8); ensure_type(op8); ensure_type(al);
 
-    Buf sn, osn, opn, an, un;
+    Buf sn, osn, opn, an, un, opcn;
     buf_init(&sn);  tn(&sn, s8);
     buf_init(&osn); tn(&osn, os8);
     buf_init(&opn); tn(&opn, op8);
+    buf_init(&opcn); ctype(&opcn, op8);   /* ?*u8 的 C 类型（M26 后是指针） */
     buf_init(&an);  tn(&an, al);
     buf_init(&un);  ctype(&un, ty_usize());
 
@@ -1803,16 +1993,16 @@ static void emit_file_runtime(void) {
         "    if (n < 0) { fclose(f); return r; }\n"
         "    rewind(f);\n"
         "    %s mem = al.alloc(al.ctx, (%s)n + 1);\n"
-        "    if (!mem.tag) { fclose(f); return r; }\n"
-        "    %s got = fread(mem.payload, 1, (%s)n, f);\n"
+        "    if (!mem) { fclose(f); return r; }\n"
+        "    %s got = fread(mem, 1, (%s)n, f);\n"
         "    fclose(f);\n"
-        "    mem.payload[got] = 0;      /* 当 C 串用也安全 */\n"
-        "    r.payload.ptr = mem.payload;\n"
+        "    mem[got] = 0;      /* 当 C 串用也安全 */\n"
+        "    r.payload.ptr = mem;\n"
         "    r.payload.len = got;\n"
         "    r.tag = true;\n"
         "    return r;\n"
         "}\n\n",
-        osn.data, an.data, sn.data, osn.data, opn.data, un.data, un.data, un.data);
+        osn.data, an.data, sn.data, osn.data, opcn.data, un.data, un.data, un.data);
     buf_printf(g_out,
         "static bool zx_file_put(%s path, %s data, const char *mode) {\n"
         "    char *c = zx_path_cstr(path);\n"
@@ -2858,9 +3048,10 @@ static void emit_fmt_runtime(void) {
             "                 unsigned __int128 u; const ZxAnyType *ty; } ZxFmtArg;\n\n");
 
     if (g_need_page) {
-        buf_printf(&g_bglobals, "static %s zx_page_alloc(%s ctx, %s n);\n", on.data, on.data, un.data);
-        buf_printf(&g_bglobals, "static void zx_page_free(%s ctx, %s p, %s n);\n", on.data, u8p.data, un.data);
-        buf_printf(&g_bglobals, "static %s zx_alloc_page = { { 0, 0 }, zx_page_alloc, zx_page_free };\n\n",
+        /* ?*u8 无标签（M26）：C 类型就是 uint8_t*，null 即"空" */
+        buf_printf(&g_bglobals, "static %s zx_page_alloc(%s ctx, %s n);\n", u8p.data, u8p.data, un.data);
+        buf_printf(&g_bglobals, "static void zx_page_free(%s ctx, %s p, %s n);\n", u8p.data, u8p.data, un.data);
+        buf_printf(&g_bglobals, "static %s zx_alloc_page = { 0, zx_page_alloc, zx_page_free };\n\n",
                    an.data);
 
         Buf *sv = g_out;
@@ -2870,13 +3061,10 @@ static void emit_fmt_runtime(void) {
         buf_printf(g_out,
             "static %s zx_page_alloc(%s ctx, %s n) {\n"
             "    (void)ctx;                 /* malloc 后端无状态 */\n"
-            "    %s r;\n"
-            "    r.payload = (%s)malloc(n ? n : 1);\n"
-            "    r.tag = (r.payload != 0);   /* ?T：tag 为真表示有值 */\n"
-            "    return r;\n"
+            "    return (%s)malloc(n ? n : 1);   /* 0 = 分配失败 = optional 空 */\n"
             "}\n\n"
             "static void zx_page_free(%s ctx, %s p, %s n) { (void)ctx; (void)n; free(p); }\n\n",
-            on.data, on.data, un.data, on.data, u8p.data, on.data, u8p.data, un.data);
+            u8p.data, u8p.data, un.data, u8p.data, u8p.data, u8p.data, un.data);
         g_out = sv;
         g_ind = si;
     }
@@ -3024,16 +3212,16 @@ static void emit_fmt_runtime(void) {
             "    zx_fmt(&m, fmt, args, nargs);\n"
             "    need = m.len + 1;\n"
             "    mem = al.alloc(al.ctx, need);\n"
-            "    if (!mem.tag) { r.payload.ptr = 0; r.payload.len = 0; r.tag = 1; return r; }\n"
-            "    w.fp = 0; w.buf = mem.payload; w.cap = need; w.len = 0;\n"
+            "    if (!mem) { r.payload.ptr = 0; r.payload.len = 0; r.tag = 1; return r; }\n"
+            "    w.fp = 0; w.buf = mem; w.cap = need; w.len = 0;\n"
             "    zx_fmt(&w, fmt, args, nargs);\n"
-            "    mem.payload[w.len] = 0;\n"
-            "    r.payload.ptr = mem.payload;\n"
+            "    mem[w.len] = 0;\n"
+            "    r.payload.ptr = mem;\n"
             "    r.payload.len = w.len;\n"
             "    r.tag = 0;\n"
             "    return r;\n"
             "}\n\n",
-            en.data, an.data, en.data, on.data);
+            en.data, an.data, en.data, u8p.data);
     }
 
     g_out = save;
@@ -3362,23 +3550,32 @@ static void ex_print(Buf *b, Node *n, bool newline) {
         int clen = j - i - 1;
         const char *c = p + i + 1;
 
+        /* 选项在冒号后面：{verb:opts} / {N:opts} / {:opts}（M26） */
+        const char *colon = (const char *)memchr(c, ':', (size_t)clen);
+        int plen = colon ? (int)(colon - c) : clen;
+        FmtOpt fopt = { ' ', 0, 0, -1 };
+        if (colon && !fmt_parse_opts(colon + 1, clen - plen - 1, &fopt, fmt)) {
+            i = j; lit = i + 1;
+            continue;
+        }
+
         /* 取参数 */
         int which = -1;
         int verb = 0;
-        if (clen == 0) {
+        if (plen == 0) {
             which = argi++;
-        } else if (clen <= 2 && (clen == 1 && (c[0] == 'd' || c[0] == 'x' || c[0] == 'b' ||
+        } else if (plen <= 2 && (plen == 1 && (c[0] == 'd' || c[0] == 'x' || c[0] == 'b' ||
                                               c[0] == 's' || c[0] == 'c'))) {
             which = argi++;
             verb = c[0];
-        } else if (clen == 3 && !strncmp(c, "any", 3)) {
+        } else if (plen == 3 && !strncmp(c, "any", 3)) {
             which = argi++;
             verb = 'a';
         } else {
             /* 数字索引 */
             int k = 0; which = 0;
-            while (k < clen && c[k] >= '0' && c[k] <= '9') { which = which * 10 + (c[k] - '0'); k++; }
-            if (k != clen) {
+            while (k < plen && c[k] >= '0' && c[k] <= '9') { which = which * 10 + (c[k] - '0'); k++; }
+            if (k != plen) {
                 err_at(fmt->line, fmt->col, "unknown format specifier `{%.*s}`", clen, c);
                 i = j;
                 lit = i + 1;
@@ -3406,7 +3603,7 @@ static void ex_print(Buf *b, Node *n, bool newline) {
             seg_lit(&g.spec, p + lit, i - lit);
             seg_flush(&g);
             Buf one; buf_init(&one);
-            fmt_spec(&g.spec, &one, n->items[which], 'b', &need_bin);
+            fmt_spec(&g.spec, &one, n->items[which], 'b', &need_bin, &fopt);
             if (g.nseg) buf_puts(&g.out, ", ");
             buf_printf(&g.out, "zx_print_bin((uint64_t)(");
             ex(&g.out, n->items[which]);
@@ -3424,7 +3621,7 @@ static void ex_print(Buf *b, Node *n, bool newline) {
             g.nseg++;
         } else {
             seg_lit(&g.spec, p + lit, i - lit);
-            fmt_spec(&g.spec, &g.args, n->items[which], verb, &need_bin);
+            fmt_spec(&g.spec, &g.args, n->items[which], verb, &need_bin, &fopt);
         }
         i = j;
         lit = i + 1;
@@ -3603,7 +3800,14 @@ static void emit_unwrap_runtime(void) {
         Type *t = g_unw[i];
         Buf nm; buf_init(&nm); tn(&nm, t);
         Buf ct; buf_init(&ct); ctype(&ct, t->elem);
-        if (t->kind == TY_OPT) {
+        if (t->kind == TY_OPT && ty_opt_flat(t)) {
+            Buf pt; buf_init(&pt); ctype(&pt, t);   /* ?*T：参数类型就是指针本身 */
+            buf_printf(g_out,
+                "static %s zx_unwrap_%s(%s o, const char *w) {\n"
+                "    if (!o) { fflush(stdout); fprintf(stderr, \"zx: unwrap of a null optional at %%s\\n\", w); abort(); }\n"
+                "    return o;\n"
+                "}\n\n", ct.data, nm.data, pt.data);
+        } else if (t->kind == TY_OPT) {
             buf_printf(g_out,
                 "static %s zx_unwrap_%s(%s o, const char *w) {\n"
                 "    if (!o.tag) { fflush(stdout); fprintf(stderr, \"zx: unwrap of a null optional at %%s\\n\", w); abort(); }\n"
@@ -3757,6 +3961,9 @@ static void ex(Buf *b, Node *n) {
         return;
     }
     case NK_STR: {
+        /* ZxSlice_u8 的 typedef 是按需发射的；字面量常直接出现在
+         * println 实参里（没人给它落过类型定义），这里兜底 ensure。 */
+        ensure_type(n->ty && n->ty->kind == TY_SLICE ? n->ty : ty_slice(ty_u8(), true));
         Buf s; buf_init(&s);
         cstr(&s, n->str ? n->str : "", n->str_len);
         buf_printf(b, "((ZxSlice_u8){ (uint8_t*)%s, %d })", s.data, n->str_len);
@@ -3878,8 +4085,12 @@ static void ex(Buf *b, Node *n) {
             return;
         }
         if (bt && (bt->kind == TY_OPT || bt->kind == TY_ERR)) {
+            bool flat = bt->kind == TY_OPT && ty_opt_flat(bt);
             ex(b, n->a);
-            buf_puts(b, !strcmp(n->name, "tag") ? ".tag" : ".payload");
+            if (flat)
+                buf_puts(b, !strcmp(n->name, "tag") ? " != 0" : "");
+            else
+                buf_puts(b, !strcmp(n->name, "tag") ? ".tag" : ".payload");
             return;
         }
         if (bt && bt->kind == TY_PTR) {
@@ -4008,9 +4219,12 @@ static void ex(Buf *b, Node *n) {
 
         if (t->kind == TY_OPT) {
             /* `?T` 的 try（v0.26）：tag 是 bool，true=有值。空（null）抛
-             * 保留错误码 error.null ≡ 65535（§5），沿同一条传播路上行。 */
+             * 保留错误码 error.null ≡ 65535（§5），沿同一条传播路上行。
+             * ?*T（M26）：没有标签，判指针本身。 */
+            bool flat = ty_opt_flat(t);
             line("%s %s = %s;", cty(t), tmp, cxs(n->a, t));
-            line("if (!%s.tag) {", tmp);
+            if (flat) line("if (!%s) {", tmp);
+            else      line("if (!%s.tag) {", tmp);
             g_ind++;
             if (g_is_main) {
                 run_defers_m(0, 1, NULL);
@@ -4025,6 +4239,7 @@ static void ex(Buf *b, Node *n) {
             g_ind--;
             line("}");
             if (t->elem && t->elem->kind == TY_VOID) buf_puts(b, "(void)0");
+            else if (flat) buf_puts(b, tmp);
             else buf_printf(b, "%s.payload", tmp);
             return;
         }
@@ -4058,13 +4273,15 @@ static void ex(Buf *b, Node *n) {
         /* `null orelse x` 是类型错误（见 sema），这里只处理真正的 ?T / !T。
          * 留一条兜底：类型缺失时按左值发，别静默变成别的东西。 */
         if (!t || (t->kind != TY_OPT && t->kind != TY_ERR)) { ex(b, n->a); return; }
-        const char *has = (t->kind == TY_OPT) ? ".tag" : ".tag == 0";
+        bool flat = t->kind == TY_OPT && ty_opt_flat(t);
+        const char *has = (t->kind == TY_OPT) ? (flat ? " != 0" : ".tag") : ".tag == 0";
+        const char *pay = flat ? "" : ".payload";
         if (!g_in_fn) {                    /* 顶层初始化器：只能老老实实写三元式 */
             buf_puts(b, "((");
             ex(b, n->a);
             buf_printf(b, ")%s ? (", has);
             ex(b, n->a);
-            buf_puts(b, ").payload : (");
+            buf_printf(b, ")%s : (", pay);
             ex(b, n->b);
             buf_puts(b, "))");
             return;
@@ -4073,7 +4290,7 @@ static void ex(Buf *b, Node *n) {
         char tmp[64];
         snprintf(tmp, sizeof tmp, "_or%d", on++);
         line("%s %s = %s;", cty(t), tmp, cxs(n->a, t));
-        buf_printf(b, "((%s)%s ? %s.payload : (", tmp, has, tmp);
+        buf_printf(b, "((%s)%s ? %s%s : (", tmp, has, tmp, pay);
         ex(b, n->b);
         buf_puts(b, "))");
         return;
@@ -4582,6 +4799,18 @@ static void gen_stmt(Node *n) {
 
     case NK_BIN:
         if (is_assign_op(n->op)) {
+            /* `_ = expr;`：只要副作用，不落存储（M26）。sema 已拦住
+             * 右值为 void 的情况；这里把右值求值成一条表达式语句。
+             * 走槽位路径，右值是 if/switch 表达式也能接住。 */
+            if (n->op == TOK_ASSIGN && n->a->kind == NK_IDENT &&
+                !strcmp(n->a->name, "_") && !n->a->sym) {
+                static int ad;
+                char tmp[32];
+                snprintf(tmp, sizeof tmp, "_ds%d", ad++);
+                line("%s %s = {0};", cty(n->b->ty), tmp);
+                gen_value(n->b, tmp, n->b->ty);
+                return;
+            }
             Buf l, r;
             buf_init(&l); buf_init(&r);
             lvalue(&l, n->a);
@@ -4762,18 +4991,20 @@ static void gen_if_body(Node *n, const char *slot, Type *slot_ty) {
     /* `?T` / `!T` 作条件：判的是 tag（`if (x)` 对 `!void` 也要走这条，
      * 那时没有载荷可捕获，只有 tag 可判）。 */
     if (is_opt || is_err) {
+        bool flat = is_opt && ty_opt_flat(c);
         static int cn;
         char tmp[64];
         snprintf(tmp, sizeof tmp, "_c%d", cn++);
         line("%s %s = %s;", cty(c), tmp, cxs(n->a, c));
-        if (is_opt) line("if (%s.tag) {", tmp);
-        else        line("if (%s.tag == 0) {", tmp);
+        if (flat)       line("if (%s) {", tmp);
+        else if (is_opt) line("if (%s.tag) {", tmp);
+        else            line("if (%s.tag == 0) {", tmp);
         g_ind++;
         CScope s; cscope_push(&s);
         /* `!void` 的载荷是 0 字节，没有可声明的变量（语义层已就此报错，
          * 这里只是不让坏代码变成 `void v = …` 这种非法 C）。 */
         if (n->name && c->elem->kind != TY_VOID)
-            line("%s %s = %s.payload;", cty(c->elem), cnames(n->name), tmp);
+            line("%s %s = %s%s;", cty(c->elem), cnames(n->name), tmp, flat ? "" : ".payload");
         gen_arm(n->b, slot, slot_ty);
         cscope_pop();
         g_ind--;
@@ -4847,11 +5078,13 @@ static void gen_loop_value(Node *n, const char *slot, Type *slot_ty) {
             char tmp[64];
             snprintf(tmp, sizeof tmp, "_w%d", cn++);
             line("%s %s = %s;", cty(c), tmp, cxs(n->a, c));
-            if (is_opt) line("if (!%s.tag) break;", tmp);
-            else        line("if (%s.tag != 0) break;", tmp);
+            bool wflat = is_opt && ty_opt_flat(c);
+            if (wflat)      line("if (!%s) break;", tmp);
+            else if (is_opt) line("if (!%s.tag) break;", tmp);
+            else            line("if (%s.tag != 0) break;", tmp);
             CScope s; cscope_push(&s);
             if (n->name && c->elem->kind != TY_VOID)
-                line("%s %s = %s.payload;", cty(c->elem), cnames(n->name), tmp);
+                line("%s %s = %s%s;", cty(c->elem), cnames(n->name), tmp, wflat ? "" : ".payload");
             gen_block_stmts(n->b);
             line("Lcont%d: ;", id);
             cscope_leave();
@@ -4971,11 +5204,13 @@ static void gen_for_body(Node *n, int id) {
 /* 聚合主语（?T / !T / 带标签联合体）的 switch 头部：C 的 switch 吃不了
  * 结构体，得换成判别值。返回静态轮换缓冲，嵌套 switch 也安全。 */
 static const char *tagref(const char *tmp, Type *st) {
-    static char bufs[4][64];
+    static char bufs[4][80];
     static int rot;
     char *b = bufs[rot++ & 3];
-    (void)st;
-    snprintf(b, 64, "%s.tag", tmp);
+    if (st && st->kind == TY_OPT && ty_opt_flat(st))
+        snprintf(b, 80, "(int)((%s) != 0)", tmp);   /* ?*T：标签即判空（M26） */
+    else
+        snprintf(b, 80, "%s.tag", tmp);
     return b;
 }
 
@@ -5078,7 +5313,8 @@ static void gen_switch(Node *n, const char *slot, Type *slot_ty) {
                 if (cap) { Buf nb; buf_init(&nb); buf_printf(&nb, "%s.u.", tmp); mname(&nb, vname); src = nb.data; }
             } else if (st && st->kind == TY_OPT) {
                 cap = st->elem;
-                Buf nb; buf_init(&nb); buf_printf(&nb, "%s.payload", tmp); src = nb.data;
+                if (ty_opt_flat(st)) { src = tmp; }
+                else { Buf nb; buf_init(&nb); buf_printf(&nb, "%s.payload", tmp); src = nb.data; }
             } else if (st && st->kind == TY_ERR) {
                 bool is_err_pat = vname && !strcmp(vname, "err");
                 if (is_err_pat) { cap = ty_error();  Buf nb; buf_init(&nb); buf_printf(&nb, "%s.tag", tmp); src = nb.data; }
@@ -5260,8 +5496,8 @@ static bool fn_is_generic(Node *fn) {
 /* 编译期值 → C 初始化器 */
 static void val_init(Buf *b, Value *v, Type *t) {
     if (!v) { buf_puts(b, "{0}"); return; }
-    /* 标量放进 ?T / !T：补上载荷+标签 */
-    if (t && (t->kind == TY_OPT || t->kind == TY_ERR) &&
+    /* 标量放进 ?T / !T：补上载荷+标签；?*T 无标签（M26），值即本体 */
+    if (t && (t->kind == TY_OPT || t->kind == TY_ERR) && !ty_opt_flat(t) &&
         v->kind != V_AGG && v->kind != V_NULL && v->kind != V_UNDEF && v->kind != V_VOID) {
         buf_puts(b, "{ ");
         val_init(b, v, t->elem);
@@ -5792,6 +6028,45 @@ int backend_emit_split(Node *root, Buf *header, Buf *rt, BUnit *units, int maxun
     g_out = &g_bbody;
     g_ind = 0;
 
+    if (g_need_pad || g_need_fmt) {
+        /* 宽度/填充助手（M26）：printf 旗标覆盖不了的填充形态走这里。
+         * width 上限 256（fmt_parse_opts 把关），512 缓冲足够宽裕。 */
+        bline(&g_bproto, "static char *zx_fmt_pad(char *out, size_t cap, char fill, int width, int align, const char *fmt, ...);");
+        bline(&g_bproto, "static char *zx_fmt_pads(char *out, size_t cap, const char *s, int n, char fill, int width, int align);");
+        buf_puts(g_out,
+            "#include <stdarg.h>\n"
+            "static char *zx_fmt_pad(char *out, size_t cap, char fill, int width, int align, const char *fmt, ...) {\n"
+            "    va_list ap; va_start(ap, fmt);\n"
+            "    int n = vsnprintf(out, cap, fmt, ap);\n"
+            "    va_end(ap);\n"
+            "    if (n < 0 || width <= 0 || n >= width || (size_t)n >= cap) return out;\n"
+            "    int pad = width - n;\n"
+            "    if (align == '<') { memset(out + n, fill, (size_t)pad); out[width] = 0; }\n"
+            "    else if (align == '>') { memmove(out + pad, out, (size_t)n + 1); memset(out, fill, (size_t)pad); }\n"
+            "    else { int l = pad / 2; memmove(out + l, out, (size_t)n + 1);\n"
+            "           memset(out, fill, (size_t)l); memset(out + l + n, fill, (size_t)(pad - l)); }\n"
+            "    return out;\n"
+            "}\n"
+            "static char *zx_fmt_pads(char *out, size_t cap, const char *s, int n, char fill, int width, int align) {\n"
+            "    if (n < 0) n = 0;\n"
+            "    if (width <= 0 || n >= width) { size_t m = (size_t)n < cap - 1 ? (size_t)n : cap - 1;\n"
+            "        memmove(out, s, m); out[m] = 0; return out; }\n"
+            "    int pad = width - n;\n"
+            "    size_t lim = cap - 1;\n"
+            "    if (align == '<') { size_t m = (size_t)n < lim ? (size_t)n : lim;\n"
+            "        memmove(out, s, m); int rest = width - (int)m;\n"
+            "        for (int k = 0; k < rest && (size_t)(m + k) < lim; k++) out[m + k] = fill;\n"
+            "        out[m + (rest < lim - m ? rest : (int)(lim - m))] = 0; }\n"
+            "    else { int lead = align == '^' ? pad / 2 : pad;\n"
+            "        size_t w = 0;\n"
+            "        for (int k = 0; k < lead && w < lim; k++) out[w++] = fill;\n"
+            "        size_t m = (size_t)n < lim - w ? (size_t)n : lim - w;\n"
+            "        memmove(out + w, s, m); w += m;\n"
+            "        for (int k = lead; k < pad && w < lim; k++) out[w++] = fill;\n"
+            "        out[w] = 0; }\n"
+            "    return out;\n"
+            "}\n\n");
+    }
     if (g_need_bin) {
         bline(&g_bproto, "static void zx_print_bin(uint64_t v);");
         buf_puts(g_out,

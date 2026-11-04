@@ -2020,6 +2020,15 @@ static bool addr_frame(Node *o) {
 }
 
 static Type *check_assign(Node *n) {
+    /* `_ = expr;` —— 显式丢弃（M26）：求值右值（拿副作用），不落存储。
+     * 只认普通 `=`；复合赋值没有丢弃语义。 */
+    if (n->op == TOK_ASSIGN && n->a->kind == NK_IDENT &&
+        !strcmp(n->a->name, "_") && !n->a->sym) {
+        Type *rt = check_expr(n->b, NULL);
+        if (rt->kind == TY_VOID)
+            return BAD(n, "`_ =` needs a value; the right side is already void");
+        return type_of(n, ty_void());
+    }
     Type *lt = check_expr(n->a, NULL);
     Type *rt;
     if (n->op == TOK_ASSIGN) {
@@ -2629,14 +2638,19 @@ static void check_fmt_args(Node *call, int first, int nargs) {
         if (j >= len) { err_at(fmt->line, fmt->col, "unterminated `{` in format string"); return; }
         int clen = j - i - 1;
         const char *c = p + i + 1;
+        /* 选项在冒号后面：{verb:opts} / {N:opts} / {:opts}（M26）。
+         * 选项本身的语法（宽度上限、fill/align 组合）在后端 fmt_parse_opts
+         * 里判；这里只剥离，让动词检查继续看冒号前面的部分。 */
+        const char *colon = (const char *)memchr(c, ':', (size_t)clen);
+        int plen = colon ? (int)(colon - c) : clen;
         int which, verb = 0;
-        if (clen == 0) which = argi++;
-        else if (clen == 1 && c[0] && strchr("dxbsc", c[0])) { verb = c[0]; which = argi++; }
-        else if (clen == 3 && !strncmp(c, "any", 3)) { verb = 'a'; which = argi++; }
+        if (plen == 0) which = argi++;
+        else if (plen == 1 && c[0] && strchr("dxbsc", c[0])) { verb = c[0]; which = argi++; }
+        else if (plen == 3 && !strncmp(c, "any", 3)) { verb = 'a'; which = argi++; }
         else {
             int k = 0; which = 0;
-            while (k < clen && c[k] >= '0' && c[k] <= '9') { which = which * 10 + (c[k] - '0'); k++; }
-            if (k == 0 || k != clen) {
+            while (k < plen && c[k] >= '0' && c[k] <= '9') { which = which * 10 + (c[k] - '0'); k++; }
+            if (k == 0 || k != plen) {
                 err_at(fmt->line, fmt->col, "unknown format specifier `{%.*s}`", clen, c);
                 i = j;
                 continue;
@@ -3006,6 +3020,11 @@ static Value *arg_ct(Node *a, Type *want);      /* 在后面，泛型实参用 *
 
 static const char *g_cur_fn_name;   /* 当前函数名：@fnName() 与断言消息用 */
 
+/* 路径/读文件助手定义在模块加载区（~3900+），@embedFile 在这里就要用 */
+static char *path_dup_dir(const char *path);
+static char *path_join(const char *dir, const char *rel);
+static char *read_source(const char *path, size_t *out_len);
+
 static Type *check_builtin(Node *n, Type *expect) {
     (void)expect;
     const char *nm = n->name ? n->name : "";
@@ -3018,6 +3037,28 @@ static Type *check_builtin(Node *n, Type *expect) {
             return BAD(n, "@%s of `%s` is not known at compile time", nm, ty_str(t));
         n->ival = (uint64_t)sz;
         return type_of(n, ty_usize());
+    }
+
+    if (!strcmp(nm, "embedFile")) {
+        /* @embedFile("rel/path")：编译期把文件内容嵌成 []const u8（M26）。
+         * 相对当前模块所在目录解析（跟 module() 同一规则）；不查 vendor
+         * 搜索路径——资源文件跟着源码走。字节数不设上限，但会进 C 字符串
+         * 字面量，几 MB 以内都合理。 */
+        if (n->nitems != 1 || n->items[0]->kind != NK_STR || !n->items[0]->str)
+            return BAD(n, "@embedFile needs one string literal path");
+        const char *rel = n->items[0]->str;
+        char *dir  = path_dup_dir(g_mod ? g_mod->path : g_srcpath);
+        char *full = path_join(dir, rel);
+        free(dir);
+        size_t len = 0;
+        char *data = read_source(full, &len);
+        free(full);
+        if (!data)
+            return BAD(n, "@embedFile: cannot read `%s` (relative to `%s`)", rel,
+                       (g_mod && g_mod->path) ? g_mod->path : (g_srcpath ? g_srcpath : "."));
+        n->str = data;
+        n->str_len = (int)len;
+        return type_of(n, ty_slice(ty_u8(), true));
     }
 
     if (!strcmp(nm, "offsetOf")) {
@@ -5879,6 +5920,9 @@ static Value *ct_eval(Node *n) {
         } else if (!strcmp(nm, "typeOf") && n->type_val) {
             v = val_type(n->type_val);
         } else if (!strcmp(nm, "typeName") && n->str) {
+            v = val_str(n->str, n->str_len);
+        } else if (!strcmp(nm, "embedFile") && n->str) {
+            /* 字节在 check_builtin 里就读好了；R1 的 const 初始化靠这一步 */
             v = val_str(n->str, n->str_len);
         } else if (!strcmp(nm, "typeInfo") && n->ct) {
             v = n->ct;

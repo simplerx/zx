@@ -1,0 +1,61 @@
+// `?*T` 无标签 optional（v0.27）：null 就是 0 指针，sizeof = 指针宽度，
+// 语法（if 捕获 / orelse / try / switch `.some`/`.none`）与带标签版完全一致。
+// 自引用链表 `next: ?*Node` 是最大受益者：节点不多占一个标签字节。
+// expect-exit: 0
+// expect-output
+// size-of-opt-ptr=8
+// size-of-node=16
+// orelse=1
+// switch-some=2
+// switch-none ok
+// sum=3
+// try=9
+// null-check ok
+const std = module("std");
+
+const Node = struct {
+    val: i32,
+    next: ?*Node,
+};
+
+const main = fn () u8 {
+    std.println("size-of-opt-ptr={}", @sizeOf(?*i32));   // 原带标签是 16
+    std.println("size-of-node={}", @sizeOf(Node));       // 8 + 4 + 补 4 = 16
+
+    var b = Node{ .val = 2, .next = null };
+    var a = Node{ .val = 1, .next = &b };
+
+    let none: ?*Node = null;
+    let v = none orelse &a;
+    std.println("orelse={}", v.val);
+
+    switch (a.next) {
+        .some: p { std.println("switch-some={}", p.val); },
+        .none:  { return 2; },
+    }
+    switch (none) {
+        .some: q { return 3; },
+        .none:   { std.println("switch-none ok"); },
+    }
+
+    std.println("sum={}", list_sum(&a));
+    try_thing();
+    return 0;
+};
+
+// while-unwrap：链表逐节点求和（1 + 2）
+const list_sum = fn (n: *Node) i32 {
+    var total: i32 = 0;
+    var cur: ?*Node = n;
+    while (cur) c { total = total + c.val; cur = c.next; }
+    return total;
+};
+
+const try_thing = fn () !void {
+    var b = Node{ .val = 9, .next = null };
+    let p: ?*Node = &b;
+    let val = try p;
+    std.println("try={}", val.val);
+    let n: ?*Node = null;
+    if (n) { return; } else { std.println("null-check ok"); }
+};

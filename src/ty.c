@@ -453,6 +453,10 @@ static bool ext_array_field(Type *agg, Type *ft, int *fs, int *fa) {
     return true;
 }
 
+bool ty_opt_flat(Type *t) {
+    return t && t->kind == TY_OPT && t->elem && t->elem->kind == TY_PTR;
+}
+
 int ty_align(Type *t) {
     if (!t) return 1;
     if (t->align >= 0) return t->align;
@@ -476,7 +480,8 @@ int ty_align(Type *t) {
         /* 规格 §5：载荷在前、标签在尾。
          * ?T 的标签是 bool（对齐 1），所以 align = align(T)；
          * !T 的标签是 error(u16)，对齐 2，所以 align(!T) = max(align(T), 2)
-         * —— 这一点必须和后端生成的 C 结构体一致，否则 @sizeOf 会骗人。 */
+         * —— 这一点必须和后端生成的 C 结构体一致，否则 @sizeOf 会骗人。
+         * 例外：?*T 无标签（M26），布局就是指针本身。 */
         Type *e = t->elem;
         a = e ? ty_align(e) : 1;
         if (t->kind == TY_ERR && a < 2) a = 2;
@@ -605,6 +610,7 @@ int ty_size(Type *t) {
         Type *e = t->elem;
         int es = e ? ty_size(e) : 0;
         if (es < 0) { s = -1; goto done; }
+        if (t->kind == TY_OPT && ty_opt_flat(t)) { s = align_up(es, ty_align(t)); break; }
         s = align_up(es + (t->kind == TY_ERR ? 2 : 1), ty_align(t));
         break;
     }
@@ -793,6 +799,7 @@ int ty_size_relaxed(Type *t) {
     }
     case TY_OPT: case TY_ERR: {
         int es = ty_size_relaxed(t->elem);
+        if (t->kind == TY_OPT && ty_opt_flat(t)) return align_up(es, ty_align_relaxed(t));
         return align_up(es + (t->kind == TY_ERR ? 2 : 1), ty_align_relaxed(t));
     }
     default:
