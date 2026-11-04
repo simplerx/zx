@@ -1,0 +1,27 @@
+// task_cross.zx —— 物理隔离下的跨实例 await：A 实例的任务等 B 实例的任务，
+// 完成时等待者必须被推回 A 的队列，而不是在 B 上继续跑。
+// expect-output:cross:42
+const std = module("std");
+const Task = std.Task;
+
+var sum: usize = 0;
+const child = fn (x: usize) !usize { return x * 2; };
+
+const parent = fn (ctx: usize) !usize {
+    let b = Task.fromId(ctx);
+    let h = b.spawn(child, 21).?;
+    let r = try b.await(h);
+    std.atomic.atomicStore(&sum, r);
+    return 0;
+};
+
+const main = fn () !i32 {
+    let a = Task.coro();
+    let b = Task.pool(2);
+    let h = a.spawn(parent, b.id).?;
+    try a.awaitAll();
+    std.println("cross:{}", sum);
+    a.close();
+    b.close();
+    return 0;
+};

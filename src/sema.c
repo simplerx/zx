@@ -619,13 +619,7 @@ static Symbol *std_builtin(const char *name) {
     static Symbol i_print, i_println;
     static Symbol proc_s, p_args, p_getenv, p_setenv, p_exit;
     static Symbol debug_s, d_panic, d_assert, d_errname, d_trace;
-    static Symbol task_s, t_spawn, t_await, t_cancel, t_yield, t_current,
-                  t_interrupted, t_auto, t_init, t_go, t_run, t_sleep,
-                  t_single, t_pool;
-    static Symbol sync_s, m_new, m_lock, m_try, m_unlock, m_free;
     static Symbol atomic_s, a_add, a_sub, a_load, a_store, a_swap, a_cas;
-    static Symbol chan_s, c_new, c_close, c_send, c_recv, c_tsend, c_trecv;
-    static Symbol cond_s, cn_new, cn_wait, cn_sig, cn_bcast, cn_free;
     static bool init;
     if (!name) return NULL;
     if (!init) {
@@ -814,88 +808,12 @@ static Symbol *std_builtin(const char *name) {
             ds[i]->builtin = BI_DEBUG_FN;
         }
 
-        /* std.Task（M56，decisions §89）：多线程 / 单线程 / 协程统一成任务
-         * 接口。Task 是调度器调度的栈有纤程——跑在工作线程还是当前线程由
-         * 调度器定（Task.init(n) 配置，0 = 纯单线程协作调度），用户只见
-         * spawn / await / cancel。任务签名 fn (usize) !usize 是刻意的：
-         * 取消复用 !T 传播链（M55 的 await 门），await 拿到 ret 或
-         * error.cancelled。句柄 usize：0 = 当前线程的根上下文（非任务）。 */
-        task_s.name = "Task"; task_s.kind = SK_NS; task_s.builtin = BI_TASK;
-        task_s.state = 2; task_s.ty = ty_type(); task_s.type_val = ty_void();
-
-        Type *task_t = ty_fn((Type *[]){ usz }, 1, ty_err(usz));
-        Type *p_tspawn[2] = { task_t, usz };
-        Type *bt = ty_bool();
-        Type *p_tauto[2] = { usz, bt };
-
-        t_spawn.name = "spawn"; t_spawn.cname = "zx_task_spawn";
-        t_spawn.ty = ty_fn(p_tspawn, 2, ty_opt(usz));
-        t_await.name = "await"; t_await.cname = "zx_task_await";
-        t_await.ty = ty_fn(&usz, 1, ty_err(usz));
-        t_cancel.name = "cancel"; t_cancel.cname = "zx_task_cancel";
-        t_cancel.ty = ty_fn(&usz, 1, ty_void());
-        t_yield.name = "yield"; t_yield.cname = "zx_task_yield";
-        t_yield.ty = ty_fn(NULL, 0, ty_void());
-        t_current.name = "current"; t_current.cname = "zx_task_current";
-        t_current.ty = ty_fn(NULL, 0, usz);
-        t_interrupted.name = "interrupted"; t_interrupted.cname = "zx_task_interrupted";
-        t_interrupted.ty = ty_fn(NULL, 0, ty_bool());
-        t_auto.name = "auto"; t_auto.cname = "zx_task_auto";
-        t_auto.ty = ty_fn(p_tauto, 2, ty_void());
-        t_init.name = "init"; t_init.cname = "zx_task_init";
-        t_init.ty = ty_fn(&usz, 1, ty_void());
-
-        /* 默认任务（M57）：spawn 要求 fn(usize)!usize 的固定签名，常用
-         * 形态得自己写包装——go / run / sleep 把三种最常见的活包掉。
-         * go：零参可错函数；run：零参不可错函数；sleep：当前任务睡 ms。 */
-        Type *t_gofn = ty_fn(NULL, 0, ty_err(usz));      /* fn() !usize */
-        Type *p_tgo[1] = { t_gofn };
-        t_go.name = "go"; t_go.cname = "zx_task_go";
-        t_go.ty = ty_fn(p_tgo, 1, ty_opt(usz));
-        Type *t_runfn = ty_fn(NULL, 0, usz);             /* fn() usize */
-        Type *p_trun[1] = { t_runfn };
-        t_run.name = "run"; t_run.cname = "zx_task_run";
-        t_run.ty = ty_fn(p_trun, 1, ty_opt(usz));
-        Type *p_tsl[1] = { usz };
-        t_sleep.name = "sleep"; t_sleep.cname = "zx_task_sleep";
-        t_sleep.ty = ty_fn(p_tsl, 1, ty_err(ty_void()));
-
-        /* 默认调度实例（M57）：三种现成形态——
-         *   single：单线程，主线程驱动，任务即协程（交错确定）；
-         *   pool：  多线程工作线程池（n=0 自动按 CPU），spawn 的任务
-         *           被池里线程偷走跑；
-         *   协程语义由 single 里的任务承担（栈有 + await 真挂起 +
-         *   Task.auto 控制门），不单列类型——对外仍然只有一个 Task。 */
-        t_single.name = "single"; t_single.cname = "zx_task_single";
-        t_single.ty = ty_fn(NULL, 0, ty_void());
-        t_pool.name = "pool"; t_pool.cname = "zx_task_pool";
-        t_pool.ty = ty_fn(&usz, 1, ty_void());
-
-        Symbol *ts[13] = { &t_spawn, &t_await, &t_cancel, &t_yield,
-                           &t_current, &t_interrupted, &t_auto, &t_init,
-                           &t_go, &t_run, &t_sleep, &t_single, &t_pool };
-        for (int i = 0; i < 13; i++) {
-            ts[i]->kind = SK_CONST;
-            ts[i]->state = 2;
-            ts[i]->builtin = BI_TASK_FN;
-        }
-
-        /* std.mutex / std.atomic：同步原语独立成命名空间——它们不是执行
-         * 模型，不违背"对外一个 Task"。C 名字沿用 zx_mutex_/zx_atomic_，
-         * 语义与 §86 定的一致（非递归、SEQ_CST）。 */
-        sync_s.name = "mutex"; sync_s.kind = SK_NS; sync_s.builtin = BI_SYNC;
-        sync_s.state = 2; sync_s.ty = ty_type(); sync_s.type_val = ty_void();
-        m_new.name = "mutexNew";    m_new.cname = "zx_mutex_new";
-        m_new.ty   = ty_fn(NULL, 0, usz);
-        m_lock.name = "mutexLock";  m_lock.cname = "zx_mutex_lock";
-        m_lock.ty  = ty_fn(&usz, 1, ty_void());
-        m_try.name = "mutexTry";    m_try.cname = "zx_mutex_try";
-        m_try.ty   = ty_fn(&usz, 1, ty_bool());
-        m_unlock.name = "mutexUnlock"; m_unlock.cname = "zx_mutex_unlock";
-        m_unlock.ty = ty_fn(&usz, 1, ty_void());
-        m_free.name = "mutexFree";  m_free.cname = "zx_mutex_free";
-        m_free.ty  = ty_fn(&usz, 1, ty_void());
-
+                /* M58：唯一的并发抽象是 std/task.zx 里的 Task 实例（物理隔离、
+         * 各管一组线程，通信也挂在实例上）。这里只保留与执行模型无关的
+         * std.atomic——它是纯函数，不是并发类型。 */
+        /* std.atomic：与执行模型无关的纯函数（SEQ_CST）。M58 起唯一的并发
+         * 抽象是 std/task.zx 的 Task 实例，mutex/cond/thread 类型已收掉，
+         * 这里只留 atomic。 */
         atomic_s.name = "atomic"; atomic_s.kind = SK_NS; atomic_s.builtin = BI_SYNC;
         atomic_s.state = 2; atomic_s.ty = ty_type(); atomic_s.type_val = ty_void();
         Type *pu64 = ty_ptr(ty_int(64, false), false, false, 0);
@@ -914,60 +832,13 @@ static Symbol *std_builtin(const char *name) {
         a_cas.name = "atomicCAS";   a_cas.cname = "zx_atomic_cas";
         a_cas.ty  = ty_fn(p_cas, 3, ty_bool());
 
-        Symbol *ss[11] = { &m_new, &m_lock, &m_try, &m_unlock, &m_free,
-                           &a_add, &a_sub, &a_load, &a_store, &a_swap, &a_cas };
-        for (int i = 0; i < 11; i++) {
+        Symbol *ss[6] = { &a_add, &a_sub, &a_load, &a_store, &a_swap, &a_cas };
+        for (int i = 0; i < 6; i++) {
             ss[i]->kind = SK_CONST;
             ss[i]->state = 2;
             ss[i]->builtin = BI_SYNC_FN;
         }
 
-        /* std.channel（M57）：纤程感知的有界通道——send/recv 在任务里
-         * 是真挂起（等在通道的等待者链上，不占 OS 线程），挂在 Task 侧
-         * 因为它依赖调度器的重入队能力。错误集：closed / would_block。 */
-        chan_s.name = "channel"; chan_s.kind = SK_NS; chan_s.builtin = BI_TASK;
-        chan_s.state = 2; chan_s.ty = ty_type(); chan_s.type_val = ty_void();
-        c_new.name = "chanNew"; c_new.cname = "zx_chan_new";
-        c_new.ty = ty_fn(&usz, 1, usz);
-        c_close.name = "chanClose"; c_close.cname = "zx_chan_close";
-        c_close.ty = ty_fn(&usz, 1, ty_void());
-        Type *p_csv[2] = { usz, usz };
-        c_send.name = "chanSend"; c_send.cname = "zx_chan_send";
-        c_send.ty = ty_fn(p_csv, 2, ty_err(ty_void()));
-        c_recv.name = "chanRecv"; c_recv.cname = "zx_chan_recv";
-        c_recv.ty = ty_fn(&usz, 1, ty_err(usz));
-        c_tsend.name = "chanTrySend"; c_tsend.cname = "zx_chan_trysend";
-        c_tsend.ty = ty_fn(p_csv, 2, ty_err(ty_void()));
-        c_trecv.name = "chanTryRecv"; c_trecv.cname = "zx_chan_tryrecv";
-        c_trecv.ty = ty_fn(&usz, 1, ty_err(usz));
-        Symbol *cs[6] = { &c_new, &c_close, &c_send, &c_recv, &c_tsend, &c_trecv };
-        for (int i = 0; i < 6; i++) {
-            cs[i]->kind = SK_CONST;
-            cs[i]->state = 2;
-            cs[i]->builtin = BI_TASK_FN;
-        }
-
-        /* std.cond（M57）：OS 线程级条件变量，std.mutex 的搭档——会阻塞
-         * 所在 OS 线程，任务里慎用（纤程级的等待用 channel）。 */
-        cond_s.name = "cond"; cond_s.kind = SK_NS; cond_s.builtin = BI_SYNC;
-        cond_s.state = 2; cond_s.ty = ty_type(); cond_s.type_val = ty_void();
-        Type *p_cw[2] = { usz, usz };
-        cn_new.name = "condNew"; cn_new.cname = "zx_cond_new";
-        cn_new.ty = ty_fn(NULL, 0, usz);
-        cn_wait.name = "condWait"; cn_wait.cname = "zx_cond_wait";
-        cn_wait.ty = ty_fn(p_cw, 2, ty_void());
-        cn_sig.name = "condSignal"; cn_sig.cname = "zx_cond_signal";
-        cn_sig.ty = ty_fn(&usz, 1, ty_void());
-        cn_bcast.name = "condBroadcast"; cn_bcast.cname = "zx_cond_broadcast";
-        cn_bcast.ty = ty_fn(&usz, 1, ty_void());
-        cn_free.name = "condFree"; cn_free.cname = "zx_cond_free";
-        cn_free.ty = ty_fn(&usz, 1, ty_void());
-        Symbol *cns[5] = { &cn_new, &cn_wait, &cn_sig, &cn_bcast, &cn_free };
-        for (int i = 0; i < 5; i++) {
-            cns[i]->kind = SK_CONST;
-            cns[i]->state = 2;
-            cns[i]->builtin = BI_SYNC_FN;
-        }
     }
 
     if (!strcmp(name, "print"))     return &print_s;
@@ -1012,33 +883,6 @@ static Symbol *std_builtin(const char *name) {
     if (!strcmp(name, "debug.assert"))    return &d_assert;
     if (!strcmp(name, "debug.errName"))   return &d_errname;
     if (!strcmp(name, "debug.printTrace")) return &d_trace;
-    if (!strcmp(name, "Task"))              return &task_s;
-    if (!strcmp(name, "Task.spawn"))        return &t_spawn;
-    if (!strcmp(name, "Task.await"))        return &t_await;
-    if (!strcmp(name, "Task.cancel"))       return &t_cancel;
-    if (!strcmp(name, "Task.yield"))        return &t_yield;
-    if (!strcmp(name, "Task.current"))      return &t_current;
-    if (!strcmp(name, "Task.interrupted"))  return &t_interrupted;
-    if (!strcmp(name, "Task.auto"))         return &t_auto;
-    if (!strcmp(name, "Task.init"))         return &t_init;
-    if (!strcmp(name, "Task.go"))           return &t_go;
-    if (!strcmp(name, "Task.run"))          return &t_run;
-    if (!strcmp(name, "Task.sleep"))        return &t_sleep;
-    if (!strcmp(name, "Task.single"))       return &t_single;
-    if (!strcmp(name, "Task.pool"))         return &t_pool;
-    if (!strcmp(name, "channel"))              return &chan_s;
-    if (!strcmp(name, "channel.chanNew"))      return &c_new;
-    if (!strcmp(name, "channel.chanClose"))    return &c_close;
-    if (!strcmp(name, "channel.chanSend"))     return &c_send;
-    if (!strcmp(name, "channel.chanRecv"))     return &c_recv;
-    if (!strcmp(name, "channel.chanTrySend"))  return &c_tsend;
-    if (!strcmp(name, "channel.chanTryRecv"))  return &c_trecv;
-    if (!strcmp(name, "mutex"))            return &sync_s;
-    if (!strcmp(name, "mutex.mutexNew"))    return &m_new;
-    if (!strcmp(name, "mutex.mutexLock"))   return &m_lock;
-    if (!strcmp(name, "mutex.mutexTry"))    return &m_try;
-    if (!strcmp(name, "mutex.mutexUnlock")) return &m_unlock;
-    if (!strcmp(name, "mutex.mutexFree"))   return &m_free;
     if (!strcmp(name, "atomic"))            return &atomic_s;
     if (!strcmp(name, "atomic.atomicAdd"))   return &a_add;
     if (!strcmp(name, "atomic.atomicSub"))   return &a_sub;
@@ -1046,12 +890,6 @@ static Symbol *std_builtin(const char *name) {
     if (!strcmp(name, "atomic.atomicStore")) return &a_store;
     if (!strcmp(name, "atomic.atomicSwap"))  return &a_swap;
     if (!strcmp(name, "atomic.atomicCAS"))   return &a_cas;
-    if (!strcmp(name, "cond"))               return &cond_s;
-    if (!strcmp(name, "cond.condNew"))       return &cn_new;
-    if (!strcmp(name, "cond.condWait"))      return &cn_wait;
-    if (!strcmp(name, "cond.condSignal"))    return &cn_sig;
-    if (!strcmp(name, "cond.condBroadcast")) return &cn_bcast;
-    if (!strcmp(name, "cond.condFree"))      return &cn_free;
     return NULL;
 }
 
@@ -1059,7 +897,7 @@ static Symbol *std_builtin(const char *name) {
 static const char *g_std_seeded[] = {
     "print", "println", "format", "heap", "file", "io", "Allocator",
     "TypeKind", "TypeInfo", "FieldInfo", "stackAlloc", "heapAlloc", "process",
-    "debug", "Task", "mutex", "atomic", "channel", "cond", NULL
+    "debug", "atomic", NULL
 };
 
 static Symbol *ns_member(Symbol *ns, const char *name, int line, int col) {
@@ -1120,11 +958,11 @@ static Symbol *ns_member(Symbol *ns, const char *name, int line, int col) {
         err_at(line, col, "'std.debug' has no member '%s'", name);
         return NULL;
     }
-    if (ns->builtin == BI_TASK || ns->builtin == BI_SYNC) {
+    if (ns->builtin == BI_SYNC) {
         char key[64];
         snprintf(key, sizeof key, "%s.%s", ns->name, name);
         Symbol *f = std_builtin(key);
-        if (f && (f->builtin == BI_TASK_FN || f->builtin == BI_SYNC_FN)) return f;
+        if (f && f->builtin == BI_SYNC_FN) return f;
         {
             char full[72];
             snprintf(full, sizeof full, "std.%s", ns->name);

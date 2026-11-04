@@ -435,9 +435,8 @@ extern fn GetTickCount64() u64;                   // Win32（大小写敏感）
 | `std.io` | `openRead/openWrite/openAppend(path)`、`read/write/seek/tell/close/flush`、`stdin/stdout/stderr`、`print/println` |
 | `std.process` | `args()`、`getEnv(name)`、`setEnv`、`exit(code)` |
 | `std.debug` | `panic(msg)`、`assert(cond, msg)`、`errName(err)`、`printTrace()` |
-| `std.Task` | `spawn/await/cancel/yield/current/interrupted/auto/init`——统一任务接口（§4.6） |
-| `std.mutex` / `std.atomic` | 非递归互斥（5 函数）/ SEQ_CST 原子（6 函数） |
-| `std.fiber` | `spawn(fn, ctx)`、`yield/resume/join/current`、`cancel/interrupted`；捕获环 trace 见 §4.7 |
+| `std.Task` | 唯一的并发类型：`coro/single/pool` 建实例；`spawn/await/awaitAll/cancel/yield/send/recv/close` 是实例方法（§4.6/§4.8） |
+| `std.atomic` | `Add/Sub/Load/Store/Swap/CAS`，usize，SEQ_CST（纯函数，不是并发类型） |
 | `std.stackAlloc(T, N)` / `std.heapAlloc(al, T, N)` | 数组分配（OOM abort） |
 
 ### 4.2 容器
@@ -498,15 +497,20 @@ std.debug.printTrace();                           // 回放捕获环（最老→
   （枚举错误 `(error)Err.x` 按显式码占位登记，decisions §90，也能回放成员名）。
 - `@file()/@line()/@col()/@fnName()` 单独可用，全部编译期折成字面量、零开销。
 
-### 4.6 任务：`std.Task`（统一线程 / 协程）
+### 4.6 任务：Task 实例（唯一的并发抽象）
 
-多线程、单线程、协程是一个模型的三种实例（decisions §89/§93）：**Task 是
-调度器调度的栈有纤程**——`Task.pool()` 默认 CPU-1 个工作线程抢分片就绪
-队列（多线程）；`Task.single()` 纯单线程，主线程 await 时顺便跑调度循环
-（协程，测试确定性来源）；await 在任务内是真挂起。两种实例只对首次 spawn
-生效。
+M58 起并发只有一个类型：`std.Task` 的**实例**。每个实例物理隔离——自己的
+任务表、就绪队列、通信通道和一组线程，实例之间不共享任何调度状态。三种
+形态只是「谁来推进」不同（decisions §94）：
+
+| 构造 | 线程 | 推进方式 |
+| --- | --- | --- |
+| `Task.coro()` | 0 | 不建线程；调用者在 `await/awaitAll` 时驱动，交错确定 |
+| `Task.single()` | 1 | 一条专属 OS 线程跑调度循环 |
+| `Task.pool(n)` | n | n 条工作线程抢本实例的就绪队列（`n=0` 自动 CPU-1） |
 
 ```zx
+const std = module("std");
 const Task = std.Task;
 
 const produce = fn (n: usize) !usize {
@@ -517,41 +521,41 @@ const produce = fn (n: usize) !usize {
 };
 
 const main = fn () !i32 {
-    Task.pool(0);                           // 或 Task.single()；只对首次 spawn 生效
-    let h = try Task.spawn(produce, 100);   // 入队即返回，?usize 句柄
-    let r = try Task.await(h);              // 真挂起等完成，拿返回值
-    std.println("{}", r);                   // 5050
+    let co = Task.coro();
+    let h = co.spawn(produce, 100).?;    // 入队即返回，?usize 句柄
+    let r = try co.await(h);             // 等完成并取结果
+    std.println("{}", r);                // 5050
+    co.close();                          // 停线程组，句柄失效
     return 0;
 };
 ```
 
-**任务签名固定为 `fn (usize) !usize`**：多值打包成堆上结构体传指针（ctx 是
-usize）；返回值/错误经 await 带回。取消复用 `!T` 传播链——`cancel(h)` 后，
-h 在下一个 await 点收到 `error.cancelled`，顺着 try 冒到任务顶层，await h
-的人收到同一个错误。
+任务签名固定 `fn (usize) !usize`。多值打包成堆上结构体传指针；`ctx` 只有
+一个 usize，要在任务里用实例就把 `t.id` 传进去、`Task.fromId(ctx)` 还原。
+`awaitAll()` 是**纯屏障**：只等本实例名下 pending 归零，结果仍用 `await(h)`
+逐个取（Zx 的 `!T` 是单值，不为它引入结果数组）。
 
-| 函数 | 语义 |
+| 实例方法 | 语义 |
 | --- | --- |
-| `spawn(fn, ctx) ?usize` | 入就绪队列（不立即跑满）；失败返回 null |
-| `await(h) !usize` | 等完成并取结果/错误；任务内是真挂起，根上下文顺便推进调度 |
-| `cancel(h)` | 置取消旗标：h 在下一个 await 点收到 `error.cancelled` |
-| `yield()` | 当前任务回就绪队列尾，切回调度循环 |
-| `current() usize` | 当前任务句柄；根上下文是 `0` |
-| `interrupted() bool` | 当前任务的取消旗标 |
-| `auto(h, on)` | 开关 await 自动挂起（默认开，见 §4.7 await 门） |
-| `single()` | 单线程实例：主线程驱动，任务即协程 |
-| `pool(n)` | 多线程实例：n 个工作线程，n=0 自动 CPU-1 |
-| `init(n)` | pool 的旧拼法，保留 |
-| `go(f)` | fire-and-forget：spawn 零参 fn，句柄丢弃 |
-| `run(f) ?usize` | spawn 零参 fn 拿句柄，结果仍要 await |
-| `sleep(ms) !void` | 任务内定时器真挂起；根上下文退化 OS 级睡眠（可能被提前叫醒，循环睡满） |
+| `spawn(fn, ctx) ?usize` | 入本实例就绪队列；失败返回 null |
+| `await(h) !usize` | 等单个任务并取结果/错误；任务内真挂起，根上下文顺便推进调度 |
+| `awaitAll() !void` | 等本实例全部任务完成（屏障） |
+| `cancel(h)` | 置取消旗标 + 提前唤醒正停靠在通信上的任务 |
+| `yield()` | 当前任务回队列尾 |
+| `close()` | 拒绝新操作、唤醒全部停靠者、停本实例线程组 |
+| `send/recv/trySend/tryRecv` | 见 §4.8 |
+
+实例由创建它的外部线程串行使用（构造 / `awaitAll` / `close`）；**实例内部
+那组工作线程之间的调度、任务表、等待链与通信由运行时自己保证线程安全**
+（decisions §94）。跨实例 await 是允许的：A 的任务等 B 的任务，B 完成时
+等待者会被推回 A 的队列，不会留在 B 上跑。
 
 ### 4.7 await 门与错误捕获 trace
 
 **await 门**：每个返回 `!T` 的函数入口都是一个 await 点（decisions §88）。
-在任务里且 auto 开着（默认开）：调用在入口**自动挂起**回调度循环；续跑后
-看取消旗标，被取消就以 `error.cancelled` 走 `!T` 传播链。根上下文里门是
-一次纯 false 检查；`--release` 下门保留（取消是运行时语义）。
+在任务里：调用在入口**自动挂起**回调度循环；续跑后看取消旗标，被取消就
+以 `error.cancelled` 走 `!T` 传播链。根上下文里门是一次纯 false 检查；
+`--release` 下门保留（取消是运行时语义）。
 
 **捕获环 trace（捕获感知任务）**：`else err { … }` 捕获点在 dev 档自动
 登记一条 `{错误名, file, line, col, fn}` 到**当前任务**的环形缓冲（64 条，
@@ -565,32 +569,30 @@ h 在下一个 await 点收到 `error.cancelled`，顺着 try 冒到任务顶层
   errName 直接回放 `Err.open` 这样的成员名；显式码占坑，运行时错误码
   （cancelled 等）跳过已占槽位分配。
 
-**同步原语**：`std.mutex`（`mutexNew/Lock/Try/Unlock/Free`，非递归，
-SRWLOCK / pthread）与 `std.atomic`（`Add/Sub/Load/Store/Swap/CAS`，usize，
-SEQ_CST）——它们不是执行模型，与 Task 分开按需链接。
+**同步原语**：并发类型只留 `Task`；`std.mutex` / `std.cond` / `std.channel`
+/ `std.thread` 在 M58 一并收掉。`std.atomic`（`Add/Sub/Load/Store/Swap/CAS`，
+usize，SEQ_CST）是纯函数，保留，按需链接。
 
-### 4.8 通道与条件变量：`std.channel` / `std.cond`
+### 4.8 通信：实例自带的 rendezvous
 
-**`std.channel` 是纤程感知的有界队列**（decisions §91）：任务里 send/recv
-是**真停靠**——等待者串 FIFO，满了/空了就切回调度循环，醒来拿结果，不忙等。
-两条快速路径让常见形态不进等待链：ring 空时 send 直投停靠 receiver（直接
-握手）；recv 腾位后把队首 sender 的值补进 ring。
+每个 Task 实例自带一条**无缓冲通道**，`send/recv` 在任务里是真停靠：先到
+的一方挂在等待链上切回调度循环，后到的一方直接握手（值直投对方的 `cval`）
+并把它推回所属实例的队列。没有 ring buffer、没有 cap，因此也不再有
+「句柄定长 64」的限制。
 
 ```zx
-const ch = try std.channel.new(4);          // ?usize 句柄，cap 0 按 1，上限 65536
-// 任务里：
-try std.channel.send(ch, v);                // 满则停靠；错误集 {closed}
-let v = try std.channel.recv(ch);           // 空则停靠；close 后收 err.closed
-std.channel.close(ch);                      // 唤醒全部等待者并让后续操作报 closed
+let co = Task.coro();
+let hp = co.spawn(producer, co.id).?;   // 任务里 try t.send(v)
+let hc = co.spawn(consumer, co.id).?;   // 任务里 let v = try t.recv()
+try co.awaitAll();
+co.close();
 ```
 
-根上下文（主线程）没有推进力：channel 操作先推一把调度再复查，还没结果
-报 `would_block`——主线程的 channel 是协作式的。已知取舍：cancel 不会
-提前唤醒停靠在 channel/定时器上的任务。
-
-**`std.cond` 是 OS 线程级条件变量**（`new/wait/signal/broadcast/free`），
-std.mutex 的搭档。它不懂纤程：任务里持锁跨 await 点会卡住整个工作线程
-（不是死锁但是饿）。纤程间同步用 channel，cond 留给 OS 线程场景。
+- 根上下文没有推进力：`send/recv` 是协作式的，没有对手就返回 `would_block`；
+  `trySend/tryRecv` 永不停靠。
+- `close()` 唤醒全部停靠者，它们收到 `error.closed`；`cancel(h)` 会提前把
+  停靠在通信链上的任务摘出来，返回 `error.cancelled`。
+- 通道属于实例，但等待者按自己 `s` 的归属回到原实例队列，跨实例通信也可行。
 
 ## 5. 构建、产物与测试
 
@@ -696,7 +698,7 @@ sh editor/zed/install.sh    # 装 Zed 扩展（高亮 + 大纲 + LSP 接线）
 
 | 限制 | 现状 | 影响 |
 | --- | --- | --- |
-| 并发 | `std.Task` 统一任务接口（single/pool 双实例 + go/run/sleep 便利层，§4.6）+ channel/cond/mutex/atomic | 无读写锁、无 select；cancel 不会提前唤醒停靠在 channel/定时器上的任务；channel 句柄定长 64 |
+| 并发 | `std.Task` 实例（coro/single/pool 物理隔离，§4.6）+ 实例自带 rendezvous 通信 + `std.atomic` | 无读写锁、无 select、无带缓冲通道；`close` 后句柄失效（槽位不复用）；根上下文通信是协作式 `would_block`；外部调用者需串行使用实例 |
 | 调试信息 | 后端不生成 DWARF/PDB，`-g` 未暴露 | 单步调试不可用；打印/断言用 `std.debug`，位置内建零开销 |
 | 包管理 | 没有网络依赖解析 | 依赖靠 `vendor/` 或 `deps` 手工放置 |
 | 优化 | 只做 `-O0`/`-O2` 交给 C 编译器 | 没有 Zx 层优化（不做内联决策） |
@@ -717,17 +719,17 @@ sh editor/zed/install.sh    # 装 Zed 扩展（高亮 + 大纲 + LSP 接线）
 | 词法 / 语法 / 类型检查 | 完成 | 25 关键字、泛型单态化、错误集、编译期求值；`tests/good` 52 + `tests/bad` 95 + 多文件 |
 | C11 后端 | 完成 | 7 个示例 + 正例编译成真二进制跑出期望输出；结构布局与 C 一致 |
 | 自举 | 完成（阶段 1–4） | `bootstrap/zxfe.zx` 用 Zx 写前端，`zxc` 默认走它；`--fe=c` 只作种子与交叉验证 |
-| 标准库 | 可用 | 7 个模块（std/str/map/fs/json/time/pool）+ 容器 + 格式化 + debug/Task/channel/cond/mutex/atomic |
+| 标准库 | 可用 | 8 个模块（std/str/map/fs/json/time/pool/task）+ 容器 + 格式化 + debug/atomic/Task 实例 |
 | 工具链 | 可用 | `init/build/run/test/check/fmt` + `-h/-v` + 增量编译 + 动态/静态库 |
 | 编辑器 | 可用 | tree-sitter 高亮/大纲 + zxls（补全/诊断/跳转/hover/签名/格式化/引用） |
-| 回归 | 在守 | `sh test.sh`：文件类 234 项 + CLI 冒烟 6 项 + LSP 会话 16 项 |
+| 回归 | 在守 | `sh test.sh`：文件类 233 项全过 + CLI 冒烟 6 项 + LSP 会话 16 项 |
 | 性能 | 有基线 | fib/mandel/mmat/str 四个锚点，前端已修掉两处 O(n²) |
-| 生态 | 起步 | 无包管理、无调试信息；调试内建（M52）、统一 Task 并发（M53~M56 演进而来）已有 |
+| 生态 | 起步 | 无包管理、无调试信息；调试内建（M52）、Task 实例并发（M58 重构后）已有 |
 
 一句话结论：**作为"能写真实程序（编译器自己就是用户）"的系统语言是完整可用的；
 作为"给别人用的语言产品"还差包管理与调试两件套。** 语言核心不再有已知的、
 会逼你改设计的缺口：自举时暴露的 G1（`orelse`/`.?`）与 G2（char 模式）都已
-补掉；并发三件套（统一 Task / channel / mutex）在 M57 压测 20/20 后落地。
+补掉；并发在 M58 收敛成一个物理隔离的 Task 实例类型，双实例通信与 pool 压测各 20/20。
 
 ---
 

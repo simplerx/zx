@@ -1,0 +1,96 @@
+// task.zx —— 唯一的并发抽象：Task 实例。
+//
+// 每个实例物理隔离：自己的任务表、就绪队列、通信通道和一组线程，互不共享
+// 调度状态。三种形态只是「谁来推进」不同：
+//   Task.coro()      协程实例：不建线程，调用者在 await/awaitAll 时推进
+//   Task.single()    单线程实例：1 条专属 OS 线程
+//   Task.pool(n)     多线程实例：n 条工作线程（n=0 自动取 CPU-1）
+//
+// 实例方法可从任意 OS 线程并发调用，实例内部状态自己保证线程安全。
+// close() 停止并回收本实例的线程组，之后句柄失效，新操作返回 closed。
+
+extern fn zx_task_new(mode: usize, n: usize) usize;
+extern fn zx_task_spawn(s: usize, f: fn (usize) !usize, ctx: usize) ?usize;
+extern fn zx_task_await(s: usize, h: usize) !usize;
+extern fn zx_task_await_all(s: usize) !void;
+extern fn zx_task_cancel(s: usize, h: usize) void;
+extern fn zx_task_yield(s: usize) void;
+extern fn zx_task_send(s: usize, v: usize) !void;
+extern fn zx_task_recv(s: usize) !usize;
+extern fn zx_task_try_send(s: usize, v: usize) !void;
+extern fn zx_task_try_recv(s: usize) !usize;
+extern fn zx_task_close(s: usize) void;
+
+pub const Task = struct {
+    id: usize,
+
+    // ---- 构造：三种物理形态 ----
+
+    const coro = fn () Self {
+        return Self{ .id = zx_task_new(0, 0) };
+    };
+
+    const single = fn () Self {
+        return Self{ .id = zx_task_new(1, 0) };
+    };
+
+    const pool = fn (n: usize) Self {
+        return Self{ .id = zx_task_new(2, n) };
+    };
+
+    // 任务函数是 fn (usize) !usize，只能带一个 usize 进来；把实例 id
+    // 当 ctx 传进去，任务里用 fromId 还原，就能在任务内 send/recv/await。
+    const fromId = fn (id: usize) Self {
+        return Self{ .id = id };
+    };
+
+    // ---- 任务 ----
+
+    const spawn = fn (self: *const Self, f: fn (usize) !usize, ctx: usize) ?usize {
+        return zx_task_spawn(self.id, f, ctx);
+    };
+
+    const await = fn (self: *const Self, h: usize) !usize {
+        return zx_task_await(self.id, h);
+    };
+
+    // 等本实例名下全部任务完成。纯屏障：结果仍用 await(h) 逐个取。
+    const awaitAll = fn (self: *const Self) !void {
+        return zx_task_await_all(self.id);
+    };
+
+    const cancel = fn (self: *const Self, h: usize) void {
+        zx_task_cancel(self.id, h);
+    };
+
+    const yield = fn (self: *const Self) void {
+        zx_task_yield(self.id);
+    };
+
+    // ---- 通信：实例自带的无缓冲 rendezvous ----
+    //
+    // send/recv 在任务内真停靠（配对直接握手），根上下文是非阻塞的
+    // 协作式操作：没有对手就返回 would_block。
+
+    const send = fn (self: *const Self, v: usize) !void {
+        return zx_task_send(self.id, v);
+    };
+
+    const recv = fn (self: *const Self) !usize {
+        return zx_task_recv(self.id);
+    };
+
+    const trySend = fn (self: *const Self, v: usize) !void {
+        return zx_task_try_send(self.id, v);
+    };
+
+    const tryRecv = fn (self: *const Self) !usize {
+        return zx_task_try_recv(self.id);
+    };
+
+    // ---- 生命周期 ----
+
+    const close = fn (self: *const Self) void {
+        zx_task_close(self.id);
+    };
+};

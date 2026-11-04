@@ -1,55 +1,40 @@
-// task_basic.zx —— 统一 Task 模型：spawn / yield / await / current
-//
-// Task.init(0)：纯单线程协作调度——主线程 await 时跑调度循环，
-// 任务间 yield 交错是确定性的。order 数字打点：a=1 b=2，跑完补 3。
+// task_basic.zx —— Task 实例（M58）：coro 实例上的 spawn / await / yield /
+// awaitAll。实例自带队列与推进力，交错是确定性的。
 // expect-output:spawned:1
-// expect-output:cur-in-root:0
 // expect-output:order:1212123
 // expect-output:sum:20
+// expect-output:awaitAll:ok
 // expect-output:main-after:ok
 const std = module("std");
+const Task = std.Task;
 
 var order: usize = 0;
 
-// 两个任务互相 yield：交错是确定性的（单线程队列序）
-const pa = fn (_: usize) !usize {
+const pa = fn (ctx: usize) !usize {
+    let t = Task.fromId(ctx);
     var n: usize = 0;
-    while (n < 3) {
-        order = order * 10 + 1;
-        std.Task.yield();
-        n = n + 1;
-    }
+    while (n < 3) { order = order * 10 + 1; t.yield(); n = n + 1; }
     order = order * 10 + 3;
     return 100;
 };
 
-const pb = fn (_: usize) !usize {
+const pb = fn (ctx: usize) !usize {
+    let t = Task.fromId(ctx);
     var n: usize = 0;
-    while (n < 3) {
-        order = order * 10 + 2;
-        std.Task.yield();
-        n = n + 1;
-    }
+    while (n < 3) { order = order * 10 + 2; t.yield(); n = n + 1; }
     return 20;
 };
 
 const main = fn () !i32 {
-    std.Task.init(0);                       // 单线程：主线程调度
-    let a = std.Task.spawn(pa, 0).?;
-    let b = std.Task.spawn(pb, 0).?;
+    let co = Task.coro();
+    let a = co.spawn(pa, co.id).?;
+    let b = co.spawn(pb, co.id).?;
     std.println("spawned:{}", a);
-    std.println("cur-in-root:{}", std.Task.current());
-    if (std.Task.await(a)) v {
-        std.println("order:{}", order);
-    } else e {
-        std.println("a failed:{}", std.debug.errName(e));
-        return error.bad;
-    }
-    if (std.Task.await(b)) v {
-        std.println("sum:{}", v);
-    } else e {
-        return error.bad;
-    }
+    if (co.await(a)) v { std.println("order:{}", order); } else e { return error.bad; }
+    if (co.await(b)) v { std.println("sum:{}", v); } else e { return error.bad; }
+    try co.awaitAll();
+    std.println("awaitAll:ok");
+    co.close();
     std.println("main-after:ok");
     return 0;
 };

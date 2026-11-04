@@ -2947,3 +2947,61 @@ go = fire-and-forget，run = 带返回值（结果仍要 await），sleep = 任�
 
 验证：`tests/good/task_modes.zx`（single 交错确定性 1212123；pool(0)/
 pool(2) 原子计数终值 4/8）、`task_default.zx`（run/go/sleep）。
+
+## 94. Task 实例：物理隔离、单类型、通信收编（M58）
+
+用户推翻 M57 的「默认调度实例」：`single()/pool()` 只是全局单例的一次性
+配置（返回 void、`zx_sched_live` 闸、任务表/分片队列/idle cv/timer 全
+`static`），不是实例。三条新约束：**① 删 go/run/sleep，保持简约；② 每个
+实例物理隔离、单独管理自己的一组线程，不要全局单例，标准库提供创建
+单线程/多线程/协程三种实例的 API；③ 涉及线程的类型只留 Task 一个，
+通信能力收编到实例上，atomic 纯函数保留**。随后补充边界：**不要求实例对
+外部线程安全，只要求它管理的那组工作线程内部安全**——构造/awaitAll/close
+由创建者串行使用，内部调度、任务表、等待链、通信由运行时自己加锁。
+
+**最大的实现决策：Task 不进编译器类型系统，而是 `std/task.zx` 里的普通
+struct**（`{ id: usize }` + `fn (self: *const Task, …)` 方法），方法体用
+`extern fn zx_task_*` 调 C 运行时。先用 `--emit-c` 验证过 ABI：`?usize` →
+`ZxOpt_usize`、`!usize` → `ZxErr_usize`、`!void` → `ZxErr_void`、任务函数
+指针 → `ZxFn_fn_usize_reusize`，与后端 `tn/ctype` 生成的 typedef 完全同名。
+于是 sema 只需删掉旧的 Task/mutex/channel/cond 内建 NS（保留 atomic），
+类型系统、方法调用、后端发射逻辑一行未动；对外原型交给 std/task.zx 的
+extern 声明，编译器只额外发 await 门与捕获环需要的三个 proto。
+
+**运行时重写**（旧的 900 行 C 字符串 → 651 行）：`ZxSched` 每实例一份——
+任务表 `[1024]`、单队列 + `qlk`、idle `lock/cv/sleeping`、`wait_lk` +
+`pending` + `all_waiters`、`chan_lk` + `rwait/wwait`、自己的线程组。全局
+只剩实例表与 thread-local 的根 fiber / 当前任务。`coro` 不建线程（调用者
+在 await/awaitAll 里 drive）、`single` 建 1 条、`pool(n)` 建 n 条（0 自动
+CPU-1）。`close` 设 stop、唤醒所有停靠者、等 worker 退出；槽位不复用避免
+ABA。按用户的边界收窄，去掉了全局表锁、UAF 防护、并发 close 闸——只保留
+worker 之间真正需要的锁与原子。
+
+**通信从有界 ring 改成无缓冲 rendezvous**：实例自带一条通道，先到者挂
+FIFO 等待链并真停靠，后到者直接握手（写对方 `cval` + unpark）。ring
+buffer / cap / 句柄表整个消失，"定长 64" 的限制连带消失；`trySend/
+tryRecv` 永不停靠，根上下文协作式返回 `would_block`。`cancel` 顺手做了
+提前唤醒：摘通信等待链 + unpark，任务醒来收 `cancelled`。
+
+**pstate 仲裁是本次唯一的新竞态，也是唯一一次挂死**。跨实例 await 与
+通信唤醒都要满足「任务在就绪队列里的时刻必然不在运行」：挂链到切走
+之间唤醒方可能抢先，直接入队就会让同一根 fiber 在两处跑。做法是停靠方
+挂链时写 `PARKING`，唤醒方 `zx_unpark` 用 `exchange(WOKEN)` 仲裁——
+`PARKED` 就自己入队，`PARKING` 交给 run_one 切回后代为入队。第一版
+run_one 只判断 `pstate == PARKING`，唤醒方抢先把它改成 `WOKEN` 时判定
+失败，任务永远不再入队（双实例通信压测 14/20 挂死）。修法：切进任务前
+重置为 `RUN`，切回后只看「是否非 `RUN`」，用 `exchange(PARKED)` 的旧值
+决定谁入队，两种时序都闭环，压测 20/20。
+
+**awaitAll 是纯屏障**（`!void`，pending 归零即返回，结果仍用 `await(h)`
+逐个取）：Zx 的 `!T` 是单值，硬塞结果数组会引入新容器类型。根上下文等
+done/pending 的复查留在 idle 锁内，沿用 §92 的无窗口协议；coro 实例连续
+200 轮无推进（约 1 秒）返回 `would_block`。跨实例 await 由 `t->s` 决定
+唤醒者把等待者推回哪个实例，天然支持物理隔离。
+
+验证：测试重写为 `task_basic`（实例 + yield 交错 1212123）、`task_cancel`、
+`task_trace`、`task_modes`（三形态 50/11/140）、`task_cross`（跨实例
+await 42）、`chan_basic`（握手 sum:6 / tryRecv would_block / close 后
+closed）、`sync_basic`（只留 atomic）；删掉 `cond_basic` 与 `task_default`。
+全量 `passed 233, failed 0`；pool(0) 100 任务 + yield 20/20、双实例
+并发 + rendezvous 20/20。
