@@ -14,17 +14,17 @@ const Shape = union(enum) {
 
     const describe = fn (self: *const Self) []const u8 {
         switch (self.tag) {
-            .circle:  { return "circle"; },
-            .rect:    { return "rect"; },
-            .labeled: { return "labeled"; },
+            .circle:  { return "circle"; };
+            .rect:    { return "rect"; };
+            .labeled: { return "labeled"; };
         }
     };
 
     const value = fn (self: *const Self) f64 {
         switch (self.tag) {
-            .circle:  { return self.circle; },
-            .rect:    { return self.rect.0 * self.rect.1; },
-            .labeled: { return (f64)(self.labeled.x + self.labeled.y); },
+            .circle:  { return self.circle; };
+            .rect:    { return self.rect.0 * self.rect.1; };
+            .labeled: { return (f64)(self.labeled.x + self.labeled.y); };
         }
     };
 };

@@ -15,17 +15,17 @@ const U = union {
 
 const name = fn (u: U) []const u8 {
     return switch (u.tag) {
-        .one:   "one",
-        .two:   "two",
-        .three: "three",
+        .one:   "one";
+        .two:   "two";
+        .three: "three";
     };
 };
 
 const payload = fn (u: U) i32 {
     return switch (u.tag) {
-        .one:   u.one,
-        .two:   u.two,
-        .three: u.three,
+        .one:   u.one;
+        .two:   u.two;
+        .three: u.three;
     };
 };
 

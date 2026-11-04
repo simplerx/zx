@@ -35,8 +35,8 @@ const Shape = union {
 
     const area = fn (self: *const Self) f64 {
         switch (self.tag) {
-            .circle: { return 3.0 * self.circle * self.circle; },
-            .rect:   { return self.rect.0 * self.rect.1; },
+            .circle: { return 3.0 * self.circle * self.circle; };
+            .rect:   { return self.rect.0 * self.rect.1; };
         }
     };
 };

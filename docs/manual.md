@@ -242,7 +242,7 @@ arr[1..3]                            // 左闭右开
 const Color = enum(u8) { red, green = 5, blue };   // blue == 6
 const Shape = union(enum) { circle: f64, rect: {f64, f64} };
 let s = Shape{ .circle = 2.0 };
-switch (s) { .circle: r a: { a: 3.14159 * r * r; }, .rect: wh a: { a: wh.0 * wh.1; } }
+switch (s) { .circle: r a: { a: 3.14159 * r * r; }; .rect: wh a: { a: wh.0 * wh.1; }; }
 ```
 
 - 结构体体是作用域：可以放 `var` 静态字段、`const` 编译期常量、方法。
@@ -281,13 +281,14 @@ let idx = hit: for (0..n) i {                  // 循环的 else：正常跑完�
 **收割 `tag: expr;`** 是 Zx 里唯一的"提前离开 + 带值"手段：块 `tag: { … }`、
 循环 `tag: while/for (…)`。`continue;` 走本轮末尾，`continue :tag;` 跳到外层标签循环的下一轮。
 
-`switch` 的模式：`.成员` / 整数 / char / `true` / `false` / 负数 / `else`；逗号并列是
-同一条臂。**冒号后紧跟 `{` 是捕获，紧跟 `:` 是标签，什么都不跟（`,}`）就是"臂值 = 捕获值"**。
+`switch` 的模式：`.成员` / 整数 / char / `true` / `false` / 负数 / `else`；**每条臂以 `;` 结尾**
+（含末臂），**逗号只作同臂模式并列**（`'a', 'b', 'c': x;`）。**冒号后紧跟 `{` 是捕获，
+紧跟 `:` 是标签，什么都不跟（`;` / `}` 前）就是"臂值 = 捕获值"**。
 枚举、`union(enum)`、`?T`、`!T`、bool 必须穷尽或有 `else`。
 
 ```zx
-let n = switch (maybe) { .some: v, .none: 0 };   // 冒号后只有一个名字 → 臂值就是 v
-let a = switch (shape) { .circle: r { r * r }, .rect: wh t: { t: wh.0 * wh.1; } };
+let n = switch (maybe) { .some: v; .none: 0; };   // 冒号后只有一个名字 → 臂值就是 v
+let a = switch (shape) { .circle: r { r * r }; .rect: wh t: { t: wh.0 * wh.1; }; };
 ```
 
 `defer` 离开所在块时执行（LIFO），**表达式在退出时求值**——所以 `defer free(buf); return buf;`
@@ -764,7 +765,7 @@ sh editor/zed/install.sh    # 装 Zed 扩展（高亮 + 大纲 + LSP 接线）
 5. **错误码从 1 起**。`(error)0` 编译错（0 = 无错误）。
 6. **`defer` 与返回值**：`defer free(buf); return buf;` 返回悬空指针。
 7. **`?T`/`!T` 不能嵌套**；两个都要表达就让"没有"也变成一个错误码。
-8. **switch 语句位置所有臂同型**：语句 switch 统一写块臂 `模式: { … },`。
+8. **switch 语句位置所有臂同型**：语句 switch 统一写块臂 `模式: { … };`。
 9. **枚举必须穷尽**（或 `else`）——这是保护，不是麻烦。
 10. **HashMap 键不复制**：键切片必须比表活得久。
 11. **浮点必须有整数部分**：`.5` 非法（`.0` 要留给元组下标）。
@@ -775,8 +776,8 @@ sh editor/zed/install.sh    # 装 Zed 扩展（高亮 + 大纲 + LSP 接线）
 16. **`module("x")` 省 `.zx` 是允许的**，但显式写全路径更不容易歧义。
 17. **`try` 只吃 `!T`**：`?T` 的空不是错误，用 `if` / `orelse` / `.?`。
 18. **defer 体里不能再 return / 收割 / continue**；`try` 也不能用在 defer 里。
-19. **switch 冒号后的裸名字一定读作捕获名**：`1: K,` 的值是匹配到的 `1`，不是常量 `K`。
-    要常量就把名字括起来 `1: (K),`。（`if (c) x else y` 不受影响：bool 条件没载荷可捕。）
+19. **switch 冒号后的裸名字一定读作捕获名**：`1: K;` 的值是匹配到的 `1`，不是常量 `K`。
+    要常量就把名字括起来 `1: (K);`。（`if (c) x else y` 不受影响：bool 条件没载荷可捕。）
 
 ### 8.2 工程与工具链
 

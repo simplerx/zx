@@ -16,33 +16,33 @@ const Color = enum { red, green, blue };
 // ① 联合体：各臂载荷类型不同，糖只在自己的臂里成立
 const area = fn (s: Shape) i32 {
     return switch (s) {
-        .circle: r,          // 裸名字 = 捕获 + 臂值
-        .rect: wh t: { t: wh.0 * wh.1; },  // 要算东西就写标签块（捕获 + 块臂）
+        .circle: r;          // 裸名字 = 捕获 + 臂值
+        .rect: wh t: { t: wh.0 * wh.1; };  // 要算东西就写标签块（捕获 + 块臂）
     };
 };
 
 // ② ?T：.some 交出载荷
 const orZero = fn (u: ?i32) i32 {
     return switch (u) {
-        .some: v,
-        .none: 0,
+        .some: v;
+        .none: 0;
     };
 };
 
 // ③ 枚举：捕获的是主语值本身（不是序号）
 const self = fn (c: Color) Color {
     return switch (c) {
-        .red: v,
-        .green: v,
-        .blue: v,
+        .red: v;
+        .green: v;
+        .blue: v;
     };
 };
 
 // ④ !T：.ok 交载荷，.err 交错误值
 const orMinus = fn (r: !i32) i32 {
     return switch (r) {
-        .ok: v,
-        .err: -1,
+        .ok: v;
+        .err: -1;
     };
 };
 
@@ -50,8 +50,8 @@ const orMinus = fn (r: !i32) i32 {
 const K: i32 = 100;
 const escape = fn (n: i32) i32 {
     return switch (n) {
-        1: (K),
-        else: 0,
+        1: (K);
+        else: 0;
     };
 };
 

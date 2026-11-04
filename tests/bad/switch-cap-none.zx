@@ -3,8 +3,8 @@ const std = module("std");
 
 const f = fn (o: ?i32) i32 {
     switch (o) {
-        .none: v { return v; },
-        .some: { return 0; },
+        .none: v { return v; };
+        .some: { return 0; };
     }
 };
 

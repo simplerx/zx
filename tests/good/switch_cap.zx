@@ -15,49 +15,49 @@ const Shape = union(enum) {
 // ① 联合体直配 + 载荷捕获：不用再 switch (s.tag) 然后手取 s.circle
 const shape_area = fn (s: Shape) f64 {
     switch (s) {
-        .circle: r { return r * 3.14159265358979 * r; },
-        .rect:   wh { return wh.0 * wh.1; },
+        .circle: r { return r * 3.14159265358979 * r; };
+        .rect:   wh { return wh.0 * wh.1; };
     }
 };
 
 // ② 单值臂 + 无捕获：表达式臂照旧
 const shape_show = fn (s: Shape) []const u8 {
     return switch (s.tag) {
-        .circle: "circle",
-        .rect:   "rect",
+        .circle: "circle";
+        .rect:   "rect";
     };
 };
 
 // ③ 枚举臂捕获主语值本身
 const enum_ord = fn (c: Color) i32 {
     switch (c) {
-        .red:   v { return (i32)v; },
-        .green: { return 1; },
-        .blue:  { return 2; },
+        .red:   v { return (i32)v; };
+        .green: { return 1; };
+        .blue:  { return 2; };
     }
 };
 
 // ④ ?T：.some 捕获载荷，.none 没有载荷（单值臂即可）
 const opt_double = fn (o: ?i32) i32 {
     switch (o) {
-        .some: v { return v * 2; },
-        .none:  { return 0; },
+        .some: v { return v * 2; };
+        .none:  { return 0; };
     }
 };
 
 // ⑤ !T：.ok 捕获载荷，.err 捕获错误值
 const err_describe = fn (e: !i32) []const u8 {
     switch (e) {
-        .ok:  v { if (v > 0) return "pos"; return "neg"; },
-        .err: code { if ((u16)code == 1) return "one"; return "other"; },
+        .ok:  v { if (v > 0) return "pos"; return "neg"; };
+        .err: code { if ((u16)code == 1) return "one"; return "other"; };
     }
 };
 
 // ⑥ 无捕获块臂照旧（穷尽性检查不受影响）
 const kind_of = fn (s: Shape) i32 {
     switch (s) {
-        .circle: { return 0; },
-        .rect:   { return 1; },
+        .circle: { return 0; };
+        .rect:   { return 1; };
     }
 };
 

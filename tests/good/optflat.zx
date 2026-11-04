@@ -30,12 +30,12 @@ const main = fn () u8 {
     std.println("orelse={}", v.val);
 
     switch (a.next) {
-        .some: p { std.println("switch-some={}", p.val); },
-        .none:  { return 2; },
+        .some: p { std.println("switch-some={}", p.val); };
+        .none:  { return 2; };
     }
     switch (none) {
-        .some: q { return 3; },
-        .none:   { std.println("switch-none ok"); },
+        .some: q { return 3; };
+        .none:   { std.println("switch-none ok"); };
     }
 
     std.println("sum={}", list_sum(&a));

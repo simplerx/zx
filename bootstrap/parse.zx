@@ -24,84 +24,84 @@ pub const Err = struct {
 // C tok_kind_name 的镜像（zxc.h TOKEN_KINDS 的可读名，同序同拼写）。
 pub const kname = fn (k: lex.Kind) []const u8 {
     return switch (k) {
-        .eof: "end of file",
-        .ident: "identifier",
-        .int: "integer",
-        .float: "float",
-        .char: "char",
-        .string: "string",
-        .kw_const: "'const'",
-        .kw_let: "'let'",
-        .kw_var: "'var'",
-        .kw_fn: "'fn'",
-        .kw_module: "'module'",
-        .kw_type: "'type'",
-        .kw_null: "'null'",
-        .kw_undefined: "'undefined'",
-        .kw_if: "'if'",
-        .kw_else: "'else'",
-        .kw_while: "'while'",
-        .kw_for: "'for'",
-        .kw_inline: "'inline'",
-        .kw_switch: "'switch'",
-        .kw_continue: "'continue'",
-        .kw_return: "'return'",
-        .kw_defer: "'defer'",
-        .kw_errdefer: "'errdefer'",
-        .kw_struct: "'struct'",
-        .kw_union: "'union'",
-        .kw_enum: "'enum'",
-        .kw_error: "'error'",
-        .kw_pub: "'pub'",
-        .kw_extern: "'extern'",
-        .kw_orelse: "'orelse'",
-        .kw_try: "'try'",
-        .lparen: "'('",
-        .rparen: "')'",
-        .lbracket: "'['",
-        .rbracket: "']'",
-        .lbrace: "'{'",
-        .rbrace: "'}'",
-        .comma: "','",
-        .semi: "';'",
-        .colon: "':'",
-        .at: "'@'",
-        .dot: "'.'",
-        .dot_brace: "'.{'",
-        .dotdot: "'..'",
-        .arrow: "'->'",
-        .plus: "'+'",
-        .minus: "'-'",
-        .star: "*",
-        .slash: "'/'",
-        .percent: "'%'",
-        .caret: "'^'",
-        .tilde: "'~'",
-        .bang: "'!'",
-        .question: "'?'",
-        .amp: "'&'",
-        .pipe: "'|'",
-        .andand: "'&&'",
-        .oror: "'||'",
-        .shl: "'<<'",
-        .shr: "'>>'",
-        .lt: "'<'",
-        .le: "'<='",
-        .gt: "'>'",
-        .ge: "'>='",
-        .eq: "'=='",
-        .ne: "'!='",
-        .assign: "'='",
-        .pluseq: "'+='",
-        .minuseq: "'-='",
-        .stareq: "'*='",
-        .slasheq: "'/='",
-        .perceq: "'%='",
-        .ampeq: "'&='",
-        .pipeeq: "'|='",
-        .careteq: "'^='",
-        .shleq: "'<<='",
-        .shreq: "'>>='",
+        .eof: "end of file";
+        .ident: "identifier";
+        .int: "integer";
+        .float: "float";
+        .char: "char";
+        .string: "string";
+        .kw_const: "'const'";
+        .kw_let: "'let'";
+        .kw_var: "'var'";
+        .kw_fn: "'fn'";
+        .kw_module: "'module'";
+        .kw_type: "'type'";
+        .kw_null: "'null'";
+        .kw_undefined: "'undefined'";
+        .kw_if: "'if'";
+        .kw_else: "'else'";
+        .kw_while: "'while'";
+        .kw_for: "'for'";
+        .kw_inline: "'inline'";
+        .kw_switch: "'switch'";
+        .kw_continue: "'continue'";
+        .kw_return: "'return'";
+        .kw_defer: "'defer'";
+        .kw_errdefer: "'errdefer'";
+        .kw_struct: "'struct'";
+        .kw_union: "'union'";
+        .kw_enum: "'enum'";
+        .kw_error: "'error'";
+        .kw_pub: "'pub'";
+        .kw_extern: "'extern'";
+        .kw_orelse: "'orelse'";
+        .kw_try: "'try'";
+        .lparen: "'('";
+        .rparen: "')'";
+        .lbracket: "'['";
+        .rbracket: "']'";
+        .lbrace: "'{'";
+        .rbrace: "'}'";
+        .comma: "','";
+        .semi: "';'";
+        .colon: "':'";
+        .at: "'@'";
+        .dot: "'.'";
+        .dot_brace: "'.{'";
+        .dotdot: "'..'";
+        .arrow: "'->'";
+        .plus: "'+'";
+        .minus: "'-'";
+        .star: "*";
+        .slash: "'/'";
+        .percent: "'%'";
+        .caret: "'^'";
+        .tilde: "'~'";
+        .bang: "'!'";
+        .question: "'?'";
+        .amp: "'&'";
+        .pipe: "'|'";
+        .andand: "'&&'";
+        .oror: "'||'";
+        .shl: "'<<'";
+        .shr: "'>>'";
+        .lt: "'<'";
+        .le: "'<='";
+        .gt: "'>'";
+        .ge: "'>='";
+        .eq: "'=='";
+        .ne: "'!='";
+        .assign: "'='";
+        .pluseq: "'+='";
+        .minuseq: "'-='";
+        .stareq: "'*='";
+        .slasheq: "'/='";
+        .perceq: "'%='";
+        .ampeq: "'&='";
+        .pipeeq: "'|='";
+        .careteq: "'^='";
+        .shleq: "'<<='";
+        .shreq: "'>>='";
     };
 };
 
@@ -154,57 +154,57 @@ pub const Node = struct {
 
 const nk_name = fn (k: NK) []const u8 {
     return switch (k) {
-        .int: "int",
-        .float: "float",
-        .str: "str",
-        .char: "char",
-        .id: "id",
-        .bool_: "bool",
-        .null_: "null",
-        .undef: "undefined",
-        .bin: "bin",
-        .range: "range",
-        .un: "un",
-        .cast: "cast",
-        .try_: "try",
-        .index: "index",
-        .slice: "slice",
-        .field: "field",
-        .call: "call",
-        .tuple: "tuple",
-        .anon_struct: "anon-struct",
-        .struct_lit: "struct-lit",
-        .array_lit: "array-lit",
-        .pair: "pair",
-        .block: "block",
-        .if_: "if",
-        .while_: "while",
-        .for_: "for",
-        .switch_: "switch",
-        .arm: "arm",
-        .unwrap: "unwrap",
-        .or_else: "orelse",
-        .return_: "return",
-        .continue_: "continue",
-        .yield: "yield",
-        .defer_: "defer",
-        .errdefer_: "errdefer",
-        .builtin: "builtin",
-        .module_: "module",
-        .decl: "decl",
-        .fn_: "fn",
-        .param: "param",
-        .t_ident: "T",
-        .ptr: "ptr",
-        .sliceT: "sliceT",
-        .tupleT: "tupleT",
-        .struct_: "struct",
-        .union_: "union",
-        .enum_: "enum",
-        .opt: "opt",
-        .err: "err",
-        .root: "root",
-        .err_set: "errset",
+        .int: "int";
+        .float: "float";
+        .str: "str";
+        .char: "char";
+        .id: "id";
+        .bool_: "bool";
+        .null_: "null";
+        .undef: "undefined";
+        .bin: "bin";
+        .range: "range";
+        .un: "un";
+        .cast: "cast";
+        .try_: "try";
+        .index: "index";
+        .slice: "slice";
+        .field: "field";
+        .call: "call";
+        .tuple: "tuple";
+        .anon_struct: "anon-struct";
+        .struct_lit: "struct-lit";
+        .array_lit: "array-lit";
+        .pair: "pair";
+        .block: "block";
+        .if_: "if";
+        .while_: "while";
+        .for_: "for";
+        .switch_: "switch";
+        .arm: "arm";
+        .unwrap: "unwrap";
+        .or_else: "orelse";
+        .return_: "return";
+        .continue_: "continue";
+        .yield: "yield";
+        .defer_: "defer";
+        .errdefer_: "errdefer";
+        .builtin: "builtin";
+        .module_: "module";
+        .decl: "decl";
+        .fn_: "fn";
+        .param: "param";
+        .t_ident: "T";
+        .ptr: "ptr";
+        .sliceT: "sliceT";
+        .tupleT: "tupleT";
+        .struct_: "struct";
+        .union_: "union";
+        .enum_: "enum";
+        .opt: "opt";
+        .err: "err";
+        .root: "root";
+        .err_set: "errset";
     };
 };
 
@@ -650,7 +650,8 @@ pub const Parser = struct {
                k == lex.Kind.lparen || k == lex.Kind.kw_null ||
                k == lex.Kind.kw_undefined || k == lex.Kind.bang ||
                k == lex.Kind.tilde || k == lex.Kind.kw_if ||
-               k == lex.Kind.kw_module;
+               k == lex.Kind.kw_module ||
+               k == lex.Kind.at;    // (T)@builtin(...) —— `@` 永远不是中缀运算符，无歧义
     };
 
     // ---- 类型 ----
@@ -1913,8 +1914,7 @@ pub const Parser = struct {
         try self.expect(lex.Kind.rparen);
         try self.expect(lex.Kind.lbrace);
 
-        var go = true;
-        while (go && !self.at(lex.Kind.rbrace) && !self.at(lex.Kind.eof)) {
+        while (!self.at(lex.Kind.rbrace) && !self.at(lex.Kind.eof)) {
             let arm = self.new(NK.arm);
             if (self.accept(lex.Kind.kw_else)) {
                 arm.flag = true;
@@ -1932,9 +1932,11 @@ pub const Parser = struct {
                         let pat = try self.parse_unary();
                         self.push_item(arm, pat);
                     }
-                    // 逗号后面能开一个新模式才继续
-                    if (self.at(lex.Kind.comma) && self.starts_pattern(self.peek_tok(1))) {
+                    // 逗号只作"同臂并列"：`,` 后必须还能开一个新模式。
+                    // 臂分隔已交给 `;`，这里不再有歧义。
+                    if (self.at(lex.Kind.comma)) {
                         self.advance();
+                        if (!self.starts_pattern(self.cur())) { return (error)Fail.f; }
                     } else {
                         go2 = false;
                     }
@@ -1947,10 +1949,10 @@ pub const Parser = struct {
             }
             try self.expect(lex.Kind.colon);
             // 冒号后最多两个名字：cap / lbl / cap lbl
-            // M50 的糖：名字后面什么都没有（紧跟 `,` / `}`）→ 臂值就是捕获值
+            // M50 的糖：名字后面什么都没有（紧跟 `;` / `}`）→ 臂值就是捕获值
             var implicit: ?*Node = null;
             if (self.at(lex.Kind.ident) && !self.is_bool_word(self.cur())) {
-                let ends = self.peek_tok(1).kind == lex.Kind.comma ||
+                let ends = self.peek_tok(1).kind == lex.Kind.semi ||
                            self.peek_tok(1).kind == lex.Kind.rbrace;
                 if (!arm.flag && ends) {
                     let idt = self.advance();
@@ -1996,10 +1998,7 @@ pub const Parser = struct {
                 }
             }
             self.push_item(n, arm);
-            if (!self.accept(lex.Kind.comma)) {
-                if (!self.at(lex.Kind.rbrace)) { return (error)Fail.f; }
-                go = false;
-            }
+            if (!self.accept(lex.Kind.semi)) { return (error)Fail.f; }
         }
         try self.expect(lex.Kind.rbrace);
         return n;

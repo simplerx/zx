@@ -23,35 +23,35 @@ const std = module("std");
 
 // ---- 判别辅助：测试里反复用的按类型取载荷 ----
 const asInt = fn (v: std.json.Value) ?i64 {
-    return switch (v.tag) { .int: v.int, else: null };
+    return switch (v.tag) { .int: v.int; else: null; };
 };
 const asStr = fn (v: std.json.Value) ?[]const u8 {
-    return switch (v.tag) { .str: v.str, else: null };
+    return switch (v.tag) { .str: v.str; else: null; };
 };
 const asBool = fn (v: std.json.Value) ?bool {
-    return switch (v.tag) { .boolean: v.boolean, else: null };
+    return switch (v.tag) { .boolean: v.boolean; else: null; };
 };
 const asFloat = fn (v: std.json.Value) f64 {
-    return switch (v.tag) { .float: v.float, else: -1.0 };
+    return switch (v.tag) { .float: v.float; else: -1.0; };
 };
 const isFloat = fn (v: std.json.Value) bool {
-    return switch (v.tag) { .float: true, else: false };
+    return switch (v.tag) { .float: true; else: false; };
 };
 const isNul = fn (v: std.json.Value) bool {
-    return switch (v.tag) { .nul: true, else: false };
+    return switch (v.tag) { .nul: true; else: false; };
 };
 const ok = fn (v: ?std.json.Value) bool {
     if (v) x { return true; }
     return false;
 };
 const asObj = fn (v: std.json.Value) ?*std.json.Obj {
-    return switch (v.tag) { .obj: v.obj, else: null };
+    return switch (v.tag) { .obj: v.obj; else: null; };
 };
 const asArr = fn (v: std.json.Value) ?*std.json.Arr {
-    return switch (v.tag) { .arr: v.arr, else: null };
+    return switch (v.tag) { .arr: v.arr; else: null; };
 };
 const isSyntax = fn (e: std.json.ParseErr) bool {
-    return switch (e) { .syntax: true, else: false };
+    return switch (e) { .syntax: true; else: false; };
 };
 
 const main = fn () i32 {

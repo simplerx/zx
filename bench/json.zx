@@ -6,7 +6,7 @@ const std = module("std");
 const DOC = "{\"name\":\"zx-json\",\"n\":42,\"pi\":3.14159,\"ok\":true,\"nil\":null,\"tags\":[\"a\",\"b\",\"c\"],\"nest\":{\"x\":1,\"y\":[10,20,30],\"s\":\"hello\\nworld\"}}";
 
 const asInt = fn (v: std.json.Value) ?i64 {
-    return switch (v.tag) { .int: v.int, else: null };
+    return switch (v.tag) { .int: v.int; else: null; };
 };
 
 const main = fn () u8 {

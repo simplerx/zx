@@ -13,9 +13,9 @@ const Color = enum {
 
     const name = fn (self: Self) []const u8 {
         return switch (self) {
-            .red:   "red",
-            .green: "green",
-            .blue:  "blue",
+            .red:   "red";
+            .green: "green";
+            .blue:  "blue";
         };
     };
 

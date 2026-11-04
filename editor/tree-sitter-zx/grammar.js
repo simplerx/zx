@@ -434,11 +434,12 @@ module.exports = grammar({
         field("subject", $._expression),
         ")",
         "{",
-        repeat(choice($.switch_arm, ",")),
+        repeat($.switch_arm),
         "}",
       ),
 
-    // 臂：`.circle a: { … }`（模式 + 捕获）、`'0', '1': { … }`、`else: v`
+    // 臂：`.circle a: { … };`（模式 + 捕获）、`'0', '1': { … };`、`else: v;`
+    // 每条臂以 ";" 结尾（v0.29）；逗号只作同臂模式并列。
     switch_arm: ($) =>
       prec.right(
         seq(
@@ -447,7 +448,7 @@ module.exports = grammar({
           ":",
           optional(field("binding", $.identifier)),
           field("value", choice($._expression, $.block)),
-          optional(","),
+          ";",
         ),
       ),
     _pattern: ($) =>

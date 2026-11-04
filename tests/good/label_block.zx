@@ -16,16 +16,16 @@ const Shape = union(enum) {
 // ① 标签块臂：只交值，不捕获
 const kind = fn (s: Shape) i32 {
     return switch (s) {
-        .circle: a: { a: 1; },
-        .rect:   a: { a: 2; },
+        .circle: a: { a: 1; };
+        .rect:   a: { a: 2; };
     };
 };
 
 // ② 捕获 + 标签：先捕获载荷 `r`，再给块贴标签 `a`
 const measure = fn (s: Shape) f64 {
     return switch (s) {
-        .circle: r  a: { a: r * 2.0; },
-        .rect:   wh a: { a: wh.0 + wh.1; },
+        .circle: r  a: { a: r * 2.0; };
+        .rect:   wh a: { a: wh.0 + wh.1; };
     };
 };
 
@@ -33,8 +33,8 @@ const measure = fn (s: Shape) f64 {
 const Color = enum { red, green };
 const weight = fn (c: Color) i32 {
     return switch (c) {
-        .red:   v r: { r: (i32)v + 10; },
-        .green: v g: { g: (i32)v + 20; },
+        .red:   v r: { r: (i32)v + 10; };
+        .green: v g: { g: (i32)v + 20; };
     };
 };
 

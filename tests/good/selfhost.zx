@@ -26,8 +26,8 @@ const Tok = union {
 
 const tok_is_op = fn (t: Tok) bool {
     return switch (t.tag) {
-        .num: false,
-        .sym: t.sym == '+' || t.sym == '-' || t.sym == '*' || t.sym == '/' || t.sym == '(' || t.sym == ')',
+        .num: false;
+        .sym: t.sym == '+' || t.sym == '-' || t.sym == '*' || t.sym == '/' || t.sym == '(' || t.sym == ')';
     };
 };
 
@@ -37,8 +37,8 @@ const count_digits = fn (src: []const u8) usize {
     var i: usize = 0;
     while (i < src.len) {
         switch ((i32)src[i]) {
-            48, 49, 50, 51, 52, 53, 54, 55, 56, 57: { n = n + 1; },
-            else: { },
+            48, 49, 50, 51, 52, 53, 54, 55, 56, 57: { n = n + 1; };
+            else: { };
         }
         i = i + 1;
     }
@@ -161,11 +161,11 @@ const kid = fn (o: ?*Node) i32 {
 
 const eval = fn (n: *Node) i32 {
     return switch (n.kind) {
-        .num: n.val,
-        .add: kid(n.lhs) + kid(n.rhs),
-        .sub: kid(n.lhs) - kid(n.rhs),
-        .mul: kid(n.lhs) * kid(n.rhs),
-        .div: kid(n.lhs) / kid(n.rhs),
+        .num: n.val;
+        .add: kid(n.lhs) + kid(n.rhs);
+        .sub: kid(n.lhs) - kid(n.rhs);
+        .mul: kid(n.lhs) * kid(n.rhs);
+        .div: kid(n.lhs) / kid(n.rhs);
     };
 };
 

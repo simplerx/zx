@@ -364,9 +364,9 @@ const Color = enum {
 
     const name = fn (self: Self) []const u8 {
         return switch (self) {
-            .red: "red",
-            .green: "green",
-            .blue: "blue",
+            .red: "red";
+            .green: "green";
+            .blue: "blue";
         };
     };
     const count = fn () u32 { return 3; };     // 关联函数：没有 self
@@ -389,8 +389,8 @@ const Shape = union(enum) {
 let s = Shape{ .circle = 2.0 };    // 构造只写成员名，标签编译器填
 
 let area = switch (s) {
-    .circle: r  a: { a: 3.14159 * r * r; },   // r 捕获载荷；捕获臂配标签块交值
-    .rect:   wh a: { a: wh.0 * wh.1; },
+    .circle: r  a: { a: 3.14159 * r * r; };   // r 捕获载荷；捕获臂配标签块交值
+    .rect:   wh a: { a: wh.0 * wh.1; };
 };
 ```
 
@@ -398,8 +398,8 @@ let area = switch (s) {
 
 ```zx
 let area2 = switch (s.tag) {
-    .circle: 3.14159 * s.circle * s.circle,
-    .rect:   s.rect.0 * s.rect.1,
+    .circle: 3.14159 * s.circle * s.circle;
+    .rect:   s.rect.0 * s.rect.1;
 };
 ```
 
@@ -533,23 +533,23 @@ const idx = hit: for (0..n) i {
 ```zx
 // 枚举：模式 .成员，表达式臂给值，必须穷尽（或有 else）
 let name = switch (color) {
-    .red:   "red",
-    .green: "green",
-    else:   "other",
+    .red:   "red";
+    .green: "green";
+    else:   "other";
 };
 
-// char 模式：词法器的写法
+// char 模式：词法器的写法（逗号并列同臂多模式）
 switch (c) {
-    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9': { nd = nd + 1; },
-    ' ', '\t', '\n': { },
-    else: { },
+    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9': { nd = nd + 1; };
+    ' ', '\t', '\n': { };
+    else: { };
 }
 
 // 整数 / 负数 / bool
 switch (n) {
-    -2, -1: { },
-    0:      { },
-    else:   { },
+    -2, -1: { };
+    0:      { };
+    else:   { };
 }
 
 // 块臂 + 标签收割交值
@@ -557,18 +557,17 @@ let area = switch (s.tag) {
     .circle a: {
         if (s.circle < 0) { a: (error)Err.neg; }
         a: 3.14159 * s.circle * s.circle;
-    },
-    .rect:  s.rect.0 * s.rect.1,
+    };
+    .rect:  s.rect.0 * s.rect.1;
 };
 ```
 
 规则要点：
 
-- 模式：`.成员` / 整数 / char / `true` / `false` / 负数 / `else`；逗号并列是  
-  一条臂（`'a', 'b': …`），臂间逗号才是分臂。
+- **每条臂以 `;` 结尾（含末臂）**；逗号只作同臂模式并列（`'a', 'b': …`）。
 - **冒号后紧跟 `{` 是捕获**（联合体臂捕获载荷，枚举臂捕获主语值），**紧跟 `:` 是  
-  标签**（块收割用）；**什么都不跟**（紧跟 `,` 或 `}`）就是"臂值 = 捕获值"
-  （v0.28）：`switch (u) { .some: v, .none: 0 }`。
+  标签**（块收割用）；**什么都不跟**（紧跟 `;` 或 `}`）就是"臂值 = 捕获值"
+  （v0.28）：`switch (u) { .some: v; .none: 0; }`。
 - **穷尽性**：枚举、带标签联合体、`?T`、`!T`、bool 的模式必须列全或有 `else`。
 - switch 是表达式，各臂值必须同型（块臂全 `{}` 也行——语句位置统一写块）。
 
@@ -922,7 +921,7 @@ if (raw) p {
 
 ## 14. 标准库速查
 
-编译器随附 `std/`（七个 .zx 文件：std / str / map / fs / json / time / pool，
+编译器随附 `std/`（七个 .zx 文件：std / str / map / fs / json / time / pool，
 全是普通 Zx 代码——它们同时是"怎么写泛型  
 容器"的标准样例）。
 
@@ -1061,7 +1060,7 @@ const eql = fn (T: type, x: T, y: T) bool {
 5. **错误码从 1 起**。`(error)0` 编译错——0 是"无错误"。
 6. **defer 与返回值**。`defer free(buf); return buf;` 返回悬空指针——defer  
    在 return 值算出后、真正离开前执行。
-7. **switch 语句位置所有臂要同型**。语句 switch 统一写块臂 `模式: { … },`。
+7. **switch 语句位置所有臂要同型**。语句 switch 统一写块臂 `模式: { … };`。
 8. **枚举穷尽**。switch 枚举漏变体又没 `else` 是编译错误（这是保护，不是麻烦）。
 9. **HashMap 键生命周期**。键切片必须比表活得久；别把指向局部缓冲的键放进去。
 10. **浮点必须有整数部分**。`.5` 非法（`t.0.0` 下标链要用 `.`+数字）。

@@ -3,8 +3,8 @@
 const main = fn () u8 {
     const x = 1;
     switch (x) {
-        1 lbl: { lbl: 10; },
-        else { },
+        1 lbl: { lbl: 10; };
+        else { };
     }
     return 0;
 };

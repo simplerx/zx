@@ -57,10 +57,10 @@ const parseIndex = fn (s: []const u8, needle: u8) !usize {
 // ---------- 分发表：错误码 → 文案 ----------
 const errName = fn (code: error) []const u8 {
     return switch (code) {
-        (error)Err.notFound: "not found",
-        (error)Err.badInput: "bad input",
-        (error)Err.overflow: "overflow",
-        else:                "unknown",
+        (error)Err.notFound: "not found";
+        (error)Err.badInput: "bad input";
+        (error)Err.overflow: "overflow";
+        else:                "unknown";
     };
 };
 

@@ -14,9 +14,9 @@ const Color = enum {
 
     const name = fn (self: Self) []const u8 {
         return switch (self) {
-            .red: "red",
-            .green: "green",
-            .blue: "blue",
+            .red: "red";
+            .green: "green";
+            .blue: "blue";
         };
     };
     const count = fn () u32 { return 3; };
@@ -90,8 +90,8 @@ const main = fn () u8 {
     // §6.6 联合体
     let s = Shape{ .circle = 2.0 };
     let area = switch (s) {
-        .circle: r  a: { a: 3.14159 * r * r; },
-        .rect:   wh a: { a: wh.0 * wh.1; },
+        .circle: r  a: { a: 3.14159 * r * r; };
+        .rect:   wh a: { a: wh.0 * wh.1; };
     };
     std.println("area={}", area);
 

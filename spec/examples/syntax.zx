@@ -50,9 +50,9 @@ const sum2 = fn (xs: []const i32, ys: []const i32) i32 {
 // 8. switch：模式 : 体，臂可带标签
 const name = fn (c: Color) []const u8 {
     return switch (c) {
-        .red:    "red",
-        .green:  "green",
-        else:    "other",
+        .red:    "red";
+        .green:  "green";
+        else:    "other";
     };
 };
 

@@ -51,17 +51,17 @@ const State = enum { idle, running, done };
 
 const step = fn (s: State) State {
     return switch (s) {
-        .idle: State.running,
-        .running: State.done,
-        else: State.idle,
+        .idle: State.running;
+        .running: State.done;
+        else: State.idle;
     };
 };
 
 const nameOf = fn (s: State) []const u8 {
     return switch (s) {
-        .idle: "idle",
-        .running: "running",
-        else: "done",
+        .idle: "idle";
+        .running: "running";
+        else: "done";
     };
 };
 

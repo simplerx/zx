@@ -13,55 +13,55 @@ const std = module("std");
 // ① 字节分派：u8 subject（词法器最常见的形状）
 const class_of = fn (c: u8) []const u8 {
     return switch (c) {
-        'a', 'b', 'c', 'd', 'e': "letter-low",
-        'A', 'B', 'C': "letter-up",
-        '0', '1', '2', '3', '4', '5', '6', '7', '8', '9': "digit",
-        ' ', '\t', '\n', '\r': "space",
-        else: "other",
+        'a', 'b', 'c', 'd', 'e': "letter-low";
+        'A', 'B', 'C': "letter-up";
+        '0', '1', '2', '3', '4', '5', '6', '7', '8', '9': "digit";
+        ' ', '\t', '\n', '\r': "space";
+        else: "other";
     };
 };
 
 // ② 整型 subject + char 模式：'a' 按 subject 的 i32 定型
 const is_digit = fn (code: i32) bool {
     return switch (code) {
-        '0', '1', '2', '3', '4', '5', '6', '7', '8', '9': true,
-        else: false,
+        '0', '1', '2', '3', '4', '5', '6', '7', '8', '9': true;
+        else: false;
     };
 };
 
 // ③ 转义：换行 / 制表 / 反斜杠 / 单引号都能直接当模式
 const name_of = fn (c: u8) []const u8 {
     return switch (c) {
-        '\n': "newline",
-        '\t': "tab",
-        '\\': "backslash",
-        '\'': "quote",
-        else: "?",
+        '\n': "newline";
+        '\t': "tab";
+        '\\': "backslash";
+        '\'': "quote";
+        else: "?";
     };
 };
 
 // ④ 多字节字符：码位当整数模式用（值不截断）
 const cjk = fn (cp: i32) i32 {
     return switch (cp) {
-        '中': 1,
-        '文': 2,
-        else: 0,
+        '中': 1;
+        '文': 2;
+        else: 0;
     };
 };
 
 // ⑤ 同一处修好的 bool 多模式与负数模式
 const bool_name = fn (b: bool) []const u8 {
     return switch (b) {
-        true, false: "known",
+        true, false: "known";
     };
 };
 
 const sign_name = fn (n: i32) []const u8 {
     return switch (n) {
-        -2, -1: "neg",
-        0: "zero",
-        1, 2: "pos",
-        else: "far",
+        -2, -1: "neg";
+        0: "zero";
+        1, 2: "pos";
+        else: "far";
     };
 };
 
@@ -71,8 +71,8 @@ const count_pairs = fn (s: []const u8) i32 {
     var i: usize = 0;
     while (i < s.len) {
         switch (s[i]) {
-            '=': { pairs = pairs + 1; },
-            else: { },
+            '=': { pairs = pairs + 1; };
+            else: { };
         }
         i = i + 1;
     }

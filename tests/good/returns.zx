@@ -37,26 +37,26 @@ const spin = fn () i32 {
 // 5. 枚举 switch 列全了，不需要 else
 const name = fn (c: Color) []const u8 {
     return switch (c) {
-        .red:   "red",
-        .green: "green",
-        .blue:  "blue",
+        .red:   "red";
+        .green: "green";
+        .blue:  "blue";
     };
 };
 
 // 6. 语句形式的 switch：每个臂都 return，也就没有 else
 const weight = fn (c: Color) i32 {
     switch (c) {
-        .red:   { return 1; },
-        .green: { return 2; },
-        .blue:  { return 3; },
+        .red:   { return 1; };
+        .green: { return 2; };
+        .blue:  { return 3; };
     }
 };
 
 // 7. bool 的两个值也是穷尽的
 const flagValue = fn (b: bool) i32 {
     switch (b) {
-        true:  { return 1; },
-        false: { return 0; },
+        true:  { return 1; };
+        false: { return 0; };
     }
 };
 
@@ -70,8 +70,8 @@ const Shape = union {
 
 const kindOf = fn (s: Shape) usize {
     return switch (s.tag) {
-        .circle: 1,
-        .rect:   2,
+        .circle: 1;
+        .rect:   2;
     };
 };
 
@@ -107,8 +107,8 @@ const pick = fn (n: i32) i32 {
 // 13. 整数 switch 不要求穷尽：后面的 return 是可达的
 const digit = fn (n: i32) i32 {
     switch (n) {
-        0: { return 0; },
-        1: { return 1; },
+        0: { return 0; };
+        1: { return 1; };
     }
     return 9;
 };

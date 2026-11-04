@@ -182,24 +182,24 @@ pub const Obj = struct {
 // v 是对象时取成员，否则 null。
 pub const member = fn (v: Value, key: []const u8) ?Value {
     return switch (v.tag) {
-        .obj: v.obj.get(key),
-        else: null,
+        .obj: v.obj.get(key);
+        else: null;
     };
 };
 
 // v 是数组时取下标，否则 null。
 pub const item = fn (v: Value, i: usize) ?Value {
     return switch (v.tag) {
-        .arr: v.arr.at(i),
-        else: null,
+        .arr: v.arr.at(i);
+        else: null;
     };
 };
 
 // v 是字符串时返回内容，否则 null。
 pub const text = fn (v: Value) ?[]const u8 {
     return switch (v.tag) {
-        .str: v.str,
-        else: null,
+        .str: v.str;
+        else: null;
     };
 };
 
@@ -908,13 +908,13 @@ const writeFloat = fn (b: *Buf, v: f64) void {
 const writeValue = fn (b: *Buf, v: Value, d: u32) void {
     if (d > 512) { b.failed = true; return; }
     switch (v.tag) {
-        .nul: b.bytes("null"),
+        .nul: b.bytes("null");
         .boolean: {
             if (v.boolean) { b.bytes("true"); } else { b.bytes("false"); }
-        },
-        .int: b.i64dec(v.int),
-        .float: writeFloat(b, v.float),
-        .str: writeStr(b, v.str),
+        };
+        .int: b.i64dec(v.int);
+        .float: writeFloat(b, v.float);
+        .str: writeStr(b, v.str);
         .arr: {
             b.byte('[');
             var i: usize = 0;
@@ -924,7 +924,7 @@ const writeValue = fn (b: *Buf, v: Value, d: u32) void {
                 i = i + 1;
             }
             b.byte(']');
-        },
+        };
         .obj: {
             b.byte('{');
             var i: usize = 0;
@@ -940,7 +940,7 @@ const writeValue = fn (b: *Buf, v: Value, d: u32) void {
                 i = i + 1;
             }
             b.byte('}');
-        },
+        };
     }
 };
 

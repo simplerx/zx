@@ -4,8 +4,8 @@ const Color = enum { red, green };
 
 const name = fn (c: Color) i32 {
     switch (c) {
-        .red:   { return 1; },
-        .green: { return 2; },
+        .red:   { return 1; };
+        .green: { return 2; };
     }
     return 0;
 };

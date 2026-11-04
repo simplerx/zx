@@ -165,6 +165,7 @@ static bool can_follow_cast(TokKind k) {
     case TOK_LBRACE: case TOK_DOT_BRACE: case TOK_AMP: case TOK_LPAREN:
     case TOK_KW_NULL: case TOK_KW_UNDEF: case TOK_BANG: case TOK_TILDE:
     case TOK_KW_IF: case TOK_KW_MODULE:
+    case TOK_AT:            /* (T)@builtin(...) — `@` 永远不是中缀运算符，无歧义 */
         return true;
     default: return false;
     }
@@ -1403,11 +1404,13 @@ static Node *parse_switch(P *p, const char *label) {
                 } else {
                     push(arm, parse_unary(p));
                 }
-                /* 逗号后面能开一个新模式才继续：`'a', 'b':`、`true, false:` 都要，
-                 * 而 `1: {}, 2: {}` 里的逗号是臂分隔符，此时下一个 token 是臂的
-                 * 模式——也满足 starts_pattern，由下一轮循环重新开一条臂。 */
-                if (at(p, TOK_COMMA) && starts_pattern(peek(p, 1)))
+                /* 逗号只作"同臂并列"：`,` 后必须还能开一个新模式。
+                 * 臂分隔已交给 `;`，这里不再有歧义。 */
+                if (at(p, TOK_COMMA)) {
                     advance(p);
+                    if (!starts_pattern(cur(p)))
+                        perr(p, "expected another pattern after ',' — ',' joins patterns of one arm, arms end with ';'");
+                }
                 else
                     break;
             }
@@ -1424,12 +1427,12 @@ static Node *parse_switch(P *p, const char *label) {
          *   cap lbl: { … }   两者都要：先捕获，再给块贴标签
          * 名字后面既不是 `{` 也不是 `:` 时，它就是表达式臂的开头（`.x: foo`）。
          * 捕获只配块臂：`cap 值` 和裸 `值` 没法区分，索性不允许。
-         * 例外是 M50 的糖：名字后面**什么都没有**（紧跟 `,` / `}`）时，臂的值
-         * 就是捕获值本身——`pattern: cap,` ≡ `pattern: cap { cap }`；
+         * 例外是 M50 的糖：名字后面**什么都没有**（紧跟 `;` / `}`）时，臂的值
+         * 就是捕获值本身——`pattern: cap;` ≡ `pattern: cap { cap }`；
          * 想要外部常量请加括号：`pattern: (cap)`。 */
         Node *implicit = NULL;
         if (at(p, TOK_IDENT) && !is_bool_word(cur(p))) {
-            bool ends = peek(p, 1)->kind == TOK_COMMA || peek(p, 1)->kind == TOK_RBRACE;
+            bool ends = peek(p, 1)->kind == TOK_SEMI || peek(p, 1)->kind == TOK_RBRACE;
             if (!arm->flag && ends) {
                 Token *idt = advance(p);
                 arm->name = dup_tok(idt);
@@ -1455,10 +1458,8 @@ static Node *parse_switch(P *p, const char *label) {
         arm->a = implicit ? implicit
                           : (at(p, TOK_LBRACE) ? parse_block(p) : parse_expr(p));
         push(n, arm);
-        if (!accept(p, TOK_COMMA)) {
-            if (!at(p, TOK_RBRACE)) perr(p, "expected ',' or '}' after switch arm");
-            break;
-        }
+        if (!accept(p, TOK_SEMI))
+            perr(p, "expected ';' after switch arm");
     }
     expect(p, TOK_RBRACE);
     return n;

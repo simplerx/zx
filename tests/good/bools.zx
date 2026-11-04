@@ -5,8 +5,8 @@ const level = if (debug) 2 else 0;
 
 const pick = fn (flag: bool) i32 {
     return switch (flag) {
-        true: 1,
-        false: 0,
+        true: 1;
+        false: 0;
     };
 };
 

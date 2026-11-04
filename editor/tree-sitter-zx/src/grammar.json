@@ -2327,17 +2327,8 @@
         {
           "type": "REPEAT",
           "content": {
-            "type": "CHOICE",
-            "members": [
-              {
-                "type": "SYMBOL",
-                "name": "switch_arm"
-              },
-              {
-                "type": "STRING",
-                "value": ","
-              }
-            ]
+            "type": "SYMBOL",
+            "name": "switch_arm"
           }
         },
         {
@@ -2431,16 +2422,8 @@
             }
           },
           {
-            "type": "CHOICE",
-            "members": [
-              {
-                "type": "STRING",
-                "value": ","
-              },
-              {
-                "type": "BLANK"
-              }
-            ]
+            "type": "STRING",
+            "value": ";"
           }
         ]
       }

@@ -11,21 +11,21 @@ const Mixed = union { n: i32, f: f64 };
 const kindName = fn (T: type) []const u8 {
     const info = @typeInfo(T);
     return switch (info.kind) {
-        .void_: "void",
-        .bool_: "bool",
-        .int_: "int",
-        .float_: "float",
-        .pointer: "pointer",
-        .slice: "slice",
-        .array: "array",
-        .struct_: "struct",
-        .union_: "union",
-        .enum_: "enum",
-        .optional: "optional",
-        .error_union: "error union",
-        .function: "fn",
-        .type_: "type",
-        else: "?",
+        .void_: "void";
+        .bool_: "bool";
+        .int_: "int";
+        .float_: "float";
+        .pointer: "pointer";
+        .slice: "slice";
+        .array: "array";
+        .struct_: "struct";
+        .union_: "union";
+        .enum_: "enum";
+        .optional: "optional";
+        .error_union: "error union";
+        .function: "fn";
+        .type_: "type";
+        else: "?";
     };
 };
 

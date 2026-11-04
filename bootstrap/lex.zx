@@ -33,84 +33,84 @@ pub const Kind = enum {
 // C 侧 tok_kind_spell：dump 用的短名（枚举名去掉 TOK_ 前缀）。
 pub const spell = fn (k: Kind) []const u8 {
     return switch (k) {
-        .eof: "EOF_",
-        .ident: "IDENT",
-        .int: "INT",
-        .float: "FLOAT",
-        .char: "CHAR",
-        .string: "STRING",
-        .kw_const: "KW_CONST",
-        .kw_let: "KW_LET",
-        .kw_var: "KW_VAR",
-        .kw_fn: "KW_FN",
-        .kw_module: "KW_MODULE",
-        .kw_type: "KW_TYPE",
-        .kw_null: "KW_NULL",
-        .kw_undefined: "KW_UNDEF",
-        .kw_if: "KW_IF",
-        .kw_else: "KW_ELSE",
-        .kw_while: "KW_WHILE",
-        .kw_for: "KW_FOR",
-        .kw_inline: "KW_INLINE",
-        .kw_switch: "KW_SWITCH",
-        .kw_continue: "KW_CONTINUE",
-        .kw_return: "KW_RETURN",
-        .kw_defer: "KW_DEFER",
-        .kw_errdefer: "KW_ERRDEFER",
-        .kw_struct: "KW_STRUCT",
-        .kw_union: "KW_UNION",
-        .kw_enum: "KW_ENUM",
-        .kw_error: "KW_ERROR",
-        .kw_pub: "KW_PUB",
-        .kw_extern: "KW_EXTERN",
-        .kw_orelse: "KW_ORELSE",
-        .kw_try: "KW_TRY",
-        .lparen: "LPAREN",
-        .rparen: "RPAREN",
-        .lbracket: "LBRACKET",
-        .rbracket: "RBRACKET",
-        .lbrace: "LBRACE",
-        .rbrace: "RBRACE",
-        .comma: "COMMA",
-        .semi: "SEMI",
-        .colon: "COLON",
-        .at: "AT",
-        .dot: "DOT",
-        .dot_brace: "DOT_BRACE",
-        .dotdot: "DOTDOT",
-        .arrow: "ARROW",
-        .plus: "PLUS",
-        .minus: "MINUS",
-        .star: "STAR",
-        .slash: "SLASH",
-        .percent: "PERCENT",
-        .caret: "CARET",
-        .tilde: "TILDE",
-        .bang: "BANG",
-        .question: "QUESTION",
-        .amp: "AMP",
-        .pipe: "PIPE",
-        .andand: "ANDAND",
-        .oror: "OROR",
-        .shl: "SHL",
-        .shr: "SHR",
-        .lt: "LT",
-        .le: "LE",
-        .gt: "GT",
-        .ge: "GE",
-        .eq: "EQ",
-        .ne: "NE",
-        .assign: "ASSIGN",
-        .pluseq: "PLUSEQ",
-        .minuseq: "MINUSEQ",
-        .stareq: "STAREQ",
-        .slasheq: "SLASHEQ",
-        .perceq: "PERCEQ",
-        .ampeq: "AMPEQ",
-        .pipeeq: "PIPEEQ",
-        .careteq: "CARETEQ",
-        .shleq: "SHLEQ",
-        .shreq: "SHREQ",
+        .eof: "EOF_";
+        .ident: "IDENT";
+        .int: "INT";
+        .float: "FLOAT";
+        .char: "CHAR";
+        .string: "STRING";
+        .kw_const: "KW_CONST";
+        .kw_let: "KW_LET";
+        .kw_var: "KW_VAR";
+        .kw_fn: "KW_FN";
+        .kw_module: "KW_MODULE";
+        .kw_type: "KW_TYPE";
+        .kw_null: "KW_NULL";
+        .kw_undefined: "KW_UNDEF";
+        .kw_if: "KW_IF";
+        .kw_else: "KW_ELSE";
+        .kw_while: "KW_WHILE";
+        .kw_for: "KW_FOR";
+        .kw_inline: "KW_INLINE";
+        .kw_switch: "KW_SWITCH";
+        .kw_continue: "KW_CONTINUE";
+        .kw_return: "KW_RETURN";
+        .kw_defer: "KW_DEFER";
+        .kw_errdefer: "KW_ERRDEFER";
+        .kw_struct: "KW_STRUCT";
+        .kw_union: "KW_UNION";
+        .kw_enum: "KW_ENUM";
+        .kw_error: "KW_ERROR";
+        .kw_pub: "KW_PUB";
+        .kw_extern: "KW_EXTERN";
+        .kw_orelse: "KW_ORELSE";
+        .kw_try: "KW_TRY";
+        .lparen: "LPAREN";
+        .rparen: "RPAREN";
+        .lbracket: "LBRACKET";
+        .rbracket: "RBRACKET";
+        .lbrace: "LBRACE";
+        .rbrace: "RBRACE";
+        .comma: "COMMA";
+        .semi: "SEMI";
+        .colon: "COLON";
+        .at: "AT";
+        .dot: "DOT";
+        .dot_brace: "DOT_BRACE";
+        .dotdot: "DOTDOT";
+        .arrow: "ARROW";
+        .plus: "PLUS";
+        .minus: "MINUS";
+        .star: "STAR";
+        .slash: "SLASH";
+        .percent: "PERCENT";
+        .caret: "CARET";
+        .tilde: "TILDE";
+        .bang: "BANG";
+        .question: "QUESTION";
+        .amp: "AMP";
+        .pipe: "PIPE";
+        .andand: "ANDAND";
+        .oror: "OROR";
+        .shl: "SHL";
+        .shr: "SHR";
+        .lt: "LT";
+        .le: "LE";
+        .gt: "GT";
+        .ge: "GE";
+        .eq: "EQ";
+        .ne: "NE";
+        .assign: "ASSIGN";
+        .pluseq: "PLUSEQ";
+        .minuseq: "MINUSEQ";
+        .stareq: "STAREQ";
+        .slasheq: "SLASHEQ";
+        .perceq: "PERCEQ";
+        .ampeq: "AMPEQ";
+        .pipeeq: "PIPEEQ";
+        .careteq: "CARETEQ";
+        .shleq: "SHLEQ";
+        .shreq: "SHREQ";
     };
 };
 
@@ -643,70 +643,70 @@ pub const Lexer = struct {
         let c = self.adv();
 
         switch (c) {
-            '(' : { self.emit(Kind.lparen, start); },
-            ')' : { self.emit(Kind.rparen, start); },
-            '[' : { self.emit(Kind.lbracket, start); },
-            ']' : { self.emit(Kind.rbracket, start); },
-            '{' : { self.emit(Kind.lbrace, start); },
-            '}' : { self.emit(Kind.rbrace, start); },
-            ',' : { self.emit(Kind.comma, start); },
-            ';' : { self.emit(Kind.semi, start); },
-            '@' : { self.emit(Kind.at, start); },
-            '~' : { self.emit(Kind.tilde, start); },
-            '?' : { self.emit(Kind.question, start); },
-            ':' : { self.emit(Kind.colon, start); },
+            '(' : { self.emit(Kind.lparen, start); };
+            ')' : { self.emit(Kind.rparen, start); };
+            '[' : { self.emit(Kind.lbracket, start); };
+            ']' : { self.emit(Kind.rbracket, start); };
+            '{' : { self.emit(Kind.lbrace, start); };
+            '}' : { self.emit(Kind.rbrace, start); };
+            ',' : { self.emit(Kind.comma, start); };
+            ';' : { self.emit(Kind.semi, start); };
+            '@' : { self.emit(Kind.at, start); };
+            '~' : { self.emit(Kind.tilde, start); };
+            '?' : { self.emit(Kind.question, start); };
+            ':' : { self.emit(Kind.colon, start); };
 
             '.' : {
                 if (self.peek() == '{') { self.adv(); self.emit(Kind.dot_brace, start); }
                 else if (self.peek() == '.') { self.adv(); self.emit(Kind.dotdot, start); }
                 else { self.emit(Kind.dot, start); }
-            },
+            };
 
             '+' : {
                 if (self.peek() == '=') { self.adv(); self.emit(Kind.pluseq, start); }
                 else { self.emit(Kind.plus, start); }
-            },
+            };
             '-' : {
                 if (self.peek() == '=') { self.adv(); self.emit(Kind.minuseq, start); }
                 else if (self.peek() == '>') { self.adv(); self.emit(Kind.arrow, start); }
                 else { self.emit(Kind.minus, start); }
-            },
+            };
             '*' : {
                 if (self.peek() == '=') { self.adv(); self.emit(Kind.stareq, start); }
                 else { self.emit(Kind.star, start); }
-            },
+            };
             '/' : {
                 if (self.peek() == '=') { self.adv(); self.emit(Kind.slasheq, start); }
                 else { self.emit(Kind.slash, start); }
-            },
+            };
             '%' : {
                 if (self.peek() == '=') { self.adv(); self.emit(Kind.perceq, start); }
                 else { self.emit(Kind.percent, start); }
-            },
+            };
             '^' : {
                 if (self.peek() == '=') { self.adv(); self.emit(Kind.careteq, start); }
                 else { self.emit(Kind.caret, start); }
-            },
+            };
 
             '&' : {
                 if (self.peek() == '=') { self.adv(); self.emit(Kind.ampeq, start); }
                 else if (self.peek() == '&') { self.adv(); self.emit(Kind.andand, start); }
                 else { self.emit(Kind.amp, start); }
-            },
+            };
             '|' : {
                 if (self.peek() == '=') { self.adv(); self.emit(Kind.pipeeq, start); }
                 else if (self.peek() == '|') { self.adv(); self.emit(Kind.oror, start); }
                 else { self.emit(Kind.pipe, start); }
-            },
+            };
 
             '=' : {
                 if (self.peek() == '=') { self.adv(); self.emit(Kind.eq, start); }
                 else { self.emit(Kind.assign, start); }
-            },
+            };
             '!' : {
                 if (self.peek() == '=') { self.adv(); self.emit(Kind.ne, start); }
                 else { self.emit(Kind.bang, start); }
-            },
+            };
 
             '<' : {
                 if (self.peek() == '<') {
@@ -716,7 +716,7 @@ pub const Lexer = struct {
                 }
                 else if (self.peek() == '=') { self.adv(); self.emit(Kind.le, start); }
                 else { self.emit(Kind.lt, start); }
-            },
+            };
             '>' : {
                 if (self.peek() == '>') {
                     self.adv();
@@ -725,7 +725,7 @@ pub const Lexer = struct {
                 }
                 else if (self.peek() == '=') { self.adv(); self.emit(Kind.ge, start); }
                 else { self.emit(Kind.gt, start); }
-            },
+            };
 
             else : {
                 if (is_digit(c)) {
@@ -752,7 +752,7 @@ pub const Lexer = struct {
                 } else {
                     self.fail();   // unexpected character
                 }
-            },
+            };
         }
     };
 
