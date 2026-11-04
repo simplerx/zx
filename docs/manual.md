@@ -495,14 +495,16 @@ std.debug.printTrace();                           // 回放捕获环（最老→
   源码里不用写、也写不出来。
 - `--release` 下 `assert` 的运行时函数体整体擦除（条件副作用保留）；`panic` 不擦。
 - `errName` 查编译器生成的静态表：`error.foo` 字面量首次被引用即登记，查表 O(1)
-  （枚举错误 `(error)Err.x` 不进表，查出来是 `?`）。
+  （枚举错误 `(error)Err.x` 按显式码占位登记，decisions §90，也能回放成员名）。
 - `@file()/@line()/@col()/@fnName()` 单独可用，全部编译期折成字面量、零开销。
 
 ### 4.6 任务：`std.Task`（统一线程 / 协程）
 
-多线程、单线程、协程是一个模型的三种配置（decisions §89）：**Task 是调度器
-调度的栈有纤程**——默认 CPU-1 个工作线程抢就绪队列（多线程）；`Task.init(0)`
-纯单线程，主线程 await 时顺便跑调度循环（协程）；await 在任务内是真挂起。
+多线程、单线程、协程是一个模型的三种实例（decisions §89/§93）：**Task 是
+调度器调度的栈有纤程**——`Task.pool()` 默认 CPU-1 个工作线程抢分片就绪
+队列（多线程）；`Task.single()` 纯单线程，主线程 await 时顺便跑调度循环
+（协程，测试确定性来源）；await 在任务内是真挂起。两种实例只对首次 spawn
+生效。
 
 ```zx
 const Task = std.Task;
@@ -515,6 +517,7 @@ const produce = fn (n: usize) !usize {
 };
 
 const main = fn () !i32 {
+    Task.pool(0);                           // 或 Task.single()；只对首次 spawn 生效
     let h = try Task.spawn(produce, 100);   // 入队即返回，?usize 句柄
     let r = try Task.await(h);              // 真挂起等完成，拿返回值
     std.println("{}", r);                   // 5050
@@ -536,7 +539,12 @@ h 在下一个 await 点收到 `error.cancelled`，顺着 try 冒到任务顶层
 | `current() usize` | 当前任务句柄；根上下文是 `0` |
 | `interrupted() bool` | 当前任务的取消旗标 |
 | `auto(h, on)` | 开关 await 自动挂起（默认开，见 §4.7 await 门） |
-| `init(n)` | 配置工作线程数；0 = 纯单线程。只对首次 spawn 生效 |
+| `single()` | 单线程实例：主线程驱动，任务即协程 |
+| `pool(n)` | 多线程实例：n 个工作线程，n=0 自动 CPU-1 |
+| `init(n)` | pool 的旧拼法，保留 |
+| `go(f)` | fire-and-forget：spawn 零参 fn，句柄丢弃 |
+| `run(f) ?usize` | spawn 零参 fn 拿句柄，结果仍要 await |
+| `sleep(ms) !void` | 任务内定时器真挂起；根上下文退化 OS 级睡眠（可能被提前叫醒，循环睡满） |
 
 ### 4.7 await 门与错误捕获 trace
 
@@ -553,11 +561,36 @@ h 在下一个 await 点收到 `error.cancelled`，顺着 try 冒到任务顶层
   trace 都不断链；任务的捕获与根上下文的捕获天然隔离。
 - `try` 传播**不记**（码没有落地）；`orelse`/不带名的 else 臂也记。
 - `--release` 下捕获点整体抹掉，trace 为空、零开销。
-- 枚举错误 `(error)Err.x` 不进名字登记表，trace 里名字显示 `?`（码仍正确）。
+- 枚举错误 `(error)Err.x` 的名字也进登记表（decisions §90）：trace /
+  errName 直接回放 `Err.open` 这样的成员名；显式码占坑，运行时错误码
+  （cancelled 等）跳过已占槽位分配。
 
 **同步原语**：`std.mutex`（`mutexNew/Lock/Try/Unlock/Free`，非递归，
 SRWLOCK / pthread）与 `std.atomic`（`Add/Sub/Load/Store/Swap/CAS`，usize，
 SEQ_CST）——它们不是执行模型，与 Task 分开按需链接。
+
+### 4.8 通道与条件变量：`std.channel` / `std.cond`
+
+**`std.channel` 是纤程感知的有界队列**（decisions §91）：任务里 send/recv
+是**真停靠**——等待者串 FIFO，满了/空了就切回调度循环，醒来拿结果，不忙等。
+两条快速路径让常见形态不进等待链：ring 空时 send 直投停靠 receiver（直接
+握手）；recv 腾位后把队首 sender 的值补进 ring。
+
+```zx
+const ch = try std.channel.new(4);          // ?usize 句柄，cap 0 按 1，上限 65536
+// 任务里：
+try std.channel.send(ch, v);                // 满则停靠；错误集 {closed}
+let v = try std.channel.recv(ch);           // 空则停靠；close 后收 err.closed
+std.channel.close(ch);                      // 唤醒全部等待者并让后续操作报 closed
+```
+
+根上下文（主线程）没有推进力：channel 操作先推一把调度再复查，还没结果
+报 `would_block`——主线程的 channel 是协作式的。已知取舍：cancel 不会
+提前唤醒停靠在 channel/定时器上的任务。
+
+**`std.cond` 是 OS 线程级条件变量**（`new/wait/signal/broadcast/free`），
+std.mutex 的搭档。它不懂纤程：任务里持锁跨 await 点会卡住整个工作线程
+（不是死锁但是饿）。纤程间同步用 channel，cond 留给 OS 线程场景。
 
 ## 5. 构建、产物与测试
 
@@ -663,7 +696,7 @@ sh editor/zed/install.sh    # 装 Zed 扩展（高亮 + 大纲 + LSP 接线）
 
 | 限制 | 现状 | 影响 |
 | --- | --- | --- |
-| 并发 | `std.Task` 统一任务接口（多线程/单线程/协程一个模型，§4.6/§4.7）+ mutex/atomic | 无 channel/条件变量/读写锁；调度锁是全局的 |
+| 并发 | `std.Task` 统一任务接口（single/pool 双实例 + go/run/sleep 便利层，§4.6）+ channel/cond/mutex/atomic | 无读写锁、无 select；cancel 不会提前唤醒停靠在 channel/定时器上的任务；channel 句柄定长 64 |
 | 调试信息 | 后端不生成 DWARF/PDB，`-g` 未暴露 | 单步调试不可用；打印/断言用 `std.debug`，位置内建零开销 |
 | 包管理 | 没有网络依赖解析 | 依赖靠 `vendor/` 或 `deps` 手工放置 |
 | 优化 | 只做 `-O0`/`-O2` 交给 C 编译器 | 没有 Zx 层优化（不做内联决策） |
@@ -684,17 +717,17 @@ sh editor/zed/install.sh    # 装 Zed 扩展（高亮 + 大纲 + LSP 接线）
 | 词法 / 语法 / 类型检查 | 完成 | 25 关键字、泛型单态化、错误集、编译期求值；`tests/good` 52 + `tests/bad` 95 + 多文件 |
 | C11 后端 | 完成 | 7 个示例 + 正例编译成真二进制跑出期望输出；结构布局与 C 一致 |
 | 自举 | 完成（阶段 1–4） | `bootstrap/zxfe.zx` 用 Zx 写前端，`zxc` 默认走它；`--fe=c` 只作种子与交叉验证 |
-| 标准库 | 可用 | 7 个模块（std/str/map/fs/json/time/pool）+ 容器 + 格式化 + debug/thread |
+| 标准库 | 可用 | 7 个模块（std/str/map/fs/json/time/pool）+ 容器 + 格式化 + debug/Task/channel/cond/mutex/atomic |
 | 工具链 | 可用 | `init/build/run/test/check/fmt` + `-h/-v` + 增量编译 + 动态/静态库 |
 | 编辑器 | 可用 | tree-sitter 高亮/大纲 + zxls（补全/诊断/跳转/hover/签名/格式化/引用） |
-| 回归 | 在守 | `sh test.sh`：文件类 220 项 + CLI 冒烟 6 项 + LSP 会话 14 项 |
+| 回归 | 在守 | `sh test.sh`：文件类 234 项 + CLI 冒烟 6 项 + LSP 会话 16 项 |
 | 性能 | 有基线 | fib/mandel/mmat/str 四个锚点，前端已修掉两处 O(n²) |
 | 生态 | 起步 | 无包管理、无调试信息；调试内建（M52）、统一 Task 并发（M53~M56 演进而来）已有 |
 
 一句话结论：**作为"能写真实程序（编译器自己就是用户）"的系统语言是完整可用的；
-作为"给别人用的语言产品"还差生态三件套——包管理、调试、并发。**
-语言核心不再有已知的、会逼你改设计的缺口：自举时暴露的 G1（`orelse`/`.?`）与
-G2（char 模式）都已补掉。
+作为"给别人用的语言产品"还差包管理与调试两件套。** 语言核心不再有已知的、
+会逼你改设计的缺口：自举时暴露的 G1（`orelse`/`.?`）与 G2（char 模式）都已
+补掉；并发三件套（统一 Task / channel / mutex）在 M57 压测 20/20 后落地。
 
 ---
 

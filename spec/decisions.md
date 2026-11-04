@@ -2846,3 +2846,104 @@ await 收到同一错误）、`task_trace.zx`（捕获环随任务、与根环�
 `sync_basic.zx`（mutex 非递归 + 原子 CAS/swap）；多工作线程模式手验
 （spawn 两个任务并行算和，await 收敛 5105）；全量回归 **229 过 0 挂**；
 release 档取消照常。旧 thread_basic / fiber_* 五个测试删除（API 已不存在）。
+
+## 90. 枚举错误名回放：`(error)Err.x` 进码→名字表（M57）
+
+`errName` 与捕获环 trace 都靠编译器的码→名字表回放名字，但 `(error)Err.x`
+（错误码取枚举值本身）之前不进表——trace 里名字显示 `?`。补法不是新机制，
+而是**把枚举错误名占位登记进同一张表**：新增 `ty_err_code_at(name, code)`，
+把 `Err.open` 这种显式码占进槽位；`ty_err_code(name)`（backend 给
+cancelled/closed/would_block 顺序分配）改为**跳过已占槽位**找第一个空位——
+两种来源共用一张表，谁先登记谁占坑，`ty_err_code_at` 对 0 / 65535 / 越界码
+拒绝、已占槽位不覆盖。
+
+登记点在 sema 的 check_cast（T→!T 装箱处）**known 判定之后、不分分支**——
+第一版放在 enum_member_value 求值分支里，被 `ct_eval_probe` 的试探折叠绕过
+（probe 成功不落分支），名字登记静默失效；挪到 known 之后两条路都过。
+
+形状教训：`Err.open` 的 AST base 是 `NK_IDENT` 而非 `NK_TYPE_IDENT`（枚举
+别名经 const 绑定），`enum_member_value` 放宽为两种 base 形态都认，TY_ENUM
+校验保留。
+
+验证：`tests/good/err_enum_name.zx`（`const Err = enum { open = 2, bad = 5 }`
+期望 `name:Err.open`）。
+
+## 91. channel 与 cond：纤程感知有界队列 + OS 级条件变量（M57）
+
+**`std.channel`：纤程感知的有界队列**（`new/close/send/recv/trySend/tryRecv`，
+cap 0 按 1 处理，上限 65536）。任务里 send/recv 是**真停靠**：等待者用
+ZxTask.next 串 FIFO（与就绪队列的 next 复用字段，停靠的任务不在就绪队列
+里，不冲突）。两条快速路径让常见形态不进等待链：**直接握手**——ring 空且
+有停靠 receiver 时，send 把值直投对方的 `cval` 唤醒；recv 腾位后把队首
+sender 的值补进 ring。close 唤醒全部等待者（`cok=false` → closed），后续
+操作报 closed。
+
+根上下文（主线程）没有推进力，channel 操作先跑 `zx_root_drive()` 推一把
+调度再复查，还没结果就报 `would_block`——主线程的 channel 是协作式的，
+不是阻塞式的。
+
+**已知取舍**：cancel 不会提前唤醒停靠在 channel/定时器上的任务（醒来才看
+旗标）；根上下文的 `Task.sleep` 退化成 OS 级睡眠，可能被调度事件提前叫醒
+（循环睡满，语义不破）；channel 句柄定长 64。
+
+**`std.cond`：OS 线程级条件变量**（`new/wait/signal/broadcast/free`），
+std.mutex 的搭档。它不懂纤程——任务里持锁跨 await 点会把整个工作线程卡住
+（不是死锁但是饿），文档口径：cond 只给 OS 线程场景，纤程同步用 channel。
+
+验证：`tests/good/chan_basic.zx`（生产消费 / close 排空收 err:closed /
+tryRecv 空收 would_block）、`cond_basic.zx`（signal/broadcast 冒烟）。
+
+## 92. 调度器锁细化 + fiber 所有权规则：多线程压测从 0/20 到 20/20（M57）
+
+M56 的调度器是一把全局锁 + 一个就绪队列。M57 拆细：**8 分片就绪队列**
+（任务按 id 落片，每片一把锁）+ 轮转扫描（拿到任务后把游标推到那一片之后
+——否则自旋任务会饿死高号分片，`order:1113` 实锤）+ 任务表原子登记 +
+等待者链独立锁 + 定时器表（256 项线性、swap-remove）。
+
+**fiber 所有权规则是本次最大战果。** 多线程 pool 压测（100 任务）8/8 段
+错误，且与 requeue 改动无关（恢复 M56 旧行为照样崩）——是 M56 遗留竞态，
+4 任务小测试通过纯属时序运气。SEH 向量异常处理器抓崩溃上下文 + 运行时
+事件环（cre/push/pop/sw/fin/del/delok 各打一点）实锤：**同一个任务被两个
+线程各 DeleteFiber 一次**（堆损坏 0xC0000374），甚至删掉一根正在别的线程
+上运行的 fiber。
+
+根因：run_one 切回后继续往下查 `done` 并回收——但门让出（requeue）和停靠
+（await/chan/sleep）都会把任务的所有权交出去，旧 runner 切回后的"查 done"
+与任务的后续生命周期（被别的线程重新弹出、跑完、删除）并发，看到 done=true
+就再删一次。**修法是所有权规则：切回后按"为什么切回"一次性判定，判定后
+立即收手**——让出：交还队列后立刻 return；停靠：什么都不做（所有权归
+唤醒者）；完成：本线程独占回收。flag 都写在 fiber 内部、切走后没人再改，
+切回读到的就是切走时的原因，判定本身无竞态；`deleted` 哨兵位（atomic
+exchange）兜底任何残余双删（包括取消未启动的回收路径）。
+
+**丢唤醒窗口挖出三个**（现象都是挂死而非崩）：
+1. push 后"先看 sleeping 再决定叫不叫"的未持锁预检查——睡眠方"pop 空 →
+   sleeping++ → wait"两步都在 idle 锁内，pusher 读到 0 时对方可能马上就要
+   睡下去，跳过广播就是永久丢唤醒。修：push 一律 idle_wake，锁内复查
+   sleeping 才广播。
+2. run_until 的 `done` 检查在锁外——fin 的广播可能落在主线程 sleeping++
+   之前，**完成态唤醒不可重放**，主线程对着一个已完成的 target 睡死。修：
+   进 idle 锁后复查 done 再睡（fin 的 done 写在它拿 idle 锁之前，锁序建立
+   happens-before，锁内必然可见；finish 的 done 写随之改原子存）。
+3. finish 尾部无条件 idle_wake——run_until 的主线程不是等待者，push 唤醒
+   不到它。
+
+不变量成文：**任务在就绪队列里的时刻必然不在运行**；让出只打标记，由
+run_one 在切回后代为入队。
+
+验证：S3（纯任务）S2（yield）S1（sleep）各 20/20，S4（200 任务混合
+fire-and-forget + await + yield）20/20；全量回归通过，CLI/LSP/增量编译
+冒烟照常。
+
+## 93. 默认调度实例：single / pool（M57）
+
+用户拍板："默认 Task 实例 = 一个单线程、一个多线程、一个协程"。补两个
+实例构造：**`Task.single()`**——纯单线程，主线程驱动，任务即协程（await
+门的调度点都在主线程跑）；**`Task.pool(n)`**——工作线程池，n=0 自动
+CPU-1。`Task.init(n)` 保留（pool 的旧拼法）。三者都只对首次 spawn 生效
+（`sched_live` 原子闸，已启动则静默忽略）。go / run / sleep 保留为便利层：
+go = fire-and-forget，run = 带返回值（结果仍要 await），sleep = 任务内
+定时器真挂起。
+
+验证：`tests/good/task_modes.zx`（single 交错确定性 1212123；pool(0)/
+pool(2) 原子计数终值 4/8）、`task_default.zx`（run/go/sleep）。

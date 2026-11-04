@@ -1,0 +1,80 @@
+// chan_basic.zx —— std.channel（M57）：纤程感知有界队列。
+// 生产者/消费者单线程交错；close 之后 recv 排空再报 closed；
+// 空 channel 的 tryRecv 报 would_block。句柄就是任务参数（usize）。
+// expect-output:sum:3
+// expect-output:recv-err:closed
+// expect-output:drained:9
+// expect-output:try:would_block
+const std = module("std");
+
+const producer = fn (ch: usize) !usize {
+    var i: usize = 0;
+    while (i < 3) {
+        try std.channel.chanSend(ch, i);
+        i = i + 1;
+    }
+    return 0;
+};
+
+const consumer = fn (ch: usize) !usize {
+    var total: usize = 0;
+    var got: usize = 0;
+    while (got < 3) {
+        if (std.channel.chanRecv(ch)) v {
+            total = total + v;
+            got = got + 1;
+        } else e {
+            return e;
+        }
+    }
+    return total;
+};
+
+const closer = fn (ch: usize) !usize {
+    try std.channel.chanSend(ch, 9);
+    std.channel.chanClose(ch);
+    return 0;
+};
+
+const drained = fn (ch: usize) !usize {
+    var total: usize = 0;
+    while (true) {
+        if (std.channel.chanRecv(ch)) v {
+            total = total + v;
+        } else e {
+            std.println("recv-err:{}", std.debug.errName(e));
+            return total;
+        }
+    }
+};
+
+const main = fn () !i32 {
+    std.Task.init(0);
+    let ch = std.channel.chanNew(1);
+    let p = std.Task.spawn(producer, ch).?;
+    let c = std.Task.spawn(consumer, ch).?;
+    if (std.Task.await(p)) v { } else e { return e; }
+    if (std.Task.await(c)) v {
+        std.println("sum:{}", v);
+    } else e {
+        return e;
+    }
+
+    let ch2 = std.channel.chanNew(4);
+    let w = std.Task.spawn(closer, ch2).?;
+    let d = std.Task.spawn(drained, ch2).?;
+    if (std.Task.await(w)) v { } else e { return e; }
+    if (std.Task.await(d)) v {
+        std.println("drained:{}", v);
+    } else e {
+        return e;
+    }
+
+    let ch3 = std.channel.chanNew(1);
+    if (std.channel.chanTryRecv(ch3)) v {
+        std.println("unexpected:{}", v);
+    } else e {
+        std.println("try:{}", std.debug.errName(e));
+    }
+    return 0;
+};

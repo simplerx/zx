@@ -148,11 +148,27 @@ static int g_nerrcodes;
 uint16_t ty_err_code(const char *name) {
     if (!name || !*name) return 0;
     for (int i = 0; i < g_nerrcodes; i++)
-        if (!strcmp(g_errnames[i], name)) return (uint16_t)(i + 1);
-    if (g_nerrcodes >= ZX_ERRCODE_MAX)
-        return 65534;                  /* 表满：共用一个码，别崩 */
-    g_errnames[g_nerrcodes] = strdup(name);
-    return (uint16_t)(++g_nerrcodes);
+        if (g_errnames[i] && !strcmp(g_errnames[i], name)) return (uint16_t)(i + 1);
+    /* 找第一个空槽：显式占位（ty_err_code_at，枚举错误用）可能把中间的
+     * 槽占了，顺序分配得绕开它们，不然两个名字挤一个码。 */
+    for (int i = 0; i < ZX_ERRCODE_MAX; i++) {
+        if (g_errnames[i]) continue;
+        g_errnames[i] = strdup(name);
+        if (i + 1 > g_nerrcodes) g_nerrcodes = i + 1;
+        return (uint16_t)(i + 1);
+    }
+    return 65534;                  /* 表满：共用一个码，别崩 */
+}
+
+/* 显式占位登记：枚举错误 `(error)Err.x` 的码就是枚举值本身，不走顺序
+ * 分配——把它在编译期登记进同一张码→名字表，errName / printTrace 的
+ * 回放就能统一解析（M57）。槽位已有别的名字就不覆盖（先到先得；
+ * 两个名字挤一个码时回放按先登记者，文档里写明这个边界）。 */
+void ty_err_code_at(const char *name, uint16_t code) {
+    if (!name || !*name || code == 0 || code == 65535 || code >= ZX_ERRCODE_MAX) return;
+    if (g_errnames[code - 1]) return;
+    g_errnames[code - 1] = strdup(name);
+    if ((int)code > g_nerrcodes) g_nerrcodes = code;
 }
 
 const char *ty_err_name(uint16_t code) {

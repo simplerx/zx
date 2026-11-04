@@ -1,0 +1,69 @@
+// task_modes.zx —— 默认调度实例（M57）：single / pool。
+// single：单线程调度器，主线程驱动，任务即协程，yield 交错确定；
+// pool：工作线程池（n=0 自动按 CPU），任务被池里线程偷走跑——
+// 顺序不定，所以只断言原子计数终值，不断言顺序。
+// expect-output:single:1212123
+// expect-output:pool:4
+// expect-output:pool2:8
+const std = module("std");
+
+var order: usize = 0;
+var hits: usize = 0;
+
+const pa = fn (_: usize) !usize {
+    var n: usize = 0;
+    while (n < 3) {
+        order = order * 10 + 1;
+        std.Task.yield();
+        n = n + 1;
+    }
+    order = order * 10 + 3;
+    return 100;
+};
+
+const pb = fn (_: usize) !usize {
+    var n: usize = 0;
+    while (n < 3) {
+        order = order * 10 + 2;
+        std.Task.yield();
+        n = n + 1;
+    }
+    return 20;
+};
+
+const hitter = fn (_: usize) !usize {
+    std.atomic.atomicAdd(&hits, 1);
+    std.Task.yield();                    // 协作点：别的任务/线程有机会
+    return 0;
+};
+
+const main = fn () !i32 {
+    // 单线程实例：任务即协程，交错确定
+    std.Task.single();
+    let a = std.Task.spawn(pa, 0).?;
+    let b = std.Task.spawn(pb, 0).?;
+    if (std.Task.await(a)) v { } else e { return e; }
+    if (std.Task.await(b)) v { } else e { return e; }
+    std.println("single:{}", order);
+
+    // 线程池实例：自动档（按 CPU 定池大小）
+    std.Task.pool(0);
+    var i: usize = 0;
+    while (i < 4) {
+        let h = std.Task.spawn(hitter, 0).?;
+        if (std.Task.await(h)) v { } else e { return e; }
+        i = i + 1;
+    }
+    std.println("pool:{}", hits);
+
+    // 线程池实例：显式 2 个工作线程
+    std.Task.pool(2);
+    i = 0;
+    while (i < 4) {
+        let h = std.Task.spawn(hitter, 0).?;
+        if (std.Task.await(h)) v { } else e { return e; }
+        i = i + 1;
+    }
+    std.println("pool2:{}", hits);
+    return 0;
+};

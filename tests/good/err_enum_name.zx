@@ -1,0 +1,30 @@
+// err_enum_name.zx —— 枚举错误名字回放统一（M57）：
+// `(error)Err.x` 的码就是枚举值本身，编译期把 "Err.x" 占位进
+// 码→名字表，errName 与 printTrace 走同一张表解析——不再是 ?。
+// expect-output:name:Err.open
+// expect-output:name2:Err.bad
+const std = module("std");
+
+const Err = enum { open = 2, bad = 5 };
+
+const probe = fn () !usize {
+    return (error)Err.open;
+};
+
+const probe2 = fn () !usize {
+    return (error)Err.bad;
+};
+
+const main = fn () !i32 {
+    if (probe()) v {
+        std.println("unexpected:{}", v);
+    } else e {
+        std.println("name:{}", std.debug.errName(e));
+    }
+    if (probe2()) v {
+        std.println("unexpected:{}", v);
+    } else e {
+        std.println("name2:{}", std.debug.errName(e));
+    }
+    return 0;
+};

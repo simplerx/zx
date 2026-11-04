@@ -134,6 +134,7 @@ Type *ty_agg(TyKind kind, Node *decl, const char *name);
  * 集合在编译期才有意义，运行时就是普通 error 值——TY_ERR 上挂不挂集合
  * 都不改变布局，只改变检查强度。 */
 uint16_t    ty_err_code(const char *name);          /* 名字 → 码（首次出现即分配） */
+void        ty_err_code_at(const char *name, uint16_t code);  /* 显式占位：码 = 枚举值 */
 const char *ty_err_name(uint16_t code);             /* 码 → 名字；未知返回 NULL */
 int         ty_err_count(void);                     /* 已登记的错误码总数 */
 void       *ty_errset_of(const char **names, int n);/* 名字集合 → interned 集合 */

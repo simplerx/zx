@@ -789,6 +789,19 @@ zx_init_<stem>(void)  每模块一个初始化函数，main 按依赖倒序调�
   `if (c) x else y` 照旧读作表达式臂（没有载荷可捕获）；switch 臂里的裸名字
   一定读作捕获名，要外部常量写 `1: (K)`。各臂类型仍要统一。`zxc -v`
   进入 **0.50.0**，spec 升到 **v0.28**。见 decisions **§83**。
+- [x] M57 **std 扩容 + 多线程压测稳定：channel/cond、single/pool 双实例、枚举错误名回放、调度器锁细化（v0.57.0）**：
+  **`std.channel`**（纤程感知有界队列：任务里 send/recv 真停靠，FIFO 等待者 +
+  空队列直接握手，close 唤醒全部，根上下文报 would_block）与 **`std.cond`**
+  （OS 级条件变量，std.mutex 搭档）；按用户拍板补**默认调度实例**：
+  `Task.single()`（单线程，任务即协程）/ `Task.pool(n)`（线程池，n=0 自动
+  CPU-1），`init(n)` 保留，go/run/sleep 归位为便利层；**`(error)Err.x` 进
+  码→名字表**（`ty_err_code_at` 显式占坑，运行时错误码跳过已占槽位分配，
+  errName/trace 直接回放 `Err.open`）。**多线程压测从 0/20 修到 20/20**：
+  SEH 抓崩溃 + 事件环实锤三连——同任务被两线程各 DeleteFiber 一次（堆损坏
+  0xC0000374）、push 丢唤醒、完成态睡死；修法收敛成**fiber 所有权规则**
+  （切回后按"为什么切回"一次性判定后立即收手，`deleted` 哨兵兜底双删）与
+  无窗口睡眠协议（复查与睡眠同在 idle 锁内，done 复查也进锁）。调度器拆
+  8 分片就绪队列 + 轮转扫描防饿死。见 decisions **§90–§93**。
 - [x] M56 **统一 Task：多线程 / 单线程 / 协程收敛成一个 `std.Task`**：
   按用户拍板删掉 thread / fiber 两套 API（同步原语独立成 `std.mutex` /
   `std.atomic`）。**Task 是调度器调度的栈有纤程**：`spawn(fn, ctx) ?usize`

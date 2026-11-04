@@ -620,9 +620,12 @@ static Symbol *std_builtin(const char *name) {
     static Symbol proc_s, p_args, p_getenv, p_setenv, p_exit;
     static Symbol debug_s, d_panic, d_assert, d_errname, d_trace;
     static Symbol task_s, t_spawn, t_await, t_cancel, t_yield, t_current,
-                  t_interrupted, t_auto, t_init;
+                  t_interrupted, t_auto, t_init, t_go, t_run, t_sleep,
+                  t_single, t_pool;
     static Symbol sync_s, m_new, m_lock, m_try, m_unlock, m_free;
     static Symbol atomic_s, a_add, a_sub, a_load, a_store, a_swap, a_cas;
+    static Symbol chan_s, c_new, c_close, c_send, c_recv, c_tsend, c_trecv;
+    static Symbol cond_s, cn_new, cn_wait, cn_sig, cn_bcast, cn_free;
     static bool init;
     if (!name) return NULL;
     if (!init) {
@@ -842,9 +845,36 @@ static Symbol *std_builtin(const char *name) {
         t_init.name = "init"; t_init.cname = "zx_task_init";
         t_init.ty = ty_fn(&usz, 1, ty_void());
 
-        Symbol *ts[8] = { &t_spawn, &t_await, &t_cancel, &t_yield,
-                          &t_current, &t_interrupted, &t_auto, &t_init };
-        for (int i = 0; i < 8; i++) {
+        /* 默认任务（M57）：spawn 要求 fn(usize)!usize 的固定签名，常用
+         * 形态得自己写包装——go / run / sleep 把三种最常见的活包掉。
+         * go：零参可错函数；run：零参不可错函数；sleep：当前任务睡 ms。 */
+        Type *t_gofn = ty_fn(NULL, 0, ty_err(usz));      /* fn() !usize */
+        Type *p_tgo[1] = { t_gofn };
+        t_go.name = "go"; t_go.cname = "zx_task_go";
+        t_go.ty = ty_fn(p_tgo, 1, ty_opt(usz));
+        Type *t_runfn = ty_fn(NULL, 0, usz);             /* fn() usize */
+        Type *p_trun[1] = { t_runfn };
+        t_run.name = "run"; t_run.cname = "zx_task_run";
+        t_run.ty = ty_fn(p_trun, 1, ty_opt(usz));
+        Type *p_tsl[1] = { usz };
+        t_sleep.name = "sleep"; t_sleep.cname = "zx_task_sleep";
+        t_sleep.ty = ty_fn(p_tsl, 1, ty_err(ty_void()));
+
+        /* 默认调度实例（M57）：三种现成形态——
+         *   single：单线程，主线程驱动，任务即协程（交错确定）；
+         *   pool：  多线程工作线程池（n=0 自动按 CPU），spawn 的任务
+         *           被池里线程偷走跑；
+         *   协程语义由 single 里的任务承担（栈有 + await 真挂起 +
+         *   Task.auto 控制门），不单列类型——对外仍然只有一个 Task。 */
+        t_single.name = "single"; t_single.cname = "zx_task_single";
+        t_single.ty = ty_fn(NULL, 0, ty_void());
+        t_pool.name = "pool"; t_pool.cname = "zx_task_pool";
+        t_pool.ty = ty_fn(&usz, 1, ty_void());
+
+        Symbol *ts[13] = { &t_spawn, &t_await, &t_cancel, &t_yield,
+                           &t_current, &t_interrupted, &t_auto, &t_init,
+                           &t_go, &t_run, &t_sleep, &t_single, &t_pool };
+        for (int i = 0; i < 13; i++) {
             ts[i]->kind = SK_CONST;
             ts[i]->state = 2;
             ts[i]->builtin = BI_TASK_FN;
@@ -890,6 +920,53 @@ static Symbol *std_builtin(const char *name) {
             ss[i]->kind = SK_CONST;
             ss[i]->state = 2;
             ss[i]->builtin = BI_SYNC_FN;
+        }
+
+        /* std.channel（M57）：纤程感知的有界通道——send/recv 在任务里
+         * 是真挂起（等在通道的等待者链上，不占 OS 线程），挂在 Task 侧
+         * 因为它依赖调度器的重入队能力。错误集：closed / would_block。 */
+        chan_s.name = "channel"; chan_s.kind = SK_NS; chan_s.builtin = BI_TASK;
+        chan_s.state = 2; chan_s.ty = ty_type(); chan_s.type_val = ty_void();
+        c_new.name = "chanNew"; c_new.cname = "zx_chan_new";
+        c_new.ty = ty_fn(&usz, 1, usz);
+        c_close.name = "chanClose"; c_close.cname = "zx_chan_close";
+        c_close.ty = ty_fn(&usz, 1, ty_void());
+        Type *p_csv[2] = { usz, usz };
+        c_send.name = "chanSend"; c_send.cname = "zx_chan_send";
+        c_send.ty = ty_fn(p_csv, 2, ty_err(ty_void()));
+        c_recv.name = "chanRecv"; c_recv.cname = "zx_chan_recv";
+        c_recv.ty = ty_fn(&usz, 1, ty_err(usz));
+        c_tsend.name = "chanTrySend"; c_tsend.cname = "zx_chan_trysend";
+        c_tsend.ty = ty_fn(p_csv, 2, ty_err(ty_void()));
+        c_trecv.name = "chanTryRecv"; c_trecv.cname = "zx_chan_tryrecv";
+        c_trecv.ty = ty_fn(&usz, 1, ty_err(usz));
+        Symbol *cs[6] = { &c_new, &c_close, &c_send, &c_recv, &c_tsend, &c_trecv };
+        for (int i = 0; i < 6; i++) {
+            cs[i]->kind = SK_CONST;
+            cs[i]->state = 2;
+            cs[i]->builtin = BI_TASK_FN;
+        }
+
+        /* std.cond（M57）：OS 线程级条件变量，std.mutex 的搭档——会阻塞
+         * 所在 OS 线程，任务里慎用（纤程级的等待用 channel）。 */
+        cond_s.name = "cond"; cond_s.kind = SK_NS; cond_s.builtin = BI_SYNC;
+        cond_s.state = 2; cond_s.ty = ty_type(); cond_s.type_val = ty_void();
+        Type *p_cw[2] = { usz, usz };
+        cn_new.name = "condNew"; cn_new.cname = "zx_cond_new";
+        cn_new.ty = ty_fn(NULL, 0, usz);
+        cn_wait.name = "condWait"; cn_wait.cname = "zx_cond_wait";
+        cn_wait.ty = ty_fn(p_cw, 2, ty_void());
+        cn_sig.name = "condSignal"; cn_sig.cname = "zx_cond_signal";
+        cn_sig.ty = ty_fn(&usz, 1, ty_void());
+        cn_bcast.name = "condBroadcast"; cn_bcast.cname = "zx_cond_broadcast";
+        cn_bcast.ty = ty_fn(&usz, 1, ty_void());
+        cn_free.name = "condFree"; cn_free.cname = "zx_cond_free";
+        cn_free.ty = ty_fn(&usz, 1, ty_void());
+        Symbol *cns[5] = { &cn_new, &cn_wait, &cn_sig, &cn_bcast, &cn_free };
+        for (int i = 0; i < 5; i++) {
+            cns[i]->kind = SK_CONST;
+            cns[i]->state = 2;
+            cns[i]->builtin = BI_SYNC_FN;
         }
     }
 
@@ -944,6 +1021,18 @@ static Symbol *std_builtin(const char *name) {
     if (!strcmp(name, "Task.interrupted"))  return &t_interrupted;
     if (!strcmp(name, "Task.auto"))         return &t_auto;
     if (!strcmp(name, "Task.init"))         return &t_init;
+    if (!strcmp(name, "Task.go"))           return &t_go;
+    if (!strcmp(name, "Task.run"))          return &t_run;
+    if (!strcmp(name, "Task.sleep"))        return &t_sleep;
+    if (!strcmp(name, "Task.single"))       return &t_single;
+    if (!strcmp(name, "Task.pool"))         return &t_pool;
+    if (!strcmp(name, "channel"))              return &chan_s;
+    if (!strcmp(name, "channel.chanNew"))      return &c_new;
+    if (!strcmp(name, "channel.chanClose"))    return &c_close;
+    if (!strcmp(name, "channel.chanSend"))     return &c_send;
+    if (!strcmp(name, "channel.chanRecv"))     return &c_recv;
+    if (!strcmp(name, "channel.chanTrySend"))  return &c_tsend;
+    if (!strcmp(name, "channel.chanTryRecv"))  return &c_trecv;
     if (!strcmp(name, "mutex"))            return &sync_s;
     if (!strcmp(name, "mutex.mutexNew"))    return &m_new;
     if (!strcmp(name, "mutex.mutexLock"))   return &m_lock;
@@ -957,6 +1046,12 @@ static Symbol *std_builtin(const char *name) {
     if (!strcmp(name, "atomic.atomicStore")) return &a_store;
     if (!strcmp(name, "atomic.atomicSwap"))  return &a_swap;
     if (!strcmp(name, "atomic.atomicCAS"))   return &a_cas;
+    if (!strcmp(name, "cond"))               return &cond_s;
+    if (!strcmp(name, "cond.condNew"))       return &cn_new;
+    if (!strcmp(name, "cond.condWait"))      return &cn_wait;
+    if (!strcmp(name, "cond.condSignal"))    return &cn_sig;
+    if (!strcmp(name, "cond.condBroadcast")) return &cn_bcast;
+    if (!strcmp(name, "cond.condFree"))      return &cn_free;
     return NULL;
 }
 
@@ -964,7 +1059,7 @@ static Symbol *std_builtin(const char *name) {
 static const char *g_std_seeded[] = {
     "print", "println", "format", "heap", "file", "io", "Allocator",
     "TypeKind", "TypeInfo", "FieldInfo", "stackAlloc", "heapAlloc", "process",
-    "debug", "Task", "mutex", "atomic", NULL
+    "debug", "Task", "mutex", "atomic", "channel", "cond", NULL
 };
 
 static Symbol *ns_member(Symbol *ns, const char *name, int line, int col) {
@@ -2158,10 +2253,12 @@ static bool castable(Type *from, Type *to) {
 }
 
 /* 枚举成员在编译期的值：显式写了的取 tag，没写的取下标（与布局规则一致）。
- * `(error)Err.x` 的成员访问节点上没有折叠值，得这样反查一次。 */
+ * `(error)Err.x` 的成员访问节点上没有折叠值，得这样反查一次。
+ * base 两种形状都收：类型标注位是 NK_TYPE_IDENT，表达式位是 NK_IDENT
+ * （type_val 都会指向枚举类型本体，TY_ENUM 校验兜底）。 */
 static bool enum_member_value(Node *e, int64_t *out) {
     if (!e || e->kind != NK_FIELD || !e->name) return false;
-    if (!e->a || e->a->kind != NK_TYPE_IDENT) return false;
+    if (!e->a || (e->a->kind != NK_TYPE_IDENT && e->a->kind != NK_IDENT)) return false;
     Type *tv = e->a->type_val;
     if (!tv || tv->kind != TY_ENUM) return false;
     for (int i = 0; i < tv->nfields; i++) {
@@ -2192,6 +2289,17 @@ static Type *check_cast(Node *n) {
         if (!v) v = ct_eval_probe(n->b);
         if (v && v->kind == V_INT) { cv = val_i64(v); known = true; }
         else if (enum_member_value(n->b, &cv)) known = true;
+        /* 枚举错误名字登记（M57 统一回放）：码就是枚举值本身，把
+         * "Err.x" 占位进码→名字表，errName / printTrace 就能和命名
+         * 错误走同一张表解析。probe 折叠成功也要登记，所以放在
+         * known 判定之后、不分分支。 */
+        if (known && n->b && n->b->kind == NK_FIELD && n->b->name &&
+            n->b->a && (n->b->a->kind == NK_TYPE_IDENT ||
+                        n->b->a->kind == NK_IDENT) && n->b->a->name) {
+            Buf nb; buf_init(&nb);
+            buf_printf(&nb, "%s.%s", n->b->a->name, n->b->name);
+            ty_err_code_at(nb.data, (uint16_t)cv);
+        }
         if (known && cv == 0)
             return BAD_CODE("E0508", n, "error code 0 means \"no error\": this would be read as "
                                         "success and hand back an uninitialized payload — "
