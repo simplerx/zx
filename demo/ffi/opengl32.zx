@@ -1,0 +1,14 @@
+// OpenGL 绑定 —— wgl 上下文管理 + 少量核心 GL 入口。
+// opengl32.dll 直接导出这些符号，glGetString 不需要 wglGetProcAddress。
+
+@link("opengl32");
+
+extern "C" {
+    pub fn wglCreateContext(dc: *u8) *u8;
+    pub fn wglMakeCurrent(dc: *u8, ctx: *u8) bool;
+    pub fn wglDeleteContext(ctx: *u8) bool;
+    pub fn glGetString(name: u32) *const u8;
+    pub fn glClearColor(r: f32, g: f32, b: f32, a: f32) void;
+    pub fn glClear(mask: u32) void;
+    pub fn glGetError() u32;
+}

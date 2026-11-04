@@ -2035,6 +2035,43 @@ pub const Parser = struct {
         return n;
     };
 
+    // extern "C" { … } 块内的一项。`extern` 语义由块本身带来，所以这里
+    // 不吃 extern 关键字：fn → extern fn、var → extern var、
+    // const Name = struct/union → extern struct/union。其余拒绝。
+    // `pub` 允许（绑定模块的 extern 就是它的公开 API），直接透传。
+    const parse_extern_item = fn (self: *Parser) !*Node {
+        let t = self.cur();
+        if (t.kind == lex.Kind.kw_pub) {
+            self.advance();
+            let inn = try self.parse_extern_item();
+            inn.is_pub = true;
+            return inn;
+        }
+        if (t.kind == lex.Kind.kw_fn) {
+            let f = try self.parse_fn(true);
+            f.is_extern = true;
+            f.flag = false;
+            try self.expect(lex.Kind.semi);
+            return f;
+        }
+        if (t.kind == lex.Kind.kw_var) {
+            let d = try self.parse_decl();
+            d.is_extern = true;
+            return d;
+        }
+        if (t.kind == lex.Kind.kw_const || t.kind == lex.Kind.kw_let) {
+            let d = try self.parse_decl();
+            if (d.b) inn {
+                if (inn.kind == NK.struct_ || inn.kind == NK.union_) {
+                    inn.is_extern = true;
+                    return d;
+                }
+            }
+            return (error)Fail.f;   // 块内只收 extern 兼容声明
+        }
+        return (error)Fail.f;
+    };
+
     const parse_stmt = fn (self: *Parser) !*Node {
         let t = self.cur();
 
@@ -2042,7 +2079,6 @@ pub const Parser = struct {
             self.advance();
             let inn = try self.parse_stmt();
             if (inn.kind == NK.decl || inn.kind == NK.fn_) {
-                if (inn.is_extern) { return (error)Fail.f; }
                 inn.is_pub = true;
             } else {
                 return (error)Fail.f;
@@ -2063,6 +2099,22 @@ pub const Parser = struct {
                 let d = try self.parse_decl();
                 d.is_extern = true;
                 return d;
+            }
+            // extern ["C"] { … } —— 块糖：整组 extern 声明一次给出。
+            // 返回标记过的 block，parse_program 把块内声明上提到文件根。
+            if (self.at(lex.Kind.lbrace)) {
+                let t0 = self.cur();
+                let blk = self.new_at(NK.block, t0);
+                self.advance();
+                while (!self.at(lex.Kind.rbrace) && !self.at(lex.Kind.eof)) {
+                    let before = self.i;
+                    let it = try self.parse_extern_item();
+                    self.push_item(blk, it);
+                    if (self.i == before) { self.advance(); }
+                }
+                try self.expect(lex.Kind.rbrace);
+                blk.is_extern = true;
+                return blk;
             }
             if (!self.at(lex.Kind.kw_fn)) { return (error)Fail.f; }
             let f = try self.parse_fn(true);
@@ -2179,7 +2231,16 @@ pub const Parser = struct {
             let nerr = self.errs.len;
             let r = self.parse_stmt();
             if (r) st {
-                self.push_item(root, st);
+                if (st.kind == NK.block && st.is_extern) {
+                    // extern "C" { … }：块内声明上提到文件根（extern 只在根合法）
+                    var qi: u64 = 0;
+                    while (qi < st.items.len) {
+                        self.push_item(root, st.items.items()[qi]);
+                        qi = qi + 1;
+                    }
+                } else {
+                    self.push_item(root, st);
+                }
                 if (self.i == before) { self.advance(); }
             } else {
                 // 顶层恢复（对应 C 的 crude recovery）：补齐兜底消息，

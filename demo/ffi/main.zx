@@ -1,0 +1,108 @@
+// OpenGL 全链路演示 —— FFI 套件的第一个真实用户（M25）。
+//
+// 不借助任何生成工具，纯手写绑定 + `extern "C"` 块糖：
+//   user32   建窗口（WNDCLASSW 里带函数指针字段）
+//   gdi32    选像素格式（PIXELFORMATDESCRIPTOR，26 字段的 C 结构体）
+//   opengl32 建 GL 上下文、glGetString 读驱动报上来的版本信息
+//
+// 布局错误的证据链：窗口类/像素格式任何一个字段错位，链路都会在
+// ChoosePixelFormat 或 wglMakeCurrent 断掉——能打出 GL 字符串，
+// 就是三层结构体布局全部正确的运行时证据。
+
+const win = module("user32.zx");
+const gdi = module("gdi32.zx");
+const gl = module("opengl32.zx");
+
+// ---- GL 常量（只列用到的） ----
+const GL_VENDOR: u32 = 0x1F00;
+const GL_RENDERER: u32 = 0x1F01;
+const GL_VERSION: u32 = 0x1F02;
+
+// PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER
+const PFD_FLAGS: u32 = 0x04 | 0x20 | 0x01;
+
+// GL 字符串是 NUL 结尾的 C 串，而 Zx 串是 (ptr,len)。驱动报上来的
+// version/renderer 都远短于 256，把返回的指针按定长数组视图读，扫到
+// NUL 为止再切成 Zx 串——省掉 strlen 依赖。
+const cstr = fn (p: *const u8) []const u8 {
+    let buf = (*const [256]u8)p;
+    var n: usize = 0;
+    while (n < 255) {
+        if (buf[n] == 0) { return buf[0..n]; }
+        n = n + 1;
+    }
+    return buf[0..255];
+};
+
+const main = fn () u8 {
+    // 1. 注册窗口类。类名是宽字符（UTF-16）——"zxgl\0" 的码点。
+    var cls_name: *[5]u16 = &.{ 122, 120, 103, 108, 0 };
+    var wc = win.WndClassW{
+        .style = 0x08,                      // CS_HREDRAW | ... 只要非 0 即可
+        .lpfnWndProc = win.def_proc,        // Zx 函数直接当 C 回调
+        .cbClsExtra = 0,
+        .cbWndExtra = 0,
+        .hInstance = (*u8)(0x400000),       // 伪实例句柄：不进消息循环够用
+        .hIcon = (*u8)(0),
+        .hCursor = (*u8)(0),
+        .hbrBackground = (*u8)(0),
+        .lpszMenuName = (*const u16)(0),
+        .lpszClassName = cls_name,
+        .hIconSm = (*u8)(0),
+    };
+    let atom = win.RegisterClassW(&wc);
+    if (atom == 0) { std.println("RegisterClassW failed"); return 1; }
+
+    // 2. 建窗口（1x1，不显示、不泵消息——建上下文用不着）。
+    let hwnd = win.CreateWindowExW(
+        0, cls_name, cls_name,
+        0x80000000,        // WS_POPUP
+        0, 0, 1, 1,
+        (*u8)(0), (*u8)(0), (*u8)(0), (*u8)(0));
+    if (hwnd == (*u8)(0)) { std.println("CreateWindowExW failed"); return 2; }
+
+    // 3. 像素格式。PIXELFORMATDESCRIPTOR 26 个字段一个不落——
+    //    这里写错任何一个偏移，ChoosePixelFormat 要么失败要么选出错的格式。
+    let dc = gdi.GetDC(hwnd);
+    if (dc == (*u8)(0)) { std.println("GetDC failed"); return 3; }
+    let pfd_size: u16 = (u16)(@sizeOf(gdi.PixelFormatDescriptor));
+    var pfd = gdi.PixelFormatDescriptor{
+        .nSize = pfd_size,
+        .nVersion = 1,
+        .dwFlags = PFD_FLAGS,
+        .iPixelType = 0,                   // PFD_TYPE_RGBA
+        .cColorBits = 24,
+        .cRedBits = 0, .cRedShift = 0,
+        .cGreenBits = 0, .cGreenShift = 0,
+        .cBlueBits = 0, .cBlueShift = 0,
+        .cAlphaBits = 0, .cAlphaShift = 0,
+        .cAccumBits = 0,
+        .cAccumRedBits = 0, .cAccumGreenBits = 0, .cAccumBlueBits = 0, .cAccumAlphaBits = 0,
+        .cDepthBits = 24,
+        .cStencilBits = 8,
+        .cAuxBuffers = 0,
+        .iLayerType = 0,                   // PFD_MAIN_PLANE
+        .bReserved = 0,
+        .dwLayerMask = 0, .dwVisibleMask = 0, .dwDamageMask = 0,
+    };
+    let pf = gdi.ChoosePixelFormat(dc, &pfd);
+    if (pf == 0) { std.println("ChoosePixelFormat failed"); return 4; }
+    if (!gdi.SetPixelFormat(dc, pf, &pfd)) { std.println("SetPixelFormat failed"); return 5; }
+
+    // 4. GL 上下文 + 绑定当前线程。
+    let ctx = gl.wglCreateContext(dc);
+    if (ctx == (*u8)(0)) { std.println("wglCreateContext failed"); return 6; }
+    if (!gl.wglMakeCurrent(dc, ctx)) { std.println("wglMakeCurrent failed"); return 7; }
+
+    // 5. 向驱动问话。能打出这三行 = user32/gdi32/opengl32 三层布局全对。
+    std.println("vendor:   {}", cstr(gl.glGetString(GL_VENDOR)));
+    std.println("renderer: {}", cstr(gl.glGetString(GL_RENDERER)));
+    std.println("version:  {}", cstr(gl.glGetString(GL_VERSION)));
+
+    gl.wglMakeCurrent((*u8)(0), (*u8)(0));
+    gl.wglDeleteContext(ctx);
+    win.DestroyWindow(hwnd);
+    return 0;
+};
+
+const std = module("std");

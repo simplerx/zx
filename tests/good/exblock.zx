@@ -1,0 +1,25 @@
+// extern "C" { … } 块糖：整组外部声明一次给出（M25）。
+// 块内 fn → extern fn；const Name = struct → extern struct；
+// var → extern var。语义与逐条写 extern 完全等价。
+@link("ws2_32");
+
+extern "C" {
+    fn htonl(u32) u32;
+    fn htons(u16) u16;
+    const Ipv4Addr = struct {
+        b0: u8, b1: u8, b2: u8, b3: u8,
+    };
+}
+
+const main = fn () u8 {
+    // 0x01020304 网络序 = 67305985
+    let v = htonl(0x01020304);
+    if (v != 0x04030201) { return 1; }
+    let p = htons(0x0102);
+    if (p != 0x0201) { return 2; }
+    // 块里声明的 extern struct 是真 C 布局：4 字节、无内边距
+    if (@sizeOf(Ipv4Addr) != 4) { return 3; }
+    std.println("htonl={}", v);
+    return 0;
+};
+const std = module("std");

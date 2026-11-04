@@ -1,0 +1,42 @@
+// Win32 user32 绑定 —— 只收 OpenGL 演示用到的最小面。
+// 句柄一律 *u8（C 的 HWND/HINSTANCE 都是指针宽度的黑盒）。
+
+@link("user32");
+
+extern "C" {
+    pub const WndClassW = struct {
+        style: u32,
+        lpfnWndProc: fn (*u8, u32, usize, usize) usize,   // WNDPROC：Zx 函数可直填
+        cbClsExtra: i32,
+        cbWndExtra: i32,
+        hInstance: *u8,
+        hIcon: *u8,
+        hCursor: *u8,
+        hbrBackground: *u8,
+        lpszMenuName: *const u16,
+        lpszClassName: *const u16,
+        hIconSm: *u8,
+    };
+
+    pub const Msg = struct {
+        hwnd: *u8,
+        message: u32,
+        wParam: usize,
+        lParam: usize,
+        time: u32,
+        pt: Point,                                        // 嵌套 extern struct
+    };
+    pub const Point = struct { x: i32, y: i32 };
+
+    pub fn RegisterClassW(wc: *WndClassW) u16;
+    pub fn CreateWindowExW(ex: u32, cls: *const u16, title: *const u16,
+                       style: u32, x: i32, y: i32, w: i32, h: i32,
+                       parent: *u8, menu: *u8, inst: *u8, param: *u8) *u8;
+    pub fn DestroyWindow(h: *u8) bool;
+}
+
+// DefWindowProcW 包一层 Zx 函数：给 WNDPROC 字段用（回调走 (void*) 中转）。
+pub const def_proc = fn (h: *u8, msg: u32, wp: usize, lp: usize) usize {
+    return DefWindowProcW(h, msg, wp, lp);
+};
+extern fn DefWindowProcW(h: *u8, msg: u32, wp: usize, lp: usize) usize;

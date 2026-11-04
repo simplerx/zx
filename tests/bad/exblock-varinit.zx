@@ -1,0 +1,9 @@
+// expect: takes no initializer
+// extern "C" 块里的 var 同样不许写初始化值——存储在 C 那边。
+extern "C" {
+    var g_v: i32 = 3;
+}
+
+const main = fn () u8 {
+    return 0;
+};

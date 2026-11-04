@@ -1498,6 +1498,43 @@ static Node *parse_yield(P *p) {
     return n;
 }
 
+/* extern "C" { … } 块内的一项。`extern` 语义由块本身带来，所以这里
+ * 不吃 extern 关键字：fn → extern fn、var → extern var、
+ * const Name = struct/union → extern struct/union。其余给出诊断。
+ * `pub` 允许（绑定模块的 extern 就是它的公开 API），直接透传。 */
+static Node *parse_extern_item(P *p) {
+    Token *t = cur(p);
+    if (t->kind == TOK_KW_PUB) {
+        advance(p);
+        Node *inn = parse_extern_item(p);
+        if (inn) inn->is_pub = true;
+        return inn;
+    }
+    if (t->kind == TOK_KW_FN) {
+        Node *fn = parse_fn(p, true);
+        if (fn) { fn->is_extern = true; fn->flag = false; }
+        expect(p, TOK_SEMI);
+        return fn;
+    }
+    if (t->kind == TOK_KW_VAR) {
+        Node *d = parse_decl(p);
+        if (d) d->is_extern = true;
+        return d;
+    }
+    if (t->kind == TOK_KW_CONST || t->kind == TOK_KW_LET) {
+        Node *d = parse_decl(p);
+        if (d && d->b && (d->b->kind == NK_STRUCT_TYPE || d->b->kind == NK_UNION_TYPE)) {
+            d->b->is_extern = true;
+            return d;
+        }
+        perr(p, "inside `extern \"C\"` only `fn` / `var` / "
+                "`const Name = struct|union` declarations are allowed");
+        return d;
+    }
+    perr(p, "expected `fn`, `var` or `const Name = struct|union` inside `extern \"C\"`");
+    return node_new(NK_BLOCK, t->line, t->col);
+}
+
 static Node *parse_stmt(P *p) {
     Token *t = cur(p);
 
@@ -1506,7 +1543,6 @@ static Node *parse_stmt(P *p) {
         advance(p);
         Node *in = parse_stmt(p);
         if (in && (in->kind == NK_DECL || in->kind == NK_FN)) {
-            if (in->is_extern) perr(p, "`pub` is not allowed on `extern` declarations");
             in->is_pub = true;
         }
         else perr(p, "`pub` must be followed by `fn`, `const`, `let` or `var`");
@@ -1527,6 +1563,21 @@ static Node *parse_stmt(P *p) {
             Node *d = parse_decl(p);
             if (d) d->is_extern = true;
             return d;
+        }
+        /* extern ["C"] { … } —— 块糖：整组 extern 声明一次给出。
+         * 返回标记过的 NK_BLOCK，parse_program 把块内声明上提到文件根。 */
+        if (at(p, TOK_LBRACE)) {
+            Node *blk = node_new(NK_BLOCK, t->line, t->col);
+            advance(p);
+            while (!at(p, TOK_RBRACE) && !at(p, TOK_EOF_)) {
+                size_t before = p->i;
+                Node *it = parse_extern_item(p);
+                if (it) push(blk, it);
+                if (p->i == before) advance(p);
+            }
+            expect(p, TOK_RBRACE);
+            blk->is_extern = true;
+            return blk;
         }
         if (!at(p, TOK_KW_FN)) {
             if (at(p, TOK_KW_STRUCT) || at(p, TOK_KW_UNION)) {
@@ -1700,7 +1751,11 @@ Node *parse_program(Lexer *lx) {
     while (!at(&p, TOK_EOF_)) {
         size_t before = p.i;
         int errs = g_error_count;
-        push(root, parse_stmt(&p));
+        Node *st = parse_stmt(&p);
+        if (st && st->kind == NK_BLOCK && st->is_extern) {
+            /* extern "C" { … }：块内声明上提到文件根（extern 只在根合法） */
+            for (int i = 0; i < st->nitems; i++) push(root, st->items[i]);
+        } else push(root, st);
         if (p.i == before) advance(&p);
         /* 这个声明吃到了错：同步到下一个声明开头再继续 */
         if (g_error_count > errs) sync_decl(&p);

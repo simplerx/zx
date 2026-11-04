@@ -488,6 +488,29 @@ extern fn htonl(u32) u32;
   重链，否则多链/少链一个库看不出来。
 - 静态库构建（`--lib`）不消费 @link：.a 里没有链接这一步。
 
+### 3.16 extern "C" { … } —— 块糖
+
+一个库一组声明，`extern` 关键字只写一次；块内声明逐条上提到文件根，
+语义与逐条写 `extern` 完全等价：
+
+```zx
+@link("ws2_32");
+extern "C" {
+    pub fn htonl(u32) u32;          // → extern fn
+    pub const Ipv4Addr = struct {   // → extern struct（C 布局校验照常做）
+        b0: u8, b1: u8, b2: u8, b3: u8,
+    };
+    var g_host: *u8;                // → extern var
+}
+```
+
+- 块内收 `fn` / `var` / `const Name = struct|union`；`pub` 直接透传——
+  **绑定模块的 extern 声明就是它的公开 API**（`pub extern fn` 也合法）。
+- `enum` 不收：C 枚举就是 int，把常量当 `const` 写。
+- 绑定模块的组织方式见 `demo/ffi/`：一库一模块，`@link` 收在模块里，
+  应用代码只见 Zx。OpenGL 全链路演示（窗口 → 像素格式 → GL 上下文 →
+  打印驱动字符串）也在这里。
+
 ---
 
 ## 4. 标准库

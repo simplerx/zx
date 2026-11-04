@@ -1,0 +1,41 @@
+// Win32 gdi32 绑定 —— 像素格式这一层。
+// PIXELFORMATDESCRIPTOR 逐字段镜像 wingdi.h；字段顺序错一个，
+// ChoosePixelFormat 就会选出错误格式或直接失败。
+
+@link("gdi32");
+
+extern "C" {
+    pub const PixelFormatDescriptor = struct {
+        nSize: u16,
+        nVersion: u16,
+        dwFlags: u32,
+        iPixelType: u8,
+        cColorBits: u8,
+        cRedBits: u8,
+        cRedShift: u8,
+        cGreenBits: u8,
+        cGreenShift: u8,
+        cBlueBits: u8,
+        cBlueShift: u8,
+        cAlphaBits: u8,
+        cAlphaShift: u8,
+        cAccumBits: u8,
+        cAccumRedBits: u8,
+        cAccumGreenBits: u8,
+        cAccumBlueBits: u8,
+        cAccumAlphaBits: u8,
+        cDepthBits: u8,
+        cStencilBits: u8,
+        cAuxBuffers: u8,
+        iLayerType: u8,
+        bReserved: u8,
+        dwLayerMask: u32,
+        dwVisibleMask: u32,
+        dwDamageMask: u32,
+    };
+
+    pub fn GetDC(h: *u8) *u8;
+    pub fn ChoosePixelFormat(dc: *u8, pfd: *PixelFormatDescriptor) i32;
+    pub fn SetPixelFormat(dc: *u8, fmt: i32, pfd: *const PixelFormatDescriptor) bool;
+    pub fn SwapBuffers(dc: *u8) bool;
+}
