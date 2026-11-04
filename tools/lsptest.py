@@ -26,9 +26,15 @@ pub const make = fn () Obj {
     return Obj{ .count = 0, .name = "x" };
 };
 
+const Shape = union {
+    circle: f64,
+    rect: (f64, f64),
+};
+
 pub fn main() i32 {
     let o = make();
     let n = o.count;
+    var s = Shape{ .circle = 1.0 };
     std.println("{}", n);
     return 0;
 }
@@ -155,6 +161,22 @@ r, _ = recv_id("completion.o", 2)
 labels = {i["label"] for i in r["result"]["items"]} if r and r.get("result") else set()
 check("completion.o.members", {"count", "name", "bump"} <= labels, str(labels))
 
+# 3b 字面量成员补全：`Obj{ .` → 只要字段，方法（bump）不出
+off = MAIN.index("Obj{ .count") + len("Obj{ .")   # 光标贴在 '.' 之后
+send({"jsonrpc": "2.0", "id": 9, "method": "textDocument/completion", "params": {
+    "textDocument": {"uri": uri}, "position": pos(MAIN, off)}})
+r, _ = recv_id("completion.literal", 9)
+labels = {i["label"] for i in r["result"]["items"]} if r and r.get("result") else set()
+check("completion.literal.obj", {"count", "name"} <= labels and "bump" not in labels, str(sorted(labels)))
+
+# 3c union 字面量：`Shape{ .` → 变体（enum/union 成员）
+off = MAIN.index("Shape{ .circle") + len("Shape{ .")
+send({"jsonrpc": "2.0", "id": 10, "method": "textDocument/completion", "params": {
+    "textDocument": {"uri": uri}, "position": pos(MAIN, off)}})
+r, _ = recv_id("completion.literal.union", 10)
+labels = {i["label"] for i in r["result"]["items"]} if r and r.get("result") else set()
+check("completion.literal.union", {"circle", "rect"} <= labels, str(sorted(labels)))
+
 # 4 completion `std.p`（带前缀点补全，旧版这里只会出关键字）
 off = MAIN.rindex("std.p") + len("std.p")   # 光标在 p 后面
 send({"jsonrpc": "2.0", "id": 3, "method": "textDocument/completion", "params": {
@@ -182,7 +204,9 @@ r, _ = recv_id("references", 5)
 locs = r["result"] if r and r.get("result") is not None else []
 check("references.count", len(locs) >= 3, f"n={len(locs)}")
 
-# 7 formatting：didChange 成乱格式再请求
+# 7 formatting：didChange 成乱格式再请求。zxc fmt 只规整缩进/尾空白/
+# 空行（保守不动行内内容），所以断言按它的真实行为写：行内间距原样，
+# 缩进补成 4 空格。
 BADFMT = "pub fn    main() i32 {\n\tlet x=1;\nreturn      x;\n}\n"
 send({"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {
     "textDocument": {"uri": uri, "version": 2},
@@ -195,7 +219,7 @@ ok_fmt = False
 if edits is not None:
     if len(edits) == 1:
         nt = edits[0]["newText"]
-        ok_fmt = "return x;" in nt and "let x = 1;" in nt
+        ok_fmt = "\n    let x=1;\n" in nt and "\n    return      x;\n" in nt and "\t" not in nt
     else:
         ok_fmt = len(edits) == 0  # 没变化=已格式化（不该发生，但也算合法应答）
 check("formatting.zxcFmt", ok_fmt, str(edits)[:200] if edits is not None else "None")

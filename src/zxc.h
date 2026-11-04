@@ -15,7 +15,7 @@
 /* 唯一版本源：`zxc -v` / `zxc --version` 与生成的工程清单都读这里。
  * 编号跟 README 的里程碑走：次版本 = 里程碑号（M49 → 0.49），修订号
  * 留给同一里程碑里的修补。改这个数就顺手在 README 的「状态」里改一行。 */
-#define ZXC_VERSION "0.49.2"
+#define ZXC_VERSION "0.56.0"
 
 /* ---------- diagnostics ---------- */
 
@@ -149,6 +149,7 @@ typedef struct {
     Token      *toks;
     size_t      ntoks, captoks;
     Buf         strbuf;   /* decoded string storage */
+    const char *fname;    /* 源文件路径：@file() 用，解析期按模块捕获 */
 } Lexer;
 
 void lexer_init(Lexer *lx, const char *src, size_t len);

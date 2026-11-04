@@ -160,6 +160,11 @@ const char *ty_err_name(uint16_t code) {
     return g_errnames[code - 1];
 }
 
+/* 登记过的错误码总数：后端给 std.debug.errName 铺静态表用 */
+int ty_err_count(void) {
+    return g_nerrcodes;
+}
+
 /* 集合本体：错误码升序数组 + 同名数组。集合都很小，线性查找足够，
  * 关键是可以按内容 intern —— 于是"两个集合相等"就是指针相等。 */
 typedef struct ErrSet {

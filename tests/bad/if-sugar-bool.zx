@@ -1,0 +1,7 @@
+// expect: has nothing to capture
+// bool 条件的 if 没有可捕获的载荷：`if (c) cap;` 不是"把 c 交出去"。
+const f = fn (c: bool) i32 {
+    return if (c) cap;
+};
+
+const main = fn () i32 { return f(true); };

@@ -1264,7 +1264,9 @@ pub const Parser = struct {
             return n;
         }
 
-        let n = self.new(NK.tuple);
+        // 位置钉在 `.{` 这个 token 上（C 版 node_new(NK_TUPLE, t)）：
+        // 用 new() 会取当前 token——那是第一个元素，字面量套字面量时位置就岔了。
+        let n = self.new_at(NK.tuple, t);
         if (!self.at(lex.Kind.rbrace)) {
             var go = true;
             while (go) {
@@ -1630,8 +1632,16 @@ pub const Parser = struct {
                k == lex.Kind.shl || k == lex.Kind.shr;
     };
 
+    // 捕获名后面紧跟这些 token：臂到此结束，值只能是捕获值本身（M50 的糖）。
+    const ends_arm_here = fn (self: *Parser, k: lex.Kind) bool {
+        return k == lex.Kind.semi || k == lex.Kind.comma ||
+               k == lex.Kind.rparen || k == lex.Kind.rbrace ||
+               k == lex.Kind.rbracket || k == lex.Kind.kw_else;
+    };
+
     // 一个 if 臂。捕获名放 self.cap 出参。
-    const parse_if_arm = fn (self: *Parser) !*Node {
+    // implicit_ok 只在真值臂上为真：else 臂的裸名字一直是普通表达式。
+    const parse_if_arm = fn (self: *Parser, implicit_ok: bool) !*Node {
         if (self.at(lex.Kind.ident) && self.peek_tok(1).kind == lex.Kind.colon) {
             let lb = self.advance();
             self.advance();
@@ -1654,6 +1664,17 @@ pub const Parser = struct {
             return b;
         }
         if (self.at(lex.Kind.lbrace)) { return self.parse_block(); }
+
+        // 捕获即返回值（M50）：`if (o) v;` / `if (o) v else 0`
+        if (implicit_ok && self.at(lex.Kind.ident) &&
+            self.ends_arm_here(self.peek_tok(1).kind)) {
+            let idt = self.advance();
+            let cname = self.tok_text(idt);
+            self.cap = cname;
+            let idn = self.new_at(NK.id, idt);
+            idn.name = cname;
+            return idn;
+        }
 
         // 单条语句臂（M19 语法糖）：包一层单语句块
         if (self.arm_stmt_only(self.cur().kind)) {
@@ -1704,7 +1725,7 @@ pub const Parser = struct {
         try self.expect(lex.Kind.rparen);
 
         self.cap = null;
-        n.b = try self.parse_if_arm();
+        n.b = try self.parse_if_arm(true);
         if (self.cap) c { n.name = c; }
         self.cap = saved_cap;
 
@@ -1730,7 +1751,7 @@ pub const Parser = struct {
                 n.c = try self.parse_if(null);
             } else {
                 self.cap = null;
-                n.c = try self.parse_if_arm();
+                n.c = try self.parse_if_arm(false);
                 if (self.cap) c2 {
                     // C 版：else 捕获 id 的位置 = if 关键字
                     let id = self.new_at(NK.id, t);
@@ -1907,23 +1928,36 @@ pub const Parser = struct {
             }
             try self.expect(lex.Kind.colon);
             // 冒号后最多两个名字：cap / lbl / cap lbl
+            // M50 的糖：名字后面什么都没有（紧跟 `,` / `}`）→ 臂值就是捕获值
+            var implicit: ?*Node = null;
             if (self.at(lex.Kind.ident) && !self.is_bool_word(self.cur())) {
-                if (self.peek_tok(1).kind == lex.Kind.lbrace) {
-                    arm.name = try self.take_ident();
-                    if (self.at(lex.Kind.ident) && self.peek_tok(1).kind == lex.Kind.colon) {
-                        arm.label = try self.take_ident();
-                        self.advance();
-                    }
+                let ends = self.peek_tok(1).kind == lex.Kind.comma ||
+                           self.peek_tok(1).kind == lex.Kind.rbrace;
+                if (!arm.flag && ends) {
+                    let idt = self.advance();
+                    let cname = self.tok_text(idt);
+                    arm.name = cname;
+                    let idn = self.new_at(NK.id, idt);
+                    idn.name = cname;
+                    implicit = idn;
                 } else {
-                    if (self.peek_tok(1).kind == lex.Kind.colon) {
-                        arm.label = try self.take_ident();
-                        self.advance();
-                    } else {
-                        if (self.peek_tok(1).kind == lex.Kind.ident &&
-                            self.peek_tok(2).kind == lex.Kind.colon) {
-                            arm.name = try self.take_ident();
+                    if (self.peek_tok(1).kind == lex.Kind.lbrace) {
+                        arm.name = try self.take_ident();
+                        if (self.at(lex.Kind.ident) && self.peek_tok(1).kind == lex.Kind.colon) {
                             arm.label = try self.take_ident();
                             self.advance();
+                        }
+                    } else {
+                        if (self.peek_tok(1).kind == lex.Kind.colon) {
+                            arm.label = try self.take_ident();
+                            self.advance();
+                        } else {
+                            if (self.peek_tok(1).kind == lex.Kind.ident &&
+                                self.peek_tok(2).kind == lex.Kind.colon) {
+                                arm.name = try self.take_ident();
+                                arm.label = try self.take_ident();
+                                self.advance();
+                            }
                         }
                     }
                 }
@@ -1933,10 +1967,14 @@ pub const Parser = struct {
             if (has_label && !self.at(lex.Kind.lbrace)) {
                 return (error)Fail.f;
             }
-            if (self.at(lex.Kind.lbrace)) {
-                arm.a = try self.parse_block();
+            if (implicit) im {
+                arm.a = im;
             } else {
-                arm.a = try self.parse_expr();
+                if (self.at(lex.Kind.lbrace)) {
+                    arm.a = try self.parse_block();
+                } else {
+                    arm.a = try self.parse_expr();
+                }
             }
             self.push_item(n, arm);
             if (!self.accept(lex.Kind.comma)) {

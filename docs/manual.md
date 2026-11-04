@@ -256,6 +256,8 @@ switch (s) { .circle: r a: { a: 3.14159 * r * r; }, .rect: wh a: { a: wh.0 * wh.
 if (n > 0) { use(n); } else { report(); }
 let max = if (a > b) a else b;                 // 表达式臂
 if (maybe) v { use(v); } else e { log((usize)e); }   // ?T / !T 捕获
+let v = if (maybe) v;                          // 捕获即返回值：臂就是 v
+let v = if (maybe) v else 0;                   // 同上，假分支给 0
 
 while (i < 10) { i = i + 1; }                  // 没有自增子句
 while (it.next()) v { total = total + v; } else { done(); }
@@ -279,8 +281,13 @@ let idx = hit: for (0..n) i {                  // 循环的 else：正常跑完�
 循环 `tag: while/for (…)`。`continue;` 走本轮末尾，`continue :tag;` 跳到外层标签循环的下一轮。
 
 `switch` 的模式：`.成员` / 整数 / char / `true` / `false` / 负数 / `else`；逗号并列是
-同一条臂。**冒号后紧跟 `{` 是捕获，紧跟 `:` 是标签**。枚举、`union(enum)`、`?T`、`!T`、bool
-必须穷尽或有 `else`。
+同一条臂。**冒号后紧跟 `{` 是捕获，紧跟 `:` 是标签，什么都不跟（`,}`）就是"臂值 = 捕获值"**。
+枚举、`union(enum)`、`?T`、`!T`、bool 必须穷尽或有 `else`。
+
+```zx
+let n = switch (maybe) { .some: v, .none: 0 };   // 冒号后只有一个名字 → 臂值就是 v
+let a = switch (shape) { .circle: r { r * r }, .rect: wh t: { t: wh.0 * wh.1; } };
+```
 
 `defer` 离开所在块时执行（LIFO），**表达式在退出时求值**——所以 `defer free(buf); return buf;`
 返回的是悬空指针。`errdefer` 只在"因错误返回"时执行。
@@ -391,6 +398,8 @@ util.secret(1);                     // ✗ private to module 'util'
 | `@hasField(T, "x")` / `@fieldType` / `@fieldName(T, i)` | 编译期字段查询 |
 | `@field(v, "x")` | 按编译期字符串取/写字段 |
 | `@trap()` / `@compileError(msg)` | 中止 / 编译期报错 |
+| `@file()` / `@fnName()` | 当前源文件路径 / 当前函数名（`[]const u8`，编译期常量） |
+| `@line()` / `@col()` | 当前行列（`i32`，编译期常量） |
 | `@memcpy(d, s, n)` / `@memmove` / `@memset(d, v, n)` | 批量内存原语 |
 
 `@` 开头的名字不能被用户重定义。**没有 cast 类内建**（`@ptrCast` 等已从规格删除），
@@ -425,6 +434,10 @@ extern fn GetTickCount64() u64;                   // Win32（大小写敏感）
 | `std.file` | `read(al, path)`、`write(path, data)`、`append`、`exists`、`remove` |
 | `std.io` | `openRead/openWrite/openAppend(path)`、`read/write/seek/tell/close/flush`、`stdin/stdout/stderr`、`print/println` |
 | `std.process` | `args()`、`getEnv(name)`、`setEnv`、`exit(code)` |
+| `std.debug` | `panic(msg)`、`assert(cond, msg)`、`errName(err)`、`printTrace()` |
+| `std.Task` | `spawn/await/cancel/yield/current/interrupted/auto/init`——统一任务接口（§4.6） |
+| `std.mutex` / `std.atomic` | 非递归互斥（5 函数）/ SEQ_CST 原子（6 函数） |
+| `std.fiber` | `spawn(fn, ctx)`、`yield/resume/join/current`、`cancel/interrupted`；捕获环 trace 见 §4.7 |
 | `std.stackAlloc(T, N)` / `std.heapAlloc(al, T, N)` | 数组分配（OOM abort） |
 
 ### 4.2 容器
@@ -469,7 +482,82 @@ std.println("{}:{}", i, v);
   实参类型配错是编译错误。
 - `fmt` 是运行时字符串时回落到运行时解析器，语义一致（`std.io.print` 一律走运行时）。
 
----
+### 4.5 调试
+
+```zx
+std.debug.assert(n > 0, "n must be positive");   // 失败 → panic（带 file:line:col 与函数名）
+std.debug.panic("unreachable branch");            // noreturn，之后的代码报不可达（E0502）
+std.println("{}", std.debug.errName(e));          // 捕到的错误值直接传，返回错误名
+std.debug.printTrace();                           // 回放捕获环（最老→最新，见 §4.7）
+```
+
+- `panic` / `assert` 的位置实参（file/line/col/fn）是**编译器在调用点注入**的，
+  源码里不用写、也写不出来。
+- `--release` 下 `assert` 的运行时函数体整体擦除（条件副作用保留）；`panic` 不擦。
+- `errName` 查编译器生成的静态表：`error.foo` 字面量首次被引用即登记，查表 O(1)
+  （枚举错误 `(error)Err.x` 不进表，查出来是 `?`）。
+- `@file()/@line()/@col()/@fnName()` 单独可用，全部编译期折成字面量、零开销。
+
+### 4.6 任务：`std.Task`（统一线程 / 协程）
+
+多线程、单线程、协程是一个模型的三种配置（decisions §89）：**Task 是调度器
+调度的栈有纤程**——默认 CPU-1 个工作线程抢就绪队列（多线程）；`Task.init(0)`
+纯单线程，主线程 await 时顺便跑调度循环（协程）；await 在任务内是真挂起。
+
+```zx
+const Task = std.Task;
+
+const produce = fn (n: usize) !usize {
+    var acc: usize = 0;
+    var i: usize = 0;
+    while (i <= n) { acc = acc + i; i = i + 1; }
+    return acc;
+};
+
+const main = fn () !i32 {
+    let h = try Task.spawn(produce, 100);   // 入队即返回，?usize 句柄
+    let r = try Task.await(h);              // 真挂起等完成，拿返回值
+    std.println("{}", r);                   // 5050
+    return 0;
+};
+```
+
+**任务签名固定为 `fn (usize) !usize`**：多值打包成堆上结构体传指针（ctx 是
+usize）；返回值/错误经 await 带回。取消复用 `!T` 传播链——`cancel(h)` 后，
+h 在下一个 await 点收到 `error.cancelled`，顺着 try 冒到任务顶层，await h
+的人收到同一个错误。
+
+| 函数 | 语义 |
+| --- | --- |
+| `spawn(fn, ctx) ?usize` | 入就绪队列（不立即跑满）；失败返回 null |
+| `await(h) !usize` | 等完成并取结果/错误；任务内是真挂起，根上下文顺便推进调度 |
+| `cancel(h)` | 置取消旗标：h 在下一个 await 点收到 `error.cancelled` |
+| `yield()` | 当前任务回就绪队列尾，切回调度循环 |
+| `current() usize` | 当前任务句柄；根上下文是 `0` |
+| `interrupted() bool` | 当前任务的取消旗标 |
+| `auto(h, on)` | 开关 await 自动挂起（默认开，见 §4.7 await 门） |
+| `init(n)` | 配置工作线程数；0 = 纯单线程。只对首次 spawn 生效 |
+
+### 4.7 await 门与错误捕获 trace
+
+**await 门**：每个返回 `!T` 的函数入口都是一个 await 点（decisions §88）。
+在任务里且 auto 开着（默认开）：调用在入口**自动挂起**回调度循环；续跑后
+看取消旗标，被取消就以 `error.cancelled` 走 `!T` 传播链。根上下文里门是
+一次纯 false 检查；`--release` 下门保留（取消是运行时语义）。
+
+**捕获环 trace（捕获感知任务）**：`else err { … }` 捕获点在 dev 档自动
+登记一条 `{错误名, file, line, col, fn}` 到**当前任务**的环形缓冲（64 条，
+满了挤最老）；`std.debug.printTrace()` 回放最老→最新。
+
+- **trace 随任务走**：环挂在任务上下文上，不挂 TLS——任务被哪个线程调度
+  trace 都不断链；任务的捕获与根上下文的捕获天然隔离。
+- `try` 传播**不记**（码没有落地）；`orelse`/不带名的 else 臂也记。
+- `--release` 下捕获点整体抹掉，trace 为空、零开销。
+- 枚举错误 `(error)Err.x` 不进名字登记表，trace 里名字显示 `?`（码仍正确）。
+
+**同步原语**：`std.mutex`（`mutexNew/Lock/Try/Unlock/Free`，非递归，
+SRWLOCK / pthread）与 `std.atomic`（`Add/Sub/Load/Store/Swap/CAS`，usize，
+SEQ_CST）——它们不是执行模型，与 Task 分开按需链接。
 
 ## 5. 构建、产物与测试
 
@@ -511,6 +599,10 @@ sh editor/zed/install.sh    # 装 Zed 扩展（高亮 + 大纲 + LSP 接线）
 - 补全/诊断/跳转/hover/签名/格式化/引用 = `zxls`，它转手问 `zxc`，**需要三件套**。
 - 扩展按平台取 `<worktree>/bin/zxls[.exe]`；**不要在 `.zed/settings.json` 里覆盖绝对路径**。
 - 改了 `zx.json` 的 `deps` 要重启语言服务器（搜索路径只在 initialize 时算一次）。
+- 保存即格式化已默认开启（语言配置里 `format_on_save = "on"` +
+  `formatter = "language_server"`），要求 `bin/` 里三件套齐全。
+- 点补全支持：`X.` 出容器成员与方法、`X{ .` 只出字段/变体（字面量上下文）、
+  `std.` / 模块绑定 / `@` 内建各归各位。
 
 ---
 
@@ -551,6 +643,8 @@ sh editor/zed/install.sh    # 装 Zed 扩展（高亮 + 大纲 + LSP 接线）
 16. **`module("x")` 省 `.zx` 是允许的**，但显式写全路径更不容易歧义。
 17. **`try` 只吃 `!T`**：`?T` 的空不是错误，用 `if` / `orelse` / `.?`。
 18. **defer 体里不能再 return / 收割 / continue**；`try` 也不能用在 defer 里。
+19. **switch 冒号后的裸名字一定读作捕获名**：`1: K,` 的值是匹配到的 `1`，不是常量 `K`。
+    要常量就把名字括起来 `1: (K),`。（`if (c) x else y` 不受影响：bool 条件没载荷可捕。）
 
 ### 8.2 工程与工具链
 
@@ -569,8 +663,8 @@ sh editor/zed/install.sh    # 装 Zed 扩展（高亮 + 大纲 + LSP 接线）
 
 | 限制 | 现状 | 影响 |
 | --- | --- | --- |
-| 并发 | 标准库无线程/原子/异步 | 需要就自己 `extern fn` 调 pthread / Win32 |
-| 调试信息 | 后端不生成 DWARF/PDB，`-g` 未暴露 | 调试靠打印与 `@trap`，不能单步 |
+| 并发 | `std.Task` 统一任务接口（多线程/单线程/协程一个模型，§4.6/§4.7）+ mutex/atomic | 无 channel/条件变量/读写锁；调度锁是全局的 |
+| 调试信息 | 后端不生成 DWARF/PDB，`-g` 未暴露 | 单步调试不可用；打印/断言用 `std.debug`，位置内建零开销 |
 | 包管理 | 没有网络依赖解析 | 依赖靠 `vendor/` 或 `deps` 手工放置 |
 | 优化 | 只做 `-O0`/`-O2` 交给 C 编译器 | 没有 Zx 层优化（不做内联决策） |
 | 约束/特征 | 无 trait/接口/约束 | 用 `union(enum)`、函数字段、`@typeInfo` 自检 |
@@ -590,12 +684,12 @@ sh editor/zed/install.sh    # 装 Zed 扩展（高亮 + 大纲 + LSP 接线）
 | 词法 / 语法 / 类型检查 | 完成 | 25 关键字、泛型单态化、错误集、编译期求值；`tests/good` 52 + `tests/bad` 95 + 多文件 |
 | C11 后端 | 完成 | 7 个示例 + 正例编译成真二进制跑出期望输出；结构布局与 C 一致 |
 | 自举 | 完成（阶段 1–4） | `bootstrap/zxfe.zx` 用 Zx 写前端，`zxc` 默认走它；`--fe=c` 只作种子与交叉验证 |
-| 标准库 | 可用 | 7 个模块（std/str/map/fs/json/time/pool）+ 容器 + 格式化 |
+| 标准库 | 可用 | 7 个模块（std/str/map/fs/json/time/pool）+ 容器 + 格式化 + debug/thread |
 | 工具链 | 可用 | `init/build/run/test/check/fmt` + `-h/-v` + 增量编译 + 动态/静态库 |
 | 编辑器 | 可用 | tree-sitter 高亮/大纲 + zxls（补全/诊断/跳转/hover/签名/格式化/引用） |
-| 回归 | 在守 | `sh test.sh`：文件类 217 项 + CLI 冒烟 6 项 + LSP 会话 14 项 |
+| 回归 | 在守 | `sh test.sh`：文件类 220 项 + CLI 冒烟 6 项 + LSP 会话 14 项 |
 | 性能 | 有基线 | fib/mandel/mmat/str 四个锚点，前端已修掉两处 O(n²) |
-| 生态 | 起步 | 无包管理、无调试信息、无并发库 |
+| 生态 | 起步 | 无包管理、无调试信息；调试内建（M52）、统一 Task 并发（M53~M56 演进而来）已有 |
 
 一句话结论：**作为"能写真实程序（编译器自己就是用户）"的系统语言是完整可用的；
 作为"给别人用的语言产品"还差生态三件套——包管理、调试、并发。**

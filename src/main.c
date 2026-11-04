@@ -65,7 +65,7 @@ static const char *g_cflags;
  * 访问直接炸成 panic——那是个真问题，但在代码层修，不靠 dev 档暴露），
  * 这里显式关掉，保持与 -O1 时代一致的语义。 */
 #define CC_DEV  "-std=c11 -O0 -fno-sanitize=undefined"
-#define CC_REL  "-std=c11 -O2"
+#define CC_REL  "-std=c11 -O2 -DZX_RELEASE"
 
 /* 链接失败的翻译：lld 会说 `undefined symbol: zx_main_foo`——模块前缀是
  * 我们自己的编码，翻回 `模块/名字` 才对用户有意义。 */

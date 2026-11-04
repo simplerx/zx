@@ -782,6 +782,68 @@ zx_init_<stem>(void)  每模块一个初始化函数，main 按依赖倒序调�
   清掉仓库里的一次性产物与旧工具链备份（`.tmp/` 7.7 GB、`.zc-cache/`
   75 MB、`.toolchain-015-bak/` 693 MB、根目录 440 个 `b0_*` 残留），
   根目录从 460 项降到 15 项。`zxc -v` 进入 **0.49.0**。
+- [x] M50 **捕获即返回值：`if (o) v;` / `switch (u) { .some: v, .none: 0 }`**：
+  臂要交的就是捕获值本身时，名字后面什么都不用写（以前得贴标签块
+  `if (o) v t: { t: v; }`）。解析器把裸名字展开成"捕获 + 臂值"，两套前端
+  （C 与 `bootstrap/parse.zx`）产出**逐字节相同**的 AST。bool 条件的
+  `if (c) x else y` 照旧读作表达式臂（没有载荷可捕获）；switch 臂里的裸名字
+  一定读作捕获名，要外部常量写 `1: (K)`。各臂类型仍要统一。`zxc -v`
+  进入 **0.50.0**，spec 升到 **v0.28**。见 decisions **§83**。
+- [x] M56 **统一 Task：多线程 / 单线程 / 协程收敛成一个 `std.Task`**：
+  按用户拍板删掉 thread / fiber 两套 API（同步原语独立成 `std.mutex` /
+  `std.atomic`）。**Task 是调度器调度的栈有纤程**：`spawn(fn, ctx) ?usize`
+  入就绪队列（默认 CPU-1 个工作线程抢，`Task.init(0)` 纯单线程——主线程
+  await 时跑调度循环，测试确定性来源）；**任务签名 `fn (usize) !usize`**
+  ——await 带回返回值或错误（ZxErr_u64 ABI），M55 的 await 门直接生效，
+  **取消 = error.cancelled 顺 !T 传播链冒到任务顶层，await 的人收到同一
+  错误**；任务内 await 是真挂起（等待者链，完成时重新入队唤醒，不忙等）。
+  任务完成即回收栈（修掉 M54 纤程栈的终身泄漏）。见 decisions **§89**。
+- [x] M55 **await 自动挂起 + 取消自动传播：`!T` 函数入口就是 await 点**：
+  栈有纤程的红利——挂起不用状态机。每个返回 `!T` 的函数在入口发一道
+  **await 门**（`zx_fiber_await_gate`）：在纤程里且 `auto_yield` 开着（默认开，
+  `std.fiber.auto(f, false)` 可关），先挂起回 resumer——这就是调度点；续跑回来
+  后看取消旗标，被取消就以 `error.cancelled` 走 `!T` 传播链，顺着 try 一路冒到
+  捕获点。**取消于是变成"下一个 await 点自动生效"**，不用轮询。根上下文里门是
+  一次纯 false 检查。release 档门**不擦**（取消是运行时语义，不是调试设施），
+  擦的只有捕获点登记。旗标时机老问题再现：注入点在 gen_fn（发体时）而
+  `g_need_fiber` 平时也在发体时才置位——照 `scan_proc_use` 的先例加
+  `scan_fiber_use` 预扫描（认 `std.fiber` 访问形状，别名形状认不出是已知缺口）。
+  `resume` 的语义随之精确为"跑到下一个 await 点或结束"。见 decisions **§88**。
+- [x] M54 **捕获感知纤程：`std.fiber` + trace 随纤程走（并发库正体 Phase 2）**：
+  栈有纤程（stackful coroutine）：`spawn(fn, ctx)` 只创建不运行、`resume` 驱动到
+  `yield` 或跑完、`join` 反复驱动、`cancel`/`interrupted` 协作式取消旗标。Win32
+  CreateFiber/SwitchToFiber 与 POSIX ucontext 双路，tramp 与切换包装只留单一
+  无条件签名（§86 的头文件提升教训）。**trace 的载体是每纤程一张捕获环**：
+  `else err { … }` 捕获点（dev 档）自动压入 `{码, file, line, col, fn}`——位置与
+  函数名由后端在发射现场取得（`g_cur_mod_path`/`g_cur_fn_zx`）；环挂在纤程上下文
+  上、不挂 TLS，纤程跨线程迁移 trace 也跟着走；`std.debug.printTrace` 从占位升级
+  为回放（最老→最新，errName 查表）。release 档捕获点被 `#ifndef ZX_RELEASE`
+  整体抹掉，零开销。教训：`buf_printf` 是 vsnprintf——格式串里的字面 `%` 必须写
+  `%%`（`% Z` 会先吃掉唯一变参，后面的 `%d` 读到垃圾）。见 decisions **§87**。
+- [x] M53 **`std.thread`：OS 线程 + 互斥 + 原子（捕获感知纤程的地基）**：
+  `spawn(fn, ctx)`（`?usize` 句柄）/ `join` / `detach` / `current`，
+  `mutexNew/Lock/Try/Unlock/Free`，`atomicAdd/Sub/Load/Store/Swap/CAS`（usize 上的
+  `__atomic` 内建，SEQ_CST）。Win32 与 pthread 双路全在手写 `extern` 里（zxrt 不
+  include windows.h）；互斥选 **SRWLOCK**——内核互斥体对持有线程递归，两平台语义
+  会分叉，SRWLOCK 非递归与 pthread 一致；`TryAcquireSRWLockExclusive` 返回 1 字节
+  BOOLEAN（只写 AL），按 `int` 读高位是垃圾、必须按 `unsigned char` 收。线程/互斥
+  句柄都是 usize（0 保留），定长注册表。见 decisions **§86**。
+- [x] M52 **零开销调试内建：`@file`/`@line`/`@col`/`@fnName` + `std.debug`**：
+  四个位置内建在编译期折成字面量（file/fnName 发字符串切片、line/col 发整数），
+  落定点全在 sema——`@file` 取当前模块路径（双前端、多模块一致），
+  `@fnName` 由 `check_fn_body` 维护（具名 const 绑定的 fn 字面量自动贴名）。
+  `std.debug` 四件套：`panic(msg)`（noreturn，之后按不可达）与
+  `assert(cond, msg)` 的位置实参由编译器在调用点注入，release（`-DZX_RELEASE`）
+  下 assert 运行时函数体整体擦除；`errName(err)` 查编译器生成的码→名静态表
+  （O(1)，错误值首见即登记）；`printTrace()` 占位，真异步感知调用链留给
+  捕获感知纤程（Phase 2）。见 decisions **§85**。
+- [x] M51 **LSP 补全与格式化补课：`Person{.` 出成员、保存自动 fmt 真的能跑**：
+  字面量点补全认 `X{.`（容器名在 `{` 前，隔空白也认），只出字段/变体不出方法；
+  修掉 LSP 格式化两个被遮住的 bug——`zxc <file> fmt` 参数序错（fmt 是子命令，
+  实际跑的是编译，保存自动格式化一直静默无效）与 TextEdit JSON 少一个闭合
+  括号（fmt 生效后才炸出来）；TextEdit 终点改为最后一行行尾。Zed 语言配置落
+  `format_on_save` / `formatter`，格式化冒烟改为真打到 zxc（zxls 与 zxc 同
+  临时目录）。见 decisions **§84**。
 - [x] M45 **std 扩容——fs / json / time 三模块（性能第一）**：
   `std.fs`（路径纯函数零分配、DirIter 流式零拷贝、stat/exists/目录增删）、
   `std.json`（零拷贝解析、u128 整数快路径、开放寻址 Obj 每槽缓存哈希、
@@ -2137,6 +2199,73 @@ Neovim / Helix 要用就拷过去，不在语法目录再养一份副本——�
 / 类型 / 泛型 / 错误集 / C11 后端 / 自举四阶段 / LSP 全在跑，回归 217 + 6 +
 14 项守着。差的是生态三件套：**包管理、调试信息、并发库**；跨平台还停在
 "自备 `ZX_CC` 与工具链"的阶段。这个结论直接写在手册里，不粉饰。
+
+## M50：捕获即返回值——把"再写一遍"的那半行删掉
+
+写 `?T` 的两条常规路径，一直有个纯冗余的尾巴：
+
+```zx
+const a = if (o) v t: { t: v; };      // 捕获 v，然后整块只为把 v 交出去
+const b = switch (u) { .some: v { v }, .none: 0 };
+```
+
+M50 把它压成一个名字——**臂的值就是捕获值本身**：
+
+```zx
+const a = if (o) v;
+const b = switch (u) { .some: v, .none: 0 };
+```
+
+**判据是"名字后面什么都没有"。** 解析器看到捕获名后面紧跟 `;` `,` `)` `}`
+`]` 或 `else`，就展开成"捕获 + `NK_IDENT(捕获名)`"——不是新语义，是把
+`if (o) v v`（捕获 + 单值臂，M19 就有）补上最后那半截。所以类型检查、后端、
+捕获绑定全部原样复用，两套前端各加十几行：C 的 `parse_if_arm` 与
+`bootstrap/parse.zx` 的同名函数，`diff_ast.sh` 与自测都要求逐字节相同。
+
+**两个容易踩的边界，都在回归里钉住了：**
+
+① **bool 条件没有载荷可捕获。** `if (a > b) a else b` 是 idioms（spec 的
+`examples/syntax.zx` 里就有），而按上面的判据它长得跟糖一模一样。语义层用
+类型把它分开：条件不是 `?T` / `!T` 时，"捕获名"无所指，臂退回普通表达式。
+名字还没声明时（`if (c) cap;`）给一条指路的错，并把这一臂按 `void` 算，
+不级联出一句"unknown identifier"。
+
+② **switch 里的裸名字一定是捕获名。** 没有条件类型可以借力，所以规则定死：
+`1: K,` 的值是匹配到的 `1`，不是常量 `K`。要常量就把名字括起来 `1: (K),`——
+括号在 Zx 里本来就是"这是个表达式"，读起来不别扭。这条写进了手册 §8.1 的
+第 19 条坑。
+
+**为什么值得加。** 捕获是 Zx 里最常写的东西（`?T` / `!T` / 联合体全走它），
+而绝大多数捕获只有两种命运：就地用掉，或者原样交出去。后者以前每次都要
+起个标签名——`t`、`lbl`、`pos` 这种名字在代码里没有任何信息量。这半行删掉
+之后，`return if (o) v;` 读起来就是"有值就给，没有就零值"，跟 `orelse` 的
+心智模型对上了。
+
+**顺带修掉一个自举期的老毛病。** 新用例里有 `area(.{ .rect = .{ 2, 3 } })`，
+`diff_ast.sh` 立刻报了一处位置差异：`bootstrap/parse.zx` 的 `parse_dot_brace`
+用 `self.new(NK.tuple)`（取**当前** token，也就是第一个元素）而不是 `new_at(…, t)`
+（取 `.{` 本身）。单层字面量看不出来，字面量套字面量就岔开三列——这类偏差不会
+让任何用例失败，只有逐字节对拍能抓到。改完 **72/72 文件全等**。
+
+## M51：LSP 补全与格式化补课——声明过的能力必须真的能用
+
+两件事都来自真实使用中的"点了没反应"：
+
+**① `Person{.` 不出成员。** 点补全把 `.` 前的内容当点路径回扫，字面量
+`Person{.` 的 `.` 前是 `{`，取出来是空路径 → 空列表。现在 `.` 前回扫空白命中
+`{` 时，容器名取 `{` 之前的标识符路径——struct 字段、union 变体、enum 变体
+都能出；字面量上下文里方法（`name = fn …`）不出，因为字面量初始化写不了方法。
+
+**② 保存自动格式化一直是空的。** LSP 声明了 `documentFormattingProvider`，
+但拼的命令是 `zxc <影子文件> fmt`——fmt 是**子命令**，正确写法是
+`zxc fmt <文件>`。"fmt" 被 file-first 分支当成第二个文件名吞掉，实际跑的
+是编译：影子文件从未被格式化，宿主拿到空编辑，看起来就像"语言没有 fmt"。
+修复换序之后，同一个功能里还连环炸出两个被遮住的老 bug：TextEdit 的 JSON
+少一个闭合括号（宿主直接解析失败）、全文替换终点没算最后一行。冒烟测试
+的环境也改对了——zxls 按**兄弟目录**找 zxc.exe，旧冒烟的环境里根本没有
+zxc，formatting 返回空数组被当成"已格式化"假通过；现在 zxc 与新编 zxls
+同临时目录，格式化冒烟第一次真正打到 zxc。Zed 侧 `format_on_save` /
+`formatter = "language_server"` 落进语言配置，装完扩展即生效。见 decisions **§84**。
 
 ## 许可
 

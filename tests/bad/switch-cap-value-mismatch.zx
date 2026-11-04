@@ -1,0 +1,10 @@
+// expect: mismatched types
+// switch 的糖省掉的是块，不是类型检查：各臂仍然要交出同一个类型。
+const pick = fn (u: ?i32) i32 {
+    return switch (u) {
+        .some: v,
+        .none: "no",
+    };
+};
+
+const main = fn () i32 { return pick(1); };

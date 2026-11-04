@@ -205,6 +205,7 @@ static Node *fe_parse_c(const char *path) {
     }
     Lexer lx;
     lexer_init(&lx, src, len);
+    lx.fname = path;          /* @file() 按模块捕获自己的源路径 */
     lexer_run(&lx);
     if (g_error_count) { free(src); return NULL; }
     Node *root = parse_program(&lx);

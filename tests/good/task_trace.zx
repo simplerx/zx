@@ -1,0 +1,35 @@
+// task_trace.zx —— 捕获环随任务走（§87/§89）：任务的捕获记录在任务自己的
+// 环里，与根上下文的环天然隔离。这里断言两个上下文各自拿到自己的错误名。
+// expect-output:root caught:too_big
+// expect-output:task caught:too_big
+// expect-output:task ret:7
+const std = module("std");
+
+const may_fail = fn (x: usize) !i32 {
+    if (x > 0) { return error.too_big; }
+    return 0;
+};
+
+// 任务里捕获 → 任务自己的环
+const probe = fn (_: usize) !usize {
+    if (may_fail(7)) v { return 0; } else e {
+        std.println("task caught:{}", std.debug.errName(e));
+        std.debug.printTrace();       // 任务环：只有 probe 的捕获点（stderr）
+        return 7;
+    }
+};
+
+const main = fn () !i32 {
+    std.Task.init(0);
+    // 根上下文捕获（根环）
+    if (may_fail(7)) v {} else e {
+        std.println("root caught:{}", std.debug.errName(e));
+    }
+    let f = std.Task.spawn(probe, 0).?;
+    if (std.Task.await(f)) v {
+        std.println("task ret:{}", v);
+    } else e {
+        return error.bad;
+    }
+    return 0;
+};

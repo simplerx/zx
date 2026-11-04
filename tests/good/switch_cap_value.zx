@@ -1,0 +1,72 @@
+// switch 的"捕获即返回值"（M50）：冒号后只写一个名字、既不写块也不写值，
+// 臂的值就是匹配到的那个东西（和 if 的糖同一条规则）。
+//   switch (u) { .some: v, .none: 0 }   ≡  .some: v { v }
+// 各臂的类型仍然要一致——不同就是 unify 报错（见 tests/bad/switch-cap-value-mismatch.zx）。
+//
+// 注意裸名字**一定**读作捕获名。要外部常量请加括号：`1: (K)`。
+const std = module("std");
+
+const Shape = union(enum) {
+    circle: i32,
+    rect:   { i32, i32 },
+};
+
+const Color = enum { red, green, blue };
+
+// ① 联合体：各臂载荷类型不同，糖只在自己的臂里成立
+const area = fn (s: Shape) i32 {
+    return switch (s) {
+        .circle: r,          // 裸名字 = 捕获 + 臂值
+        .rect: wh t: { t: wh.0 * wh.1; },  // 要算东西就写标签块（捕获 + 块臂）
+    };
+};
+
+// ② ?T：.some 交出载荷
+const orZero = fn (u: ?i32) i32 {
+    return switch (u) {
+        .some: v,
+        .none: 0,
+    };
+};
+
+// ③ 枚举：捕获的是主语值本身（不是序号）
+const self = fn (c: Color) Color {
+    return switch (c) {
+        .red: v,
+        .green: v,
+        .blue: v,
+    };
+};
+
+// ④ !T：.ok 交载荷，.err 交错误值
+const orMinus = fn (r: !i32) i32 {
+    return switch (r) {
+        .ok: v,
+        .err: -1,
+    };
+};
+
+// ⑤ 括号逃生口：这里要的是常量，不是匹配到的 n
+const K: i32 = 100;
+const escape = fn (n: i32) i32 {
+    return switch (n) {
+        1: (K),
+        else: 0,
+    };
+};
+
+const main = fn () u8 {
+    std.println("{} {}", area(.{ .circle = 3 }), area(.{ .rect = .{ 2, 3 } }));
+    std.println("{} {}", orZero(6), orZero(null));
+    std.println("{any} {any} {any}", self(Color.red), self(Color.green), self(Color.blue));
+    std.println("{} {}", orMinus(4), orMinus(error.bad));
+    std.println("{} {}", escape(1), escape(2));
+    return 0;
+};
+
+// expect-output
+// 3 6
+// 6 0
+// Color.red Color.green Color.blue
+// 4 -1
+// 100 0

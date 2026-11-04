@@ -2561,3 +2561,288 @@ timed out`（卡满 60s）和 `link failed: unable to make temporary file`，每
 顺带把 `build.sh` / `test.sh` 的 zig 缓存统一到仓库内 `.zc-cache/`（并且
 必须传 Windows 形式路径 `$ROOTW`——POSIX 的 `/e/...` 交给 zig/lld 会被当成
 没有盘符的路径），子进程不再往用户 home 的 zig 缓存里写东西。
+
+## 83. 捕获即返回值：糖只在"名字后面什么都没有"时成立（M50）
+
+**要解决的是冗余，不是表达力。** 捕获（`if (o) v`、`switch (u) { .some: v }`）
+是 Zx 里最常写的东西，而大多数捕获只有两种命运：就地用掉，或者**原样交出去**。
+后者以前必须借一个标签名——`if (o) v t: { t: v; }`——而 `t` 这个名字在代码里
+不带任何信息。现在 `if (o) v;` 等价于它。
+
+**判据选"名字后面紧跟 `;` `,` `)` `}` `]` 或 `else`"，而不是"臂里只有一个名字"。**
+前者在语法上是一个 lookahead（块写不出这种形状、值也写不出），后者要读完整个臂
+再回退。展开目标也不是新语义：`捕获名 + 单个返回值`（M19 的 `if (o) v v`）本来
+就存在，糖只是把这个值换成了"捕获名自己"——所以类型检查、捕获绑定、后端一行
+没改，两套前端各加十几行。
+
+**bool 条件必须特判，否则会悄悄改掉 idiom。** `if (a > b) a else b`（spec 的
+`examples/syntax.zx` 里就有）按新判据长得跟糖一模一样。它能不能是捕获，取决于
+**条件类型**——这是语义层才有的信息，解析层没有。所以规则是：条件不是 `?T`/`!T`
+时，"捕获名"无所指，臂退回普通表达式（`n->name = NULL`）；名字又不在作用域里时
+额外报一句"an `if` on a bool has nothing to capture"，并把这一臂按 `void` 算，
+让调用处只多一条真正的类型错，而不是"unknown identifier"的哑谜。判据落在
+`arm_is_capture_value()`：块包一层也算（语句臂会被解析器包成单语句块），
+所以 `if (c) x; else y;` 这种老写法也在保护范围内。
+
+**switch 没有条件类型可借力，规则就得定死**：冒号后的裸名字**一定**是捕获名，
+`1: K,` 的值是匹配到的 `1` 而不是常量 `K`。逃生口是括号 `1: (K),`——括号在
+Zx 里本来就表示"这是一个表达式"，不是新记法。之所以敢定死：仓库里（编译器自身、
+std、tests、spec 示例）没有一处 `模式: 裸名字` 的值臂；而且这种写法一旦类型
+不同就会在 unify 处报错，不会静默跑错。这条写进手册 §8.1 第 19 条坑，因为它是
+**唯一**一个"新语法改变了旧代码含义"的地方。
+
+**两套前端必须产出同一棵树。** 糖在解析期展开，AST 里看到的就是
+`NK_IDENT(捕获名)`，`bootstrap/diff_ast.sh` 的逐字节对拍（含位置）继续成立：
+`tests/good/if_cap_value.zx` 与 `tests/good/switch_cap_value.zx` 两个用例
+两份前端 dump 完全一致。反例 `tests/bad/if-sugar-bool.zx`（bool 上套糖）与
+`tests/bad/switch-cap-value-mismatch.zx`（各臂不同型）钉住报错路径——**糖省掉的
+是块，不是类型检查**。
+
+## 84. 语言服务器的"假功能"比没有功能更糟：LSP 冒烟必须打到真编译器（M51）
+
+**`zxc fmt` 是子命令，LSP 拼成了 `zxc <file> fmt`。** file-first 分支把 "fmt"
+当成第二个文件名吞掉，实际跑的是编译——影子文件从来没被格式化，读回原样，
+宿主拿到空编辑。于是 `documentFormattingProvider` 声明了、Zed 的保存自动格式化
+也调了，效果却是零。两个教训：
+
+- **能力声明了就得真的能用。** 这种"静默无效"比缺能力更糟：用户以为语言没有
+  fmt，实际是接线错了。修复只是把参数换序（`zxc fmt <影子文件>`），但能发现它
+  靠的是把冒烟测试的环境改对——zxls 按兄弟目录找 zxc.exe，旧冒烟用仓库根的
+  临时 zxls，兄弟目录没有 zxc，formatting 请求返回空数组，被测试当成"已格式化"
+  假通过。现在 test.sh 把 zxc.exe 和新编 zxls 放进同一临时目录，格式化冒烟才
+  第一次真正打到 zxc。
+- **被遮住的坑会连环爆。** fmt 生效后立刻炸出第二个老 bug：TextEdit 的 JSON
+  里 `"end":{...}` 之后少一个 `}`，newText 被塞进 range 对象，宿主直接 JSON
+  解析失败。以前永远走不到这个分支（原样返回空编辑），修 fmt 才现形。同一处
+  还修了终点位置：不能假设文档以 `\n` 结尾，`"a\nb"` 的全文替换终点必须是
+  最后一行的行尾，否则最后一行漏在替换区外。
+
+**字面量点补全：`Person{.` 的容器名在 `{` 之前。** 点补全把 `.` 前的内容当
+点路径回扫，`Person{.` 取出来是空路径 → 空列表。判据加一条：`.` 前回扫空白
+命中 `{` 时，容器名取 `{` 之前的标识符路径（`Person{ .circle` 隔空白同样命中）。
+字面量上下文里只出字段/变体，方法（`name = fn …`）不出——字面量初始化写不了
+方法。Zed 侧 `format_on_save = "on"` + `formatter = "language_server"` 落在
+语言配置里，不依赖用户设置。
+
+## 85. 位置即内建，调试走同一条路：`@file`/`@line`/`@col`/`@fnName` 与 `std.debug`（M52）
+
+**位置信息必须在 sema 落定，不依赖前端。** 最初把 `@file` 挂在 Lexer 上
+（`lx.fname`），立刻踩了双前端不一致：常规编译走 Zx 自举前端（zxfe 子进程），
+C 前端改的捕获根本不生效；多文件下 `g_srcpath` 又会被检查中的模块来回改。
+结论是位置的三要素各自有天然的落定点——都在 sema，零前端参与：
+
+- `@file` → 当前模块 `g_mod->path`（多文件检查时它已经指向正在查的模块，
+  C 前端与 Zx 前端、单模块与多模块都一致）；
+- `@fnName` → `check_fn_body` 维护的 `g_cur_fn_name`；`const f = fn …`
+  这种 fn 字面量节点本来没名字，`check_stmts` 在检查具名 const 绑定时把
+  绑定名贴给函数体；
+- `@line`/`@col` → 节点自带的行列（解析期就有）。
+
+四个内建全部在编译期折成常量：file/fnName 发 C 字符串字面量切片，
+line/col 发整数字面量——**release 里不占一个字节、不花一条指令**。
+
+**`std.debug` 复用 `std.io.print` 的特判模式，不新增机制。** panic / assert
+的位置实参是编译器在调用点注入的，变参走不了普通函数类型，于是按 builtin
+识别（`BI_DEBUG_FN`）：sema 在 `check_call` 校验用户实参后把
+`@file/@line/@col/@fnName` 四个节点追加到实参尾部，后端按符号 C 名字认出
+`zx_debug_panic` / `zx_debug_assert` 直接发射。两个坑都出在"绕开通用路径"：
+
+- 特判路径不经过通用发射，`need_by_cname` 没人调 → 运行时原型不生成，
+  C 编译器报 undeclared。特判里补一行置位。
+- errName 的 C 签名必须和 zx 类型逐字段对上：错误值在 C 里按 u64 传、
+  `[]const u8` 返回值是切片结构体（不是 `char*`），签名写错就是
+  "member reference base type" 这种后端 bug。
+
+**语义取舍：`panic` 是 noreturn，不是 `!void`。** 一个 abort 掉的程序不
+存在"接下来处理错误"——`!void` 会逼调用方处理一个永不出现的错误。
+`panic` 之后的代码按不可达处理（E0502），与 `@trap` 同一待遇。
+
+**release 擦除发生在运行时函数体，不在调用点。** `CC_REL` 加
+`-DZX_RELEASE`，`zx_debug_assert` 的函数体在 `#ifndef ZX_RELEASE` 之外
+整段为空——调用点、位置字面量照发，条件照求值（副作用保留），断言本身
+零开销。panic 不擦：硬中断永远在。
+
+**errName 的静态表是编译期错误登记的免费红利。** sema 跑完时整个工程的
+错误集已经登记完（`ty_err_code` 首见即编号），后端直接按码序铺成字符串
+数组，errName 查表 O(1)。错误值第一次被引用就自动入表——不存在"没登记
+的错误"。`errName` 的实参就是错误值本身（捕到的 `e` 直接传），不用先取
+`.tag`。
+
+验证：`tests/good/debug_builtin.zx`（errName 三态 + assert 通过 +
+`@fnName`）；abort 类用例（panic 触发、assert 失败、`--release` 下 assert
+擦除后继续跑）退出码跨平台不稳，留在 `.tmp` 手工验证。
+
+## 86. 并发地基的手写边界：`std.thread` 全走 extern 声明，不 include windows.h（M53）
+
+**zxrt 是一个翻译单元，include 顺序不是自己能控制的。** 第一次实现把
+`#include <windows.h>` 发进 zxrt.c，立刻两头炸：fs/time 运行时早就在同一单元里
+手写声明过 `FindFirstFileA`/`QueryPerformanceCounter`（本仓风格：**缺什么就
+`extern` 什么，绝不 include windows.h**），windows.h 的原型和它们冲突；更隐蔽的
+是头文件组装器会把 g_out 里的**函数定义提升成原型**——trampoline 的两个
+`#ifdef` 分支被一起提升进头文件然后在用户单元里相撞（`DWORD` 在头里没人定义）。
+教训：平台条件代码进 g_out 前，先把签名收敛成**单一无条件形式**。
+
+**Win32 互斥不用内核互斥体，用 SRWLOCK。** `CreateMutexW` 系对持有线程是递归的
+（同线程重复 Wait 直接成功），pthread 默认非递归——同名 API 两平台语义分叉是
+定时炸弹。SRWLOCK 指针大小、零初始化、非递归，正好和 pthread 对齐；代价是
+`TryAcquireSRWLockExclusive` 返回 1 字节 BOOLEAN（只写 AL，EAX 高位不保证清零），
+extern 声明按 `int` 读永远非零——**必须按 `unsigned char` 收**。这条是拿真机
+最小 C 用例（worker 在主线程持锁时 try，期望失败）抓出来的。
+
+**原子操作直接用 `__atomic` 内建**（SEQ_CST）：gcc/clang/zig cc 全支持，MSVC
+不走这条生成路径。线程与互斥的句柄都是 usize、0 保留为无效，各自一张 256 槽
+定长注册表——线程本来就少，线性登记足够，注册表自身的增删只发生在创建线程
+之前，不加锁（文档写明约束）。
+
+**spawn 的 worker 签名是 `fn (usize) void`**：函数指针 + usize 上下文，C ABI
+就是 `void (*)(uint64_t)`（usize 在 C 里就是 uint64_t）。要带多个值就打包成
+堆上结构体传指针。这是刻意留给纤程层的最小接口——纤程调度器只需要
+"给我一个入口和一个上下文"。
+
+验证：`tests/good/thread_basic.zx`（spawn/join 后原子计数确定值 5+100+230、
+跨线程 try 失败、CAS 命中/未命中、current 非零，expect-output 全断言）；
+全量回归 227 过 0 挂。
+
+## 87. 捕获感知纤程：trace 的载体是每纤程一张捕获环（M54）
+
+**方案 A 落地：`!T` 布局零改动，trace 挂上下文不挂错误值。** 每个纤程上下文
+（含每个线程的根上下文）自带一张 64 条的环形缓冲；`else err { … }` 捕获臂
+一进入，后端就在那里压一条 `{码, file, line, col, fn}`——"捕获点"就是错误值
+落地绑定的那个位置，sema/后端在发射现场全都知道。`std.debug.printTrace`
+回放最老→最新，错误名查编译期登记表。
+
+**环为什么挂纤程结构体而不是 TLS：纤程可以跨线程迁移。** TLS 里的
+`zx_fb_cur` 只是"当前上下文"指针，由切换包装函数维护；环本体在纤程上，
+换线程继续跑 trace 不断链。根上下文（每线程一份 TLS 结构体）也有自己的环，
+主流程的捕获和纤程的捕获天然隔离——fiber_trace.zx 钉住这个行为。
+
+**捕获点的注入在后端，不在 sema。** `gen_if_body` 发射 `!T` 条件的 else 臂时，
+若有捕获（带不带名字都算——不带名字也是把码丢了）就先发一条
+`zx_cap_push(码, "模块路径", line, col, "函数名")`。模块路径与函数名来自两个
+发射期全局（`g_cur_mod_path` 在模块循环里取 `sema_module_path(mi)`，
+`g_cur_fn_zx` 在 `gen_fn` 里挂上）。`try` 传播不记——它不是捕获，码没有落地；
+这正是"trace 反映错误被处理的地点而不是路过的地点"的语义。
+
+**release 擦除在调用点，不在函数体。** `#ifndef ZX_RELEASE` 把 push 调用
+整段包掉——比空函数省得彻底（连接口都不留）。这与 assert 的擦除层次相反：
+assert 的调用点要保留求值副作用，只能擦函数体；捕获点没有副作用，直接擦调用。
+
+**内部 helper 一律行首缩进一个空格。** 头文件组装器会把列首的
+`(...) {` 形状行提升成原型（`buf_protos_from`），带自定义类型签名的 helper
+（`zx_fiber_switch_to`、`zx_cap_current`…）被提升进头就是
+"unknown type name"。行首加空格既跳过提升也躲过 `buf_destatic` 的剥 static——
+helper 保持内部链接。
+
+**`buf_printf` 是 vsnprintf：格式串里的字面 `%` 必须 `%%`。**
+`% ZX_CAP_MAX` 里的 `% Z` 是非法转换——先吃掉唯一的变参，后面的 `%d` 读到
+垃圾（15），`% Z` 本身打成 `(null)`。这个 bug 的表象极具迷惑性：同一份
+zxrt 里 errname 显示"没有错误码"而 printTrace 显示"15 个"——其实是同一个
+`ne` 被吃参顺序搞乱后的两个幻象。`buf_puts` 不做格式化，纯字符串的发射
+（cap_push 本体）不受影响。
+
+**errName 表无条件发射。** 枚举错误（`(error)Err.x`）不进错误码登记表，
+`ne` 可能是 0，但 printTrace 的代码路径始终引用 `zx_err_names`——空表 +
+哨兵兜底，查表边界检查后显示 `?`。枚举错误的名字回放是已知缺口
+（登记表只收 `error.foo` 字面量），留待 errName 语义统一时处理。
+
+**取消是协作式旗标，不是异常。** `cancel(h)` 置位、`interrupted()` 轮询，
+纤程自己决定在哪退出（通常是 `return error.cancelled`——错误名首用即登记，
+不需要预留）。await 编译器自动挂起（在 `!T` 边界插入 yield）是下一步，
+届时取消可以变成"挂起点自动检查"。
+
+验证：`tests/good/fiber_basic.zx`（spawn/yield/resume/join/cancel 全部确定性
+输出，expect-output）、`tests/good/fiber_trace.zx`（纤程环与根环隔离，
+expect-output 断言捕获与名字；stderr 的位置回放手工验证）；全量回归
+229 过 0 挂；release 档 trace 为空、errName 照常。
+
+## 88. await 门：`!T` 函数入口就是 await 点，取消顺着传播链自动生效（M55）
+
+**栈有纤程的红利：挂起不需要状态机。** async/await 要把函数拆成状态机是因为
+没有自己的栈；栈有纤程整个栈都在，挂起就是一次切换。于是"await 点"不用挑
+语法形状——**每个返回 `!T` 的函数入口天然就是一个**。在入口发一道
+await 门（`zx_fiber_await_gate`，用户单元可见的原型 + zxrt 里的实现）：
+
+- 根上下文（`zx_fb_cur` 为空或 is_root）：一次纯 false 检查，进函数体；
+- 在纤程里且 `auto_yield` 开着（**默认开**，`std.fiber.auto(f, false)` 关）：
+  先挂起回 resumer——这就是调度点，resumer 决定何时续跑；
+- 续跑回来后看取消旗标：被取消就让门返回 true，gen_fn 里门的调用点直接
+  `return (T){ .tag = <cancelled 码> }`——**取消以 error.cancelled 走 !T 传播链**，
+  顺着 try 一路冒到捕获点。这正是"取消复用错误传播链"的本意：取消发生在
+  挂起期间，下一个 await 点自动生效，不用轮询。
+
+**`resume` 的语义随之精确：跑到下一个 await 点或结束。** 这让 resumer 循环
+天然成为调度器——`join` 是"驱动到完"，`resume` 是"让一步"。M54 的测试只改了
+一处（fiber_trace 的单次 resume 改 join），其余原样通过。
+
+**release 档门不擦。** 取消是运行时语义，不是调试设施——这与 assert（擦函数体）、
+捕获点登记（擦调用点）层次都不同：门必须留在 release 里，否则取消在优化档
+失效。代价是每次 `!T` 调用多一次跨单元的 false 检查（不能内联），可接受。
+
+**旗标时机老问题再现，照 `scan_proc_use` 的先例解。** 注入点在 gen_fn（发体
+时），而 `g_need_fiber` 平时在发体过程中才置位——第一个被生成的函数赶不上。
+加 `scan_fiber_use` 预扫描：进代码生成前把整棵树走一遍，认 `std.fiber` 这个
+访问形状。已知缺口同款：`const fb = std.fiber; fb.spawn(…)` 别名形状认不出。
+
+**门的返回值发射逐字段借用既有惯用法。** 零标签返回本来就写成
+`return (T){ .tag = 0 }`（隐式 return 和 errvoid 同款），cancelled 只是把 0
+换成 `ty_err_code("cancelled")`——错误名首用即登记，errName 表自动收进
+"cancelled"，测试里 `errName(e)` 直接显示名字，零额外机制。
+
+**`error.cancelled` 没有进任何错误集的静态检查。** 门的注入在后端，绕过了
+sema 的错误集检查——调用方的 `else e { }` 捕获臂拿到的是运行时塞进来的码。
+这是刻意的：取消是正交于业务错误集的控制流，要求每个函数集都声明 cancelled
+会把传播链污染成样板。代价是 errName 之外的静态工具（比如错误集完备性检查）
+看不到它，文档写明。
+
+验证：`tests/good/fiber_cancel.zx`（挂起→取消→续跑→`caught:cancelled at i:0`，
+expect-output）、`tests/good/fiber_noauto.zx`（auto 关掉后一路跑完）；
+fiber_basic/fiber_trace/thread_basic 原样过；全量回归 **231 过 0 挂**；
+release 档取消传播照常。
+
+## 89. 统一 Task：多线程 / 单线程 / 协程收敛成一个接口（M56）
+
+**用户拍板：thread 与 fiber 两套 API 不要了，对外只有一个 `std.Task`。**
+这个收敛其实早该做——M53 的 thread（OS 线程 + join/detach）和 M55 的 fiber
+（resume/join 驱动）是同一个调度问题的两半，用户要写并发代码时却要选边。
+统一后：**Task 是调度器调度的栈有纤程**，跑在工作线程还是当前线程由调度器
+定，用户只见 spawn / await / cancel。
+
+**任务签名 `fn (usize) !usize` 是整个设计里最值钱的决定。** M53/M54 的
+worker 是 `fn (usize) void`——结果只能靠共享内存，取消要轮询。改成 `!usize`
+之后三件事同时成立：await 能带回返回值（ZxErr_u64 一个 ABI 装下 payload +
+错误码）；M55 的 await 门直接对任务函数生效（它就是 !T 函数）；**取消变成
+传播链**——cancel 置旗标，任务在下一个 await 门收到 error.cancelled，顺着
+try 一路冒到任务顶层，任务带着错误码完成，await 它的人收到同一个错误。
+M55 那套门机制一行没改，换了宿主就长成了取消模型。
+
+**调度器：侵入链表就绪队列 + 一把全局锁 + 条件变量，N 个工作线程。**
+默认 N = CPU 核数 - 1（Windows 用 `GetActiveProcessorCount`，POSIX
+`sysconf`，都手写 extern / 标准头）；`Task.init(0)` 是纯单线程协作调度——
+主线程 await 时跑调度循环，这就是单线程模式的推进力，也是测试确定性的来源。
+await 在任务内是**真挂起**（登记到目标的等待者链，完成时整体重新入队，
+不忙等）；在根上下文则顺便跑 `run_until`（帮忙 + 推进）。任务完成后栈
+立即回收（DeleteFiber / free stk）——M54 的纤程栈是终身泄漏的，Task 化
+顺手修掉了。已知取舍：全局锁在 await 高频时会竞争（per-task futex / 工作
+窃取是后续优化方向）；cancel 一个还在队列里的任务由取出方结算（finish
+cancelled），不做出队摘除。
+
+**同步原语拆出去：`std.mutex` / `std.atomic`。** 它们不是执行模型，留在
+Task 里反而污染"对外一个类型"的意图；C 名字（zx_mutex_/zx_atomic_）与
+语义（非递归、SEQ_CST）原样沿用 §86，运行时与 Task 调度器分开按需发射——
+用 Task 不用锁的程序不背这份代码。
+
+**sem 层的经验复用与新版教训：** ns_member 的分支用 `ns->name` 拼键
+（"Task.spawn" / "mutex.lock"），两个命名空间一个分支；预扫描
+`scan_task_use` 认 `std.Task` 访问形状（§88 的先例第三抄）。zxrt 里任务
+tramp / 调度循环全是缩进的 static——头文件组装器照旧会把列首定义提升成
+原型，这次连 forward declaration 都得缩进。
+
+**"await" 作成员名没问题**——它不是 Zx 保留字，`std.Task.await` 走的是
+普通命名空间成员解析。
+
+验证：`tests/good/task_basic.zx`（init(0) 单线程 spawn/yield/await 交错，
+确定性 order 1212123）、`task_cancel.zx`（cancel → caught:cancelled →
+await 收到同一错误）、`task_trace.zx`（捕获环随任务、与根环隔离）、
+`sync_basic.zx`（mutex 非递归 + 原子 CAS/swap）；多工作线程模式手验
+（spawn 两个任务并行算和，await 收敛 5105）；全量回归 **229 过 0 挂**；
+release 档取消照常。旧 thread_basic / fiber_* 五个测试删除（API 已不存在）。

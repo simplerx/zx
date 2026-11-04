@@ -1,0 +1,59 @@
+// if 的"捕获即返回值"（M50）：捕获名后面什么都不写时，臂的值就是捕获值。
+//   const i = if (o) cap;          ≡ 捕获 cap，真值臂交出 cap（假分支没有 else → 零值）
+//   const i = if (o) cap else 0;   ≡ 捕获 cap + else 值臂
+// 以前的写法要么贴标签块（`if (o) cap t: { t: cap; }`），要么写 `if (o) cap cap`。
+//
+// 两个边界，测试都钉住：
+//   · bool 条件的 `if (c) x else y` 仍然是普通表达式臂——没有载荷可捕获，
+//     解析器把糖退回原样（spec §8.1）。
+//   · 想要外部常量而不是捕获值，把它括起来：`if (o) (x)`。
+const std = module("std");
+
+const orZero = fn (o: ?i32) i32 {
+    return if (o) v;
+};
+
+const orElse = fn (o: ?i32) i32 {
+    return if (o) v else -1;
+};
+
+// 错误值同样：`!T` 的 .ok 载荷进 v，失败走 else
+const orErr = fn (r: !i32) i32 {
+    return if (r) ok else 7;
+};
+
+// 语句位置：值被丢弃，只是判空 + 绑定（块臂照旧）
+const show = fn (o: ?i32) []const u8 {
+    var s: []const u8 = "none";
+    if (o) v { s = "some"; }
+    return s;
+};
+
+// 老写法不受影响：bool 条件，a / b 是普通表达式臂
+const maxOf = fn (a: i32, b: i32) i32 {
+    return if (a > b) a else b;
+};
+
+// 括号 = 我就是要这个名字的值，不要捕获
+const FALLBACK: i32 = 99;
+const plain = fn (o: ?i32) i32 {
+    return if (o) (FALLBACK);
+};
+
+const main = fn () u8 {
+    std.println("{} {}", orZero(5), orZero(null));
+    std.println("{} {}", orElse(5), orElse(null));
+    std.println("{} {}", orErr(8), orErr(error.boom));
+    std.println("{} {}", show(1), show(null));
+    std.println("{} {}", maxOf(9, 2), maxOf(1, 2));
+    std.println("{}", plain(3));
+    return 0;
+};
+
+// expect-output
+// 5 0
+// 5 -1
+// 8 7
+// some none
+// 9 2
+// 99

@@ -135,6 +135,7 @@ Type *ty_agg(TyKind kind, Node *decl, const char *name);
  * 都不改变布局，只改变检查强度。 */
 uint16_t    ty_err_code(const char *name);          /* 名字 → 码（首次出现即分配） */
 const char *ty_err_name(uint16_t code);             /* 码 → 名字；未知返回 NULL */
+int         ty_err_count(void);                     /* 已登记的错误码总数 */
 void       *ty_errset_of(const char **names, int n);/* 名字集合 → interned 集合 */
 void       *ty_errset_one(const char *name);        /* 单元素集合 */
 bool        ty_errset_has(const void *set, uint16_t code);

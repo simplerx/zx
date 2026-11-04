@@ -434,7 +434,8 @@ static Type *base_type(const char *n) {
 }
 
 enum { BI_NONE, BI_PRINT, BI_PRINTLN, BI_FORMAT, BI_HEAP, BI_FILE, BI_FILE_FN,
-       BI_IO, BI_IO_FN, BI_IO_PRINT, BI_STACKALLOC, BI_HEAPALLOC, BI_PROC, BI_PROC_FN };
+       BI_IO, BI_IO_FN, BI_IO_PRINT, BI_STACKALLOC, BI_HEAPALLOC, BI_PROC, BI_PROC_FN,
+       BI_DEBUG, BI_DEBUG_FN, BI_TASK, BI_TASK_FN, BI_SYNC, BI_SYNC_FN };
 
 /* ---------------- 内建类型 Allocator ----------------
  *
@@ -617,6 +618,11 @@ static Symbol *std_builtin(const char *name) {
     static Symbol i_seek, i_tell, i_close, i_flush, i_stdin, i_stdout, i_stderr;
     static Symbol i_print, i_println;
     static Symbol proc_s, p_args, p_getenv, p_setenv, p_exit;
+    static Symbol debug_s, d_panic, d_assert, d_errname, d_trace;
+    static Symbol task_s, t_spawn, t_await, t_cancel, t_yield, t_current,
+                  t_interrupted, t_auto, t_init;
+    static Symbol sync_s, m_new, m_lock, m_try, m_unlock, m_free;
+    static Symbol atomic_s, a_add, a_sub, a_load, a_store, a_swap, a_cas;
     static bool init;
     if (!name) return NULL;
     if (!init) {
@@ -778,6 +784,113 @@ static Symbol *std_builtin(const char *name) {
             ps[i]->state = 2;
             ps[i]->builtin = BI_PROC_FN;
         }
+
+        /* std.debug：调试内建（decisions §85）。panic / assert 的位置实参
+         * （file/line/col/fn）由编译器在调用点自动注入——变参走不了普通
+         * 函数类型，check_call / 后端按 builtin 特判，同 std.io.print 模式。
+         * errName / printTrace 是普通函数，走通用调用路径。 */
+        debug_s.name = "debug"; debug_s.kind = SK_NS; debug_s.builtin = BI_DEBUG;
+        debug_s.state = 2; debug_s.ty = ty_type(); debug_s.type_val = ty_void();
+
+        d_panic.name = "panic";   d_panic.cname = "zx_debug_panic";
+        d_assert.name = "assert"; d_assert.cname = "zx_debug_assert";
+        d_panic.builtin = d_assert.builtin = BI_DEBUG_FN;
+        d_panic.kind = d_assert.kind = SK_CONST;
+        d_panic.state = d_assert.state = 2;
+
+        /* errName 的实参就是错误值本身（运行时 u16）：捕到的 err 直接传进来，
+         * 不用先取 .tag。码 → 名字的静态表由后端按编译期登记的错误集生成。 */
+        d_errname.name = "errName"; d_errname.cname = "zx_debug_errname";
+        d_errname.ty = ty_fn((Type *[]){ ty_error() }, 1, ty_slice(ty_u8(), true));
+        d_trace.name = "printTrace"; d_trace.cname = "zx_debug_printtrace";
+        d_trace.ty = ty_fn(NULL, 0, ty_void());
+        Symbol *ds[2] = { &d_errname, &d_trace };
+        for (int i = 0; i < 2; i++) {
+            ds[i]->kind = SK_CONST;
+            ds[i]->state = 2;
+            ds[i]->builtin = BI_DEBUG_FN;
+        }
+
+        /* std.Task（M56，decisions §89）：多线程 / 单线程 / 协程统一成任务
+         * 接口。Task 是调度器调度的栈有纤程——跑在工作线程还是当前线程由
+         * 调度器定（Task.init(n) 配置，0 = 纯单线程协作调度），用户只见
+         * spawn / await / cancel。任务签名 fn (usize) !usize 是刻意的：
+         * 取消复用 !T 传播链（M55 的 await 门），await 拿到 ret 或
+         * error.cancelled。句柄 usize：0 = 当前线程的根上下文（非任务）。 */
+        task_s.name = "Task"; task_s.kind = SK_NS; task_s.builtin = BI_TASK;
+        task_s.state = 2; task_s.ty = ty_type(); task_s.type_val = ty_void();
+
+        Type *task_t = ty_fn((Type *[]){ usz }, 1, ty_err(usz));
+        Type *p_tspawn[2] = { task_t, usz };
+        Type *bt = ty_bool();
+        Type *p_tauto[2] = { usz, bt };
+
+        t_spawn.name = "spawn"; t_spawn.cname = "zx_task_spawn";
+        t_spawn.ty = ty_fn(p_tspawn, 2, ty_opt(usz));
+        t_await.name = "await"; t_await.cname = "zx_task_await";
+        t_await.ty = ty_fn(&usz, 1, ty_err(usz));
+        t_cancel.name = "cancel"; t_cancel.cname = "zx_task_cancel";
+        t_cancel.ty = ty_fn(&usz, 1, ty_void());
+        t_yield.name = "yield"; t_yield.cname = "zx_task_yield";
+        t_yield.ty = ty_fn(NULL, 0, ty_void());
+        t_current.name = "current"; t_current.cname = "zx_task_current";
+        t_current.ty = ty_fn(NULL, 0, usz);
+        t_interrupted.name = "interrupted"; t_interrupted.cname = "zx_task_interrupted";
+        t_interrupted.ty = ty_fn(NULL, 0, ty_bool());
+        t_auto.name = "auto"; t_auto.cname = "zx_task_auto";
+        t_auto.ty = ty_fn(p_tauto, 2, ty_void());
+        t_init.name = "init"; t_init.cname = "zx_task_init";
+        t_init.ty = ty_fn(&usz, 1, ty_void());
+
+        Symbol *ts[8] = { &t_spawn, &t_await, &t_cancel, &t_yield,
+                          &t_current, &t_interrupted, &t_auto, &t_init };
+        for (int i = 0; i < 8; i++) {
+            ts[i]->kind = SK_CONST;
+            ts[i]->state = 2;
+            ts[i]->builtin = BI_TASK_FN;
+        }
+
+        /* std.mutex / std.atomic：同步原语独立成命名空间——它们不是执行
+         * 模型，不违背"对外一个 Task"。C 名字沿用 zx_mutex_/zx_atomic_，
+         * 语义与 §86 定的一致（非递归、SEQ_CST）。 */
+        sync_s.name = "mutex"; sync_s.kind = SK_NS; sync_s.builtin = BI_SYNC;
+        sync_s.state = 2; sync_s.ty = ty_type(); sync_s.type_val = ty_void();
+        m_new.name = "mutexNew";    m_new.cname = "zx_mutex_new";
+        m_new.ty   = ty_fn(NULL, 0, usz);
+        m_lock.name = "mutexLock";  m_lock.cname = "zx_mutex_lock";
+        m_lock.ty  = ty_fn(&usz, 1, ty_void());
+        m_try.name = "mutexTry";    m_try.cname = "zx_mutex_try";
+        m_try.ty   = ty_fn(&usz, 1, ty_bool());
+        m_unlock.name = "mutexUnlock"; m_unlock.cname = "zx_mutex_unlock";
+        m_unlock.ty = ty_fn(&usz, 1, ty_void());
+        m_free.name = "mutexFree";  m_free.cname = "zx_mutex_free";
+        m_free.ty  = ty_fn(&usz, 1, ty_void());
+
+        atomic_s.name = "atomic"; atomic_s.kind = SK_NS; atomic_s.builtin = BI_SYNC;
+        atomic_s.state = 2; atomic_s.ty = ty_type(); atomic_s.type_val = ty_void();
+        Type *pu64 = ty_ptr(ty_int(64, false), false, false, 0);
+        Type *p_aa[2] = { pu64, usz };
+        a_add.name = "atomicAdd";   a_add.cname = "zx_atomic_add";
+        a_add.ty  = ty_fn(p_aa, 2, usz);
+        a_sub.name = "atomicSub";   a_sub.cname = "zx_atomic_sub";
+        a_sub.ty  = ty_fn(p_aa, 2, usz);
+        a_load.name = "atomicLoad"; a_load.cname = "zx_atomic_load";
+        a_load.ty = ty_fn(&pu64, 1, usz);
+        a_store.name = "atomicStore"; a_store.cname = "zx_atomic_store";
+        a_store.ty = ty_fn(p_aa, 2, ty_void());
+        a_swap.name = "atomicSwap"; a_swap.cname = "zx_atomic_swap";
+        a_swap.ty = ty_fn(p_aa, 2, usz);
+        Type *p_cas[3] = { pu64, usz, usz };
+        a_cas.name = "atomicCAS";   a_cas.cname = "zx_atomic_cas";
+        a_cas.ty  = ty_fn(p_cas, 3, ty_bool());
+
+        Symbol *ss[11] = { &m_new, &m_lock, &m_try, &m_unlock, &m_free,
+                           &a_add, &a_sub, &a_load, &a_store, &a_swap, &a_cas };
+        for (int i = 0; i < 11; i++) {
+            ss[i]->kind = SK_CONST;
+            ss[i]->state = 2;
+            ss[i]->builtin = BI_SYNC_FN;
+        }
     }
 
     if (!strcmp(name, "print"))     return &print_s;
@@ -817,13 +930,41 @@ static Symbol *std_builtin(const char *name) {
     if (!strcmp(name, "process.getEnv")) return &p_getenv;
     if (!strcmp(name, "process.setEnv")) return &p_setenv;
     if (!strcmp(name, "process.exit"))   return &p_exit;
+    if (!strcmp(name, "debug"))           return &debug_s;
+    if (!strcmp(name, "debug.panic"))     return &d_panic;
+    if (!strcmp(name, "debug.assert"))    return &d_assert;
+    if (!strcmp(name, "debug.errName"))   return &d_errname;
+    if (!strcmp(name, "debug.printTrace")) return &d_trace;
+    if (!strcmp(name, "Task"))              return &task_s;
+    if (!strcmp(name, "Task.spawn"))        return &t_spawn;
+    if (!strcmp(name, "Task.await"))        return &t_await;
+    if (!strcmp(name, "Task.cancel"))       return &t_cancel;
+    if (!strcmp(name, "Task.yield"))        return &t_yield;
+    if (!strcmp(name, "Task.current"))      return &t_current;
+    if (!strcmp(name, "Task.interrupted"))  return &t_interrupted;
+    if (!strcmp(name, "Task.auto"))         return &t_auto;
+    if (!strcmp(name, "Task.init"))         return &t_init;
+    if (!strcmp(name, "mutex"))            return &sync_s;
+    if (!strcmp(name, "mutex.mutexNew"))    return &m_new;
+    if (!strcmp(name, "mutex.mutexLock"))   return &m_lock;
+    if (!strcmp(name, "mutex.mutexTry"))    return &m_try;
+    if (!strcmp(name, "mutex.mutexUnlock")) return &m_unlock;
+    if (!strcmp(name, "mutex.mutexFree"))   return &m_free;
+    if (!strcmp(name, "atomic"))            return &atomic_s;
+    if (!strcmp(name, "atomic.atomicAdd"))   return &a_add;
+    if (!strcmp(name, "atomic.atomicSub"))   return &a_sub;
+    if (!strcmp(name, "atomic.atomicLoad"))  return &a_load;
+    if (!strcmp(name, "atomic.atomicStore")) return &a_store;
+    if (!strcmp(name, "atomic.atomicSwap"))  return &a_swap;
+    if (!strcmp(name, "atomic.atomicCAS"))   return &a_cas;
     return NULL;
 }
 
 /* 挂进 std 模块作用域的那些名字（std.zx 自己的声明另外由 hoist 加进来） */
 static const char *g_std_seeded[] = {
     "print", "println", "format", "heap", "file", "io", "Allocator",
-    "TypeKind", "TypeInfo", "FieldInfo", "stackAlloc", "heapAlloc", "process", NULL
+    "TypeKind", "TypeInfo", "FieldInfo", "stackAlloc", "heapAlloc", "process",
+    "debug", "Task", "mutex", "atomic", NULL
 };
 
 static Symbol *ns_member(Symbol *ns, const char *name, int line, int col) {
@@ -870,6 +1011,32 @@ static Symbol *ns_member(Symbol *ns, const char *name, int line, int col) {
             if (sug) diag_help("did you mean `%s`?", sug);
         }
         err_at(line, col, "'std.process' has no member '%s'", name);
+        return NULL;
+    }
+    if (ns->builtin == BI_DEBUG) {
+        char key[64];
+        snprintf(key, sizeof key, "debug.%s", name);
+        Symbol *f = std_builtin(key);
+        if (f && f->builtin == BI_DEBUG_FN) return f;
+        {
+            const char *sug = suggest_std_member("std.debug", name);
+            if (sug) diag_help("did you mean `%s`?", sug);
+        }
+        err_at(line, col, "'std.debug' has no member '%s'", name);
+        return NULL;
+    }
+    if (ns->builtin == BI_TASK || ns->builtin == BI_SYNC) {
+        char key[64];
+        snprintf(key, sizeof key, "%s.%s", ns->name, name);
+        Symbol *f = std_builtin(key);
+        if (f && (f->builtin == BI_TASK_FN || f->builtin == BI_SYNC_FN)) return f;
+        {
+            char full[72];
+            snprintf(full, sizeof full, "std.%s", ns->name);
+            const char *sug = suggest_std_member(full, name);
+            if (sug) diag_help("did you mean `%s`?", sug);
+        }
+        err_at(line, col, "'std.%s' has no member '%s'", ns->name, name);
         return NULL;
     }
     /* 文件模块：只认带 pub 的顶层声明 */
@@ -2116,13 +2283,15 @@ static Type *check_field(Node *n) {
                     /* 内建函数在调用点特判；std.heap / std.file 是命名空间值，
                      * 继续挂上去让 `.page` / `.write` 还能接着查一层 */
                     if (m->builtin == BI_FILE || m->builtin == BI_IO ||
-                        m->builtin == BI_PROC) {
+                        m->builtin == BI_PROC || m->builtin == BI_DEBUG ||
+                        m->builtin == BI_TASK || m->builtin == BI_SYNC) {
                         n->type_val = ty_void();
                         return type_of(n, ty_type());
                     }
                     if (m->builtin && m->builtin != BI_HEAP &&
                         m->builtin != BI_FILE_FN && m->builtin != BI_IO_FN &&
-                        m->builtin != BI_PROC_FN)
+                        m->builtin != BI_PROC_FN && m->builtin != BI_DEBUG_FN &&
+                        m->builtin != BI_TASK_FN && m->builtin != BI_SYNC_FN)
                         return type_of(n, ty_void());
                     ensure(m);
                     if (m->ty && m->ty->kind == TY_TYPE) {
@@ -2535,6 +2704,25 @@ static Type *check_method_call(Node *n) {
     return type_of(n, ret);
 }
 
+/* std.debug.panic / assert：把 @file/@line/@col/@fnName 四个位置内建追加到
+ * 实参尾部（decisions §85）。节点在 check 时自行折成编译期常量，后端发的
+ * 是零开销字面量——不走到这里（release 也不擦调用点，只擦运行时函数体）。 */
+static void debug_inject_loc(Node *n) {
+    static const char *loc[4] = { "file", "line", "col", "fnName" };
+    int old = n->nitems;
+    Node **items = calloc((size_t)(old + 4), sizeof(Node *));
+    for (int i = 0; i < old; i++) items[i] = n->items[i];
+    for (int k = 0; k < 4; k++) {
+        Node *b = node_new(NK_BUILTIN, n->line, n->col);
+        b->name = loc[k];
+        check_expr(b, NULL);
+        items[old + k] = b;
+    }
+    free(n->items);
+    n->items = items;
+    n->nitems = old + 4;
+}
+
 static Type *check_call(Node *n, Type *expect) {
     (void)expect;
     /* 内建命名空间方法：std.print / std.println / std.format */
@@ -2620,6 +2808,30 @@ static Type *check_call(Node *n, Type *expect) {
     }
 
     Type *ct = check_expr(n->a, NULL);
+    /* std.debug.panic / assert：变参走不了普通函数类型，按 builtin 识别。
+     * 用户实参检查完，把位置四件套注入尾部；panic 永不返回（同 @trap），
+     * assert 平时是 void，release 档运行时函数体整体擦除（-DZX_RELEASE）。 */
+    if (n->a->sym && n->a->sym->builtin == BI_DEBUG_FN) {
+        const char *dc = sema_sym_cname(n->a->sym);
+        if (dc && !strcmp(dc, "zx_debug_panic")) {
+            if (n->nitems != 1)
+                return BAD(n, "std.debug.panic takes a message");
+            Type *mt = check_expr(n->items[0], ty_slice(ty_u8(), true));
+            coerce_node(n->items[0], mt, ty_slice(ty_u8(), true), "message");
+            debug_inject_loc(n);
+            return type_of(n, ty_noreturn());
+        }
+        if (dc && !strcmp(dc, "zx_debug_assert")) {
+            if (n->nitems != 2)
+                return BAD(n, "std.debug.assert takes (cond, message)");
+            Type *bt = check_expr(n->items[0], ty_bool());
+            coerce_node(n->items[0], bt, ty_bool(), "condition");
+            Type *mt = check_expr(n->items[1], ty_slice(ty_u8(), true));
+            coerce_node(n->items[1], mt, ty_slice(ty_u8(), true), "message");
+            debug_inject_loc(n);
+            return type_of(n, ty_void());
+        }
+    }
     /* std.io.print / std.io.println：往句柄（usize）上格式化。变参走不了
      * 普通函数类型，但 check_field 已把符号挂在 callee 上（std.io.print
      * 和 `const io = std.io` 别名同款）——按 builtin 识别。 */
@@ -2733,6 +2945,8 @@ static Type *check_tuple_lit(Node *n, Type *expect) {
 
 static Value *arg_ct(Node *a, Type *want);      /* 在后面，泛型实参用 */
 
+static const char *g_cur_fn_name;   /* 当前函数名：@fnName() 与断言消息用 */
+
 static Type *check_builtin(Node *n, Type *expect) {
     (void)expect;
     const char *nm = n->name ? n->name : "";
@@ -2766,6 +2980,32 @@ static Type *check_builtin(Node *n, Type *expect) {
         /* 只有真的执行到这一行才报错：放在 `if` 里的 @compileError 是编译期
          * 分支的一部分，不能在检查函数体时就炸。 */
         return type_of(n, ty_noreturn());
+    }
+
+    /* 源码位置内建：编译期已知，零运行时开销（decisions §85）。
+     * 路径 / 函数名在语义阶段落定——不依赖前端（C 前端与 Zx 自举前端
+     * 都走同一条 sema 路），多模块下各自指向自己的源文件：
+     *   @file   → 当前模块 g_mod->path（多文件检查时 g_srcpath 已被设成
+     *             p->mod->path，见 sema_check 的待查体循环）
+     *   @fnName → check_fn_body 维护的 g_cur_fn_name（fn 字面量无名时为 "?"） */
+    if (!strcmp(nm, "file")) {
+        if (n->nitems != 0) return BAD(n, "@file takes no arguments");
+        const char *p = (g_mod && g_mod->path) ? g_mod->path
+                      : (g_srcpath ? g_srcpath : "");
+        n->str = p;
+        n->str_len = (int)strlen(p);
+        return type_of(n, ty_slice(ty_u8(), true));
+    }
+    if (!strcmp(nm, "fnName")) {
+        if (n->nitems != 0) return BAD(n, "@fnName takes no arguments");
+        n->str = g_cur_fn_name ? g_cur_fn_name : "?";
+        n->str_len = (int)strlen(n->str);
+        return type_of(n, ty_slice(ty_u8(), true));
+    }
+    if (!strcmp(nm, "line") || !strcmp(nm, "col")) {
+        if (n->nitems != 0) return BAD(n, "@%s takes no arguments", nm);
+        n->ival = (nm[0] == 'l') ? (uint64_t)n->line : (uint64_t)n->col;
+        return type_of(n, ty_i32());
     }
 
     if (!strcmp(nm, "trap")) return type_of(n, ty_noreturn());
@@ -3212,6 +3452,10 @@ static void check_stmts(Node *blk) {
     for (int i = 0; i < blk->nitems; i++) {
         Node *s = blk->items[i];
         if (dead) err_unreachable(s, prev);
+        /* 具名绑定到 fn 字面量的，把名字贴上：const helper = fn () void{…}
+         * 这种写法下 fn 节点本身没有名字，@fnName() 就只会拿到 "?"。 */
+        if (s->kind == NK_DECL && s->name && s->b && s->b->kind == NK_FN && !s->b->name)
+            s->b->name = s->name;
         check_stmt(s);
         if (!dead && stmt_blocks_next(s)) dead = true;
         prev = s;
@@ -3827,6 +4071,8 @@ static void ensure(Symbol *s) {
 }
 
 static Type *check_fn_body(Node *fn) {
+    const char *prev_fn = g_cur_fn_name;
+    g_cur_fn_name = fn->name ? fn->name : "?";
     Type *ft = resolve_fn_type(fn);
     if (!ft || ft->kind == TY_INVALID) return ft;
     Type *ret = ft->ret ? ft->ret : ty_void();
@@ -3864,6 +4110,7 @@ static Type *check_fn_body(Node *fn) {
     g_ret = save_ret;
     g_in_defer = save_defer;
     scope_pop(&sc);
+    g_cur_fn_name = prev_fn;    /* 还原外层函数名（嵌套/错误路径安全） */
     return ft;
 }
 
@@ -4029,6 +4276,17 @@ static bool ct_pure(Node *n) {
     return true;
 }
 
+/* 臂的值是不是"就是捕获名本身"（M50 的糖）。语句臂会被解析器包成单语句块，
+ * 所以两种形状都算。 */
+static bool arm_is_capture_value(Node *a, const char *cap) {
+    if (!a || !cap) return false;
+    if (a->kind == NK_BLOCK) {
+        if (a->nitems != 1) return false;
+        a = a->items[0];
+    }
+    return a && a->kind == NK_IDENT && a->name && !strcmp(a->name, cap);
+}
+
 static Type *check_if(Node *n, Type *expect) {
     Label *lb = n->label ? label_push(n->label, false) : NULL;
 
@@ -4040,6 +4298,26 @@ static Type *check_if(Node *n, Type *expect) {
                "`if` condition must be bool, or ?T / !T with a capture name; found `%s`",
                ty_str(c));
     Type *cap_ty = (is_opt || is_err) ? c->elem : NULL;
+
+    /* `if (c) x else y`：bool 条件没有载荷可捕获，"x 是捕获名"这种读法在这里
+     * 无所指——退回老语义，x 就是普通表达式（M50 的糖只在 ?T / !T 上成立）。
+     * 名字又不在作用域里时，用户显然是照着糖写的：给一条指路的错，
+     * 别让 `cap` 落成 "unknown identifier"。 */
+    if (!is_opt && !is_err && n->name && arm_is_capture_value(n->b, n->name)) {
+        if (ty_eq(c, ty_bool()) && !lookup(n->name)) {
+            err_at(n->line, n->col,
+                   "`%s` is not declared — an `if` on a bool has nothing to capture; "
+                   "write `if (c) { %s }` for a value arm", n->name, n->name);
+            /* 这一臂别再往下检查：`cap` 必然也是"未声明"，级联只会多一条
+             * 同义诊断。臂按 void 算，和 `!void` 捕获那条路一样，让调用处
+             * 报真正的类型错（"expected i32, found void"）。 */
+            n->name = NULL;
+            n->b = NULL;
+            n->meth_done = true;
+        } else {
+            n->name = NULL;
+        }
+    }
 
     /* `!void` / `?void` 没有载荷：`if (x) v { … }` 里的 `v` 无所指。
      * 这种写法一定是误会——想要"成功就做事"写 `if (x) { … }`，

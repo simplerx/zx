@@ -45,6 +45,7 @@ typedef struct {
 
 static jmp_buf g_spec;
 static int     g_spec_depth = 0;
+static const char *g_parse_fname;   /* 当前模块的源路径，供 @file() 捕获 */
 
 static Token *cur(P *p) { return &p->t[p->i < p->n ? p->i : p->n - 1]; }
 static Token *peek(P *p, size_t k) {
@@ -967,6 +968,12 @@ static Node *parse_primary(P *p) {
         advance(p);
         Node *n = node_new(NK_BUILTIN, t->line, t->col);
         n->name = take_ident(p);
+        /* @file() 在解析期就把当前模块路径存进节点：多模块下每个 @file 都
+         * 指向自己所在的源文件，而不是入口文件（decisions §85）。 */
+        if (n->name && !strcmp(n->name, "file")) {
+            n->str = g_parse_fname ? g_parse_fname : "";
+            n->str_len = (int)strlen(n->str);
+        }
         /* @typeOf(e) / @field(v, "name") 收表达式；@sizeOf / @alignOf /
          * @typeName / @fieldName(T, i) 收类型；
          * @intCast / @ptrCast / @bitCast 是 (类型, 表达式)；
@@ -1119,16 +1126,30 @@ static bool starts_binop(TokKind k) {
     }
 }
 
+/* 捕获名后面紧跟这些 token，说明臂到这里就结束了——臂的值只能是捕获值本身
+ * （M50 的糖）。块和值都写不出这种形状，所以判定不歧义。 */
+static bool ends_arm_here(TokKind k) {
+    switch (k) {
+    case TOK_SEMI: case TOK_COMMA: case TOK_RPAREN:
+    case TOK_RBRACE: case TOK_RBRACKET: case TOK_KW_ELSE:
+        return true;
+    default: return false;
+    }
+}
+
 /* One `if` arm.
  *   t: { … }        labeled block arm（标签=块；`t: v;` 交出臂的值）
  *   v { … }         capture + block
  *   v t: { … }      capture + labeled block
  *   { … }           plain block arm
  *   v expr          capture + single value (sugar)
+ *   v               capture, and the arm is the capture itself (sugar, M50)
  *   expr            expression arm
  *   10              expression arm
- */
-static Node *parse_if_arm(P *p, const char **capture) {
+ *
+ * implicit_ok 只在"真值臂"上为真：`else` 臂那边 `if (c) x else y` 的 x/y 一直是
+ * 普通表达式（老写法），不能读成捕获。 */
+static Node *parse_if_arm(P *p, const char **capture, bool implicit_ok) {
     if (at(p, TOK_IDENT) && peek(p, 1)->kind == TOK_COLON) {
         const char *lb = dup_tok(advance(p));
         advance(p);                       /* ':' */
@@ -1152,6 +1173,18 @@ static Node *parse_if_arm(P *p, const char **capture) {
         return b;
     }
     if (at(p, TOK_LBRACE)) return parse_block(p);
+
+    /* 捕获即返回值（M50）：`if (o) v;` / `if (o) v else 0`——臂的值就是捕获值
+     * 本身，不用再写标签块（`if (o) v t: { t: v; }`）。
+     * 判据：捕获名后面紧跟"臂到此为止"的 token。真值臂与 else 臂共用这套写法，
+     * 但 else 臂不读捕获（那里的裸名字一直是普通表达式）。 */
+    if (implicit_ok && at(p, TOK_IDENT) && ends_arm_here(peek(p, 1)->kind)) {
+        Token *idt = advance(p);
+        *capture = dup_tok(idt);
+        Node *idn = node_new(NK_IDENT, idt->line, idt->col);
+        idn->name = *capture;
+        return idn;
+    }
 
     /* 单条语句臂（语法糖，M19）：`if (c) return x;` / `continue;` / `defer f();`
      * 语句直接当块用——包一层单语句的块，语义零变化。 */
@@ -1205,7 +1238,7 @@ static Node *parse_if(P *p, const char *label) {
     n->a = parse_expr(p);
     expect(p, TOK_RPAREN);
 
-    n->b = parse_if_arm(p, &n->name);
+    n->b = parse_if_arm(p, &n->name, true);
 
     /* 单表达式语句臂（语法糖）：`if (c) call(); else other();`
      * 臂就是一条表达式语句，分号属于臂本身，不是外层语句的结束符。
@@ -1228,7 +1261,7 @@ static Node *parse_if(P *p, const char *label) {
             n->c = parse_if(p, NULL);
         } else {
             const char *cap2 = NULL;
-            n->c = parse_if_arm(p, &cap2);
+            n->c = parse_if_arm(p, &cap2, false);
             if (cap2) {
                 Node *id = node_new(NK_IDENT, t->line, t->col);
                 id->name = cap2;
@@ -1368,9 +1401,19 @@ static Node *parse_switch(P *p, const char *label) {
          *   lbl: { … }       标签块臂：名字后跟 `:`，块里 `lbl: v;` 交出臂的值
          *   cap lbl: { … }   两者都要：先捕获，再给块贴标签
          * 名字后面既不是 `{` 也不是 `:` 时，它就是表达式臂的开头（`.x: foo`）。
-         * 捕获只配块臂：`cap 值` 和裸 `值` 没法区分，索性不允许。 */
+         * 捕获只配块臂：`cap 值` 和裸 `值` 没法区分，索性不允许。
+         * 例外是 M50 的糖：名字后面**什么都没有**（紧跟 `,` / `}`）时，臂的值
+         * 就是捕获值本身——`pattern: cap,` ≡ `pattern: cap { cap }`；
+         * 想要外部常量请加括号：`pattern: (cap)`。 */
+        Node *implicit = NULL;
         if (at(p, TOK_IDENT) && !is_bool_word(cur(p))) {
-            if (peek(p, 1)->kind == TOK_LBRACE) {
+            bool ends = peek(p, 1)->kind == TOK_COMMA || peek(p, 1)->kind == TOK_RBRACE;
+            if (!arm->flag && ends) {
+                Token *idt = advance(p);
+                arm->name = dup_tok(idt);
+                implicit = node_new(NK_IDENT, idt->line, idt->col);
+                implicit->name = arm->name;
+            } else if (peek(p, 1)->kind == TOK_LBRACE) {
                 arm->name = take_ident(p);
                 if (at(p, TOK_IDENT) && peek(p, 1)->kind == TOK_COLON) {
                     arm->label = take_ident(p);
@@ -1387,7 +1430,8 @@ static Node *parse_switch(P *p, const char *label) {
         }
         if (arm->label && !at(p, TOK_LBRACE))
             perr(p, "a labeled arm needs a block: the label is the scope its `lbl: v;` yields to");
-        arm->a = at(p, TOK_LBRACE) ? parse_block(p) : parse_expr(p);
+        arm->a = implicit ? implicit
+                          : (at(p, TOK_LBRACE) ? parse_block(p) : parse_expr(p));
         push(n, arm);
         if (!accept(p, TOK_COMMA)) {
             if (!at(p, TOK_RBRACE)) perr(p, "expected ',' or '}' after switch arm");
@@ -1614,6 +1658,7 @@ static size_t *bracket_match(Token *t, size_t n) {
 }
 
 Node *parse_program(Lexer *lx) {
+    g_parse_fname = lx->fname;   /* @file() 按模块捕获自己的源路径 */
     P p = { .t = lx->toks, .n = lx->ntoks, .i = 0, .last_line = 0,
             .match = bracket_match(lx->toks, lx->ntoks) };
     Node *root = node_new(NK_ROOT, 1, 1);

@@ -1663,10 +1663,26 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
     const dotted = ps > 0 and text[ps - 1] == '.';
 
     if (dotted) {
-        // 取 '.' 之前的完整路径（可含多级点：std / std.heap / obj.field）
+        // 取 '.' 之前的完整路径（可含多级点：std / std.heap / obj.field）。
+        // 结构体/联合字面量 `Person{.`：'.' 前是 '{'，容器名在 '{' 之前
+        //（中间隔空白也认：`Person{ .circle`）。普通点路径则照旧回扫。
         const base_end = ps - 1;
         var base_start = base_end;
-        while (base_start > 0 and (isIdentChar(text[base_start - 1]) or text[base_start - 1] == '.')) base_start -= 1;
+        var lit_ctx = false;
+        {
+            var q = base_end;
+            while (q > 0 and (text[q - 1] == ' ' or text[q - 1] == '\t' or
+                text[q - 1] == '\n' or text[q - 1] == '\r')) q -= 1;
+            if (q > 0 and text[q - 1] == '{') {
+                lit_ctx = true;
+                q -= 1;
+                while (q > 0 and (text[q - 1] == ' ' or text[q - 1] == '\t')) q -= 1;
+                while (q > 0 and (isIdentChar(text[q - 1]) or text[q - 1] == '.')) q -= 1;
+                base_start = q;
+            } else {
+                while (base_start > 0 and (isIdentChar(text[base_start - 1]) or text[base_start - 1] == '.')) base_start -= 1;
+            }
+        }
         const path = text[base_start..base_end];
 
         var handled = false;
@@ -1746,6 +1762,8 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
             }
             if (handled) {
                 for (decls.items) |dcl| {
+                    // 字面量初始化只能写字段/变体，方法（name = fn …）不出
+                    if (lit_ctx and dcl.kind == .value) continue;
                     const k: u32 = switch (dcl.kind) {
                         .field => 5,
                         .variant => 20,
@@ -1816,25 +1834,39 @@ fn formatDoc(doc: *const Document) ?[]const u8 {
     Io.Dir.cwd().writeFile(g_io, .{ .sub_path = shadow.items, .data = doc.text }) catch return null;
     defer Io.Dir.cwd().deleteFile(g_io, shadow.items) catch {};
 
+    // fmt 是子命令：`zxc fmt <file>`。以前拼成 `zxc <file> fmt`，"fmt" 被
+    // 当成第二个文件名忽略，实际跑的是编译——影子文件永远没被格式化，
+    // 读回来原样，宿主拿到空编辑，保存自动格式化于是静默失效。
     var cmdline: std.ArrayList(u8) = .empty;
     defer cmdline.deinit(gpa);
     cmdline.appendSlice(gpa, zxc_path) catch return null;
-    cmdline.append(gpa, ' ') catch return null;
+    cmdline.appendSlice(gpa, " fmt ") catch return null;
     cmdline.appendSlice(gpa, shadow.items) catch return null;
-    cmdline.appendSlice(gpa, " fmt") catch return null;
     const argv = [_][]const u8{ "C:\\Windows\\System32\\cmd.exe", "/c", cmdline.items };
     _ = std.process.run(gpa, g_io, .{ .argv = &argv, .stderr_limit = .unlimited, .cwd = childCwd() }) catch return null;
 
     const new_text = readFileSmall(shadow.items) orelse return null;
     if (std.mem.eql(u8, new_text, doc.text)) return "[]"; // 没变化，空编辑
-    var lines: u32 = 0;
+    // 终点 = 最后一行的行号 + 该行长度。不能假设文档以 \n 结尾：
+    // "a\nb" 的全文替换终点是 (1, len("b"))，若用（换行数, 0）会把
+    // 最后一行漏在替换区外，格式化结果拼接出错。
+    var end_line: u32 = 0;
+    var end_char: u32 = 0;
     for (doc.text) |c| {
-        if (c == '\n') lines += 1;
+        if (c == '\n') {
+            end_line += 1;
+            end_char = 0;
+        } else end_char += 1;
     }
     var j = Json{};
     j.buf.appendSlice(gpa, "[{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":") catch return null;
-    j.raw("{d}", .{lines});
-    j.buf.appendSlice(gpa, ",\"character\":0},\"newText\":") catch return null;
+    j.raw("{d}", .{end_line});
+    j.buf.appendSlice(gpa, ",\"character\":") catch return null;
+    j.raw("{d}", .{end_char});
+    // 两个 } ：一个闭 "end"，一个闭 "range"。少一个 newText 就会被
+    // 塞进 range 对象里，宿主直接报 JSON 解析错（以前 fmt 没生效、
+    // 永远走"无变化"分支，这个坑被遮到今天）。
+    j.buf.appendSlice(gpa, "}},\"newText\":") catch return null;
     j.str(new_text);
     j.buf.appendSlice(gpa, "}]") catch return null;
     return j.buf.items;

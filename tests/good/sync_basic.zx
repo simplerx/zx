@@ -1,0 +1,32 @@
+// sync_basic.zx —— 同步原语：std.mutex（非递归 SRWLOCK/pthread）与
+// std.atomic（SEQ_CST）。单线程下断言原语语义本身。
+// expect-output:try-locked:false
+// expect-output:try-unlocked:true
+// expect-output:cas-hit:true
+// expect-output:cas-miss:false
+// expect-output:cnt:7
+// expect-output:sw:9
+const std = module("std");
+
+var cnt: usize = 0;
+
+const main = fn () !i32 {
+    let m = std.mutex.mutexNew();
+    std.mutex.mutexLock(m);
+    std.println("try-locked:{}", std.mutex.mutexTry(m));    // false：非递归
+    std.mutex.mutexUnlock(m);
+    std.println("try-unlocked:{}", std.mutex.mutexTry(m));  // true
+    std.mutex.mutexUnlock(m);
+
+    std.atomic.atomicStore(&cnt, 5);
+    std.atomic.atomicAdd(&cnt, 2);
+    std.println("cnt:{}", std.atomic.atomicLoad(&cnt));
+
+    let hit = std.atomic.atomicCAS(&cnt, 7, 9);
+    let miss = std.atomic.atomicCAS(&cnt, 7, 100);
+    std.println("cas-hit:{}", hit);
+    std.println("cas-miss:{}", miss);
+    std.println("sw:{}", std.atomic.atomicSwap(&cnt, 1));
+    std.mutex.mutexFree(m);
+    return 0;
+};

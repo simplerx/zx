@@ -1,0 +1,36 @@
+// task_cancel.zx —— 取消复用 !T 传播链（M55 门 + M56 Task）：
+// cancel 后任务在下一个 await 门收到 error.cancelled，冒到任务顶层，
+// await 它的人收到同一个错误。
+// expect-output:caught:cancelled
+// expect-output:after await:done
+const std = module("std");
+
+// !T 函数：入口即 await 点（自动挂起 + 取消检查）
+const step = fn (n: usize) !i32 {
+    if (n > 100) { return error.overflow; }
+    return 0;
+};
+
+const worker = fn (_: usize) !usize {
+    var i: usize = 0;
+    while (i < 1000) {
+        if (step(i)) v { i = i + 1; } else e {
+            // error.cancelled 从 step 入口冒出来，直接向上传播
+            return e;
+        }
+    }
+    return 0;
+};
+
+const main = fn () !i32 {
+    std.Task.init(0);
+    let f = std.Task.spawn(worker, 0).?;
+    std.Task.cancel(f);                 // 未开始就取消
+    if (std.Task.await(f)) v {
+        std.println("unexpected:{}", v);
+    } else e {
+        std.println("caught:{}", std.debug.errName(e));
+    }
+    std.println("after await:done");
+    return 0;
+};

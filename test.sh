@@ -138,10 +138,14 @@ rm -rf "$pdir" 2>/dev/null || true
 # 2.6 LSP 冒烟：语言服务器的模块解析必须和编译器**同一条链**（vendor/ +
 # zx.json 的 deps 都要认）。这条挡的是"能编过、IDE 里补不出来"的偏差：
 # 两侧各写一份解析链，缺一个目录就是一个点了没反应的句点。
+# zxls 编进临时目录并把 zxc.exe 拷到它旁边——zxls 按兄弟目录找 zxc，
+# 这样格式化冒烟才能打到真 fmt，而不是空响应假通过。
 printf "\n== LSP 冒烟（tools/lsptest.py：补全/跳转 + vendor/ 与 deps）\n"
 if [ -x "$ZYG" ] && command -v python >/dev/null 2>&1; then
-    if $ZYG build-exe tools/zxls.zig -O ReleaseSafe -femit-bin="$TPFX.zxls.exe" > "$TPFX.zxls.log" 2>&1; then
-        if ZXLS_BIN="$TPFX.zxls.exe" python tools/lsptest.py > "$TPFX.lsp.log" 2>&1; then
+    mkdir -p "$TPFX.lspbin"
+    cp "$ZXC" "$TPFX.lspbin/zxc.exe" 2>/dev/null || true
+    if $ZYG build-exe tools/zxls.zig -O ReleaseSafe -femit-bin="$TPFX.lspbin/zxls.exe" > "$TPFX.zxls.log" 2>&1; then
+        if ZXLS_BIN="$TPFX.lspbin/zxls.exe" python tools/lsptest.py > "$TPFX.lsp.log" 2>&1; then
             printf "  ok   %s 项全过（含 vendor/ 与 deps 模块）\n" \
                 "$(grep -c '^ok' "$TPFX.lsp.log" | tr -d ' ')"
         else
@@ -174,6 +178,7 @@ fi
 # 用例会在仓库根留下自己的临时文件：io_fmt.zx 写 io_fmt.tmp，stdfs.zx 建
 # fs_t_dir / fs_t_dir2。跑完统一带走——测试不该往工作区里堆东西。
 rm -rf io_fmt.tmp fs_t_dir fs_t_dir2 2>/dev/null || true
+rm -rf "$TPFX.lspbin" 2>/dev/null || true
 rm -f "$TPFX"* 2>/dev/null || true
 
 if [ $fail -ne 0 ]; then

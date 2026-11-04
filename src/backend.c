@@ -681,6 +681,11 @@ static bool g_need_allocfmt; /* 用过 std.format → 还要带上 zx_format */
 static bool g_need_file;    /* 用过 std.file → 带上 zx_file_* */
 static bool g_need_io;      /* 用过 std.io → 带上 zx_io_*（句柄流） */
 static bool g_need_proc;    /* 用过 std.process → 带上 zx_proc_* */
+static bool g_need_debug;   /* 用过 std.debug → 带上 zx_debug_* */
+static bool g_need_sync;  /* 用过 std.thread → 带上线程/互斥/原子运行时 */
+static bool g_need_task;   /* 用过 std.fiber / else 捕获 / printTrace → 纤程 + 捕获环 */
+static const char *g_cur_mod_path;  /* 正在发射的模块源路径（捕获点记录用） */
+static const char *g_cur_fn_zx;     /* 正在发射的函数 Zx 名（捕获点记录用） */
 static bool g_need_page;     /* 用到 std.heap.page → 带上页分配器 */
 static bool g_need_any;      /* 打印过聚合值 → 带上结构展开器与类型描述符 */
 static bool g_need_div;      /* 用过整数 / % → 带上除零 trap 辅助（M19） */
@@ -696,6 +701,11 @@ static void need_by_cname(const char *cn) {
     if (!strncmp(cn, "zx_file_", 8))  g_need_file = true;
     if (!strncmp(cn, "zx_io_", 6))    g_need_io = true;
     if (!strncmp(cn, "zx_proc_", 8))  g_need_proc = true;
+    if (!strncmp(cn, "zx_debug_", 9)) g_need_debug = true;
+    if (!strncmp(cn, "zx_mutex_", 9) || !strncmp(cn, "zx_atomic_", 10))
+        g_need_sync = true;
+    if (!strncmp(cn, "zx_task_", 8) || !strncmp(cn, "zx_cap_", 7))
+        g_need_task = true;
 }
 
 /* 预扫描：main 的签名要在发函数体之前定（用没用 std.process 决定
@@ -713,6 +723,26 @@ static bool scan_proc_use(Node *n) {
         if (scan_proc_use(n->items[i])) return true;
     for (int i = 0; i < n->nunroll; i++)
         if (scan_proc_use(n->unroll[i])) return true;
+    return false;
+}
+
+/* 同款预扫描：await 门的注入点在 gen_fn（发体时），而 g_need_task 平时
+ * 在发体过程中才置位——第一个被生成的函数就赶不上。程序里只要出现过
+ * `std.Task` 的访问形状就开调度器 + await 门注入。
+ * 已知缺口同 scan_proc_use：`const Task = std.Task; Task.spawn(…)` 这种
+ * 别名形状认不出来。 */
+static bool scan_task_use(Node *n) {
+    if (!n) return false;
+    if (n->kind == NK_FIELD && n->name && !strcmp(n->name, "Task") &&
+        n->a && n->a->kind == NK_IDENT && n->a->name &&
+        !strcmp(n->a->name, "std"))
+        return true;
+    if (scan_task_use(n->a) || scan_task_use(n->b) || scan_task_use(n->c))
+        return true;
+    for (int i = 0; i < n->nitems; i++)
+        if (scan_task_use(n->items[i])) return true;
+    for (int i = 0; i < n->nunroll; i++)
+        if (scan_task_use(n->unroll[i])) return true;
     return false;
 }
 
@@ -1216,6 +1246,20 @@ static void ex_builtin(Buf *b, Node *n) {
         Buf s; buf_init(&s);
         cstr(&s, p, len);
         buf_printf(b, "((ZxSlice_u8){(uint8_t*)%s, %d})", s.data, len);
+        return;
+    }
+    if (!strcmp(nm, "file") || !strcmp(nm, "fnName")) {
+        /* 路径 / 函数名在编译期就定死了：直接发 C 字符串字面量切片，零开销 */
+        const char *p = n->str ? n->str : "";
+        int len = n->str_len > 0 ? n->str_len : (int)strlen(p);
+        Buf s; buf_init(&s);
+        cstr(&s, p, len);
+        buf_printf(b, "((ZxSlice_u8){(uint8_t*)%s, %d})", s.data, len);
+        return;
+    }
+    if (!strcmp(nm, "line") || !strcmp(nm, "col")) {
+        int v = (nm[0] == 'l') ? n->line : n->col;
+        buf_printf(b, "((int32_t)%d)", v);
         return;
     }
     if (!strcmp(nm, "typeInfo")) {
@@ -1981,6 +2025,543 @@ static void emit_io_runtime(void) {
         un.data, un.data);         /* stderr */
     g_out = sv;
     g_ind = si;
+}
+
+/* std.debug 运行时：panic / assert 的位置实参由编译器在调用点注入成字面量；
+ * errName 的码 → 名字静态表在这里铺出（进代码生成时 sema 已把整个工程的
+ * 错误集登记完，直接按码序展开成字符串数组，查表 O(1)）；
+ * assert 的函数体在 release（-DZX_RELEASE）下整体擦除。 */
+static void emit_debug_runtime(void) {
+    int ne = ty_err_count();
+    /* 表无条件发射：枚举错误（(error)Err.x）不进登记表，ne 可能是 0，
+     * 但 printTrace 的代码路径始终引用它——空表 + 哨兵兜底。 */
+    buf_puts(g_out, "static const char *zx_err_names[] = {\n    NULL");
+    for (uint16_t c = 1; c <= (uint16_t)ne; c++) {
+        const char *nm = ty_err_name(c);
+        if (!nm) nm = "?";
+        int nl = (int)strlen(nm);
+        Buf s; buf_init(&s);
+        cstr(&s, nm, nl);
+        buf_printf(g_out, ",\n    %s", s.data);
+    }
+    buf_puts(g_out, "\n};\n\n");
+    bline(&g_bproto, "ZxSlice_u8 zx_debug_errname(uint64_t code);");
+    buf_puts(g_out, "ZxSlice_u8 zx_debug_errname(uint64_t code) {\n");
+    buf_printf(g_out,
+        "    ZxSlice_u8 r;\n"
+        "    const char *s = (code > 0 && code <= %d) ? zx_err_names[code] : \"?\";\n"
+        "    r.ptr = (uint8_t *)s; r.len = strlen(s);\n"
+        "    return r;\n"
+        "}\n\n", ne);
+
+    bline(&g_bproto, "void zx_debug_panic(ZxSlice_u8 msg, ZxSlice_u8 file,"
+                     " int32_t line, int32_t col, ZxSlice_u8 fn);");
+    bline(&g_bproto, "void zx_debug_assert(bool cond, ZxSlice_u8 msg, ZxSlice_u8 file,"
+                     " int32_t line, int32_t col, ZxSlice_u8 fn);");
+    buf_puts(g_out,
+        "void zx_debug_panic(ZxSlice_u8 msg, ZxSlice_u8 file, int32_t line, int32_t col, ZxSlice_u8 fn) {\n"
+        "    fprintf(stderr, \"panic: %.*s\\n  at %.*s:%d:%d in %.*s\\n\",\n"
+        "            (int)msg.len, (const char *)msg.ptr,\n"
+        "            (int)file.len, (const char *)file.ptr, line, col,\n"
+        "            (int)fn.len, (const char *)fn.ptr);\n"
+        "    fflush(stderr);\n"
+        "    abort();\n"
+        "}\n\n"
+        "void zx_debug_assert(bool cond, ZxSlice_u8 msg, ZxSlice_u8 file, int32_t line, int32_t col, ZxSlice_u8 fn) {\n"
+        "#ifndef ZX_RELEASE\n"
+        "    if (!cond) zx_debug_panic(msg, file, line, col, fn);\n"
+        "#else\n"
+        "    (void)cond; (void)msg; (void)file; (void)line; (void)col; (void)fn;\n"
+        "#endif\n"
+        "}\n\n");
+
+    /* 真正的异步感知调用链由捕获感知纤程提供：`else err { … }` 的捕获点
+     * （gen_if_body）把 {码, file, line, col, fn} 压进当前上下文的捕获环，
+     * printTrace 回放。捕获环在纤程运行时里（emit_fiber_runtime 先发）。 */
+    bline(&g_bproto, "void zx_debug_printtrace(void);");
+    buf_printf(g_out,
+        "void zx_debug_printtrace(void) {\n"
+        "    ZxCap *c = (ZxCap *)zx_cap_current();\n"
+        "    if (c->n == 0) { fprintf(stderr, \"zx trace: no captured errors\\n\"); return; }\n"
+        "    fprintf(stderr, \"zx trace (oldest first):\\n\");\n"
+        "    for (int i = 0; i < c->n; i++) {\n"
+        "        ZxCapRec *r = &c->recs[(c->start + i) %% ZX_CAP_MAX];\n"
+        "        const char *nm = (r->code > 0 && r->code <= %d) ? zx_err_names[r->code] : \"?\";\n"
+        "        fprintf(stderr, \"  %%s at %%s:%%u:%%u in %%s\\n\",\n"
+        "                nm, r->file, r->line, r->col, r->fn);\n"
+        "    }\n"
+        "}\n\n", ne);
+}
+
+/* std.thread 运行时：OS 线程 + 互斥 + 原子（decisions §86）。
+ * Win32 / pthread 双路，都在生成 C 里按平台挑；句柄是 usize（0 保留），
+ * 线程与互斥各留一张定长注册表——线程本来就少，线性登记足够；
+ * 原子操作用 __atomic 内建（gcc/clang/zig cc 全支持，MSVC 不走这条路）。
+ * 注册表本身的增删只在创建线程之前发生，不加锁（文档里写明）。 */
+/* std.mutex / std.atomic 运行时（decisions §86 语义沿用：非递归 SRWLOCK /
+ * pthread 互斥，SEQ_CST 原子）。与 Task 调度器分开、按需发射——用 Task
+ * 不用锁的程序不背这份代码。 */
+static void emit_sync_runtime(void) {
+    bline(&g_bproto, "uint64_t zx_mutex_new(void);");
+    bline(&g_bproto, "void zx_mutex_lock(uint64_t m);");
+    bline(&g_bproto, "bool zx_mutex_try(uint64_t m);");
+    bline(&g_bproto, "void zx_mutex_unlock(uint64_t m);");
+    bline(&g_bproto, "void zx_mutex_free(uint64_t m);");
+    bline(&g_bproto, "uint64_t zx_atomic_add(uint64_t *p, uint64_t v);");
+    bline(&g_bproto, "uint64_t zx_atomic_sub(uint64_t *p, uint64_t v);");
+    bline(&g_bproto, "uint64_t zx_atomic_load(uint64_t *p);");
+    bline(&g_bproto, "void zx_atomic_store(uint64_t *p, uint64_t v);");
+    bline(&g_bproto, "uint64_t zx_atomic_swap(uint64_t *p, uint64_t v);");
+    bline(&g_bproto, "bool zx_atomic_cas(uint64_t *p, uint64_t old, uint64_t nv);");
+
+    /* Win32 一律手写 extern（本仓风格：zxrt 不 include windows.h）。
+     * TryAcquireSRWLockExclusive 返回 1 字节 BOOLEAN（只写 AL），按 int
+     * 读高位是垃圾，必须按 unsigned char 收（§86）。 */
+    buf_puts(g_out,
+        "#ifdef _WIN32\n"
+        "extern void AcquireSRWLockExclusive(void *l);\n"
+        "extern unsigned char TryAcquireSRWLockExclusive(void *l);\n"
+        "extern void ReleaseSRWLockExclusive(void *l);\n"
+        "#else\n"
+        "#include <pthread.h>\n"
+        "#endif\n\n"
+        "#define ZX_MUTEX_MAX 256\n"
+        "#ifdef _WIN32\n"
+        "static void *zx_mutex_tab[ZX_MUTEX_MAX];\n"
+        "#else\n"
+        "static pthread_mutex_t zx_mutex_tab[ZX_MUTEX_MAX];\n"
+        "#endif\n"
+        "static bool zx_mutex_used[ZX_MUTEX_MAX];\n\n"
+        "uint64_t zx_mutex_new(void) {\n"
+        "    for (int i = 0; i < ZX_MUTEX_MAX; i++) {\n"
+        "        if (zx_mutex_used[i]) continue;\n"
+        "#ifdef _WIN32\n"
+        "        zx_mutex_tab[i] = NULL;\n"
+        "#else\n"
+        "        pthread_mutex_init(&zx_mutex_tab[i], NULL);\n"
+        "#endif\n"
+        "        zx_mutex_used[i] = true;\n"
+        "        return (uint64_t)(i + 1);\n"
+        "    }\n"
+        "    return 0;\n"
+        "}\n\n"
+        "void zx_mutex_lock(uint64_t m) {\n"
+        "    if (m == 0 || m > ZX_MUTEX_MAX || !zx_mutex_used[m - 1]) return;\n"
+        "#ifdef _WIN32\n"
+        "    AcquireSRWLockExclusive(&zx_mutex_tab[m - 1]);\n"
+        "#else\n"
+        "    pthread_mutex_lock(&zx_mutex_tab[m - 1]);\n"
+        "#endif\n"
+        "}\n\n"
+        "bool zx_mutex_try(uint64_t m) {\n"
+        "    if (m == 0 || m > ZX_MUTEX_MAX || !zx_mutex_used[m - 1]) return false;\n"
+        "#ifdef _WIN32\n"
+        "    return TryAcquireSRWLockExclusive(&zx_mutex_tab[m - 1]) != 0;\n"
+        "#else\n"
+        "    return pthread_mutex_trylock(&zx_mutex_tab[m - 1]) == 0;\n"
+        "#endif\n"
+        "}\n\n"
+        "void zx_mutex_unlock(uint64_t m) {\n"
+        "    if (m == 0 || m > ZX_MUTEX_MAX || !zx_mutex_used[m - 1]) return;\n"
+        "#ifdef _WIN32\n"
+        "    ReleaseSRWLockExclusive(&zx_mutex_tab[m - 1]);\n"
+        "#else\n"
+        "    pthread_mutex_unlock(&zx_mutex_tab[m - 1]);\n"
+        "#endif\n"
+        "}\n\n"
+        "void zx_mutex_free(uint64_t m) {\n"
+        "    if (m == 0 || m > ZX_MUTEX_MAX || !zx_mutex_used[m - 1]) return;\n"
+        "#ifdef _WIN32\n"
+        "    /* SRWLOCK 无需销毁 */\n"
+        "#else\n"
+        "    pthread_mutex_destroy(&zx_mutex_tab[m - 1]);\n"
+        "#endif\n"
+        "    zx_mutex_used[m - 1] = false;\n"
+        "}\n\n"
+        "uint64_t zx_atomic_add(uint64_t *p, uint64_t v) { return __atomic_add_fetch(p, v, __ATOMIC_SEQ_CST); }\n"
+        "uint64_t zx_atomic_sub(uint64_t *p, uint64_t v) { return __atomic_sub_fetch(p, v, __ATOMIC_SEQ_CST); }\n"
+        "uint64_t zx_atomic_load(uint64_t *p)            { return __atomic_load_n(p, __ATOMIC_SEQ_CST); }\n"
+        "void zx_atomic_store(uint64_t *p, uint64_t v)   { __atomic_store_n(p, v, __ATOMIC_SEQ_CST); }\n"
+        "uint64_t zx_atomic_swap(uint64_t *p, uint64_t v){ return __atomic_exchange_n(p, v, __ATOMIC_SEQ_CST); }\n"
+        "bool zx_atomic_cas(uint64_t *p, uint64_t old, uint64_t nv) {\n"
+        "    uint64_t e = old;\n"
+        "    return __atomic_compare_exchange_n(p, &e, nv, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);\n"
+        "}\n\n");
+}
+
+/* std.Task 运行时：统一任务调度器 + 栈有纤程 + 捕获环（decisions §89）。
+ *
+ * 模型：Task 是调度器调度的栈有纤程——多线程（N 个工作线程抢就绪队列）、
+ * 单线程（Task.init(0)，主线程 await 时跑调度循环）、协程（任务间
+ * yield/await 挂起切换）是一个模型的三种配置。任务签名 fn (usize) !usize
+ * 是刻意的 ABI（ZxErr_u64）：取消复用 !T 传播链——cancel 置旗标，任务在
+ * 下一个 await 门收到 error.cancelled，一路冒到任务顶层，任务带着错误码
+ * 完成，await 它的人收到同一个错误。
+ *
+ * 就绪队列：侵入链表 + 全局 SRWLOCK/cond。任务完成时把等待者链整体
+ * 重新入队（await 是真挂起，不忙等）。根上下文 await 未完成任务时主线程
+ * 顺便跑调度循环（帮忙），这就是单线程模式的推进力。
+ *
+ * 捕获环（§87）挂在 ZxTask 上；TLS zx_fb_cur 只是"当前上下文"指针。
+ * 内部 helper 一律行首缩进一个空格：躲头文件组装器的列首提升与剥 static
+ * （§86/§87 教训）。 */
+static void emit_task_runtime(void) {
+    unsigned cc = (unsigned)ty_err_code("cancelled");
+    Type *task_t = ty_fn((Type *[]){ ty_usize() }, 1, ty_err(ty_usize()));
+    Type *erru   = ty_err(ty_usize());
+    Type *optu   = ty_opt(ty_usize());
+    ensure_type(task_t);
+    ensure_type(erru);
+    ensure_type(optu);
+    Buf tb; buf_init(&tb); ctype(&tb, task_t);   /* 任务 fn 的 typedef 名 */
+    Buf en; buf_init(&en); tn(&en, erru);        /* ZxErr_u64：任务结果 ABI */
+    Buf ob; buf_init(&ob); tn(&ob, optu);
+    Buf un; buf_init(&un); ctype(&un, ty_usize());
+
+    /* 用户单元要看到的原型 */
+    bline(&g_bproto, "void zx_cap_push(unsigned code, const char *file,"
+                     " unsigned line, unsigned col, const char *fn);");
+    bline(&g_bproto, "void *zx_cap_current(void);");
+    buf_printf(&g_bproto, "%s zx_task_spawn(%s f, %s ctx);\n", ob.data, tb.data, un.data);
+    buf_printf(&g_bproto, "%s zx_task_await(uint64_t id);\n", en.data);
+    bline(&g_bproto, "void zx_task_cancel(uint64_t id);");
+    bline(&g_bproto, "void zx_task_yield(void);");
+    buf_printf(&g_bproto, "%s zx_task_current(void);\n", un.data);
+    bline(&g_bproto, "bool zx_task_interrupted(void);");
+    bline(&g_bproto, "void zx_task_auto(uint64_t id, bool on);");
+    bline(&g_bproto, "void zx_task_init(uint64_t n);");
+    bline(&g_bproto, "bool zx_task_await_gate(void);");
+
+    /* 类型、平台原语、任务结构与调度器全局量 */
+    buf_printf(g_out,
+        "#define ZX_ERR_CANCELLED %uu\n"
+        "#define ZX_CAP_MAX 64\n"
+        "typedef struct { uint16_t code; const char *file; unsigned line, col; const char *fn; } ZxCapRec;\n"
+        "typedef struct { ZxCapRec recs[ZX_CAP_MAX]; int n, start; } ZxCap;\n"
+        "static __thread ZxCap zx_cap_root;\n\n"
+        "#ifdef _WIN32\n"
+        "extern void *ConvertThreadToFiber(void *arg);\n"
+        "extern void *CreateFiber(unsigned long long st, void (*fn)(void *), void *arg);\n"
+        "extern void SwitchToFiber(void *f);\n"
+        "extern void DeleteFiber(void *f);\n"
+        "extern uint64_t CreateThread(void *attr, unsigned long long stack,\n"
+        "    uint64_t (*fn)(void *), void *arg, uint64_t flags, uint64_t *tid);\n"
+        "extern void InitializeConditionVariable(void *cv);\n"
+        "extern int SleepConditionVariableSRW(void *cv, void *srw,\n"
+        "    unsigned long ms, unsigned long flags);\n"
+        "extern void WakeAllConditionVariable(void *cv);\n"
+        "extern void AcquireSRWLockExclusive(void *l);\n"
+        "extern void ReleaseSRWLockExclusive(void *l);\n"
+        "extern unsigned short GetActiveProcessorCount(unsigned short group);\n"
+        "#define ZX_TASK_STACK 0\n"
+        "#define ZX_TASK_INF 0xFFFFFFFFu\n"
+        "#else\n"
+        "#include <pthread.h>\n"
+        "#include <unistd.h>\n"
+        "#include <ucontext.h>\n"
+        "#define ZX_TASK_STACK (1024 * 1024)\n"
+        "#endif\n\n"
+        "typedef struct ZxTask {\n"
+        "#ifdef _WIN32\n"
+        "    void *h;\n"
+        "#else\n"
+        "    ucontext_t ctx;\n"
+        "    char *stk;\n"
+        "#endif\n"
+        "    %s (*fn)(uint64_t);\n"
+        "    uint64_t arg;\n"
+        "    struct ZxTask *back, *next, *waiters;\n"
+        "    bool done, cancelled, started, is_root, inited, auto_yield;\n"
+        "    uint16_t tag;\n"
+        "    uint64_t ret, id;\n"
+        "    ZxCap cap;\n"
+        "} ZxTask;\n\n"
+        "static __thread ZxTask zx_tk_root;\n"
+        "static __thread ZxTask *zx_fb_cur;\n"
+        "#ifdef _WIN32\n"
+        "typedef void *ZxSchedLk; typedef void *ZxSchedCv;\n"
+        "#else\n"
+        "typedef pthread_mutex_t ZxSchedLk; typedef pthread_cond_t ZxSchedCv;\n"
+        "#endif\n"
+        "static ZxSchedLk zx_sched_lk;\n"
+        "static ZxSchedCv zx_sched_cv;\n"
+        "static ZxTask *zx_ready_head, *zx_ready_tail;\n"
+        "#define ZX_TASK_MAX 256\n"
+        "static ZxTask *zx_tk_tab[ZX_TASK_MAX];\n"
+        "static int zx_tk_n;\n"
+        "static int zx_nworkers, zx_want_workers = -1;\n"
+        "static int zx_sched_live;\n\n",
+        cc, en.data);
+
+    /* 内部 helper 前置声明（行首缩进：不进头文件、保持 static） */
+    buf_puts(g_out,
+        " static void zx_task_worker_loop(void);\n"
+        "#ifdef _WIN32\n"
+        " static uint64_t zx_task_worker_tramp(void *p);\n"
+        "#else\n"
+        " static void *zx_task_worker_tramp(void *p);\n"
+        "#endif\n\n");
+
+    /* 调度锁 / 条件变量 / 就绪队列 / 捕获环 */
+    buf_puts(g_out,
+        " static void zx_sched_lock(void) {\n"
+        "#ifdef _WIN32\n"
+        "    AcquireSRWLockExclusive(&zx_sched_lk);\n"
+        "#else\n"
+        "    pthread_mutex_lock(&zx_sched_lk);\n"
+        "#endif\n"
+        " }\n\n"
+        " static void zx_sched_unlock(void) {\n"
+        "#ifdef _WIN32\n"
+        "    ReleaseSRWLockExclusive(&zx_sched_lk);\n"
+        "#else\n"
+        "    pthread_mutex_unlock(&zx_sched_lk);\n"
+        "#endif\n"
+        " }\n\n"
+        " static void zx_sched_waitcv(void) {\n"
+        "#ifdef _WIN32\n"
+        "    SleepConditionVariableSRW(&zx_sched_cv, &zx_sched_lk, ZX_TASK_INF, 0);\n"
+        "#else\n"
+        "    pthread_cond_wait(&zx_sched_cv, &zx_sched_lk);\n"
+        "#endif\n"
+        " }\n\n"
+        " static void zx_sched_wakeall(void) {\n"
+        "#ifdef _WIN32\n"
+        "    WakeAllConditionVariable(&zx_sched_cv);\n"
+        "#else\n"
+        "    pthread_cond_broadcast(&zx_sched_cv);\n"
+        "#endif\n"
+        " }\n\n"
+        " static void zx_ready_push(ZxTask *t) {\n"
+        "    t->next = NULL;\n"
+        "    if (zx_ready_tail) zx_ready_tail->next = t; else zx_ready_head = t;\n"
+        "    zx_ready_tail = t;\n"
+        " }\n\n"
+        " static ZxTask *zx_ready_pop(void) {\n"
+        "    ZxTask *t = zx_ready_head;\n"
+        "    if (t) { zx_ready_head = t->next; if (!zx_ready_head) zx_ready_tail = NULL; t->next = NULL; }\n"
+        "    return t;\n"
+        " }\n\n"
+        " void *zx_cap_current(void) {\n"
+        "    return (zx_fb_cur && !zx_fb_cur->is_root) ? &zx_fb_cur->cap : &zx_cap_root;\n"
+        " }\n\n"
+        "void zx_cap_push(unsigned code, const char *file, unsigned line, unsigned col, const char *fn) {\n"
+        "    ZxCap *c = zx_cap_current();\n"
+        "    ZxCapRec *r;\n"
+        "    if (c->n < ZX_CAP_MAX) { r = &c->recs[(c->start + c->n) % ZX_CAP_MAX]; c->n++; }\n"
+        "    else { r = &c->recs[c->start]; c->start = (c->start + 1) % ZX_CAP_MAX; }\n"
+        "    r->code = (uint16_t)code; r->file = file; r->line = line; r->col = col; r->fn = fn;\n"
+        "}\n\n");
+
+    /* 线程根上下文（含调度器与工作线程的惰性初始化）、切换、完成、驱动 */
+    buf_printf(g_out,
+        " static ZxTask *zx_task_rootctx(void) {\n"
+        "    if (__atomic_exchange_n(&zx_sched_live, 1, __ATOMIC_SEQ_CST) == 0) {\n"
+        "#ifdef _WIN32\n"
+        "        InitializeConditionVariable(&zx_sched_cv);\n"
+        "#else\n"
+        "        pthread_mutex_init(&zx_sched_lk, NULL);\n"
+        "        pthread_cond_init(&zx_sched_cv, NULL);\n"
+        "#endif\n"
+        "        int n = zx_want_workers;\n"
+        "        if (n < 0) {\n"
+        "#ifdef _WIN32\n"
+        "            unsigned short nc = GetActiveProcessorCount(0xFFFF);\n"
+        "            n = nc > 1 ? (int)nc - 1 : 0;\n"
+        "#else\n"
+        "            long sc = sysconf(_SC_NPROCESSORS_ONLN);\n"
+        "            n = sc > 1 ? (int)sc - 1 : 0;\n"
+        "#endif\n"
+        "        }\n"
+        "        for (int i = 0; i < n; i++) {\n"
+        "#ifdef _WIN32\n"
+        "            CreateThread(NULL, 0, zx_task_worker_tramp, NULL, 0, NULL);\n"
+        "#else\n"
+        "            pthread_t th; pthread_create(&th, NULL, zx_task_worker_tramp, NULL);\n"
+        "#endif\n"
+        "            zx_nworkers++;\n"
+        "        }\n"
+        "    }\n"
+        "    if (!zx_tk_root.inited) {\n"
+        "        zx_tk_root.inited = true;\n"
+        "        zx_tk_root.is_root = true;\n"
+        "#ifdef _WIN32\n"
+        "        zx_tk_root.h = ConvertThreadToFiber(0);\n"
+        "        if (!zx_tk_root.h) return 0;\n"
+        "#endif\n"
+        "    }\n"
+        "    return &zx_tk_root;\n"
+        " }\n\n"
+        " static void zx_task_switch_to(ZxTask *from, ZxTask *to) {\n"
+        "    zx_fb_cur = to;\n"
+        "#ifdef _WIN32\n"
+        "    SwitchToFiber(to->h);\n"
+        "#else\n"
+        "    swapcontext(&from->ctx, &to->ctx);\n"
+        "#endif\n"
+        " }\n\n"
+        " static void zx_task_finish(ZxTask *self, uint64_t ret, uint16_t tag) {\n"
+        "    self->ret = ret; self->tag = tag; self->done = true;\n"
+        "    zx_sched_lock();\n"
+        "    ZxTask *w = self->waiters; self->waiters = NULL;\n"
+        "    while (w) { ZxTask *nx = w->next; zx_ready_push(w); w = nx; }\n"
+        "    zx_sched_wakeall();\n"
+        "    zx_sched_unlock();\n"
+        " }\n\n"
+        " static void zx_task_main(void *p) {\n"
+        "    ZxTask *self = (ZxTask *)p;\n"
+        "    %s r = self->fn(self->arg);\n"
+        "    zx_task_finish(self, r.payload, r.tag);\n"
+        "    if (self->back) { zx_task_switch_to(self, self->back); return; }\n"
+        "    fprintf(stderr, \"zx task: entry returned without a scheduler\\n\");\n"
+        "    abort();\n"
+        " }\n\n"
+        " static void zx_task_run_one(ZxTask *t, ZxTask *root) {\n"
+        "    if (t->cancelled && !t->started) {\n"
+        "        zx_task_finish(t, 0, ZX_ERR_CANCELLED);\n"
+        "        return;\n"
+        "    }\n"
+        "    t->started = true;\n"
+        "    t->back = root;\n"
+        "    zx_task_switch_to(root, t);\n"
+        "    if (t->done) {\n"
+        "#ifdef _WIN32\n"
+        "        DeleteFiber(t->h);\n"
+        "#else\n"
+        "        free(t->stk); t->stk = NULL;\n"
+        "#endif\n"
+        "    }\n"
+        " }\n\n"
+        " static void zx_task_worker_loop(void) {\n"
+        "    ZxTask *root = zx_task_rootctx();\n"
+        "    if (!root) return;\n"
+        "    for (;;) {\n"
+        "        zx_sched_lock();\n"
+        "        ZxTask *t = zx_ready_pop();\n"
+        "        if (!t) { zx_sched_waitcv(); zx_sched_unlock(); continue; }\n"
+        "        zx_sched_unlock();\n"
+        "        zx_task_run_one(t, root);\n"
+        "    }\n"
+        " }\n\n"
+        "#ifdef _WIN32\n"
+        " static uint64_t zx_task_worker_tramp(void *p) { (void)p; zx_task_worker_loop(); return 0; }\n"
+        "#else\n"
+        " static void *zx_task_worker_tramp(void *p) { (void)p; zx_task_worker_loop(); return NULL; }\n"
+        "#endif\n\n"
+        " static void zx_task_run_until(ZxTask *target) {\n"
+        "    ZxTask *root = zx_task_rootctx();\n"
+        "    if (!root) return;\n"
+        "    for (;;) {\n"
+        "        if (target->done) return;\n"
+        "        zx_sched_lock();\n"
+        "        ZxTask *t = zx_ready_pop();\n"
+        "        if (!t) {\n"
+        "            if (zx_nworkers > 0) { zx_sched_waitcv(); zx_sched_unlock(); continue; }\n"
+        "            zx_sched_unlock();\n"
+        "            return;   /* 单线程且就绪队空：target 在等一个不会来的东西 */\n"
+        "        }\n"
+        "        zx_sched_unlock();\n"
+        "        zx_task_run_one(t, root);\n"
+        "    }\n"
+        " }\n\n",
+        en.data);
+
+    /* 对外 API */
+    buf_printf(g_out,
+        "%s zx_task_spawn(%s f, %s ctx) {\n"
+        "    %s r; r.payload = 0; r.tag = false;\n"
+        "    ZxTask *root = zx_task_rootctx();\n"
+        "    if (!root) return r;\n"
+        "    zx_sched_lock();\n"
+        "    int idx = zx_tk_n;\n"
+        "    if (idx < ZX_TASK_MAX) zx_tk_n = idx + 1;\n"
+        "    zx_sched_unlock();\n"
+        "    if (idx >= ZX_TASK_MAX) return r;\n"
+        "    ZxTask *t = (ZxTask *)calloc(1, sizeof(ZxTask));\n"
+        "    if (!t) return r;\n"
+        "    t->fn = f; t->arg = ctx;\n"
+        "    t->auto_yield = true;   /* await 自动挂起默认开（§88） */\n"
+        "#ifdef _WIN32\n"
+        "    t->h = CreateFiber(ZX_TASK_STACK, zx_task_main, t);\n"
+        "    if (!t->h) { free(t); return r; }\n"
+        "#else\n"
+        "    if (getcontext(&t->ctx) != 0) { free(t); return r; }\n"
+        "    t->stk = (char *)malloc(ZX_TASK_STACK);\n"
+        "    if (!t->stk) { free(t); return r; }\n"
+        "    t->ctx.uc_stack.ss_sp = t->stk;\n"
+        "    t->ctx.uc_stack.ss_size = ZX_TASK_STACK;\n"
+        "    t->ctx.uc_link = 0;\n"
+        "    makecontext(&t->ctx, (void (*)(void))zx_task_main, 1, t);\n"
+        "#endif\n"
+        "    t->id = (uint64_t)idx + 1;\n"
+        "    zx_sched_lock();\n"
+        "    zx_tk_tab[idx] = t;\n"
+        "    zx_ready_push(t);\n"
+        "    zx_sched_wakeall();\n"
+        "    zx_sched_unlock();\n"
+        "    r.payload = t->id; r.tag = true;\n"
+        "    return r;\n"
+        "}\n\n"
+        "void zx_task_init(uint64_t n) {\n"
+        "    if (zx_sched_live) return;   /* 已启动：配置只对首次 spawn 生效 */\n"
+        "    zx_want_workers = (int)n;\n"
+        "}\n\n"
+        "/* await 门（§88 沿用）：!T 函数入口即 await 点。在任务里且 auto 开：\n"
+        " * 自己回就绪队列尾并切回调度循环——调度点；回来后看取消旗标。 */\n"
+        "bool zx_task_await_gate(void) {\n"
+        "    ZxTask *c = zx_fb_cur;\n"
+        "    if (!c || c->is_root) return false;\n"
+        "    if (c->auto_yield && !c->done && c->back) {\n"
+        "        zx_sched_lock(); zx_ready_push(c); zx_sched_unlock();\n"
+        "        zx_task_switch_to(c, c->back);\n"
+        "    }\n"
+        "    return c->cancelled;\n"
+        "}\n\n"
+        "void zx_task_yield(void) {\n"
+        "    ZxTask *c = zx_fb_cur;\n"
+        "    if (!c || c->is_root || !c->back) return;\n"
+        "    zx_sched_lock(); zx_ready_push(c); zx_sched_unlock();\n"
+        "    zx_task_switch_to(c, c->back);\n"
+        "}\n\n"
+        "void zx_task_cancel(uint64_t id) {\n"
+        "    if (id == 0 || id > (uint64_t)zx_tk_n || !zx_tk_tab[id - 1]) return;\n"
+        "    zx_tk_tab[id - 1]->cancelled = true;\n"
+        "}\n\n"
+        "bool zx_task_interrupted(void) {\n"
+        "    return zx_fb_cur ? zx_fb_cur->cancelled : false;\n"
+        "}\n\n"
+        "void zx_task_auto(uint64_t id, bool on) {\n"
+        "    if (id == 0 || id > (uint64_t)zx_tk_n || !zx_tk_tab[id - 1]) return;\n"
+        "    zx_tk_tab[id - 1]->auto_yield = on;\n"
+        "}\n\n"
+        "%s zx_task_current(void) {\n"
+        "    return (zx_fb_cur && !zx_fb_cur->is_root) ? zx_fb_cur->id : (%s)0;\n"
+        "}\n\n"
+        "/* await：任务内是真挂起（登记等待者、切回调度循环，完成时被重新\n"
+        " * 入队唤醒）；根上下文则顺便跑调度循环直到目标完成。 */\n"
+        "%s zx_task_await(uint64_t id) {\n"
+        "    %s r; r.payload = 0; r.tag = 0;\n"
+        "    if (id == 0 || id > (uint64_t)zx_tk_n || !zx_tk_tab[id - 1]) return r;\n"
+        "    ZxTask *t = zx_tk_tab[id - 1];\n"
+        "    if (t->done) { r.payload = t->ret; r.tag = t->tag; return r; }\n"
+        "    ZxTask *self = zx_fb_cur;\n"
+        "    if (!self || self->is_root) {\n"
+        "        zx_task_run_until(t);\n"
+        "        if (t->done) { r.payload = t->ret; r.tag = t->tag; }\n"
+        "        else r.tag = ZX_ERR_CANCELLED;\n"
+        "        return r;\n"
+        "    }\n"
+        "    zx_sched_lock();\n"
+        "    if (t->done) { zx_sched_unlock(); r.payload = t->ret; r.tag = t->tag; return r; }\n"
+        "    self->next = t->waiters; t->waiters = self;\n"
+        "    zx_sched_unlock();\n"
+        "    zx_task_switch_to(self, self->back);\n"
+        "    r.payload = t->ret; r.tag = t->tag;\n"
+        "    return r;\n"
+        "}\n\n",
+        ob.data, tb.data, un.data, ob.data,
+        un.data, un.data,
+        en.data, en.data);
 }
 
 /* 整个运行时格式化器（只在用到时才生成） */
@@ -3315,6 +3896,22 @@ static void ex(Buf *b, Node *n) {
             if (ioc && !strcmp(ioc, "zx_io_print"))   { ex_io_print(b, n, false); return; }
             if (ioc && !strcmp(ioc, "zx_io_println")) { ex_io_print(b, n, true);  return; }
         }
+        /* std.debug.panic / assert：sema 已把 @file/@line/@col/@fnName 追加到
+         * 实参尾部，这里按注入后的实参直接调运行时——位置全是编译期字面量，
+         * release 档 assert 的擦除发生在运行时函数体里，调用点不变。 */
+        {
+            const char *dc = sym_cname(n->a);
+            if (dc && (!strcmp(dc, "zx_debug_panic") || !strcmp(dc, "zx_debug_assert"))) {
+                need_by_cname(dc);      /* 特判路径绕过了通用发射，这里补置 need 标志 */
+                buf_printf(b, "%s(", dc);
+                for (int i = 0; i < n->nitems; i++) {
+                    if (i) buf_puts(b, ", ");
+                    ex(b, n->items[i]);
+                }
+                buf_putc(b, ')');
+                return;
+            }
+        }
         if (n->inst) {
             int nc = (int)n->ival;                  /* 前 nc 个实参在编译期吃掉了 */
             const char *nm = (n->a && n->a->name) ? n->a->name : NULL;
@@ -3914,6 +4511,24 @@ static void gen_if_body(Node *n, const char *slot, Type *slot_ty) {
         g_ind++;
         if (n->c) {
             CScope s2; cscope_push(&s2);
+            /* 捕获点（decisions §87）：`else err { … }` 一进入就登记一条
+             * {码, file, line, col, fn} 到当前上下文的捕获环——错误值在
+             * 这里落地绑定，trace 就是它的脚印。dev 档才有；release 里
+             * 整个调用被预处理器抹掉，零开销。 */
+            if (is_err) {
+                g_need_task = true;
+                Buf pf, pn;
+                buf_init(&pf); buf_init(&pn);
+                const char *mp = g_cur_mod_path ? g_cur_mod_path : "";
+                const char *fp = g_cur_fn_zx ? g_cur_fn_zx : "?";
+                cstr(&pf, mp, (int)strlen(mp));
+                cstr(&pn, fp, (int)strlen(fp));
+                line("#ifndef ZX_RELEASE");
+                line("zx_cap_push((unsigned)%s.tag, %s, %d, %d, %s);",
+                     tmp, pf.data, n->line, n->col, pn.data);
+                line("#endif");
+                buf_free(&pf); buf_free(&pn);
+            }
             if (n->d && n->d->kind == NK_IDENT) {
                 /* else 捕获只属于 `!T`（`?T` + else 捕获已被 sema 拒掉）。
                  * is_opt 分支只是防御：tag 是 bool。 */
@@ -4329,9 +4944,19 @@ static void gen_fn(Node *fn, const char *name, bool is_main, bool exported) {
         }
     }
 
+    /* await 门（decisions §88）：栈有纤程下，`!T` 函数的入口就是 await 点。
+     * 在纤程里：先挂起回 resumer（调度点），续跑回来后看取消旗标——被取消
+     * 就以 error.cancelled 走 !T 传播链，顺着 try 一路冒到捕获点。
+     * 根上下文里这是一次纯 false 检查，直接进函数体。 */
+    if (!is_main && g_need_task && ret->kind == TY_ERR) {
+        line("if (zx_task_await_gate()) return (%s){ .tag = %u };",
+             cty(ret), (unsigned)ty_err_code("cancelled"));
+    }
+
     g_cur_ret = ret;
     g_is_main = is_main;
     g_saw_errdefer = false;
+    g_cur_fn_zx = fn->name ? fn->name : "?";
 
     g_depth = 0;
     g_csc = NULL;
@@ -4351,6 +4976,7 @@ static void gen_fn(Node *fn, const char *name, bool is_main, bool exported) {
     g_cur_ret = NULL;
     g_is_main = false;
     g_in_fn = false;
+    g_cur_fn_zx = NULL;
 }
 
 /* ======================================================================
@@ -4738,6 +5364,10 @@ int backend_emit_split(Node *root, Buf *header, Buf *rt, BUnit *units, int maxun
     for (int mi = 1; mi < nmods && !g_need_proc; mi++)
         g_need_proc = scan_proc_use(MOD_ROOT(mi));
 
+    g_need_task = scan_task_use(root);
+    for (int mi = 1; mi < nmods && !g_need_task; mi++)
+        g_need_task = scan_task_use(MOD_ROOT(mi));
+
     /* 初始化函数表：被依赖的先初始化（模块表里入口排在最前） */
     g_ninit = 0;
     for (int mi = nmods - 1; mi >= 0 && g_ninit < 64; mi--) {
@@ -4767,6 +5397,7 @@ int backend_emit_split(Node *root, Buf *header, Buf *rt, BUnit *units, int maxun
     for (int mi = 0; mi < nmods; mi++) {
         Node *mr = MOD_ROOT(mi);
         g_cur_unit = mi;
+        g_cur_mod_path = sema_module_path(mi);
         char stem[64];
         unit_stem(mi, stem, sizeof stem);
         units[mi].name = malloc(strlen(stem) + 1);
@@ -4882,6 +5513,12 @@ int backend_emit_split(Node *root, Buf *header, Buf *rt, BUnit *units, int maxun
     if (g_need_file) emit_file_runtime();
     if (g_need_io)   emit_io_runtime();
     if (g_need_proc) emit_proc_runtime();
+    /* 纤程运行时必须在 debug 之前：printTrace 回放捕获环，
+     * 而 ZxCap / ZxCapRec 类型定义在 fiber 运行时里。只要用过
+     * std.debug（printTrace）或发生过 else 捕获，就带捕获环。 */
+    if (g_need_task || g_need_debug) emit_task_runtime();
+    if (g_need_debug) emit_debug_runtime();
+    if (g_need_sync) emit_sync_runtime();
     if (g_need_heapalloc) emit_heapalloc_runtime();
     if (g_need_div) emit_div_runtime();
     if (g_nuw) emit_unwrap_runtime();
