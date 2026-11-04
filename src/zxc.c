@@ -5,6 +5,20 @@
 const char *g_srcpath = "<stdin>";
 int g_error_count = 0;
 
+/* ---------- 外部库链接（@link） ----------
+ * 语义阶段由 @link("ws2_32") 填，driver 拼链接命令时消费。
+ * 去重：同名只记一次（多模块都 @link 同一个库很常见）。 */
+char *g_link_libs[ZXC_MAX_LINK_LIBS];
+int   g_nlink_libs = 0;
+
+void zx_add_link_lib(const char *name) {
+    if (!name || !*name) return;
+    for (int i = 0; i < g_nlink_libs; i++)
+        if (!strcmp(g_link_libs[i], name)) return;
+    if (g_nlink_libs >= ZXC_MAX_LINK_LIBS) return;
+    g_link_libs[g_nlink_libs++] = strdup(name);
+}
+
 /* 超过这个数就不再打印（继续计数）：一个语法错能连出几十条级联报错，
  * 把终端刷满反而看不见第一个错——第一个错通常就是根因。 */
 int g_diag_max_print = 30;

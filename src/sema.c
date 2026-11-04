@@ -200,9 +200,11 @@ Node *sema_module_root(int i)      { return (i >= 0 && i < g_nmods) ? g_mods[i]-
 const char *sema_module_path(int i) { return (i >= 0 && i < g_nmods) ? g_mods[i]->path : NULL; }
 const char *sema_module_stem(int i) { return (i >= 0 && i < g_nmods) ? g_mods[i]->stem : NULL; }
 const char *sema_sym_cname(Symbol *s) { return s ? (s->cname ? s->cname : s->name) : NULL; }
-/* extern 声明的符号：C 名就是外部符号名，后端不许再做关键字转义 */
+/* extern 声明的符号：C 名就是外部符号名，后端不许再做关键字转义
+ * （extern fn 与 extern var 都算——外部符号是别人编好的，改名就链不到） */
 bool sema_sym_is_extern(Symbol *s) {
-    return s && s->decl && s->decl->kind == NK_FN && s->decl->is_extern;
+    if (!s || !s->decl || !s->decl->is_extern) return false;
+    return s->decl->kind == NK_FN || s->decl->kind == NK_DECL;
 }
 bool sema_sym_has_storage(Symbol *s) { return !(s && s->ct_bind); }
 Value *sema_sym_ct(Symbol *s) { return s ? s->ct : NULL; }
@@ -1516,8 +1518,97 @@ static void collect_methods(Node *n, Type *agg, const char *what) {
     }
 }
 
+/* extern struct / extern union 的字段类型必须映射成 C 布局兼容的东西。
+ * 返回 false 时已经报过错。递归校验：嵌套聚合体必须自己也是 extern 的，
+ * 定长数组（*[N]T）逐元素校验，函数指针逐参数校验。 */
+static bool check_c_able(Node *at, Type *t, const char *fname) {
+    if (!t || t->kind == TY_INVALID) return false;
+    switch (t->kind) {
+    case TY_INT:
+        if (t->bits == 1) {
+            err_at(at->line, at->col,
+                   "field '%s': i1 has no C equivalent (use bool or u8)",
+                   fname ? fname : "?");
+            return false;
+        }
+        return true;
+    case TY_FLOAT: case TY_BOOL: case TY_ENUM:
+        return true;
+    case TY_PTR:
+        /* 指针就是一个机器字：指向什么都不影响**这个**结构体的布局。
+         * 定长数组（*[N]T）例外——它作为 extern 字段要展开成 C 数组，
+         * 元素类型必须同样 C 兼容。 */
+        if (t->has_len) return check_c_able(at, t->elem, fname);
+        return true;
+    case TY_FN: {
+        bool ok = t->ret ? check_c_able(at, t->ret, fname) : true;
+        for (int i = 0; ok && i < t->nparams; i++)
+            ok = check_c_able(at, t->params[i], fname);
+        return ok;
+    }
+    case TY_STRUCT: case TY_UNION:
+        if (t->decl && t->decl->is_extern) return true;
+        err_at(at->line, at->col,
+               "field '%s': nested aggregates in `extern struct`/`extern union` "
+               "must be `extern` too (Zx 聚合体带运行时信息，布局与 C 不保证一致)",
+               fname ? fname : "?");
+        return false;
+    case TY_OPT:
+        err_at(at->line, at->col,
+               "field '%s': ?T carries a Zx tag bool — a C pointer is just "
+               "`*T` (null is 0)", fname ? fname : "?");
+        return false;
+    case TY_SLICE:
+        err_at(at->line, at->col,
+               "field '%s': []T is a {ptr, len} pair with no C equivalent — "
+               "pass a pointer `*T` and the length as separate fields",
+               fname ? fname : "?");
+        return false;
+    case TY_ERR: case TY_ERRORSET:
+        err_at(at->line, at->col,
+               "field '%s': error unions are Zx-only, they never cross the FFI boundary",
+               fname ? fname : "?");
+        return false;
+    case TY_TUPLE:
+        err_at(at->line, at->col,
+               "field '%s': use an `extern struct` instead of a tuple for C layout",
+               fname ? fname : "?");
+        return false;
+    default:
+        err_at(at->line, at->col,
+               "field '%s': `%s` has no C-compatible layout",
+               fname ? fname : "?", ty_str(t));
+        return false;
+    }
+}
+
 static Type *resolve_struct_body(Node *n, Type *agg, bool is_union) {
     if (agg->fields) return agg;          /* 已解析 */
+
+    /* extern struct / extern union（FFI）：镜像外部 C 结构体的布局。
+     * 只允许"数据"——方法、静态成员、字段默认值都不进布局，一律拒绝。 */
+    bool ext = n->is_extern;
+    if (ext) {
+        if (n->flag)
+            err_at(n->line, n->col,
+                   "extern struct does not support (packed); C structs follow "
+                   "the platform's natural layout");
+        if (is_union && n->op == 1)
+            err_at(n->line, n->col,
+                   "extern union cannot be union(enum) — tagged unions are a "
+                   "Zx layout ({payload, tag}); a C union is plain");
+        for (int i = 0; i < n->nitems; i++) {
+            Node *it = n->items[i];
+            if (it->kind == NK_FN)
+                err_at(it->line, it->col,
+                       "extern struct/union cannot have methods — attach free "
+                       "functions to the type from outside");
+            else if (it->kind == NK_DECL)
+                err_at(it->line, it->col,
+                       "extern struct/union cannot have static members — "
+                       "only plain `name: Type` fields");
+        }
+    }
 
     Scope sc;
     scope_push(&sc);
@@ -1623,7 +1714,16 @@ static Type *resolve_struct_body(Node *n, Type *agg, bool is_union) {
         fs[k].dflt = it->b;
         k++;
         /* 默认值按字段类型检查 */
-        if (it->b) coerce_node(it->b, check_expr(it->b, ft), ft, "field default");
+        if (it->b) {
+            if (ext)
+                err_at(it->line, it->col,
+                       "field '%s': extern struct/union fields cannot have "
+                       "default values (the C side owns the layout)",
+                       fname ? fname : "?");
+            coerce_node(it->b, check_expr(it->b, ft), ft, "field default");
+        }
+        /* extern 聚合体：字段类型必须 C 布局兼容 */
+        if (ext && ft != agg) check_c_able(it, ft, fname);
     }
 
     agg->fields = fs;
@@ -2920,6 +3020,23 @@ static Type *check_builtin(Node *n, Type *expect) {
         return type_of(n, ty_usize());
     }
 
+    if (!strcmp(nm, "offsetOf")) {
+        /* @offsetOf(T, "field")：字段偏移。布局在 ty_size 里顺带算好
+         * （fields[i].offset），FFI 对外部结构体的布局验证靠它。 */
+        if (n->nitems < 2) return BAD(n, "@offsetOf needs (type, \"field\")");
+        Type *t = resolve_type(n->items[0]);
+        if (ty_size(t) < 0)
+            return BAD(n, "@offsetOf of `%s` is not known at compile time", ty_str(t));
+        Value *sv = arg_ct(n->items[1], NULL);
+        if (!sv || sv->kind != V_STR)
+            return BAD(n, "@offsetOf: the field name must be a string literal");
+        int i = ty_field_index(t, sv->sval);
+        if (i < 0 || t->fields[i].is_static)
+            return BAD(n, "@offsetOf: `%s` has no field `%s`", ty_str(t), sv->sval);
+        n->ival = t->fields[i].offset;
+        return type_of(n, ty_usize());
+    }
+
     if (!strcmp(nm, "typeOf")) {
         if (n->nitems < 1) return BAD(n, "@typeOf needs a value");
         Type *t = check_expr(n->items[0], NULL);
@@ -2968,6 +3085,18 @@ static Type *check_builtin(Node *n, Type *expect) {
     }
 
     if (!strcmp(nm, "trap")) return type_of(n, ty_noreturn());
+
+    if (!strcmp(nm, "link")) {
+        /* @link("ws2_32") / @link("./vendor/foo.lib")：把外部库交给链接器。
+         * 编译期动作，运行时是 no-op；名字去重后由 build_program 转成
+         * `-l<name>`（带路径分隔符或扩展名的按文件路径原样传）。 */
+        if (n->nitems < 1) return BAD(n, "@link needs a library name: @link(\"ws2_32\")");
+        Value *sv = arg_ct(n->items[0], NULL);
+        if (!sv || sv->kind != V_STR)
+            return BAD(n, "@link: the library name must be a string literal");
+        zx_add_link_lib(sv->sval);
+        return type_of(n, ty_void());
+    }
 
     if (!strcmp(nm, "memcpy") || !strcmp(nm, "memmove") || !strcmp(nm, "memset")) {
         /* @memcpy(dst, src, bytes) / @memmove(dst, src, bytes) /
@@ -3524,7 +3653,8 @@ static void hoist(Scope *sc, Node *blk) {
                 s->decl = it;
                 s->mod = g_mod;
                 s->is_pub = it->is_pub;
-                s->cname = mangle_name(it->name);
+                /* extern var 同 extern fn：外部符号用**原名**当 C 名 */
+                s->cname = it->is_extern ? it->name : mangle_name(it->name);
                 s->in_fn = (g_fn_depth > 0);   /* 槽位在当前栈帧上（逃逸检查用） */
                 it->sym = s;
                 /* 泛型 lambda（`const L = fn (T: type) type { … }`）也要知道自己
@@ -3578,6 +3708,37 @@ static void ensure_raw(Symbol *s) {
 
     Node *d = s->decl;
     if (!d) { s->state = 2; s->ty = ty_invalid(); return; }
+
+    /* extern var：外部 C 全局变量（M24）。C 侧拥有存储——必须有类型标注、
+     * 不能有初始化值；只在文件根有意义（函数里的 extern 声明没有 Zx 语义）。
+     * 类型同样要过 C 布局校验：这个变量要跟 C 那边的定义逐字节对上。 */
+    if (d->is_extern) {
+        if (g_fn_depth > 0) {
+            err_at(d->line, d->col,
+                   "extern var belongs at file scope — function-local extern "
+                   "declarations have no Zx semantics");
+        } else if (d->op != 2) {
+            err_at(d->line, d->col,
+                   "`extern var` is the only extern binding — const/let imply "
+                   "a Zx-side initializer, which would fight the C definition");
+        } else if (!d->a) {
+            err_at(d->line, d->col,
+                   "extern var '%s' needs a type annotation (`extern var %s: T;`)",
+                   s->name ? s->name : "?", s->name ? s->name : "?");
+        } else if (d->b) {
+            err_at(d->line, d->col,
+                   "extern var '%s' takes no initializer — the C side owns the storage",
+                   s->name ? s->name : "?");
+        } else {
+            Type *t = resolve_type(d->a);
+            check_c_able(d, t, s->name);
+            s->ty = t;
+            d->ty = t;
+        }
+        if (!s->ty) s->ty = ty_invalid();
+        s->state = 2;
+        return;
+    }
 
     /* `const heap = std.heap;` / `const square = mathx.square;`
      *

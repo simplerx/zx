@@ -1,0 +1,19 @@
+// @link("ws2_32")：源码里声明外部库，build_program 拼进链接命令（-lws2_32）。
+// 不加这个声明， htonl/ntohl 会以 undefined symbol 收场。
+@link("ws2_32");
+
+extern fn htonl(u32) u32;
+extern fn ntohl(u32) u32;
+
+const main = fn () u8 {
+    let x = htonl(0x01020304);
+    if (x != 0x04030201) { return 1; }
+    if (ntohl(x) != 0x01020304) { return 2; }
+    std.println("exlink ok: {}", x);
+    return 0;
+};
+
+// expect-output
+// exlink ok: 67305985
+
+const std = module("std");

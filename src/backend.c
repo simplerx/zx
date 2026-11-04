@@ -400,6 +400,17 @@ static void ensure_type(Type *t) {
                 Field *f = &t->fields[k];
                 if (f->is_static) continue;
                 buf_puts(g_out, "    ");
+                /* extern 聚合体（FFI）里的定长数组字段必须内联展开成 C
+                 * 数组（`char name[64]`），按指针发布局就错了。普通 Zx
+                 * 结构体的 *[N]T 语义就是指针，照旧。 */
+                if (t->decl && t->decl->is_extern &&
+                    f->ty && f->ty->kind == TY_PTR && f->ty->has_len) {
+                    ctype(g_out, f->ty->elem);
+                    buf_putc(g_out, ' ');
+                    mname(g_out, f->name);
+                    buf_printf(g_out, "[%llu];\n", (unsigned long long)f->ty->len);
+                    continue;
+                }
                 ctype(g_out, f->ty);
                 buf_putc(g_out, ' ');
                 mname(g_out, f->name);
@@ -449,6 +460,14 @@ static void ensure_type(Type *t) {
                 Field *f = &t->fields[k];
                 if (f->is_static) continue;
                 buf_puts(g_out, "    ");
+                if (t->decl && t->decl->is_extern &&
+                    f->ty && f->ty->kind == TY_PTR && f->ty->has_len) {
+                    ctype(g_out, f->ty->elem);
+                    buf_putc(g_out, ' ');
+                    mname(g_out, f->name);
+                    buf_printf(g_out, "[%llu];\n", (unsigned long long)f->ty->len);
+                    continue;
+                }
                 ctype(g_out, f->ty);
                 buf_putc(g_out, ' ');
                 mname(g_out, f->name);
@@ -1274,6 +1293,11 @@ static void ex_builtin(Buf *b, Node *n) {
     }
     if (!strcmp(nm, "trap") || !strcmp(nm, "panic")) {
         buf_puts(b, "abort()");
+        return;
+    }
+    if (!strcmp(nm, "link")) {
+        /* @link 在语义阶段已经把库名记给了 driver；运行时是 no-op */
+        buf_puts(b, "((void)0)");
         return;
     }
     if (!strcmp(nm, "memcpy") || !strcmp(nm, "memmove") || !strcmp(nm, "memset")) {
@@ -5373,6 +5397,26 @@ static void gen_global(Node *d, bool exported) {
     Type *t = d->ty;
     if (!t || t->kind == TY_INVALID || t->kind == TY_TYPE) return;
     if (t->kind == TY_VOID) return;      /* `const x = { 42; }` 没有运行时表示 */
+
+    /* extern var：外部 C 全局变量——只发一条 extern 声明进共享头，
+     * 不定义存储（定义在 C 那边）。名字原样发，跟 extern fn 同一条规则。 */
+    if (d->is_extern) {
+        ensure_type(t);
+        Buf e; buf_init(&e);
+        buf_puts(&e, "extern ");
+        if (t->kind == TY_PTR && t->has_len) {
+            /* C 侧的全局数组：Zx 侧声明成 *[N]T，C 原型写成 elem name[]
+             *（数组符号的地址 == 首元素地址，链接没问题） */
+            ctype(&e, t->elem);
+            buf_printf(&e, " %s[];", d->name ? d->name : "_");
+        } else {
+            ctype(&e, t);
+            buf_printf(&e, " %s;", d->name ? d->name : "_");
+        }
+        buf_puts(&g_bpub, e.data);
+        return;
+    }
+
     if (sema_ty_ct_only(t)) {            /* std.TypeInfo 等：编译期绑定，不物化 */
         if (t->kind == TY_STRUCT || t->kind == TY_UNION)
             for (int i = 0; i < t->nfields; i++)
@@ -5684,6 +5728,8 @@ int backend_emit_split(Node *root, Buf *header, Buf *rt, BUnit *units, int maxun
             for (int i = 0; i < mr->nitems; i++) {
                 Node *it = mr->items[i];
                 if (it->kind != NK_DECL) continue;
+                /* extern var：没有初值（b 为空）也要发 extern 声明 */
+                if (it->is_extern) { gen_global(it, false); continue; }
                 if (it->c) { gen_global(it, false); continue; }
                 if (!it->b) continue;
                 if (it->b->kind == NK_FN || it->b->kind == NK_MODULE) continue;

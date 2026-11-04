@@ -1,0 +1,7 @@
+// expect: no initializer
+// extern var 的存储在 C 那边——Zx 侧写初始化值会跟 C 定义打架。
+extern var G: i32 = 3;
+
+const main = fn () u8 {
+    return 0;
+};

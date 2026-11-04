@@ -1,0 +1,74 @@
+// extern struct / extern union（M24 FFI 补全）：镜像 C 结构体的布局。
+// 真库对照：kernel32 的 GetLocalTime 往 SYSTEMTIME 里写值，字段错一个
+// 位置年份就会读歪——这是布局正确性的运行时证据。
+const SystemTime = extern struct {
+    wYear: u16, wMonth: u16, wDayOfWeek: u16, wDay: u16,
+    wHour: u16, wMinute: u16, wSecond: u16, wMilliseconds: u16,
+};
+
+// 定长数组字段在 C 里内联展开（char data[16]，不是指针）
+const Buf8 = extern struct {
+    data: *[16]u8,
+    n: u32,
+};
+
+// extern union：C 联合体，所有成员偏移 0、大小取最大
+const IV = extern union {
+    i: i32,
+    f: f32,
+};
+
+// extern 里嵌 extern：布局逐层镜像
+const Nested = extern struct {
+    b: Buf8,
+    tag: u8,
+};
+
+// 函数指针字段：C 结构体带回调的形态，Zx 函数直接赋进去
+const Handler = extern struct {
+    id: u32,
+    cb: fn (i32) i32,
+};
+
+extern fn GetLocalTime(st: *SystemTime) void;
+
+const add10 = fn (x: i32) i32 { return x + 10; };
+
+const main = fn () u8 {
+    // 布局断言（与 C 编译器的自然布局一致）
+    if (@sizeOf(Buf8) != 20) { return 1; }
+    if (@offsetOf(Buf8, "n") != 16) { return 2; }
+    if (@sizeOf(IV) != 4) { return 3; }
+    if (@sizeOf(Nested) != 24) { return 4; }
+    if (@offsetOf(Nested, "tag") != 20) { return 5; }
+    if (@sizeOf(Handler) != 16) { return 6; }
+
+    var b: Buf8 = undefined;
+    b.n = 3;
+    b.data[0] = 'A';
+    b.data[1] = 'B';
+    b.data[2] = 0;
+    if (b.data[0] != 'A' || b.data[1] != 'B' || b.n != 3) { return 7; }
+
+    var iv: IV = undefined;
+    iv.i = 0x3f800000;
+    if (iv.f != 1.0) { return 8; }        // 0x3f800000 == 1.0f，同块内存换读法
+
+    var h: Handler = undefined;
+    h.id = 1;
+    h.cb = add10;
+    if (h.cb(5) != 15) { return 9; }
+
+    // 真实 C API：GetLocalTime 按上面这套字段写值
+    var st: SystemTime = undefined;
+    GetLocalTime(&st);
+    if (st.wYear < 2026) { return 10; }
+
+    std.println("exstruct ok: {} {} {}", @sizeOf(Buf8), @sizeOf(IV), h.cb(32));
+    return 0;
+};
+
+// expect-output
+// exstruct ok: 20 4 42
+
+const std = module("std");

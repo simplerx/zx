@@ -555,6 +555,21 @@ static int build_program(Node *root, const char *out, const char *cachedir, OutK
     snprintf(fstamp, sizeof fstamp, "%s|%s\n", g_cc, g_cflags);
     bool fchanged = write_file_if_changed(fpath, fstamp, strlen(fstamp));
 
+    /* @link 收集的外部库：内容记一份到 .libs。库的增删只影响链接、不影响
+     * .o 的内容（.flags 盖不住它），所以单独盖章：变过就强制重链。 */
+    bool lchanged = false;
+    if (kind != OUT_STATIC) {
+        Buf ls; buf_init(&ls);
+        for (int i = 0; i < g_nlink_libs; i++) {
+            buf_puts(&ls, g_link_libs[i]);
+            buf_putc(&ls, '\n');
+        }
+        char lpath[2048];
+        snprintf(lpath, sizeof lpath, "%s.libs", stem);
+        lchanged = write_file_if_changed(lpath, ls.data ? ls.data : "", ls.len);
+        buf_free(&ls);
+    }
+
     /* 收集单元：先落盘 .c 并决定谁要重编（等全部落盘后并行开火） */
     for (int pass = 0; pass <= n; pass++) {
         const char *uname = (pass == 0) ? "zxrt" : units[pass - 1].name;
@@ -632,7 +647,7 @@ static int build_program(Node *root, const char *out, const char *cachedir, OutK
     path_abs(out, absout, sizeof absout);
     if (njobs == 0) {
         long long om = fmtime(absout);
-        if (om > 0 && om >= maxobj) {
+        if (om > 0 && om >= maxobj && !lchanged) {
             if (getenv("ZX_VERBOSE")) fprintf(stderr, "  link skipped (up to date: %s)\n", out);
             return 0;
         }
@@ -654,6 +669,15 @@ static int build_program(Node *root, const char *out, const char *cachedir, OutK
 #endif
         snprintf(cmd, sizeof cmd, "%s %s %s -o \"%s\" %s",
                  g_cc, g_cflags, shared, absout, objs.data);
+        /* @link("ws2_32") 收集的外部库：名字走 -l，带路径分隔符或扩展名的
+         * 当文件路径原样传（vendor 目录里的 .lib / .a）。 */
+        for (int i = 0; i < g_nlink_libs; i++) {
+            const char *L = g_link_libs[i];
+            if (strchr(L, '/') || strchr(L, '\\') || strchr(L, '.'))
+                snprintf(cmd + strlen(cmd), sizeof cmd - strlen(cmd), " \"%s\"", L);
+            else
+                snprintf(cmd + strlen(cmd), sizeof cmd - strlen(cmd), " -l%s", L);
+        }
     }
     {
         char llog[2048];

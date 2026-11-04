@@ -393,6 +393,7 @@ util.secret(1);                     // ✗ private to module 'util'
 | 内建 | 用途 |
 | --- | --- |
 | `@sizeOf(T)` / `@alignOf(T)` | 字节数 / 对齐 |
+| `@offsetOf(T, "field")` | 字段偏移（布局在 `@sizeOf` 时一并算好） |
 | `@typeOf(e)` / `@typeName(T)` | 取类型 / 类型名 |
 | `@typeInfo(T)` | 类型元数据（`kind/name/bytes/align/fieldCount/fields`） |
 | `@hasField(T, "x")` / `@fieldType` / `@fieldName(T, i)` | 编译期字段查询 |
@@ -424,6 +425,68 @@ extern fn GetTickCount64() u64;                   // Win32（大小写敏感）
   真正可用（M24 前名单有名字、头里没声明，编译必失败）。
 - 编译器魔法（`print`/`file`/`io`/`Allocator`/`stackAlloc`…）种进**每个**
   模块的作用域——std.zx 之外也能裸用 `file.read`；模块自己的同名声明优先。
+
+### 3.13 extern struct / extern union —— 镜像 C 结构体布局
+
+调用真实 C 库（OpenGL、Win32、SDL…）绕不开对方的结构体。`extern struct`
+让 Zx 侧的类型按 C 的自然布局落内存：
+
+```zx
+const SystemTime = extern struct {
+    wYear: u16, wMonth: u16, wDayOfWeek: u16, wDay: u16,
+    wHour: u16, wMinute: u16, wSecond: u16, wMilliseconds: u16,
+};
+extern fn GetLocalTime(st: *SystemTime) void;
+
+var st: SystemTime = undefined;
+GetLocalTime(&st);
+std.println("{}-{}", st.wYear, st.wMonth);
+```
+
+- **写法**跟普通类型一致——类型是值：`const Vec3 = extern struct { … };`。
+  语句位置的 `extern struct Name { … };` 不是合法语法。
+- **字段约束**（sema 逐个校验，不合规直接报错）：
+  - 整数（i1 除外）/ 浮点 / bool / 枚举 / 指针——指针就是一个机器字；
+  - **定长数组 `*[N]T` 展开成 C 内联数组**（`char name[64]`），元素同样
+    受约束；`@sizeOf`/`@offsetOf` 按内联数组算（20 字节的 `char[16]+u32`，
+    不是 8 字节指针）；
+  - 嵌套聚合体必须自己也是 `extern struct`/`extern union`——普通 Zx 结构体
+    的布局带运行时信息，不保证与 C 一致；
+  - **函数指针字段** `cb: fn (i32) i32`——C 结构体带回调的形态，Zx 函数直接赋；
+  - `?T`（带标签 optional）、`[]T`（切片）、`!T`（错误联合）、元组、
+    方法、静态成员、字段默认值：**全部拒绝**——它们要么是 Zx 专有布局，
+    要么根本不进 C 布局。C 指针写 `*T`（null 就是 0）。
+- `extern union`：C 联合体（所有成员偏移 0）；`union(enum)` 的带标签形式
+  是 Zx 布局，不允许混进来。
+- `extern struct(packed)` 不支持：C 结构体跟平台自然布局走。
+- 链接系统库用 **`@link("ws2_32")`**（见 §3.14）。
+
+### 3.14 extern var —— 外部 C 全局变量
+
+```zx
+extern var g_counter: i32;              // C 侧: int g_counter;
+extern var g_table: *const u8;          // C 侧: const char *g_table;
+extern var g_origin: *Point;            // 指向 extern struct 的全局
+```
+
+- 只声明不定义：存储在 C 那边，`extern` 声明进生成头，名字原样（不转义）。
+- **必须有类型标注、不能有初始化值**；只允许 `var`（C 全局没有只读保证）；
+  只能写在文件根。
+- Zx 与 C 读写的是同一份存储：Zx 侧赋值，C 侧立刻可见（反之亦然）。
+
+### 3.15 @link —— 源码里声明外部库
+
+```zx
+@link("ws2_32");                    // → 链接命令加 -lws2_32
+@link("./vendor/foo.lib");          // 带路径/扩展名的按文件原样传
+@link("./counter.o");               // 手写的 C 对象文件也能挂进来
+extern fn htonl(u32) u32;
+```
+
+- 编译期动作，运行时 no-op；写在文件根或任何语句位置都行，多次声明同名去重。
+- 库列表记到构建缓存（`<stem>.libs`），增删库会**强制重链**——.o 没变也要
+  重链，否则多链/少链一个库看不出来。
+- 静态库构建（`--lib`）不消费 @link：.a 里没有链接这一步。
 
 ---
 

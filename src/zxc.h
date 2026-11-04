@@ -41,6 +41,15 @@ extern int g_error_count;
 extern int g_diag_shown;       /* 实际打印过多少条（超过上限后只计数） */
 extern int g_diag_max_print;   /* 打印上限 */
 
+/* ---------- 外部库链接（@link） ---------- */
+
+/* `@link("ws2_32")` 在语义阶段把库名记到这里（去重），build_program 拼
+ * 链接命令时逐个转成 `-l<name>`；带 `/` `\` `.` 的当文件路径原样传。 */
+#define ZXC_MAX_LINK_LIBS 64
+extern char *g_link_libs[ZXC_MAX_LINK_LIBS];
+extern int   g_nlink_libs;
+void zx_add_link_lib(const char *name);
+
 /* ---------- growable byte buffer ---------- */
 
 typedef struct {

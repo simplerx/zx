@@ -1,0 +1,10 @@
+// expect: tag bool
+// extern struct 字段必须是 C 布局兼容类型：?T 在 Zx 里是 {payload, tag}
+// 的带标签结构体，C 指针直接用 *T（null 就是 0）。
+const S = extern struct {
+    p: ?*u8,
+};
+
+const main = fn () u8 {
+    return 0;
+};

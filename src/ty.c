@@ -440,6 +440,19 @@ static int align_up(int n, int a) {
     return (n + a - 1) / a * a;
 }
 
+/* extern 聚合体（FFI）里的定长数组字段在 C 里是内联数组：大小 = N × 元素，
+ * 对齐 = 元素对齐。普通 Zx 结构体的 *[N]T 是指针（8 字节），不能用这条路。
+ * 返回 false = 不是 extern 数组字段，按普通规则算。 */
+static bool ext_array_field(Type *agg, Type *ft, int *fs, int *fa) {
+    if (!agg || !agg->decl || !agg->decl->is_extern) return false;
+    if (!ft || ft->kind != TY_PTR || !ft->has_len) return false;
+    int es = ty_size(ft->elem);
+    if (es < 0) return false;
+    *fs = es * (int)ft->len;
+    *fa = ty_align(ft->elem);
+    return true;
+}
+
 int ty_align(Type *t) {
     if (!t) return 1;
     if (t->align >= 0) return t->align;
@@ -480,14 +493,26 @@ int ty_align(Type *t) {
     case TY_STRUCT: {
         for (int i = 0; i < t->nfields; i++) {
             if (t->fields[i].is_static) continue;
-            int fa = ty_align(t->fields[i].ty);
+            Type *ft = t->fields[i].ty;
+            int fa;
+            if (ft && ft->kind == TY_PTR && ft->has_len &&
+                t->decl && t->decl->is_extern)
+                fa = ty_align(ft->elem);        /* extern 内联数组按元素对齐 */
+            else
+                fa = ty_align(ft);
             if (fa > a) a = fa;
         }
         break;
     }
     case TY_UNION: {
         for (int i = 0; i < t->nfields; i++) {
-            int fa = ty_align(t->fields[i].ty);
+            Type *ft = t->fields[i].ty;
+            int fa;
+            if (ft && ft->kind == TY_PTR && ft->has_len &&
+                t->decl && t->decl->is_extern)
+                fa = ty_align(ft->elem);
+            else
+                fa = ty_align(ft);
             if (fa > a) a = fa;
         }
         if (t->is_tagged && t->tag_ty) {
@@ -541,7 +566,14 @@ int ty_size(Type *t) {
         for (int i = 0; i < t->nfields; i++) {
             if (t->fields[i].is_static) continue;
             Type *ft = t->fields[i].ty;
-            int fa = ty_align(ft), fs = ty_size(ft);
+            int fa, fs;
+            if (ext_array_field(t, ft, &fs, &fa)) {          /* extern 内联数组 */
+                t->fields[i].offset = (uint64_t)align_up(off, fa);
+                off = (int)t->fields[i].offset + fs;
+                if (fa > maxa) maxa = fa;
+                continue;
+            }
+            fa = ty_align(ft); fs = ty_size(ft);
             if (fs < 0) { s = -1; goto done; }
             if (fa > maxa) maxa = fa;
             off = align_up(off, fa);
@@ -554,10 +586,14 @@ int ty_size(Type *t) {
     case TY_UNION: {
         int maxs = 0, maxa = 1;
         for (int i = 0; i < t->nfields; i++) {
-            int fs = ty_size(t->fields[i].ty);
+            Type *ft = t->fields[i].ty;
+            int fs, fa;
+            if (!ext_array_field(t, ft, &fs, &fa)) {
+                fs = ty_size(ft);
+                fa = ty_align(ft);
+            }
             if (fs < 0) { s = -1; goto done; }
             if (fs > maxs) maxs = fs;
-            int fa = ty_align(t->fields[i].ty);
             if (fa > maxa) maxa = fa;
             t->fields[i].offset = 0;
         }

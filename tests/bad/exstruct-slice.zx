@@ -1,0 +1,9 @@
+// expect: no C equivalent
+// 切片是 {ptr, len} 的 Zx 表示，C 结构体里没有对应物——分开传指针和长度。
+const S = extern struct {
+    name: []const u8,
+};
+
+const main = fn () u8 {
+    return 0;
+};

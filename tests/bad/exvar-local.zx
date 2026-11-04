@@ -1,0 +1,6 @@
+// expect: file scope
+// extern var 只在文件根有意义；函数里的 extern 声明没有 Zx 语义。
+const main = fn () u8 {
+    extern var G: i32;
+    return 0;
+};

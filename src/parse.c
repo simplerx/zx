@@ -519,6 +519,27 @@ static Node *parse_type_prefix(P *p) {
         return n;
     }
 
+    case TOK_KW_EXTERN: {
+        /* extern struct / extern union（FFI）：类型前缀形式，配合
+         * `const Vec3 = extern struct { … };` 使用——和普通类型声明
+         * `const P = struct { … }` 同一套"类型即值"的习惯。
+         * 字段的 C 布局约束由 sema 校验（resolve_struct_body）。 */
+        advance(p);
+        if (at(p, TOK_STRING)) {           /* extern "C" struct … */
+            Token *ab = advance(p);
+            if (!(ab->text_len == 1 && ab->text[0] == 'C'))
+                perr(p, "only `extern \"C\"` is supported for now");
+        }
+        if (!at(p, TOK_KW_STRUCT) && !at(p, TOK_KW_UNION)) {
+            perr(p, "expected `struct` or `union` after `extern` "
+                    "(functions use `extern fn name(params) Ret;`)");
+            return node_new(NK_STRUCT_TYPE, t->line, t->col);
+        }
+        Node *n = parse_type_primary(p);
+        if (n) n->is_extern = true;
+        return n;
+    }
+
     default:
         return parse_type_primary(p);
     }
@@ -934,8 +955,9 @@ static Node *parse_primary(P *p) {
     }
 
     case TOK_KW_STRUCT: case TOK_KW_UNION: case TOK_KW_ENUM:
+    case TOK_KW_EXTERN:
     case TOK_QUESTION:
-        return parse_type(p);   /* types are values */
+        return parse_type(p);   /* types are values（extern struct/union 走前缀分支） */
 
     /* 类型是值：`[]const u8` / `*i32` 也能出现在表达式位置（泛型实参、
      * 结构体字面量的构造者）。primary 位置不可能以二元运算符开头，
@@ -1500,7 +1522,20 @@ static Node *parse_stmt(P *p) {
             if (!(ab->text_len == 1 && ab->text[0] == 'C'))
                 perr(p, "only `extern \"C\"` is supported for now");
         }
+        /* extern var name: T;   —— 外部 C 全局变量（M24）。 */
+        if (at(p, TOK_KW_VAR)) {
+            Node *d = parse_decl(p);
+            if (d) d->is_extern = true;
+            return d;
+        }
         if (!at(p, TOK_KW_FN)) {
+            if (at(p, TOK_KW_STRUCT) || at(p, TOK_KW_UNION)) {
+                /* `extern struct Name { … };` 语句形式：Zx 的类型是值，
+                 * 命名类型一律 `const Name = …`，这里给出对齐写法的提示。 */
+                perr(p, "named types are values in Zx — write "
+                        "`const Name = extern struct { … };`");
+                return node_new(NK_BLOCK, t->line, t->col);
+            }
             perr(p, "expected `fn` after `extern`");
             return node_new(NK_BLOCK, t->line, t->col);
         }

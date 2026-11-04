@@ -1,0 +1,7 @@
+// expect: needs a type annotation
+// 外部符号的类型就是 ABI 契约，必须显式写出来。
+extern var G;
+
+const main = fn () u8 {
+    return 0;
+};

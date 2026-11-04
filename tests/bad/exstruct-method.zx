@@ -1,0 +1,10 @@
+// expect: cannot have methods
+// extern struct 只允许"数据"：方法、静态成员、字段默认值都不进 C 布局。
+const S = extern struct {
+    x: i32,
+    const get = fn (self: S) i32 { return self.x; };
+};
+
+const main = fn () u8 {
+    return 0;
+};
