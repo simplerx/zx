@@ -37,6 +37,9 @@ void diag_code_at(const char *code, int line, int col, const char *fmt, ...);
 void err_at(int line, int col, const char *fmt, ...);   /* = diag_at(PH_SEMA, …) */
 /* fix-it：预挂一条 help 行，跟在下一条诊断后面（A2）。 */
 void diag_help(const char *fmt, ...);
+/* note（D2）：预挂一个"相关位置"（可跨模块：path 传声明所在文件的路径），
+ * 渲染成 note 行 + 那一行的源码片段。生命周期同 diag_help。 */
+void diag_note(const char *path, int line, int col, const char *fmt, ...);
 extern int g_error_count;
 extern int g_diag_shown;       /* 实际打印过多少条（超过上限后只计数） */
 extern int g_diag_max_print;   /* 打印上限 */

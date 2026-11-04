@@ -1,0 +1,12 @@
+// E0401 扩到类型位置：类型名拼错同样给 did you mean。
+//
+// expect-count: 1
+// expect: unknown type 'Colour'
+// expect: did you mean `Color`?
+
+const Color = struct { r: i32 };
+
+const main = fn () u8 {
+    let c: Colour = undefined;
+    return 0;
+};

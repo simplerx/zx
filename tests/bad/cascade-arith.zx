@@ -1,0 +1,10 @@
+// 连锁抑制：操作数已经报过错（unknown identifier → TY_INVALID），
+// 算术检查不再跟一条 "arithmetic needs numbers"——根因一条就够。
+//
+// expect-count: 1
+// expect: unknown identifier 'nope'
+
+const main = fn () u8 {
+    let y = nope + 1;
+    return 0;
+};

@@ -130,6 +130,8 @@ struct Symbol {
     bool        in_fn;     /* 声明在函数体里：它的槽位在当前栈帧上 */
     bool        stack_val; /* 它的值指向当前栈帧（逃逸检查用，见 addr_frame） */
     const char *cname;     /* 后端用的 C 名字（模块内名字带前缀） */
+    int         decl_line; /* 声明位置（D2 note 用；0 = 没记） */
+    int         decl_col;
     Symbol     *next;
 };
 
@@ -284,6 +286,14 @@ static Symbol *lookup(const char *name) {
         if (s) return s;
     }
     return NULL;
+}
+
+/* 带声明位置的版本：只有"值得被 note 指回去"的声明（顶层、类型体成员）
+ * 才记位置——参数、捕获这类就地重复的，note 没有增量价值。 */
+static Symbol *scope_add_at(Scope *sc, const char *name, int kind, int line, int col) {
+    Symbol *s = scope_add(sc, name, kind);
+    if (s) { s->decl_line = line; s->decl_col = col; }
+    return s;
 }
 
 const char *sema_sym_name(Symbol *s) { return s ? s->name : NULL; }
@@ -988,6 +998,9 @@ static Symbol *ns_member(Symbol *ns, const char *name, int line, int col) {
         for (Symbol *m = ns->mod->scope.first; m; m = m->next) {
             if (!m->name || strcmp(m->name, name)) continue;
             if (!m->is_pub) {
+                if (m->decl_line && m->mod && m->mod->path)
+                    diag_note(m->mod->path, m->decl_line, m->decl_col,
+                              "'%s' declared here", name);
                 err_at(line, col,
                        "'%s' is private to module '%s'; mark it `pub` to export it",
                        name, ns->mod->stem);
@@ -1319,7 +1332,12 @@ static Type *resolve_type(Node *n) {
         Type *b = base_type(n->name);
         if (b) { n->ty = ty_type(); n->type_val = b; return b; }
         Symbol *s = lookup(n->name);
-        if (!s) { BAD(n, "unknown type '%s'", n->name); return ty_invalid(); }
+        if (!s) {
+            const char *sug = suggest_ident(n->name);
+            if (sug) diag_help("did you mean `%s`?", sug);
+            BAD(n, "unknown type '%s'", n->name);
+            return ty_invalid();
+        }
         /* 正在构造的聚合类型：`struct { next: *Node }` 里的 Node 就是它自己（R5）。
          * 只给外壳，成员表填完之前不能用它算大小。 */
         if (s->state == 3 && s->type_val) {
@@ -1626,13 +1644,23 @@ static Type *resolve_struct_body(Node *n, Type *agg, bool is_union) {
         Node *it = n->items[i];
         if (it->kind == NK_PARAM || it->kind == NK_PAIR) nfields++;
         else if (it->kind == NK_DECL && it->name) {
-            Symbol *s = scope_add(&sc, it->name, it->op == 2 ? SK_VAR : SK_CONST);
-            if (!s) err_at(it->line, it->col, "duplicate member '%s'", it->name);
+            Symbol *s = scope_add_at(&sc, it->name, it->op == 2 ? SK_VAR : SK_CONST, it->line, it->col);
+            if (!s) {
+                Symbol *prev = scope_find_here(&sc, it->name);
+                if (prev && prev->decl_line)
+                    diag_note(NULL, prev->decl_line, prev->decl_col, "'%s' first declared here", it->name);
+                err_at(it->line, it->col, "duplicate member '%s'", it->name);
+            }
             else { s->decl = it; it->sym = s; }
             nfields++;
         } else if (it->kind == NK_FN) {
-            Symbol *s = scope_add(&sc, it->name ? it->name : "?", SK_FN);
-            if (!s) err_at(it->line, it->col, "duplicate member '%s'", it->name ? it->name : "?");
+            Symbol *s = scope_add_at(&sc, it->name ? it->name : "?", SK_FN, it->line, it->col);
+            if (!s) {
+                Symbol *prev = scope_find_here(&sc, it->name ? it->name : "?");
+                if (prev && prev->decl_line)
+                    diag_note(NULL, prev->decl_line, prev->decl_col, "'%s' first declared here", it->name);
+                err_at(it->line, it->col, "duplicate member '%s'", it->name ? it->name : "?");
+            }
             else { s->decl = it; it->sym = s; }
         }
     }
@@ -1768,14 +1796,24 @@ static Type *resolve_enum_body(Node *n, Type *e) {
     for (int i = 0; i < n->nitems; i++) {
         Node *it = n->items[i];
         if (it->kind == NK_DECL && it->name) {
-            Symbol *s = scope_add(&sc, it->name, it->op == 2 ? SK_VAR : SK_CONST);
-            if (!s) err_at(it->line, it->col, "duplicate member '%s'", it->name);
+            Symbol *s = scope_add_at(&sc, it->name, it->op == 2 ? SK_VAR : SK_CONST, it->line, it->col);
+            if (!s) {
+                Symbol *prev = scope_find_here(&sc, it->name);
+                if (prev && prev->decl_line)
+                    diag_note(NULL, prev->decl_line, prev->decl_col, "'%s' first declared here", it->name);
+                err_at(it->line, it->col, "duplicate member '%s'", it->name);
+            }
             else { s->decl = it; it->sym = s; }
             nst++;
         } else if (it->kind == NK_FN) {
-            Symbol *s = scope_add(&sc, it->name ? it->name : "?", SK_FN);
-            if (!s) err_at(it->line, it->col, "duplicate member '%s'",
-                           it->name ? it->name : "?");
+            Symbol *s = scope_add_at(&sc, it->name ? it->name : "?", SK_FN, it->line, it->col);
+            if (!s) {
+                Symbol *prev = scope_find_here(&sc, it->name ? it->name : "?");
+                if (prev && prev->decl_line)
+                    diag_note(NULL, prev->decl_line, prev->decl_col, "'%s' first declared here", it->name);
+                err_at(it->line, it->col, "duplicate member '%s'",
+                       it->name ? it->name : "?");
+            }
             else { s->decl = it; it->sym = s; }
         }
     }
@@ -1909,6 +1947,10 @@ static bool lvalue_mutable(Node *n) {
 static Type *type_of(Node *n, Type *t) { n->ty = t; return t; }
 
 static Type *check_num_operands(Node *at, Type *a, Type *b) {
+    /* 连锁抑制：操作数已经报过错（unknown identifier 之类返回 TY_INVALID），
+     * 根因诊断在上面发过了——这里跟着喊一嗓子只是噪音。 */
+    if ((a && a->kind == TY_INVALID) || (b && b->kind == TY_INVALID))
+        return ty_invalid();
     if (!numeric_like(a) || !numeric_like(b))
         return BAD(at, "arithmetic needs numbers, found `%s` and `%s`", ty_str(a), ty_str(b));
 
@@ -3677,8 +3719,14 @@ static void hoist(Scope *sc, Node *blk) {
             if (it->c) {
                 for (int k = 0; k < it->c->nitems; k++) {
                     Node *id = it->c->items[k];
-                    Symbol *s = scope_add(sc, id->name, SK_CONST);
-                    if (!s) { err_at(id->line, id->col, "duplicate declaration '%s'", id->name); continue; }
+                    Symbol *s = scope_add_at(sc, id->name, SK_CONST, id->line, id->col);
+                    if (!s) {
+                        Symbol *prev = scope_find_here(sc, id->name);
+                        if (prev && prev->decl_line)
+                            diag_note(NULL, prev->decl_line, prev->decl_col, "'%s' first declared here", id->name);
+                        err_at(id->line, id->col, "duplicate declaration '%s'", id->name);
+                        continue;
+                    }
                     s->decl = it;
                     s->index = k;
                     s->mod = g_mod;
@@ -3689,8 +3737,14 @@ static void hoist(Scope *sc, Node *blk) {
                 }
             } else if (it->name) {
                 int kind = it->op == 2 ? SK_VAR : it->op == 1 ? SK_LET : SK_CONST;
-                Symbol *s = scope_add(sc, it->name, kind);
-                if (!s) { err_at(it->line, it->col, "duplicate declaration '%s'", it->name); continue; }
+                Symbol *s = scope_add_at(sc, it->name, kind, it->line, it->col);
+                if (!s) {
+                    Symbol *prev = scope_find_here(sc, it->name);
+                    if (prev && prev->decl_line)
+                        diag_note(NULL, prev->decl_line, prev->decl_col, "'%s' first declared here", it->name);
+                    err_at(it->line, it->col, "duplicate declaration '%s'", it->name);
+                    continue;
+                }
                 s->decl = it;
                 s->mod = g_mod;
                 s->is_pub = it->is_pub;
@@ -3703,8 +3757,14 @@ static void hoist(Scope *sc, Node *blk) {
                 if (it->b && it->b->kind == NK_FN) it->b->sym = s;
             }
         } else if (it->kind == NK_FN && it->name) {
-            Symbol *s = scope_add(sc, it->name, SK_FN);
-            if (!s) { err_at(it->line, it->col, "duplicate declaration '%s'", it->name); continue; }
+            Symbol *s = scope_add_at(sc, it->name, SK_FN, it->line, it->col);
+            if (!s) {
+                Symbol *prev = scope_find_here(sc, it->name);
+                if (prev && prev->decl_line)
+                    diag_note(NULL, prev->decl_line, prev->decl_col, "'%s' first declared here", it->name);
+                err_at(it->line, it->col, "duplicate declaration '%s'", it->name);
+                continue;
+            }
             s->decl = it;
             s->mod = g_mod;
             s->is_pub = it->is_pub;

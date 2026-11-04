@@ -1,0 +1,2 @@
+pub const ok = fn () void { };
+const secret = fn () void { };

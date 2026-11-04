@@ -1,0 +1,12 @@
+// D2 note：跨模块访问私有符号，note 指到定义所在模块的声明行（另一份源码）。
+//
+// expect-count: 1
+// expect: is private to module
+// expect: declared here
+
+const lib = module("mod.zx");
+
+const main = fn () u8 {
+    lib.secret();
+    return 0;
+};

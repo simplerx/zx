@@ -1,0 +1,10 @@
+// D2 note：重复声明把第一次声明的位置带回来——"在哪儿重复了"还得看"第一次在哪儿"。
+//
+// expect-count: 1
+// expect: duplicate declaration 'helper'
+// expect: first declared here
+
+const helper = fn () void { };
+const helper = fn () void { };
+
+const main = fn () u8 { return 0; };

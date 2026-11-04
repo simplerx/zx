@@ -3028,3 +3028,28 @@ Python 按**码点**算——`'中'` 一出现列号就错位，脚本必须按�
 多包一层括号。`@` 永远不是中缀运算符，加入 cast 后继集零歧义。
 
 回归：`passed 251, failed 0`（全部既有用例迁移后语义不变）。
+
+## 96. 诊断渲染：源码片段 + note 通道 + 连锁抑制（M61）
+
+**问题**：诊断只有一行 `path:line:col: error[code]: msg`，"第 18 列"要自己
+数；`did you mean` 建议已覆盖 16 个调用点但没有声明位置可指；操作数报过错后
+算术/调用检查跟着喊第二嗓（`unknown identifier` 后面跟一条
+`arithmetic needs numbers, found <error>`），是纯噪音。
+
+**裁定**：
+1. **渲染器挂在 diag_emit 单一出口**：每条诊断后面跟源码行 + `^` 指位。
+   编译器列号按字节，渲染时换算显示宽度（UTF-8 多字节算 2 格、tab 展开 4），
+   CJK 源码指位也落得准。源码按路径读、8 槽缓存（note 常在另一个模块里，
+   单槽来回重读）。文件读不到/行列越界就静默跳过片段——渲染永不引入新错误。
+2. **note 通道**（`diag_note(path, line, col, …)`）：预挂一个相关位置，
+   渲染成 note 行 + 那一行的片段；跨模块时补 `(path:line:col)`。生命周期同
+   diag_help——诊断被去重或截断时一并丢弃。为此 Symbol 记了声明位置
+   （decl_line/decl_col），只有"值得指回去"的声明（顶层、类型体成员）才记。
+3. **连锁抑制**：`check_num_operands` 顶部拦 TY_INVALID 操作数——根因诊断
+   已在操作数处发过，次生诊断一律不发。原则：**用户看到的条数 = 根因数**。
+
+**已知边界**：Zx 前端（zxfe 子进程）的词法/语法诊断还是一行式——渲染器
+在 zxc 侧，镜像到 bootstrap 是独立一件事，被具体需求顶到再做。
+
+回归：`passed 257, failed 0`（新增 dup-note / private-note /
+unknown-type-suggest / cascade-arith 四个用例钉行为）。

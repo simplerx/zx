@@ -166,6 +166,114 @@ void diag_help(const char *fmt, ...) {
     g_help_pending = true;
 }
 
+/* ---------- 源码渲染器（D1） ----------
+ * 诊断不再只有一行头：后面跟出错那行的源码和 ^ 指位——"第 18 列"变成
+ * 直接看得见的箭头。列号是编译器口径（按字节），渲染时换算显示宽度：
+ * UTF-8 多字节字符按 2 格算（CJK 为主体），tab 展开到 4 的倍数，指针才落得准。
+ * 源码按需读、按路径缓存多槽（note 常在另一个模块里，单槽会来回重读）。 */
+typedef struct { char *path; char **lines; int n; } SrcFile;
+
+static SrcFile g_srcs[8];
+static int g_nsrcs = 0;
+
+static SrcFile *src_file(const char *path) {
+    if (!path || !*path) return NULL;
+    for (int i = 0; i < g_nsrcs; i++)
+        if (strcmp(g_srcs[i].path, path) == 0) return &g_srcs[i];
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return NULL;
+    if (fseek(fp, 0, SEEK_END) != 0) { fclose(fp); return NULL; }
+    long sz = ftell(fp);
+    if (sz < 0 || sz > 32 * 1024 * 1024) { fclose(fp); return NULL; }
+    rewind(fp);
+    char *buf = malloc((size_t)sz + 1);
+    if (!buf) { fclose(fp); return NULL; }
+    size_t rd = fread(buf, 1, (size_t)sz, fp);
+    fclose(fp);
+    buf[rd] = '\0';
+    int cap = 2;                                   /* 段数最多 \n 数 + 2（尾部空段） */
+    for (size_t i = 0; i < rd; i++) if (buf[i] == '\n') cap++;
+    char **lines = malloc(sizeof(char *) * (size_t)cap);
+    if (!lines) { free(buf); return NULL; }
+    int li = 0;
+    char *start = buf;
+    for (size_t i = 0; i <= rd; i++) {
+        char c = buf[i];               /* 先存原字符——覆写 NUL 后再判就分不清行尾和文件尾了 */
+        if (c == '\n' || c == '\0') {
+            buf[i] = '\0';
+            size_t len = strlen(start);
+            if (len && start[len - 1] == '\r') start[len - 1] = '\0';
+            if (li < cap) lines[li++] = start;
+            start = buf + i + 1;
+            if (c == '\0') break;
+        }
+    }
+    if (g_nsrcs == 8) {                            /* 缓存满：腾最旧的 */
+        free(g_srcs[0].path); free(g_srcs[0].lines);   /* 行指针指向同一块 buf */
+        for (int i = 1; i < 8; i++) g_srcs[i - 1] = g_srcs[i];
+        g_nsrcs--;
+    }
+    SrcFile *sf = &g_srcs[g_nsrcs++];
+    sf->path = strdup(path);
+    sf->lines = lines;
+    sf->n = li;
+    return sf;
+}
+
+/* 一个字符的显示宽度：0xC0-0xDF 开头是西文等窄字符（1 格），
+ * 0xE0+ 是 CJK/韩文等宽字符（2 格）。近似值——只求指针落得大致准。 */
+static int disp_width_of(unsigned char lead) {
+    if (lead < 0x80) return 1;
+    if ((lead & 0xE0) == 0xC0) return 1;
+    return 2;
+}
+
+static void render_snippet(const char *path, int line, int col) {
+    if (!path || !*path || line <= 0) return;
+    SrcFile *sf = src_file(path);
+    if (!sf || line > sf->n) return;
+    const char *text = sf->lines[line - 1];
+    int gw = 1;
+    for (int t = line; t >= 10; t /= 10) gw++;
+    Buf body;
+    buf_init(&body);
+    int dcol = 0, caret = 0, idx = 1;
+    bool found = col == 1;
+    for (const unsigned char *p = (const unsigned char *)text; *p; p++) {
+        if (idx == col) { caret = dcol; found = true; }
+        if (*p == '\t') { do { buf_putc(&body, ' '); dcol++; } while (dcol & 3); }
+        else {
+            buf_putc(&body, (char)*p);
+            if ((*p & 0xC0) != 0x80) dcol += disp_width_of(*p);
+        }
+        idx++;
+    }
+    if (!found) caret = dcol;                      /* 列越界：指到行尾 */
+    fprintf(stderr, " %*d | %s\n", gw, line, body.data ? body.data : "");
+    fprintf(stderr, " %*s | ", gw, "");
+    for (int i = 0; i < caret; i++) fputc(' ', stderr);
+    fprintf(stderr, "^\n");
+    buf_free(&body);
+}
+
+/* note（D2）：预挂一个"相关位置"，跟在下一条诊断后面——`redeclared` 带
+ * `first declared here`，`is private` 带声明点。生命周期同 help：诊断被
+ * 去重或超上限截断时一并丢弃，note 永远不会孤立出现。 */
+static struct { char path[512]; int line, col; char text[200]; } g_note;
+static bool g_note_pending;
+
+void diag_note(const char *path, int line, int col, const char *fmt, ...) {
+    if (!path || !*path) path = g_srcpath;
+    snprintf(g_note.path, sizeof g_note.path, "%s", path);
+    g_note.line = line;
+    g_note.col = col;
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(g_note.text, sizeof g_note.text, fmt, ap);
+    va_end(ap);
+    g_note_pending = true;
+}
+
 static void diag_remember(const char *code, int line, int col, const char *msg) {
     int i = g_recent_n % 8;
     g_recent[i].line = line;
@@ -176,15 +284,34 @@ static void diag_remember(const char *code, int line, int col, const char *msg) 
 }
 
 static void diag_emit(const char *code, int line, int col, const char *msg) {
-    if (diag_is_dup(code, line, col, msg)) { g_help_pending = false; return; }
+    if (diag_is_dup(code, line, col, msg)) {
+        g_help_pending = false;
+        g_note_pending = false;
+        return;
+    }
     diag_remember(code, line, col, msg);
     g_error_count++;
-    if (g_error_count > g_diag_max_print) { g_help_pending = false; return; }   /* 只计数，不再刷屏 */
+    if (g_error_count > g_diag_max_print) {
+        g_help_pending = false;
+        g_note_pending = false;
+        return;                                    /* 只计数，不再刷屏 */
+    }
     g_diag_shown++;
     fprintf(stderr, "%s:%d:%d: error[%s]: %s\n", g_srcpath, line, col, code, msg);
-    /* fix-it（A2）：diag_help 预挂的建议行跟在刚发的这条后面。 */
+    /* D1：头下面跟源码行 + 指位 */
+    render_snippet(g_srcpath, line, col);
+    /* fix-it（A2）：diag_help 预挂的建议行；note（D2）带声明点片段。 */
     if (g_help_pending) fprintf(stderr, "  help: %s\n", g_help);
+    if (g_note_pending) {
+        if (strcmp(g_note.path, g_srcpath) == 0)
+            fprintf(stderr, "  note: %s\n", g_note.text);
+        else
+            fprintf(stderr, "  note: %s (%s:%d:%d)\n", g_note.text,
+                    g_note.path, g_note.line, g_note.col);
+        render_snippet(g_note.path, g_note.line, g_note.col);
+    }
     g_help_pending = false;
+    g_note_pending = false;
 }
 
 static void diag_v(DiagPhase ph, int line, int col, const char *fmt, va_list ap) {
