@@ -144,6 +144,9 @@ printf "\n== LSP 冒烟（tools/lsptest.py：补全/跳转 + vendor/ 与 deps）
 if [ -x "$ZYG" ] && command -v python >/dev/null 2>&1; then
     mkdir -p "$TPFX.lspbin"
     cp "$ZXC" "$TPFX.lspbin/zxc.exe" 2>/dev/null || true
+    # 诊断检查要起 zxc --check，zxc 又要同目录的 zxfe 解析——少一个就
+    # 静默没诊断（本文件 2.6 节的教训：模块解析必须和编译器同一条链）。
+    cp bin/zxfe.exe "$TPFX.lspbin/zxfe.exe" 2>/dev/null || true
     if $ZYG build-exe tools/zxls.zig -O ReleaseSafe -femit-bin="$TPFX.lspbin/zxls.exe" > "$TPFX.zxls.log" 2>&1; then
         if ZXLS_BIN="$TPFX.lspbin/zxls.exe" python tools/lsptest.py > "$TPFX.lsp.log" 2>&1; then
             printf "  ok   %s 项全过（含 vendor/ 与 deps 模块）\n" \

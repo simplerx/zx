@@ -165,12 +165,18 @@ static Node *fe_parse_zx(const char *path) {
 #else
     key ^= (unsigned long long)getpid() << 32;
 #endif
+    /* 临时 .ast 落 zxc 自己的 exe 目录——和 AST 缓存同一优先级，必然可写。
+     * 之前落 TEMP：zxls（zig Io 的 spawn）等宿主拉起的进程链里环境可能
+     * 整个缺失，GetTempPath 就退到 C:\WINDOWS——不可写，zxfe 写不了
+     * 临时文件，zxc --check 静默返回 1，诊断全空（LSP 一直"没错误"）。 */
     char tmp[1200];
-    size_t tl = strlen(tmpdir);
-    if (tl > 0 && (tmpdir[tl - 1] == '\\' || tmpdir[tl - 1] == '/'))
-        snprintf(tmp, sizeof tmp, "%s.zxfe-%llu.ast", tmpdir, key);
-    else
-        snprintf(tmp, sizeof tmp, "%s\\.zxfe-%llu.ast", tmpdir, key);
+    {
+        size_t dl = strlen(dir);
+        if (dl > 0 && (dir[dl - 1] == '\\' || dir[dl - 1] == '/'))
+            snprintf(tmp, sizeof tmp, "%s.zxfe-%llu.ast", dir, key);
+        else
+            snprintf(tmp, sizeof tmp, "%s\\.zxfe-%llu.ast", dir, key);
+    }
     char cmd[2800];
     if (*dir) {
         /* 注意：Windows 的 system() 会让 cmd /c 吃掉首尾引号——命令行

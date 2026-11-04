@@ -28,16 +28,16 @@ pub const make = fn () Obj {
 
 const Shape = union {
     circle: f64,
-    rect: (f64, f64),
+    rect: {f64, f64},
 };
 
-pub fn main() i32 {
+pub const main = fn () i32 {
     let o = make();
     let n = o.count;
     var s = Shape{ .circle = 1.0 };
     std.println("{}", n);
     return 0;
-}
+};
 """
 
 uri = "file:///" + TESTDIR.replace("\\", "/") + "/main.zx"
@@ -269,6 +269,35 @@ if isinstance(loc, dict):
 elif isinstance(loc, list) and loc:
     target = loc[0].get("uri", "")
 check("definition.vendor", "vendor" in target, str(loc)[:200])
+
+# 10b 诊断带 help/note：改出个错，publishDiagnostics 的 message 里应有
+#     did you mean（渲染器的 help 行被 zxls 挂进诊断消息）。
+BADTXT = MAIN.replace("let n = o.count;", "let n = o.coutn;")
+send({"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {
+    "textDocument": {"uri": uri, "version": 7},
+    "contentChanges": [{"text": BADTXT}]}})
+# 诊断由后台 worker 异步发布：轮询通知流，直到拿到该文档带诊断的发布。
+import time as _t2
+diag_msgs = []
+deadline = _t2.time() + 60
+while _t2.time() < deadline:
+    try:
+        m = out_q.get(timeout=1)
+    except queue.Empty:
+        continue
+    if m is None:
+        break
+    if m.get("__badframe__"):
+        break
+    if "id" in m:
+        continue
+    if (m.get("method") == "textDocument/publishDiagnostics"
+            and m["params"].get("uri", "").endswith("main.zx")
+            and m["params"].get("diagnostics")):
+        diag_msgs = [d.get("message", "") for d in m["params"]["diagnostics"]]
+        break
+ok_help = any("did you mean" in m for m in diag_msgs)
+check("diagnostics.helpInMsg", ok_help, str(diag_msgs)[:300])
 
 # 9 shutdown/exit
 send({"jsonrpc": "2.0", "id": 8, "method": "shutdown", "params": None})

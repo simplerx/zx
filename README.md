@@ -27,13 +27,20 @@ zig 的 `cc` 当 clang + 自带 libc 编出原生可执行文件），前端与�
 
 ## 现在到哪个程度
 
-**版本 `0.58.0`。** 编译器自举可跑、标准库 8 个模块可用、并发 Task 实例与 rendezvous
-通信已落地并压测稳定、Zed 编辑器有完整 IDE 能力。回归 `sh test.sh`：文件类 **233 项全过**
-+ CLI 冒烟 6 项 + LSP 会话 16 项。
+**版本 `0.61.0`。** 编译器自举可跑、标准库 8 个模块可用、并发 Task 实例与 rendezvous
+通信已落地并压测稳定、Zed 编辑器有完整 IDE 能力。回归 `sh test.sh`：文件类 **257 项全过**
++ CLI 冒烟 6 项 + LSP 会话 17 项。
 
 **已经稳的东西**：捕获即返回值的语法糖、编译期求值与泛型单态化、`@file/@line/@col/@fnName`
 零开销位置内建、`std.debug`（panic/assert/errName/printTrace）、文件类与反例测试、
-多文件模块与增量编译、结构展开 `{any}`、指针算术、枚举错误名回放。
+多文件模块与增量编译、结构展开 `{any}`、指针算术、枚举错误名回放、
+**FFI**（`extern "C"` 块一次声明一组 C 函数/变量/结构体，`@link` 挂系统库，
+`demo/ffi/` 有打真实显卡的 OpenGL 例子）、`@embedFile` 编译期嵌文件、
+格式化 `{[idx][verb]:[fill][align][width][.prec]}` 全规格、`_ = expr` 显式丢弃、
+`?*T` 无标签 optional（null 即 0 指针，sizeof = 指针宽度）、
+**诊断体验**（报错带源码行 + `^` 指位，多字节字符与 tab 指位也准；
+`did you mean` 拼写建议；重复声明/跨模块私有访问带相关位置 note；
+连锁错误抑制——用户看到的条数等于根因数）。
 
 **已知限制（会变，但别按"它有"来设计）**：
 
@@ -207,11 +214,30 @@ HashMap / 字符串）与格式化（`{}` 占位）齐备。
 `deps` 列表。模块名可省 `.zx`（`module("ext")` 即 `vendor/ext.zx`）。`vendor/` 是
 源码依赖根，应提交进版本控制；`deps` 留给工程外的目录。
 
+### FFI：直接调 C
+
+不用写绑定生成器，`extern "C"` 块一次声明一组；`@link` 挂系统库：
+
+```zx
+@link("user32");
+extern "C" {
+    pub const MessageBoxW = fn (hWnd: ?*anyopaque, text: ?*const u16,
+                                caption: ?*const u16, type: u32) i32;
+    pub const GetTickCount = fn () u32;
+}
+```
+
+函数、变量（`extern var`）、结构体（`extern struct`）都能声明，布局按 C ABI
+对齐；完整例子见 `demo/ffi/`（user32/gdi32/opengl32 绑定 + 创建窗口 + OpenGL
+上下文，跑起来打印显卡型号）。SDL/GLFW 这类深嵌套布局的库照此办理。
+
 ### 编辑器（Zed）
 
 `sh build.sh` 编出三件套后，`sh editor/zed/install.sh` 装扩展即获得语法高亮、大纲、
 LSP 补全/跳转/诊断。zxls（语言服务器）走 vendored zig 0.17.0；诊断与编译器 100% 同源
-（同一份 sema）。排障见 `editor/README.md`。其他 LSP 客户端也可接 `bin/zxls.exe`。
+（同一份 sema），错误消息的源码片段、`did you mean` 建议与相关位置 note 原样进编辑器，
+且不依赖宿主环境变量（临时文件落工具链自身目录）。排障见 `editor/README.md`。
+其他 LSP 客户端也可接 `bin/zxls.exe`。
 
 ---
 
@@ -219,12 +245,16 @@ LSP 补全/跳转/诊断。zxls（语言服务器）走 vendored zig 0.17.0；�
 
 | 目录 | 内容 |
 | --- | --- |
-| `src/` | 编译器 C 实现：`parse.c`（前端 parser）、`sema.c`（类型/语义）、`backend.c`（C 发射）、`zxc.h` 等 |
+| `src/` | 编译器 C 实现：`parse.c`（前端 parser）、`sema.c`（类型/语义）、`backend.c`（C 发射）、`zxc.c`（诊断/缓冲）等 |
+| `bootstrap/` | 自举前端（Zx 代码）：`parse.zx` / `lex.zx`，编译成 `bin/zxfe.exe`，zxc 默认走它 |
 | `std/` | 标准库（Zx 代码，可读可改）：`str/map/fs/json/time/pool/task.zx` + 聚合 `std.zx` |
 | `docs/` | `manual.md` 语言手册、`guide.md` 教程 |
-| `spec/` | `zx-spec.md` 规格、`zx.ebnf` 文法、`decisions.md` 设计裁定记录 |
-| `tests/` | `good/`（正例，带 `// expect-output:`）+ `bad/`（反例） |
-| `tools/` | `lsptest.py` 等工具 |
+| `spec/` | `zx-spec.md` 规格、`zx.ebnf` 文法、`decisions.md` 设计裁定记录（96 条） |
+| `tests/` | `good/`（正例，带 `// expect-output:`）+ `bad/`（反例）+ `multi/`（多文件） |
+| `demo/` | `ffi/`：Windows API + OpenGL 全链路例子（extern "C" 绑定的真实用户） |
+| `bench/` | 基准（JSON 解析等） |
+| `tools/` | `lsptest.py`（LSP 冒烟）、`runner.c`（测试驱动）、`zxls.zig`（语言服务器） |
 | `editor/zed/` | Zed 扩展（高亮 + 大纲 + LSP 接线） |
+| `editor/tree-sitter-zx/` | tree-sitter 语法（含 wasm 构建，其他编辑器接入用） |
 
 设计取舍的来龙去脉都记在 `spec/decisions.md`，不在本文里复述。

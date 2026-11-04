@@ -1909,6 +1909,19 @@ fn runCheck(doc: *const Document, out_diags: *std.ArrayList(Diag)) void {    // 
     var it = std.mem.splitScalar(u8, res.stderr, '\n');
     while (it.next()) |line_raw| {
         const line = std.mem.trimEnd(u8, line_raw, "\r");
+        // D2/D1：渲染器跟在诊断后面的 help:/note: 行（含建议与相关位置）
+        // 挂进上一条诊断的消息——编辑器里一眼看到 did you mean。
+        const trimmed = std.mem.trimStart(u8, line, " ");
+        if (std.mem.startsWith(u8, trimmed, "help: ") or std.mem.startsWith(u8, trimmed, "note: ")) {
+            if (out_diags.items.len > 0) {
+                const last = &out_diags.items[out_diags.items.len - 1];
+                if (std.mem.concat(gpa, u8, &.{ last.msg, "\n", trimmed })) |joined| {
+                    gpa.free(last.msg);
+                    last.msg = joined;
+                } else |_| {}
+            }
+            continue;
+        }
         const marker = std.mem.indexOf(u8, line, ": error[") orelse continue;
         var seg = line[0..marker];
         const c1 = std.mem.lastIndexOfScalar(u8, seg, ':') orelse continue;
