@@ -3330,3 +3330,12 @@ lbl: 其余（{} / {a,b} / expr）→ 收割
 连带改动：stair.zx 原本 `module("numkit.zx")` 借用 `floorLog2`（init 算层数、query 算覆盖宽度两处），现在就地内联为私有 `floorLog2`——**扩展库成员应当自包含**，单文件拷走就能用，这是 x/ 的准入标准之一。
 
 `x/demo.zx` 相应收窄：只验收稀疏表（37 个伪随机数全子区间与暴力对拍、单点相等、越界 null、比较器换向取最大）。README 的 x/ 小节与代码结构表同步。
+
+
+## 104. 1.0.0 终稿：撤掉扩展库，README 回归薄
+
+§102/§103 两轮折腾的结论：**`x/` 整个删除**（stair/lattice/numkit/demo 全部），语言不设 std 之外的扩展库层。理由：1.0.0 的门面应该只有语言本身——库是后续按需生长的事，预先铺一层目录只会让 README 和维护面变宽。两个编译器修复（§102 的 E0505/E0410）是独立 bug 修复，保留。
+
+README 同时重写：只留语言介绍、构建、上手 demo（hello + 错误处理速览）、常用命令与目录表——特性清单、Task 详表、FFI、编辑器细节全部让位给`docs/manual.md`。
+
+顺手修了重写 demo 撞出的 backend bug：`emit_debug_runtime` 发射的 `zx_debug_errname` 引用 `ZxSlice_u8` 却不 ensure 该类型，调用点传常量错误码时被别处顺带 ensure 而侥幸通过，传运行期错误值直接编不过（B1003）。修法：emit_debug_runtime 开头自己 `ensure_type(ty_slice(ty_u8(), true))`；`good/errname-runtime` 钉住。

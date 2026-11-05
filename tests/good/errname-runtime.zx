@@ -1,0 +1,23 @@
+// errname-runtime.zx —— std.debug.errName 收运行期错误值（非常量码）。
+// backend 的 emit_debug_runtime 引用 ZxSlice_u8 却曾不 ensure 类型：
+// 调用点传常量错误码时会被顺带 ensure 而侥幸通过，传运行期值就
+// 编不过（B1003: unknown type name 'ZxSlice_u8'）。
+
+const std = module("std");
+
+const mayFail = fn (x: usize) !usize {
+    if (x > 100) { return error.too_big; }
+    return x * 2;
+};
+
+const main = fn () !i32 {
+    // e 是运行期值，不走常量折叠的 ensure 路径。
+    if (mayFail(200)) v {
+        std.println("ok:{}", v);
+    } else e {
+        let name = std.debug.errName(e);
+        if (name.len != 7) { return 1; }
+        std.println("err:{}", name);
+    }
+    return 0;
+};

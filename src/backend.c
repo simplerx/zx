@@ -2247,6 +2247,10 @@ static void emit_io_runtime(void) {
  * 错误集登记完，直接按码序展开成字符串数组，查表 O(1)）；
  * assert 的函数体在 release（-DZX_RELEASE）下整体擦除。 */
 static void emit_debug_runtime(void) {
+    /* 函数签名与返回值都写 ZxSlice_u8，类型必须先有 typedef——
+     * 调用点传常量错误码时会顺带 ensure，传运行期错误值就没有
+     * 别的路径补上（README 的 demo 撞出来的），在这里自己 ensure。 */
+    ensure_type(ty_slice(ty_u8(), true));
     int ne = ty_err_count();
     /* 表无条件发射：枚举错误（(error)Err.x）不进登记表，ne 可能是 0，
      * 但 printTrace 的代码路径始终引用它——空表 + 哨兵兜底。 */
