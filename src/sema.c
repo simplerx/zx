@@ -1380,14 +1380,29 @@ static Type *resolve_type(Node *n) {
     }
 
     case NK_ERR_SET: {
+        /* 集合字面量里的名字有两重身份：引用已声明的错误集时是**合并**
+         * （`const All = error{ IoErr, extra }` 把 IoErr 的码并进来），
+         * 其余是普通成员名——成员不需要声明，查不到符号很正常。
+         * 只认“类型值恰好是错误集”的名字：同名函数/常量不合并，
+         * 照旧当成员。解析中的符号（state==1，互相引用）也当成员，
+         * 让循环引用自然落在字面量一侧而不是挂死。 */
+        void *refs = NULL;
         const char *names[64];
         int k = 0;
-        for (int i = 0; i < n->nitems && k < 64; i++) {
+        for (int i = 0; i < n->nitems; i++) {
             Node *m = n->items[i];
             if (!m || !m->name) continue;
-            names[k++] = m->name;
+            Symbol *s = lookup(m->name);
+            if (s && s->state != 1 && s->ty && s->ty->kind == TY_TYPE &&
+                s->type_val && s->type_val->kind == TY_ERRORSET) {
+                refs = refs ? ty_errset_union(refs, s->type_val->eset)
+                            : s->type_val->eset;
+                continue;
+            }
+            if (k < 64) names[k++] = m->name;
         }
-        return ty_errset_type(ty_errset_of(names, k));
+        void *lit = ty_errset_of(names, k);
+        return ty_errset_type(refs ? ty_errset_union(refs, lit) : lit);
     }
 
     case NK_ERR_TYPE: {
@@ -2329,10 +2344,22 @@ static void *cur_errset(void) {
  *   - `error.name` 字面量 → {name}
  *   - 其余（`!T` anyerror、`(error)Enum.x` 旧写法）→ NULL（未知，不检查） */
 static void *expr_errset(Node *e, Type *t) {
-    if (t && t->kind == TY_ERR) return t->eset;
+    /* 节点形状先于类型：error.x / Err.no 的集合写在节点上，而不是折后
+     * 的类型上。expect 传播会把 error 字面量提前定型成目标错误联合体
+     * （t = want），这时再看 t，看到的是**函数声明的**集合——
+     * `return error.read` 在 `error{no}!void` 里漏报 E0901，原因就是
+     * 顺序：类型分支先命中，拿 want 的集合与自己比，永远“子集”。 */
     if (e && e->kind == NK_FIELD && e->name && e->a &&
-        e->a->kind == NK_TYPE_IDENT && e->a->name && !strcmp(e->a->name, "error"))
-        return ty_errset_one(e->name);
+        e->a->kind == NK_TYPE_IDENT) {
+        /* Err.no：base 是命名错误集类型（`const Err = error{no}`），集合就是它。
+         * 不认这个，`return Err.no` 的集合检查就哑了——折出来的类型是普通
+         * error，看不出集合，检查只能跳过。 */
+        Type *btv = e->a->type_val;
+        if (btv && btv->kind == TY_ERRORSET) return btv->eset;
+        if (e->a->name && !strcmp(e->a->name, "error"))
+            return ty_errset_one(e->name);
+    }
+    if (t && t->kind == TY_ERR) return t->eset;
     return NULL;
 }
 
@@ -2375,6 +2402,46 @@ static Type *check_field(Node *n) {
         if (tv->kind == TY_ERROR && n->name) {
             uint16_t code = ty_err_code(n->name);
             n->ct = val_int(ty_error(), code, false);
+            return type_of(n, ty_error());
+        }
+        /* Err.no：命名错误集类型的成员。集合里声明的每个名字都是编译期常量
+         * （同 `error.name` 字面量）；不在集合里的报错，并拿集合现有名字给
+         * did you mean。注意先用**名字**对集合查——ty_err_code 对没见过的
+         * 名字会顺手分配新码，成员查找不能有这个副作用（污染 errName 表）。 */
+        if (tv->kind == TY_ERRORSET && n->name) {
+            const char *hit = NULL, *sug = NULL;
+            int bd = 999;
+            for (int i = 0; i < ty_errset_size(tv->eset); i++) {
+                const char *c = ty_errset_name_at(tv->eset, i);
+                if (!c) continue;
+                if (!strcmp(c, n->name)) { hit = c; break; }
+                if (name_close(n->name, c)) {
+                    int d = edit_distance(n->name, c);
+                    if (d < bd) { bd = d; sug = c; }
+                }
+            }
+            if (!hit) {
+                if (sug) {
+                    diag_help("did you mean `%s`?", sug);
+                } else if (ty_errset_size(tv->eset) > 0 &&
+                           ty_errset_size(tv->eset) <= 8) {
+                    /* 小集合直接把成员列出来：完全写错名字时比沉默有用 */
+                    static char names[256];
+                    size_t k = 0;
+                    names[0] = 0;
+                    for (int i = 0; i < ty_errset_size(tv->eset); i++) {
+                        const char *c = ty_errset_name_at(tv->eset, i);
+                        if (!c) continue;
+                        int w = snprintf(names + k, sizeof names - k,
+                                         "%s%s", k ? ", " : "", c);
+                        if (w < 0 || k + (size_t)w >= sizeof names - 8) break;
+                        k += (size_t)w;
+                    }
+                    diag_help("this error set declares: %s", names);
+                }
+                return BAD(n, "`%s` has no member '%s'", ty_str(tv), n->name);
+            }
+            n->ct = val_int(ty_error(), ty_err_code(hit), false);
             return type_of(n, ty_error());
         }
         if (n->name) {

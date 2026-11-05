@@ -310,6 +310,137 @@ fn collectIdents(text: []const u8, set: *std.StringHashMapUnmanaged(void)) void 
     }
 }
 
+/// `error{` 的 '{' 位置。跳过 // 注释与字符串；`myerror{` 这种长名不认
+/// （前一个字符是标识符字节就继续扫）。
+fn findErrBrace(text: []const u8, from: usize) ?usize {
+    var i = from;
+    while (i + 5 <= text.len) : (i += 1) {
+        const c = text[i];
+        if (c == '/' and i + 1 < text.len and text[i + 1] == '/') {
+            while (i < text.len and text[i] != '\n') i += 1;
+            continue;
+        }
+        if (c == '"') {
+            i += 1;
+            while (i < text.len and text[i] != '"' and text[i] != '\n') i += 1;
+            continue;
+        }
+        if (!std.mem.startsWith(u8, text[i..], "error")) continue;
+        if (i > 0 and isIdentChar(text[i - 1])) continue;
+        var p = i + 5;
+        while (p < text.len and (text[p] == ' ' or text[p] == '\t')) p += 1;
+        if (p < text.len and text[p] == '{') return p;
+    }
+    return null;
+}
+
+/// 从 '{' 起收割错误集成员（逗号分隔的名字，可带 `= 值`）。返回 '}' 之后的位置。
+fn harvestErrBlock(text: []const u8, brace: usize, out: *std.ArrayList(Decl)) usize {
+    var depth: usize = 0;
+    var i = brace + 1;
+    while (i < text.len) : (i += 1) {
+        const c = text[i];
+        if (c == '/' and i + 1 < text.len and text[i + 1] == '/') {
+            while (i < text.len and text[i] != '\n') i += 1;
+            continue;
+        }
+        if (c == '"') {
+            i += 1;
+            while (i < text.len and text[i] != '"' and text[i] != '\n') i += 1;
+            continue;
+        }
+        if (c == '{') depth += 1;
+        if (c == '}') {
+            if (depth == 0) return i + 1;
+            depth -= 1;
+        }
+        if (depth == 0 and isIdentChar(c) and !(c >= '0' and c <= '9')) {
+            var j = i + 1;
+            while (j < text.len and isIdentChar(text[j])) j += 1;
+            out.append(gpa, .{ .name = text[i..j], .kind = .variant }) catch {};
+            i = j - 1; // 循环末尾 +1，正好落在名字后
+        }
+    }
+    return i;
+}
+
+/// `error.` 的补全：所有 `error{ … }` 集合 + 所有 `error.x` 用法里的码名。
+/// 错误码名在编译器侧是全局 intern 的（没有作用域），所以工作区一起扫，
+/// 见过的都端出来——这与容器分支的"宁缺毋滥"不同：码名来源可靠，
+/// 只认 error{ } 块与 error.x 用法，混不进局部变量。
+fn collectAllErrMembers(files: []const []const u8, out: *std.ArrayList(Decl)) bool {
+    for (files) |ftext| {
+        var idx: usize = 0;
+        while (findErrBrace(ftext, idx)) |brace| idx = harvestErrBlock(ftext, brace, out);
+        var q: usize = 0;
+        while (std.mem.indexOfPos(u8, ftext, q, "error.")) |hit| {
+            q = hit + 6;
+            if (q >= ftext.len) break;
+            if (!isIdentChar(ftext[q]) or (ftext[q] >= '0' and ftext[q] <= '9')) continue;
+            var j = q + 1;
+            while (j < ftext.len and isIdentChar(ftext[j])) j += 1;
+            out.append(gpa, .{ .name = ftext[q..j], .kind = .variant }) catch {};
+            q = j;
+        }
+    }
+    return out.items.len > 0;
+}
+
+/// `const <name> = error{` 的块起点（文件文本 + '{' 位置）。找不到返回 null。
+fn findErrsetBlock(files: []const []const u8, name: []const u8) ?struct { text: []const u8, brace: usize } {
+    var pat: std.ArrayList(u8) = .empty;
+    defer pat.deinit(gpa);
+    pat.appendSlice(gpa, "const ") catch return null;
+    pat.appendSlice(gpa, name) catch return null;
+    pat.appendSlice(gpa, " =") catch return null;
+    for (files) |ftext| {
+        var idx: usize = 0;
+        while (std.mem.indexOfPos(u8, ftext, idx, pat.items)) |hit| {
+            if (hit > 0 and isIdentChar(ftext[hit - 1])) {
+                idx = hit + 1;
+                continue;
+            }
+            var p = hit + pat.items.len;
+            while (p < ftext.len and (ftext[p] == ' ' or ftext[p] == '\t')) p += 1;
+            if (!std.mem.startsWith(u8, ftext[p..], "error")) {
+                idx = hit + 1;
+                continue;
+            }
+            p += 5;
+            while (p < ftext.len and (ftext[p] == ' ' or ftext[p] == '\t')) p += 1;
+            if (p >= ftext.len or ftext[p] != '{') {
+                idx = hit + 1;
+                continue;
+            }
+            return .{ .text = ftext, .brace = p };
+        }
+    }
+    return null;
+}
+
+/// `Err.` 的补全：`const Err = error{ … }` 那一块的成员。
+/// 块里引用别的集合（`error{ IoErr, extra }`）时递归展开——与 sema 的
+/// 合并语义一致（NK_ERR_SET 的 refs），引用到的名字必须是声明的集合，
+/// 否则当普通成员。depth 限 4 层，互相引用不会挂死。
+fn collectNamedErrMembers(files: []const []const u8, name: []const u8, out: *std.ArrayList(Decl)) bool {
+    return namedErrInner(files, name, out, 0);
+}
+
+fn namedErrInner(files: []const []const u8, name: []const u8, out: *std.ArrayList(Decl), depth: u8) bool {
+    const hit = findErrsetBlock(files, name) orelse return false;
+    var raw: std.ArrayList(Decl) = .empty;
+    defer raw.deinit(gpa);
+    _ = harvestErrBlock(hit.text, hit.brace, &raw);
+    for (raw.items) |d| {
+        if (depth < 4 and findErrsetBlock(files, d.name) != null) {
+            _ = namedErrInner(files, d.name, out, depth + 1);
+        } else {
+            out.append(gpa, d) catch {};
+        }
+    }
+    return out.items.len > 0;
+}
+
 /// 在 files 里找 `const BASE = struct/union/enum …{`，提取成员
 fn containerMembers(files: []const []const u8, base: []const u8, fields: *std.ArrayList(Decl)) bool {
     var pat: std.ArrayList(u8) = .empty;
@@ -1754,6 +1885,13 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                         fp.appendSlice(gpa, entry.name) catch continue;
                         if (readFileSmall(fp.items)) |txt| files.append(gpa, txt) catch {};
                     }
+                }
+                // 错误集成员：`error.`（全局码名）或 `Err.`（`const Err = error{…}`）。
+                if (!handled) {
+                    if (std.mem.eql(u8, container, "error"))
+                        handled = collectAllErrMembers(files.items, &decls)
+                    else
+                        handled = collectNamedErrMembers(files.items, container, &decls);
                 }
                 if (containerMembers(files.items, container, &decls)) handled = decls.items.len > 0;
                 if (!handled) {

@@ -1,0 +1,11 @@
+// 命名错误集里没有的名字，`E.x` 取不出来——拼写错误要给 did you mean。
+// expect: `error{open}` has no member 'opne'
+// expect-code: E0304
+// expect-count: 1
+const Err = error{ open };
+
+const f = fn () Err!void {
+    return Err.opne;
+};
+
+const main = fn () i32 { return 0; };

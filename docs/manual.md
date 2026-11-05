@@ -360,6 +360,15 @@ const read_it = fn (p: []const u8) IoError!i32 {
 ```
 
 - 集合协变：窄集合可以交给宽集合，反过来不行。
+- **命名集合的成员可以直接取**：`AppErr.open`（与 `error.open` 是同一个码）。
+  取的名字必须在集合里，拼错会给出 `did you mean`。
+- **集合可以合并**：字面量里引用别的错误集就是并集——
+
+  ```zx
+  const All = error{ IoErr, NetErr, bad };   // {open,read} ∪ {timeout,reset} ∪ {bad}
+  ```
+
+  引用的名字解析到错误集类型才合并；同名函数/普通常量照旧当成员名。
 - 编译器守三件事：`return` 的码（E0901）、`try` 可能抛的码（E0902）、
   anyerror 抛进声明了集合的函数（E0903，得显式放宽返回类型）。
 - 布局不变：`E!T` 与 `!T` 内存里一模一样，只多一份编译期信息。

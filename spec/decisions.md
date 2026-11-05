@@ -3141,3 +3141,50 @@ ASCII 与含中文两行都精确命中 `coutn`）。
 回归：`passed 257, failed 0`；CLI 冒烟 6+9 项（新增"无具体建议时诊断带通用
 修法""explain 给出文档链接""每个码都有锚点""两处文档地址一致"）；LSP 冒烟
 20 项（新增 codeDescription 正反两条 + genericFix）。
+
+## 99. 错误集当一等公民：成员访问 + 集合合并 + 码名补全（M64）
+
+**问题**（用户截图报 `` `error{no}` has no member 'no' ``，随后两连问）：
+
+1. `const Err = error{no}` 之后，`Err.no` 取不出来。成员访问在类型值上只认
+   容器字段/枚举体，`error{…}` 的名字没被当成成员——但语言语义里它就是成员
+   （`error.no` 字面量本来就行，换个写法就哑，说不通）。
+2. 编辑器里 `error.` 点不出码名，`Err.` 同样点不出。
+3. 集合没有合并手段：想写"这些错加那个错"只能把码抄一遍。
+
+**裁定一：命名错误集的成员访问**（`check_field` 的 TY_TYPE 分支）
+
+`tv->kind == TY_ERRORSET && n->name` 时按**名字**对集合查（不能用
+`ty_err_code`：对没见过的名字它会顺手分配新码，成员查找不能有这个副作用——
+码表是全局 intern 的，查一次成员就污染一次 `errName` 回放）。命中折成
+编译期常量（同 `error.name`）；不命中给两级提示：编辑距离近的给
+`did you mean`，小集合（≤8 个）直接列出全部成员。
+
+**裁定二：集合合并——字面量里引用别的集合就是并集**
+
+`const All = error{ IoErr, NetErr, bad }`。NK_ERR_SET 定型时逐项 lookup：
+解析到"类型值恰好是错误集"的符号就 `ty_errset_union` 进来，否则当普通
+成员名。三点边界：
+
+- 只认 TY_ERRORSET 的类型值：同名函数/常量不合并，照旧当成员——成员本就
+  不需要声明，这条规则不新增关键字、不引入歧义。
+- 解析中的符号（state==1，互相引用）当字面量：循环引用自然落到字面量一侧。
+- 码还是全局 intern 的：`AppErr.open` 与 `IoErr.open` 是同一个码（用例钉住）。
+
+**裁定三：LSP 码名补全（文本层，与容器补全同一架构）**
+
+zxls 的点补全不跑类型检查，错误码又是全局 intern（没有作用域），所以：
+
+- `error.` → 扫工作区所有 `error{ … }` 块 + `error.x` 用法，见过的都端出来。
+  来源只有这两种词法形状，混不进局部变量，比容器分支的"宁缺毋滥"更稳。
+- `Err.` → 找 `const Err = error{…}` 那块收割成员；引用别的集合时**递归展开**
+  （与 sema 合并语义一致，depth 限 4 层防互相引用挂死）。
+- 注释与字符串在扫描层跳过——注释里的 `error.foo` 不能进补全。
+
+**顺带**：`expr_errset` 改为节点形状先于类型。expect 传播会把 `error.x`
+字面量提前定型成目标错误联合体（t = want），此时看类型拿到的是**函数声明的**
+集合，与字面量自身的集合自比永远"子集"——顺序错了 E0901 就哑了。（探针
+曾经用 `if (false) return …` 验证，死分支不检查，一度误判守卫失效。）
+
+回归：`passed 262, failed 0`（新增 errset-named / errset-merge / errset-member
+三个用例）；LSP 冒烟 23 项（新增 errsetMembers / errorMembers / errsetMerge）。

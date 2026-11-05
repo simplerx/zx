@@ -1,0 +1,35 @@
+// errset-named.zx —— 命名错误集的成员访问：`Err.no` 是编译期常量
+//
+// v0.62 之前 `Err.no` 报 `` `error{no, yes}` has no member 'no' ``——成员
+// 访问只认容器字段，没把错误集的名字当成员。修好后顺带钉住三件事：
+//   ① 集合里的名字都能 `E.x` 直接取，与 `error.x` 等价（同一个码）
+//   ② 取的名字必须在集合里（反例见 tests/bad/errset-member.zx）
+//   ③ `return E.x` 的集合守卫照常工作：声明了集合就得守住
+// expect-output
+// err 1
+// same=true
+// ok 7
+// err 1
+const std = module("std");
+
+const Err = error{
+    no,
+    yes,
+};
+
+const throw_no = fn () Err!void {
+    return Err.no;
+};
+
+const maybe = fn (b: bool) Err!i32 {
+    if (b) { return 7; }
+    return Err.no;
+};
+
+const main = fn () i32 {
+    if (throw_no()) { std.println("unreachable"); } else e { std.println("err {}", e); }
+    std.println("same={}", Err.no == error.no);
+    if (maybe(true)) v { std.println("ok {}", v); } else e { std.println("err {}", e); }
+    if (maybe(false)) v { std.println("ok {}", v); } else e { std.println("err {}", e); }
+    return 0;
+};

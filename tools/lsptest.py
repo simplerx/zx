@@ -38,6 +38,17 @@ pub const main = fn () i32 {
     std.println("{}", n);
     return 0;
 };
+
+const IOErr = error{ open, read };
+
+const AllErr = error{ IOErr, extra };
+
+const probe = AllErr.read;
+
+const thrower = fn (b: bool) IOErr!i32 {
+    if (b) { return IOErr.open; }
+    return error.read;
+};
 """
 
 uri = "file:///" + TESTDIR.replace("\\", "/") + "/main.zx"
@@ -241,9 +252,9 @@ check("definition.make", ok_def, str(r)[:200])
 send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
     "textDocument": {"uri": exturi, "languageId": "zx", "version": 1, "text": EXTUSE}}})
 
-def complete_at(text, off, rid):
+def complete_at(text, off, rid, doc_uri=None):
     send({"jsonrpc": "2.0", "id": rid, "method": "textDocument/completion", "params": {
-        "textDocument": {"uri": exturi}, "position": pos(text, off)}})
+        "textDocument": {"uri": doc_uri or exturi}, "position": pos(text, off)}})
     r, _ = recv_id("completion", rid)
     return {i["label"] for i in r["result"]["items"]} if r and r.get("result") else set()
 
@@ -258,6 +269,21 @@ check("completion.vendorPrefix", "hello" in labels, str(sorted(labels))[:200])
 off = EXTUSE.index("util.twice") + len("util.")          # zx.json deps
 labels = complete_at(EXTUSE, off, 22)
 check("completion.deps", "twice" in labels, str(sorted(labels))[:200])
+
+# 3b 错误集补全（M64）：`Err.` 出集合成员；`error.` 出全局码名。
+# 错误码名在编译器侧是全局 intern 的，文本层就把工程里见过的都端出来。
+off = MAIN.index("IOErr.") + len("IOErr.")
+labels = complete_at(MAIN, off, 30, doc_uri=uri)
+check("completion.errsetMembers", {"open", "read"} <= labels, str(sorted(labels))[:200])
+
+off = MAIN.index("return error.") + len("return error.")   # 光标贴在 error. 后
+labels = complete_at(MAIN, off, 31, doc_uri=uri)
+check("completion.errorMembers", "open" in labels and "read" in labels, str(sorted(labels))[:200])
+
+# 3c 集合合并的补全：AllErr 引用了 IOErr，成员要展开（M64）
+off = MAIN.index("AllErr.") + len("AllErr.")
+labels = complete_at(MAIN, off, 32, doc_uri=uri)
+check("completion.errsetMerge", {"open", "read", "extra"} <= labels, str(sorted(labels))[:200])
 
 # 11 definition: ext.hello → vendor/ext.zx
 off = EXTUSE.index("ext.hello") + len("ext.h")

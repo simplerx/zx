@@ -27,9 +27,9 @@ zig 的 `cc` 当 clang + 自带 libc 编出原生可执行文件），前端与�
 
 ## 现在到哪个程度
 
-**版本 `0.62.0`。** 编译器自举可跑、标准库 8 个模块可用、并发 Task 实例与 rendezvous
-通信已落地并压测稳定、Zed 编辑器有完整 IDE 能力。回归 `sh test.sh`：文件类 **257 项全过**
-+ CLI 冒烟 6 项 + 错误码目录 9 项 + LSP 会话 20 项。
+**版本 `0.63.0`。** 编译器自举可跑、标准库 8 个模块可用、并发 Task 实例与 rendezvous
+通信已落地并压测稳定、Zed 编辑器有完整 IDE 能力。回归 `sh test.sh`：文件类 **262 项全过**
++ CLI 冒烟 6 项 + 错误码目录 9 项 + LSP 会话 23 项。
 
 **已经稳的东西**：捕获即返回值的语法糖、编译期求值与泛型单态化、`@file/@line/@col/@fnName`
 零开销位置内建、`std.debug`（panic/assert/errName/printTrace）、文件类与反例测试、
@@ -251,7 +251,7 @@ LSP 补全/跳转/诊断。zxls（语言服务器）走 vendored zig 0.17.0；�
 | `bootstrap/` | 自举前端（Zx 代码）：`parse.zx` / `lex.zx`，编译成 `bin/zxfe.exe`，zxc 默认走它 |
 | `std/` | 标准库（Zx 代码，可读可改）：`str/map/fs/json/time/pool/task.zx` + 聚合 `std.zx` |
 | `docs/` | `manual.md` 语言手册、`guide.md` 教程、`errors.md` 错误码参考 |
-| `spec/` | `zx-spec.md` 规格、`zx.ebnf` 文法、`decisions.md` 设计裁定记录（98 条） |
+| `spec/` | `zx-spec.md` 规格、`zx.ebnf` 文法、`decisions.md` 设计裁定记录（99 条） |
 | `tests/` | `good/`（正例，带 `// expect-output:`）+ `bad/`（反例）+ `multi/`（多文件） |
 | `demo/` | `ffi/`：Windows API + OpenGL 全链路例子（extern "C" 绑定的真实用户） |
 | `bench/` | 基准（JSON 解析等） |

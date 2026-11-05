@@ -1,0 +1,31 @@
+// errset-merge.zx —— 集合合并：字面量里引用别的错误集 = 并集
+//
+// `const All = error{ IoErr, NetErr, bad }` 把两个集合的码并进来再加自己的。
+// 语义钉住四件事：
+//   ① 引用的名字解析到错误集类型 → 合并；解析不到（普通成员）→ 当字面量
+//   ② 合并后的集合成员照常 `All.x` 访问、照常 return/try 检查（E0901/E0902）
+//   ③ 码在 intern 表里全局唯一：IoErr.open 与 AppErr 里的 open 是同一个码
+//   ④ 同名但不是集合（函数/普通常量）不合并，照旧当成员名
+// expect-output
+// err 3
+// err 5
+// open=true timeout=true
+const std = module("std");
+
+const IoErr = error{ open, read };
+const NetErr = error{ timeout, reset };
+// 引用别的集合 = 合并：AppErr = {open, read} ∪ {timeout, reset} ∪ {bad}
+const AppErr = error{ IoErr, NetErr, bad };
+
+const thrower = fn (b: bool) AppErr!i32 {
+    if (b) { return NetErr.timeout; }
+    return AppErr.bad;
+};
+
+const main = fn () i32 {
+    if (thrower(true)) v { std.println("unreachable"); } else e { std.println("err {}", e); }
+    if (thrower(false)) v { std.println("ok {}", v); } else e { std.println("err {}", e); }
+    // 合并进来的成员照常取，且与原集合的码相同
+    std.println("open={} timeout={}", AppErr.open == IoErr.open, AppErr.timeout == NetErr.timeout);
+    return 0;
+};
