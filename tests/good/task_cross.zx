@@ -18,7 +18,7 @@ const parent = fn (ctx: usize) !usize {
 const main = fn () !i32 {
     let a = Task.coro();
     let b = Task.pool(2);
-    let h = a.spawn(parent, b.id).?;
+    _ = a.spawn(parent, b.id).?;
     try a.awaitAll();
     std.println("cross:{}", sum);
     a.close();

@@ -213,7 +213,7 @@ const nk_name = fn (k: NK) []const u8 {
 const puts = fn (out: *std.ArrayList(u8), s: []const u8) void {
     var i: usize = 0;
     while (i < s.len) {
-        var ok = out.push(s[i]);
+        _ = out.push(s[i]);
         i = i + 1;
     }
 };
@@ -233,7 +233,7 @@ const put_u64 = fn (out: *std.ArrayList(u8), v: u64) void {
     }
     while (n > 0) {
         n = n - 1;
-        var ok = out.push(ds[n]);
+        _ = out.push(ds[n]);
     }
 };
 
@@ -383,13 +383,13 @@ const bracket_match = fn (al: std.Allocator, toks: []lex.Tok) []usize {
                             (k == lex.Kind.rbrace &&
                              (open == lex.Kind.lbrace || open == lex.Kind.dot_brace));
                 if (pairs) {
-                    let popped = stk.pop();
+                    _ = stk.pop();
                     ok = m.set(j, i);
                     ok = m.set(i, j) && ok;
                     if (!ok) { return m.items(); }
                 } else {
                     // 交叉嵌套：栈作废重来（多余闭括号留给报错）
-                    while (stk.items().len > 0) { let dead = stk.pop(); }
+                    while (stk.items().len > 0) { _ = stk.pop(); }
                 }
             }
         }
@@ -432,7 +432,7 @@ pub const Parser = struct {
     const pushs = fn (self: *Parser, s: []const u8) void {
         var i: usize = 0;
         while (i < s.len) {
-            var ok = self.msgb.push(s[i]);
+            _ = self.msgb.push(s[i]);
             i = i + 1;
         }
     };
@@ -456,7 +456,7 @@ pub const Parser = struct {
     const record = fn (self: *Parser, code: []const u8, msg: []const u8) void {
         if (self.spec_depth > 0) { return; }   // 试探区：失败是回溯，不是报错
         let t = self.cur();
-        var ok = self.errs.push(Err{ .line = t.line, .col = t.col, .code = code, .msg = msg });
+        _ = self.errs.push(Err{ .line = t.line, .col = t.col, .code = code, .msg = msg });
     };
 
     // expect 家族共用的 "expected X, found Y"（C parse.c:82/85）
@@ -478,7 +478,7 @@ pub const Parser = struct {
             if (n > 24) { n = 24; }
             var i: usize = 0;
             while (i < n) {
-                var ok = self.msgb.push(txt[i]);
+                _ = self.msgb.push(txt[i]);
                 i = i + 1;
             }
             self.pushs("`");
@@ -519,7 +519,7 @@ pub const Parser = struct {
 
     const expect = fn (self: *Parser, k: lex.Kind) !void {
         if (self.at(k)) {
-            var t = self.advance();
+            _ = self.advance();
             return;
         }
         self.err_expected(k);

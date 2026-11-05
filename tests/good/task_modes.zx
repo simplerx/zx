@@ -16,7 +16,7 @@ const work = fn (x: usize) !usize {
 const main = fn () !i32 {
     let co = Task.coro();
     var i: usize = 0;
-    while (i < 5) { let h = co.spawn(work, i).?; i = i + 1; }
+    while (i < 5) { _ = co.spawn(work, i).?; i = i + 1; }
     try co.awaitAll();
     std.println("coro:{}", hits);
     co.close();
@@ -29,7 +29,7 @@ const main = fn () !i32 {
 
     let pl = Task.pool(4);
     var j: usize = 0;
-    while (j < 8) { let h = pl.spawn(work, j).?; j = j + 1; }
+    while (j < 8) { _ = pl.spawn(work, j).?; j = j + 1; }
     try pl.awaitAll();
     std.println("pool:{}", hits);
     pl.close();

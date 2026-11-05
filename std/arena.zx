@@ -75,7 +75,7 @@ const bumpAlloc = fn (ctx: ?*u8, n: usize) ?*u8 {
 
 // arena 不单笔回收。参数按 Allocator 形状收全但都用不上；
 // Zx 未使用参数不告警，这里不用 `_ =` 丢弃（它不是赋值目标）。
-const bumpFree = fn (ctx: ?*u8, p: *u8, n: usize) void {
+const bumpFree = fn (_ctx: ?*u8, _p: *u8, _n: usize) void {
 };
 
 pub const ArenaAllocator = struct {

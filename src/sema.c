@@ -128,6 +128,8 @@ struct Symbol {
     bool        is_std;    /* 内建 "std" 命名空间 */
     bool        ct_bind;   /* 泛型的编译期实参：没有 C 变量，值直接内联 */
     bool        in_fn;     /* 声明在函数体里：它的槽位在当前栈帧上 */
+    bool        used;      /* 被读过或写过一次；没碰过的局部绑定要报（M66） */
+    struct Symbol *locals_next;  /* 本函数体的局部登记链（见 local_track） */
     bool        stack_val; /* 它的值指向当前栈帧（逃逸检查用，见 addr_frame） */
     const char *cname;     /* 后端用的 C 名字（模块内名字带前缀） */
     int         decl_line; /* 声明位置（D2 note 用；0 = 没记） */
@@ -155,6 +157,10 @@ typedef struct Scope {
 } Scope;
 
 static Scope *g_scope;
+/* 当前函数体登记过的全部局部绑定（参数、let/var、解构槽、捕获）。
+ * 为什么另立一条链：作用域是**栈上**的，出块就销毁，符号却活得久——
+ * 想在函数体结束时统一问"哪些一次都没用过"，只能自己记一份。 */
+static Symbol *g_locals;
 
 /* 作用域链上找与 bad 最接近的名字（fix-it）。符号名的寿命覆盖诊断
  * 打印，直接返回指针。 */
@@ -278,6 +284,42 @@ static Symbol *scope_add(Scope *sc, const char *name, int kind) {
         if (h) { h->sym = s; h->next = sc->tab[b]; sc->tab[b] = h; }
     }
     return s;
+}
+
+/* 登记一个局部绑定。line/col 只在符号自己没记的时候补——声明处的
+ * 位置就是报"未使用"时要指的地方。 */
+static void local_track(Symbol *s, int line, int col) {
+    if (!s || s->locals_next) return;
+    s->locals_next = g_locals;
+    g_locals = s;
+    if (!s->decl_line) { s->decl_line = line; s->decl_col = col; }
+}
+
+/* 函数体收尾：把这条链上没被碰过一遍的绑定报出来。
+ *
+ * 为什么强制而不是警告：Zx 编到 C，未使用的局部变量在 C 里只是 warning，
+ * 而用户看不到 C；更实际的是"声明了从没用过"几乎总是写漏了一半——
+ * 打算用、结果没接上，或者名字拼错（拼错的地方是 E0401，但只写不读的
+ * 拼错就完全静默）。要求写成 `_x` 是把意图显式化：`_` 开头就是"我知道
+ * 它没被用"。 */
+static void check_unused(Symbol *head, int errs_before) {
+    /* å½æ°ä½éå·²ç»æ¥è¿éå°±ä¸åé®"ææ²¡ææ²¡ç¨è¿çåé"ï¼
+     * éè¯¯æ¢å¤ä¸è¿æ¡å¤æ­å¤åæ¯åè±¡ï¼è¡¨è¾¾å¼åºéâ
+     * æ£æ¥æåæ¶å°¾âåé¢çä½¿ç¨æ²¡è¢«è®°ä¸ï¼ï¼
+     * èä¸è¿ç§åªé³ä¼çä½çæ­£çæ ¹å ãä¿®å®ééç¼ï¼å®èªç¶ä¼åºç°ã */
+    if (g_error_count != errs_before) return;
+    for (Symbol *s = head; s; s = s->locals_next) {
+        if (s->used || !s->name || s->name[0] == '_') continue;
+        /* `self` 是方法接收者的惯用名：不用它的方法也得写出来（位置决定签名），
+         * 叫人改成 `_self` 只会让方法看起来像函数。 */
+        if (!strcmp(s->name, "self")) continue;
+        if (s->kind == SK_FN || s->kind == SK_NS) continue;
+        const char *what = s->kind == SK_PARAM   ? "parameter"
+                         : s->kind == SK_CAPTURE ? "binding"
+                         :                         "variable";
+        diag_help("if you don't need it, write `_%s` or `_`", s->name);
+        err_at(s->decl_line, s->decl_col, "unused %s '%s'", what, s->name);
+    }
 }
 
 static Symbol *lookup(const char *name) {
@@ -3421,6 +3463,7 @@ static Type *check_expr_raw(Node *n, Type *expect) {
             return BAD(n, "unknown identifier '%s'", n->name);
         }
         n->sym = s;
+        s->used = true;      /* 求值路径就是"用到了"：读、写、取地址都算 */
         /* 正在构造的聚合类型：外壳已经挂上了，名字就能用（`Color.red` 写在
          * Color 自己的体里）。成员表填完之前它只能当类型用。 */
         if (s->state == 3 && s->type_val && s->ty && s->ty->kind == TY_TYPE) {
@@ -3801,6 +3844,10 @@ static void hoist(Scope *sc, Node *blk) {
                     s->cname = mangle_name(id->name);
                     id->sym = s;
                     if (k == 0) it->sym = s;
+                    /* 判据是"当前作用域不是模块"，不能看 g_fn_depth：
+                     * 模块是在**函数体里**懒性加载的（第一次用到 std 就在那时），
+                     * g_fn_depth 那时已>0＜误把模块顶层声明当成局部。 */
+                    if (!sc->is_module) local_track(s, id->line, id->col);
                 }
             } else if (it->name) {
                 int kind = it->op == 2 ? SK_VAR : it->op == 1 ? SK_LET : SK_CONST;
@@ -3819,6 +3866,7 @@ static void hoist(Scope *sc, Node *blk) {
                 s->cname = it->is_extern ? it->name : mangle_name(it->name);
                 s->in_fn = (g_fn_depth > 0);   /* 槽位在当前栈帧上（逃逸检查用） */
                 it->sym = s;
+                if (!sc->is_module) local_track(s, it->line, it->col);
                 /* 泛型 lambda（`const L = fn (T: type) type { … }`）也要知道自己
                  * 属于哪个模块——实例化时得回到定义处的模块作用域里检查体。 */
                 if (it->b && it->b->kind == NK_FN) it->b->sym = s;
@@ -4408,6 +4456,10 @@ static Type *check_fn_body(Node *fn) {
     if (!ft || ft->kind == TY_INVALID) return ft;
     Type *ret = ft->ret ? ft->ret : ty_void();
 
+    Symbol *save_locals = g_locals;
+    int save_errs = g_error_count;      /* ç¨æ¥å¤æ­"è¿ä¸ªå½æ°ä½éæ¥è¿éæ²¡"ï¼è§ check_unusedï¼ */
+    g_locals = NULL;
+
     Scope sc;
     scope_push(&sc);
     for (int i = 0; i < fn->nitems; i++) {
@@ -4422,6 +4474,7 @@ static Type *check_fn_body(Node *fn) {
         s->ty = pm->ty;
         s->state = 2;
         s->in_fn = true;      /* 形参槽位也在被调方的栈帧上：&pm 不可返回 */
+        local_track(s, pm->line, pm->col);
         pm->sym = s;
     }
 
@@ -4440,6 +4493,8 @@ static Type *check_fn_body(Node *fn) {
     g_fn_depth--;
     g_ret = save_ret;
     g_in_defer = save_defer;
+    check_unused(g_locals, save_errs);      /* 局部绑定问一遍，然后还上层函数的链 */
+    g_locals = save_locals;
     scope_pop(&sc);
     g_cur_fn_name = prev_fn;    /* 还原外层函数名（嵌套/错误路径安全） */
     return ft;

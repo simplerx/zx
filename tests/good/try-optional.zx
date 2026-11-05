@@ -39,6 +39,6 @@ const main = fn () !void {
     let miss = probe(null);
     std.println("hit={}", miss);
     // find(a, 99) 是 null → error.null 沿 try 传到 main，退出码 65535
-    let never = try middle(a);
+    _ = try middle(a);
     std.println("exit=0");
 };

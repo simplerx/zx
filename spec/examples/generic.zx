@@ -118,6 +118,7 @@ const main = fn () u8 {
     // 编译期表
     let p3 = POW2.3;                    // 8
     let z = zero(u32);
+    _ = { bl, p, z };                   // 示例值只看类型推导，不再消费
 
     std.println("generic ok, p3={}, sum={}", p3, TABLE_SUM);
     return 0;

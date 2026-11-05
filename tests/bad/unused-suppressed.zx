@@ -1,0 +1,10 @@
+// 错误恢复下不报未使用：函数体里已经有过硬错误时，"这个变量没用过"多半是
+// 假象（检查中途收尾，后面的使用没被记上），报出来只会盖住根因。
+//
+// expect-count: 1
+// expect: unknown identifier 'nope'
+
+const main = fn () u8 {
+    let v = nope;              // v 确实没被用，但根因是 nope
+    return 0;
+};

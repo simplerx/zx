@@ -43,7 +43,7 @@ const main = fn () i32 {
     std.println("exists={}", std.fs.exists(al, "std/std.zx"));
 
     // ---- 目录遍历：先造一个已知内容的目录，数得清 ----
-    let made = std.fs.createDir(al, "fs_t_dir");
+    _ = std.fs.createDir(al, "fs_t_dir");
     // 已存在也当成功（第二次跑测试）
     std.file.write("fs_t_dir/one.txt", "1");
     std.file.write("fs_t_dir/two.txt", "22");

@@ -122,11 +122,15 @@ const main = fn () u8 {
     let pimm = &imm;               // *const i32
     // pimm.0 = 8;                 // 编译错误：透过 *const 写入
 
+    _ = { xv, pimm };
+
     // 指针自动穿透：ps.flag == ps.0.flag
     var s = S{ .flag = true };
     let ps = &s;
     ps.flag = false;
     let fv = ps.0.flag;
+
+    _ = fv;
 
     // 普通联合体：构造 + 读成员
     var r: Raw = Raw{ .i = 42 };
@@ -146,6 +150,8 @@ const main = fn () u8 {
     let slow = shapes[i];          // 运行时下标，带边界检查
     let whole = shapes[0..];       // → []Shape
 
+    _ = { tag0, radius, w, slow, whole };
+
     // 函数是指针，可以放进数组、可以传参
     var ops = &.{add, sub};
     let v: i32 = ops.0(apply(add, 1, 2), ops.1(5, 1));
@@ -153,6 +159,7 @@ const main = fn () u8 {
     // 显式转换，没有任何隐式转换
     let wide: i64 = (i64)p.age;
     let narrow: u8 = (u8)wide;     // 截断
+    _ = narrow;
 
     std.println("types ok, v={}", v);
     return 0;

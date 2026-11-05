@@ -396,23 +396,23 @@ pub const Lexer = struct {
 
     const decode_escape = fn (self: *Lexer) i32 {
         let e = self.adv();
-        if (e == 'n') { var ok = self.strbuf.push('\n'); return 1; }
-        if (e == 't') { var ok = self.strbuf.push('\t'); return 1; }
-        if (e == 'r') { var ok = self.strbuf.push('\r'); return 1; }
-        if (e == '0') { var ok = self.strbuf.push(0); return 1; }
-        if (e == '\\') { var ok = self.strbuf.push('\\'); return 1; }
-        if (e == '"') { var ok = self.strbuf.push('"'); return 1; }
-        if (e == '\'') { var ok = self.strbuf.push('\''); return 1; }
-        if (e == 'a') { var ok = self.strbuf.push(7); return 1; }
-        if (e == 'b') { var ok = self.strbuf.push(8); return 1; }
-        if (e == 'f') { var ok = self.strbuf.push(12); return 1; }
-        if (e == 'v') { var ok = self.strbuf.push(11); return 1; }
-        if (e == 'e') { var ok = self.strbuf.push(0x1b); return 1; }
+        if (e == 'n') { _ = self.strbuf.push('\n'); return 1; }
+        if (e == 't') { _ = self.strbuf.push('\t'); return 1; }
+        if (e == 'r') { _ = self.strbuf.push('\r'); return 1; }
+        if (e == '0') { _ = self.strbuf.push(0); return 1; }
+        if (e == '\\') { _ = self.strbuf.push('\\'); return 1; }
+        if (e == '"') { _ = self.strbuf.push('"'); return 1; }
+        if (e == '\'') { _ = self.strbuf.push('\''); return 1; }
+        if (e == 'a') { _ = self.strbuf.push(7); return 1; }
+        if (e == 'b') { _ = self.strbuf.push(8); return 1; }
+        if (e == 'f') { _ = self.strbuf.push(12); return 1; }
+        if (e == 'v') { _ = self.strbuf.push(11); return 1; }
+        if (e == 'e') { _ = self.strbuf.push(0x1b); return 1; }
         if (e == 'x') {
             let hi = hexval(self.adv());
             let lo = hexval(self.adv());
             if (hi < 0 || lo < 0) { self.fail(); return -1; }   // \x needs two hex digits
-            var ok = self.strbuf.push((u8)(hi * 16 + lo));
+            _ = self.strbuf.push((u8)(hi * 16 + lo));
             return 1;
         }
         if (e == 'u') {
@@ -433,24 +433,24 @@ pub const Lexer = struct {
     // BMP 码点 → UTF-8（1..4 字节），追加进 strbuf
     const utf8_encode = fn (self: *Lexer, cp: u32) i32 {
         if (cp < 0x80) {
-            var ok = self.strbuf.push((u8)cp);
+            _ = self.strbuf.push((u8)cp);
             return 1;
         }
         if (cp < 0x800) {
-            var ok1 = self.strbuf.push((u8)(0xC0 | (cp >> 6)));
-            var ok2 = self.strbuf.push((u8)(0x80 | (cp & 0x3F)));
+            _ = self.strbuf.push((u8)(0xC0 | (cp >> 6)));
+            _ = self.strbuf.push((u8)(0x80 | (cp & 0x3F)));
             return 2;
         }
         if (cp < 0x10000) {
-            var ok1 = self.strbuf.push((u8)(0xE0 | (cp >> 12)));
-            var ok2 = self.strbuf.push((u8)(0x80 | ((cp >> 6) & 0x3F)));
-            var ok3 = self.strbuf.push((u8)(0x80 | (cp & 0x3F)));
+            _ = self.strbuf.push((u8)(0xE0 | (cp >> 12)));
+            _ = self.strbuf.push((u8)(0x80 | ((cp >> 6) & 0x3F)));
+            _ = self.strbuf.push((u8)(0x80 | (cp & 0x3F)));
             return 3;
         }
-        var ok1 = self.strbuf.push((u8)(0xF0 | (cp >> 18)));
-        var ok2 = self.strbuf.push((u8)(0x80 | ((cp >> 12) & 0x3F)));
-        var ok3 = self.strbuf.push((u8)(0x80 | ((cp >> 6) & 0x3F)));
-        var ok4 = self.strbuf.push((u8)(0x80 | (cp & 0x3F)));
+        _ = self.strbuf.push((u8)(0xF0 | (cp >> 18)));
+        _ = self.strbuf.push((u8)(0x80 | ((cp >> 12) & 0x3F)));
+        _ = self.strbuf.push((u8)(0x80 | ((cp >> 6) & 0x3F)));
+        _ = self.strbuf.push((u8)(0x80 | (cp & 0x3F)));
         return 4;
     };
 
@@ -470,12 +470,12 @@ pub const Lexer = struct {
                 closed = true;
             } else if (c == '\\') {
                 self.adv();
-                let n = self.decode_escape();
+                _ = self.decode_escape();
                 // n < 0：错误已计数，C 侧同样不追加任何字节
             } else {
                 // UTF-8 连续字节原样通过
                 let b = self.adv();
-                var ok = self.strbuf.push(b);
+                _ = self.strbuf.push(b);
             }
         }
         if (bad) { self.fail(); }
@@ -522,16 +522,16 @@ pub const Lexer = struct {
             let n = self.decode_escape();
             if (n < 0) {
                 // C 侧：n=1 且填 '?'，解码结果同样进 strbuf
-                var ok = self.strbuf.push('?');
+                _ = self.strbuf.push('?');
             }
         } else {
             let b = self.adv();
-            var ok = self.strbuf.push(b);
+            _ = self.strbuf.push(b);
             // 吸收 UTF-8 连续字节
             var cont = (self.peek() & 0xC0) == 0x80;
             while (cont) {
                 let cb = self.adv();
-                var ok2 = self.strbuf.push(cb);
+                _ = self.strbuf.push(cb);
                 cont = (self.peek() & 0xC0) == 0x80;
             }
         }
@@ -801,13 +801,13 @@ const put_digit_r = fn (out: *std.ArrayList(u8), v: u32, w: usize) void {
     if (n > pad) { pad = n; }
     var i = pad - n;
     while (i > 0) {
-        var ok = out.push(' ');
+        _ = out.push(' ');
         i = i - 1;
     }
     var j = n;
     while (j > 0) {
         j = j - 1;
-        var ok = out.push(ds[j]);
+        _ = out.push(ds[j]);
     }
 };
 
@@ -827,11 +827,11 @@ const put_digit_l = fn (out: *std.ArrayList(u8), v: u32, w: usize) void {
     var i = n;
     while (i > 0) {
         i = i - 1;
-        var ok = out.push(ds[i]);
+        _ = out.push(ds[i]);
     }
     var k = n;
     while (k < w) {
-        var ok = out.push(' ');
+        _ = out.push(' ');
         k = k + 1;
     }
 };
@@ -839,11 +839,11 @@ const put_digit_l = fn (out: *std.ArrayList(u8), v: u32, w: usize) void {
 const put_str_l = fn (out: *std.ArrayList(u8), s: []const u8, w: usize) void {
     var i: usize = 0;
     while (i < s.len) {
-        var ok = out.push(s[i]);
+        _ = out.push(s[i]);
         i = i + 1;
     }
     while (i < w) {
-        var ok = out.push(' ');
+        _ = out.push(' ');
         i = i + 1;
     }
 };
@@ -855,27 +855,27 @@ pub const dump = fn (lx: *Lexer, out: *std.ArrayList(u8)) void {
         let t = toks[i];
         i = i + 1;
         put_digit_r(out, t.line, 4);
-        var ok1 = out.push(':');
+        _ = out.push(':');
         put_digit_l(out, t.col, 4);
-        var ok2 = out.push(' ');
+        _ = out.push(' ');
         put_str_l(out, spell(t.kind), 14);
         if (t.kind == Kind.string) {
-            var ok3 = out.push('"');
+            _ = out.push('"');
             let decoded = lx.strbuf.items()[t.str_off..t.str_off + t.text_len];
             var j: usize = 0;
             while (j < decoded.len) {
-                var ok4 = out.push(decoded[j]);
+                _ = out.push(decoded[j]);
                 j = j + 1;
             }
-            var ok5 = out.push('"');
+            _ = out.push('"');
         } else if (t.len > 0 && t.len < 64) {
             let raw = lx.src[t.start..t.start + t.len];
             var j: usize = 0;
             while (j < raw.len) {
-                var ok6 = out.push(raw[j]);
+                _ = out.push(raw[j]);
                 j = j + 1;
             }
         }
-        var ok7 = out.push('\n');
+        _ = out.push('\n');
     }
 };

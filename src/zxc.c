@@ -95,6 +95,7 @@ static const DiagRule g_rules[] = {
     { "cannot take the address",          "E0403" },
 
     /* 名字、声明、可见性 */
+    { "unused",                           "E0410" },
     { "unknown identifier",               "E0401" },
     { "unknown type",                     "E0401" },
     { "not found",                        "E0401" },

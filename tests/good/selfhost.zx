@@ -79,7 +79,7 @@ const Parser = struct {
         n.lhs = null;
         n.rhs = null;
         n.val = 0;
-        var ignored = self.nodes.push(n);
+        _ = self.nodes.push(n);
         return n;
     };
 
@@ -197,7 +197,7 @@ const main = fn () i32 {
     var list = std.ArrayList(u8).init(al);
     var i: usize = 0;
     while (i < 5) {
-        var ok = list.push((u8)(97 + (i32)i));
+        _ = list.push((u8)(97 + (i32)i));
         i = i + 1;
     }
     std.println("list={s}", list.items());
