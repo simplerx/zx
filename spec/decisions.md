@@ -3053,3 +3053,39 @@ Python 按**码点**算——`'中'` 一出现列号就错位，脚本必须按�
 
 回归：`passed 257, failed 0`（新增 dup-note / private-note /
 unknown-type-suggest / cascade-arith 四个用例钉行为）。
+
+## 97. 诊断可点选 + 错误码目录（M62）
+
+**问题**（用户报"error 点选不了成员"）：三处叠在一起。
+
+1. **LSP range 固定 1 个字符宽**：`col` 到 `col+1`。`coutn` 五个字母，
+   点第 2 个字母就没反应，也做不了整词高亮。
+2. **列号编码错配**：编译器的列号是 **1-based 字节偏移**，LSP 的 character
+   数的是 **UTF-16 码元**。一行里只要有一个中文，诊断就整体后移。
+3. **成员访问节点的位置记的是 `.`**：`NK_FIELD` 用点号 token 的 line/col，
+   所以 `o.coutn` 的诊断指在点上——渲染器画 `^` 也画在点上，编辑器里
+   既点不中名字，也没法把波浪线落在成员上。
+
+顺带：34 个错误码里，文档散着 31 个，没有集中索引。用户拿着
+`error[E0304]` 搜不到任何东西。
+
+**裁定**：
+
+1. **range 扩到整 token**（`tools/zxls.zig` 的 `diagRange`）：从诊断位置
+   向后扫标识符字节（`[A-Za-z0-9_]` 与非 ASCII），range 覆盖整词；运算符
+   这类非标识符就扩一个完整码点。同时把字节列换算成 UTF-16 码元
+   （`utf16Len`，4 字节字符算代理对 2 码元）。零宽时兜底 `end = start + 1`
+   ——LSP 对零宽 range 不画波浪线。
+2. **成员名定位**：`NK_FIELD` 的 line/col 改记**成员名** token（C 端四处：
+   成员访问 ident/下标、switch 模式 `.member`、类型路径 `std.HashMap`；
+   bootstrap 镜像同步）。sema 的所有 `has no field/member` 自动落到名字上。
+3. **错误码目录**：`src/errors.c` 存每条码的标题 + 一句修法；
+   `zxc errors` 按类别列全部，`zxc explain E0304` 看单条（大小写不敏感，
+   未知码返回 1）。`docs/errors.md` 是完整参考（触发条件、典型消息、示例）。
+   三方码集必须**完全相等**，`test.sh` 双向校验——码一旦发布不能改，
+   漂移就是契约破损。
+
+**顺带修**：删除 `dot` 未使用变量（改了位置后不再需要）。
+
+回归：`passed 257, failed 0`；LSP 冒烟 17 项（诊断 range 由探针钉住：
+ASCII 与含中文两行都精确命中 `coutn`）。

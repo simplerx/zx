@@ -35,6 +35,14 @@ void diag_at(DiagPhase ph, int line, int col, const char *fmt, ...);
 /* 明确知道码的调用点用它（解析器几乎全是 E0201，不该让码表猜） */
 void diag_code_at(const char *code, int line, int col, const char *fmt, ...);
 void err_at(int line, int col, const char *fmt, ...);   /* = diag_at(PH_SEMA, …) */
+/* ---------- 错误码目录（errors.c） ----------
+ * `zxc errors` 列全部码，`zxc explain CODE` 看单条。
+ * 码的真源是 zxc.c 的 g_rules；这里只放面向用户的标题与修法。 */
+void        errors_print_all(FILE *out);
+int         errors_print_one(FILE *out, const char *code);   /* 0=找到 */
+int         errors_count(void);
+const char *errors_code_at(int i);
+
 /* fix-it：预挂一条 help 行，跟在下一条诊断后面（A2）。 */
 void diag_help(const char *fmt, ...);
 /* note（D2）：预挂一个"相关位置"（可跨模块：path 传声明所在文件的路径），

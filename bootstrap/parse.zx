@@ -710,9 +710,10 @@ pub const Parser = struct {
                     go = false;
                 } else {
                     self.advance();
+                    let nmtok = self.cur();
                     let nm = try self.take_ident();
-                    // C 版这里的位置是**基标识符**的（t 是 parse_type_primary 入口）
-                    let f = self.new_at(NK.field, t);
+                    // 位置记**成员名**（与 C 端一致）：诊断落在名字上才点得中
+                    let f = self.new_at(NK.field, nmtok);
                     f.a = base;
                     f.name = nm;
                     base = f;
@@ -1131,14 +1132,14 @@ pub const Parser = struct {
                     self.advance();
                     if (self.at(lex.Kind.ident)) {
                         let id = self.advance();
-                        let n = self.new_at(NK.field, t);
+                        let n = self.new_at(NK.field, id);
                         n.a = base;
                         n.name = self.tok_text(id);
                         base = n;
                     } else {
                         if (self.at(lex.Kind.int)) {
                             let ix = self.advance();
-                            let n = self.new_at(NK.field, t);
+                            let n = self.new_at(NK.field, ix);
                             n.a = base;
                             n.ival = ix.int_val;
                             base = n;
@@ -1923,9 +1924,9 @@ pub const Parser = struct {
                 var go2 = true;
                 while (go2) {
                     if (self.at(lex.Kind.dot) && self.peek_tok(1).kind == lex.Kind.ident) {
-                        let dot = self.advance();
+                        self.advance();
                         let id = self.advance();
-                        let pat = self.new_at(NK.field, dot);
+                        let pat = self.new_at(NK.field, id);
                         pat.name = self.tok_text(id);
                         self.push_item(arm, pat);
                     } else {

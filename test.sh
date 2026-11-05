@@ -135,6 +135,58 @@ else
 fi
 rm -rf "$pdir" 2>/dev/null || true
 
+# 2.55 错误码目录：诊断里出现的每个码都必须查得到。
+# 三处码集要完全一致——src/zxc.c 的 g_rules（真源）、src/errors.c 的文案
+# （`zxc explain` 念它）、docs/errors.md（完整参考）。漏一处就是"用户拿着码
+# 搜不到东西"，而码一旦发布又不能改，只能靠这里挡。
+printf "\n== 错误码目录（zxc errors / explain / docs/errors.md 三方一致）\n"
+# 真源 = 编译器里实际会发出的码；文案表必须与它**相等**（多一个少一个都算漂移）
+codes=$(grep -ohE '"E[0-9]{4}"' src/zxc.c src/sema.c src/parse.c src/lex.c src/backend.c | tr -d '"' | sort -u)
+codes_doc=$(grep -ohE '"E[0-9]{4}"' src/errors.c | tr -d '"' | sort -u)
+ncodes=$(printf "%s\n" "$codes" | grep -c '^E')
+$ZXC errors > "$TPFX.cli.codes" 2>&1 || true
+miss_list=""
+for c in $codes; do
+    grep -q "$c" "$TPFX.cli.codes" || miss_list="$miss_list $c"
+done
+if [ "$codes" = "$codes_doc" ]; then
+    printf "  ok   errors.c 的码集与编译器一致（%s 个）\n" "$ncodes"
+else
+    printf "  FAIL errors.c 与编译器码集不一致\n"
+    printf "       只在编译器里:%s\n" "$(printf "%s\n" "$codes" | grep -vxF "$codes_doc" | tr "\n" " ")"
+    printf "       只在 errors.c:%s\n" "$(printf "%s\n" "$codes_doc" | grep -vxF "$codes" | tr "\n" " ")"
+    fail=1
+fi
+if [ -z "$miss_list" ]; then
+    printf "  ok   zxc errors 列出全部 %s 个码\n" "$ncodes"
+else
+    printf "  FAIL zxc errors 漏了:%s\n" "$miss_list"; fail=1
+fi
+bad_explain=""
+for c in $codes; do
+    $ZXC explain "$c" > /dev/null 2>&1 || bad_explain="$bad_explain $c"
+done
+if [ -z "$bad_explain" ]; then
+    printf "  ok   zxc explain 认得全部 %s 个码\n" "$ncodes"
+else
+    printf "  FAIL zxc explain 不认:%s\n" "$bad_explain"; fail=1
+fi
+if $ZXC explain E9999 > /dev/null 2>&1; then
+    printf "  FAIL explain 对不存在的码返回了成功\n"; fail=1
+else
+    printf "  ok   explain 对未知码返回非零\n"
+fi
+doc_miss=""
+for c in $codes; do
+    grep -q "$c" docs/errors.md || doc_miss="$doc_miss $c"
+done
+if [ -z "$doc_miss" ]; then
+    printf "  ok   docs/errors.md 覆盖全部 %s 个码\n" "$ncodes"
+else
+    printf "  FAIL docs/errors.md 缺:%s\n" "$doc_miss"; fail=1
+fi
+
+
 # 2.6 LSP 冒烟：语言服务器的模块解析必须和编译器**同一条链**（vendor/ +
 # zx.json 的 deps 都要认）。这条挡的是"能编过、IDE 里补不出来"的偏差：
 # 两侧各写一份解析链，缺一个目录就是一个点了没反应的句点。

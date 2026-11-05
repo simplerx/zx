@@ -170,7 +170,7 @@ zxc build --lib --shared   # out/<out>.dll（非 Windows: .so）
 "hi\n"                   // 字符串 → []const u8
 ```
 
-- 关键字 25 个：`const let var fn module type null undefined if else while for inline switch continue return defer struct union enum error pub extern orelse try`，另有 `errdefer`、`and`、`or`。
+- 关键字 25 个：`const let var fn module type null undefined if else while for inline switch continue return defer struct union enum error pub extern orelse try`，另有 `errdefer`。
 - **没有 `break`**；`true`/`false` 是字面量不是关键字。
 - 字符串转义：`\n \t \r \0 \\ \" \' \a \b \f \v \e \xHH \uXXXX`。
 - `.{` 是一个 token（复合字面量开头）；`..` 是范围；浮点必须有整数部分（`.5` 非法）。
@@ -859,11 +859,21 @@ path:line:col: error[E0301]: initializer: expected `i32`, found `[]const u8`
 | `E02xx` | 语法 | `expected …`、声明边界、缺少分号 |
 | `E03xx` | 类型 | 类型不匹配、参数个数、缺少字段、联合体初始化 |
 | `E04xx` | 名字与作用域 | 未知标识符、私有成员、取地址、循环外 continue |
-| `E05xx` | 编译期与流程 | 非常量、缺返回路径、不可达、穷尽性、除零、溢出错 |
+| `E05xx` | 编译期与流程 | 非常量、缺返回路径、栈逃逸、穷尽性、除零、保留错误码 |
 | `E06xx` | 模块与标准库 | 找不到模块、循环导入、std 成员不存在 |
 | `E07xx` | 泛型 | 实例化失败、类型参数误用 |
 | `E08xx` | 格式化 | 占位符与实参不匹配、序列个数 |
 | `E09xx` | 错误集 | 返回码不在集合、try 可能抛的码、anyerror 混入 |
+
+每个码都能单独查：
+
+```
+zxc errors            # 按类别列出全部码
+zxc explain E0304     # 单条：什么意思、通常怎么修（大小写不敏感）
+```
+
+完整参考见 [`docs/errors.md`](errors.md)：每条带触发条件、典型消息和示例。
+**码一旦发布就不再改**，可以拿它搜索、贴进 issue、写进 CI 的失败判定。
 
 - 诊断会尽量多报（一次编译能报几个就报几个）；操作数已经报过错的地方
   （比如未知标识符参与算术）不再跟连锁的次生诊断，根因一条就够。

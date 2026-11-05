@@ -248,7 +248,7 @@ LSP 补全/跳转/诊断。zxls（语言服务器）走 vendored zig 0.17.0；�
 | `src/` | 编译器 C 实现：`parse.c`（前端 parser）、`sema.c`（类型/语义）、`backend.c`（C 发射）、`zxc.c`（诊断/缓冲）等 |
 | `bootstrap/` | 自举前端（Zx 代码）：`parse.zx` / `lex.zx`，编译成 `bin/zxfe.exe`，zxc 默认走它 |
 | `std/` | 标准库（Zx 代码，可读可改）：`str/map/fs/json/time/pool/task.zx` + 聚合 `std.zx` |
-| `docs/` | `manual.md` 语言手册、`guide.md` 教程 |
+| `docs/` | `manual.md` 语言手册、`guide.md` 教程、`errors.md` 错误码参考 |
 | `spec/` | `zx-spec.md` 规格、`zx.ebnf` 文法、`decisions.md` 设计裁定记录（96 条） |
 | `tests/` | `good/`（正例，带 `// expect-output:`）+ `bad/`（反例）+ `multi/`（多文件） |
 | `demo/` | `ffi/`：Windows API + OpenGL 全链路例子（extern "C" 绑定的真实用户） |

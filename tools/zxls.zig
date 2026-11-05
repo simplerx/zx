@@ -1944,6 +1944,80 @@ fn runCheck(doc: *const Document, out_diags: *std.ArrayList(Diag)) void {    // 
     }
 }
 
+// 诊断 range 的两件事：宽度与编码。
+//
+// 编译器的列号是 **1-based 字节偏移**，而 LSP 的 character 数的是
+// **UTF-16 码元**——含中文的行必须换算，否则指位整体后移。
+// 另外编译器只给一个起点、不给长度：range 若只有 1 个字符，
+// 编辑器里点波浪线只能命中那个字节（成员名有 5 个字母，
+// 点第 2 个字母就没反应）。这里按源码把 range 扩到整个 token。
+fn lineSpan(text: []const u8, line0: u32) []const u8 {
+    var ln: u32 = 0;
+    var start: usize = 0;
+    var i: usize = 0;
+    while (i <= text.len) : (i += 1) {
+        if (i == text.len or text[i] == '\n') {
+            if (ln == line0) {
+                var end = i;
+                if (end > start and text[end - 1] == '\r') end -= 1;
+                return text[start..end];
+            }
+            ln += 1;
+            start = i + 1;
+        }
+    }
+    return "";
+}
+
+fn utf16Len(s: []const u8) u32 {
+    var n: u32 = 0;
+    var i: usize = 0;
+    while (i < s.len) {
+        const c = s[i];
+        if (c < 0x80) {
+            n += 1;
+            i += 1;
+        } else if (c & 0xE0 == 0xC0) {
+            n += 1;
+            i += 2;
+        } else if (c & 0xF0 == 0xE0) {
+            n += 1;
+            i += 3;
+        } else if (c & 0xF8 == 0xF0) {
+            n += 2; // 星光面字符在 UTF-16 里是代理对，两个码元
+            i += 4;
+        } else {
+            n += 1;
+            i += 1;
+        }
+    }
+    return n;
+}
+
+fn isIdentByte(c: u8) bool {
+    return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or
+        (c >= '0' and c <= '9') or c == '_' or c >= 0x80;
+}
+
+const Range = struct { s: u32, e: u32 };
+
+fn diagRange(text: []const u8, line0: u32, bytecol: u32) Range {
+    const ln = lineSpan(text, line0);
+    var c: usize = bytecol;
+    if (c > ln.len) c = ln.len;
+    const s = utf16Len(ln[0..c]);
+    var end = c;
+    if (end < ln.len and isIdentByte(ln[end])) {
+        while (end < ln.len and isIdentByte(ln[end])) end += 1;
+    } else if (end < ln.len) {
+        end += 1; // 非标识符（运算符、括号…）就只指这一个字符
+        while (end < ln.len and (ln[end] & 0xC0) == 0x80) end += 1;
+    }
+    var e = utf16Len(ln[0..end]);
+    if (e <= s) e = s + 1; // LSP 要求 end > start，零宽诊断编辑器不画波浪线
+    return .{ .s = s, .e = e };
+}
+
 fn publishDiags(doc: *const Document, diags: []const Diag) void {
     var j = Json{};
     // 所有含字面花括号的片段用 appendSlice 写入，绕开 fmt 的 {{ }} 转义；
@@ -1954,10 +2028,11 @@ fn publishDiags(doc: *const Document, diags: []const Diag) void {
     for (diags, 0..) |d, i| {
         if (i > 0) j.buf.append(gpa, ',') catch @panic("oom");
         // {"range":{"start":{"line":L,"character":C},"end":{"line":L,"character":C2}},"severity":...
+        const rg = diagRange(doc.text, d.line, d.col);
         j.buf.appendSlice(gpa, "{\"range\":{\"start\":{\"line\":") catch @panic("oom");
-        j.raw("{d},\"character\":{d}", .{ d.line, d.col });
+        j.raw("{d},\"character\":{d}", .{ d.line, rg.s });
         j.buf.appendSlice(gpa, "},\"end\":{\"line\":") catch @panic("oom");
-        j.raw("{d},\"character\":{d}", .{ d.line, d.col + 1 });
+        j.raw("{d},\"character\":{d}", .{ d.line, rg.e });
         j.buf.appendSlice(gpa, "}},\"severity\":1,\"code\":") catch @panic("oom");
         j.str(d.code);
         j.buf.appendSlice(gpa, ",\"source\":\"zxc\",\"message\":") catch @panic("oom");

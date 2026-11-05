@@ -733,6 +733,8 @@ static void usage(FILE *f) {
         "  test [名字过滤]                  运行 src/test/ 的用例（零参 pub 函数即用例）\n"
         "  check [file...]                  静态检查（缺省当前目录，回落 src/、src/test/）\n"
         "  fmt [file...] [--check]          格式化（--check 只报告不写回）\n"
+        "  errors                           列出全部错误码（按类别）\n"
+        "  explain <CODE>                   解释单个错误码：什么意思、怎么修\n"
         "\n"
         "单文件选项:\n"
         "  --check        只做检查（默认行为，显式写法）\n"
@@ -1778,6 +1780,13 @@ int main(int argc, char **argv) {
             return 0;
         }
         if (!strcmp(a, "version")) { print_version(stdout); return 0; }
+        /* 旗标形式的同义词，给习惯 `--` 的人 */
+        if (!strcmp(a, "--explain") && argc >= 3)
+            return errors_print_one(stdout, argv[2]);
+        if (!strcmp(a, "--errors") || !strcmp(a, "--codes")) {
+            errors_print_all(stdout);
+            return 0;
+        }
         if (!strcmp(a, "help")) {
             if (argc < 3) { usage(stdout); return 0; }
             help_sub(stdout, argv[2]);
@@ -1792,6 +1801,16 @@ int main(int argc, char **argv) {
         int special = arg_special_flag(argc, argv, 2);
         if (special == 1) { help_sub(stdout, sub); return 0; }
         if (special == 2) { print_version(stdout); return 0; }
+        /* 错误码目录：`zxc errors` 一览、`zxc explain E0304` 单条。
+         * 诊断里出现的每个 E0xxx 都能在这查到——码一旦发布就不再改。 */
+        if (!strcmp(sub, "errors")) { errors_print_all(stdout); return 0; }
+        if (!strcmp(sub, "explain")) {
+            if (argc < 3) {
+                fprintf(stderr, "用法：zxc explain <CODE>    例如 zxc explain E0304\n");
+                return 2;
+            }
+            return errors_print_one(stdout, argv[2]);
+        }
         if (!strcmp(sub, "init"))  return cmd_init(argc, argv, 2);
         if (!strcmp(sub, "check")) return cmd_check(argc, argv, 2);
         if (!strcmp(sub, "fmt"))   return cmd_fmt(argc, argv, 2, false);

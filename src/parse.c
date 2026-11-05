@@ -239,7 +239,7 @@ static Node *parse_type_primary(P *p) {
             Token *dot = advance(p);
             (void)dot;
             const char *nm = take_ident(p);
-            Node *f = node_new(NK_FIELD, t->line, t->col);
+            Node *f = node_new(NK_FIELD, cur(p)->line, cur(p)->col);
             f->a = base;
             f->name = nm;
             base = f;
@@ -649,13 +649,15 @@ static Node *parse_postfix(P *p, Node *base) {
             advance(p);
             if (at(p, TOK_IDENT)) {
                 Token *id = advance(p);
-                Node *n = node_new(NK_FIELD, t->line, t->col);
+                /* 位置记**成员名**而不是点号：`o.coutn` 的诊断要指在 coutn 上，
+                 * 指在 `.` 上编辑器里既点不中、也没法做整词高亮。 */
+                Node *n = node_new(NK_FIELD, id->line, id->col);
                 n->a = base;
                 n->name = dup_tok(id);
                 base = n;
             } else if (at(p, TOK_INT)) {
                 Token *ix = advance(p);
-                Node *n = node_new(NK_FIELD, t->line, t->col);
+                Node *n = node_new(NK_FIELD, ix->line, ix->col);
                 n->a = base;
                 n->ival = ix->v.int_val;
                 n->flag = false;   /* flag=false → index access */
@@ -1398,7 +1400,7 @@ static Node *parse_switch(P *p, const char *label) {
                 if (at(p, TOK_DOT) && peek(p, 1)->kind == TOK_IDENT) {
                     Token *dot = advance(p);
                     Token *id = advance(p);
-                    Node *pat = node_new(NK_FIELD, dot->line, dot->col);
+                    Node *pat = node_new(NK_FIELD, id->line, id->col);
                     pat->name = dup_tok(id);
                     push(arm, pat);
                 } else {
