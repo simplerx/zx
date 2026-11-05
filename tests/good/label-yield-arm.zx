@@ -1,0 +1,71 @@
+// label-yield-arm.zx —— 收割写在 if 臂上（不是块里）也必须跳出循环。
+//
+// 用户报的现象（v0.63）：
+//
+//     tag: while (i < 10) {
+//         i += 1;
+//         if (i == 5) tag: {};      // 期望到 5 就走，实际跑到 10
+//     }
+//
+// 根因是"同一段文字在两个位置含义不同"：语句位置 `tag: {}` 是收割
+// （brace_is_block 说花括号里没有语句 → 那是值），而臂位置不看这一步，
+// 一律按"标签 + 块"读——带标签的空块什么都不做，看着像 break，其实是死代码。
+//
+// 修法是把臂位置也按同一条规则分：构造 → 标签构造；有语句的块 → 标签块；
+// 其余 → 收割。这里把四种形状全钉住。
+// expect-output
+// A i=5
+// B k=5
+// C n=4 w=40
+// D q=5
+// E both=3 2
+const std = module("std");
+
+const main = fn () !void {
+    // ① 带值收割写在臂上
+    var i = 0;
+    tag: while (i < 10) {
+        i += 1;
+        if (i == 5) tag: 0;
+    }
+    std.println("A i={}", i);
+
+    // ② 空值收割写在臂上（用户的原样写法）
+    var k = 0;
+    tag: while (k < 10) {
+        k += 1;
+        if (k == 5) tag: {};
+    }
+    std.println("B k={}", k);
+
+    // ③ 循环的值来自臂上的收割
+    var n = 0;
+    const w = done: while (n < 10) {
+        n += 1;
+        if (n == 4) done: n * 10;
+    };
+    std.println("C n={} w={}", n, w);
+
+    // ④ 收在块里（原来的写法）不能因为这次改动退化
+    var q = 0;
+    tag: while (q < 10) {
+        q += 1;
+        if (q == 5) { tag: {}; }
+    }
+    std.println("D q={}", q);
+
+    // ⑤ 同一段里两个标签，各收各的：外层标签在内层循环里收割
+    var a = 0;
+    var seen = 0;
+    outer: while (a < 10) {
+        a += 1;
+        var b = 0;
+        inner: while (b < 10) {
+            b += 1;
+            if (a == 3 && b == 7) outer: {};
+        }
+        seen = seen + 1;
+    }
+    std.println("E both={} {}", a, seen);
+    return;
+};

@@ -1,0 +1,22 @@
+// process-argv-shadow.zx —— 局部变量叫 `argv` / `argc` 不能踩到生成的 main 形参。
+//
+// 生成的 C 是 `int main(int argc, char **argv)`，而 Zx 局部变量按**原名**发。
+// 用户写 `let argv = std.process.args();` 时，C 里就变成
+// `redefinition of 'argv' with a different type`——一条读起来像用户代码
+// 写错的错误，实际是编译器没给 main 的形参留出名字空间。
+// expect-output
+// argc=0
+// first=<none>
+const std = module("std");
+
+const main = fn () u8 {
+    let argv = std.process.args();
+    let argc = argv.len;
+    std.println("argc={}", argc);
+    if (argc > 0) {
+        std.println("first={}", argv[0]);
+    } else {
+        std.println("first=<none>");
+    }
+    return 0;
+};

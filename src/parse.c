@@ -182,6 +182,7 @@ static Node *parse_fn(P *p, bool allow_name);
 static Node *parse_stmt(P *p);
 static Node *parse_construct(P *p, const char *label);
 static Node *parse_for(P *p, const char *label, bool allow_nobind);
+static Node *parse_yield(P *p);
 
 static Node *type_ident(const char *name, int line, int col) {
     Node *n = node_new(NK_TYPE_IDENT, line, col);
@@ -877,6 +878,11 @@ static Node *parse_primary(P *p) {
          * `true` / `false` 除外——它们是 bool 字面量，不是标签。 */
         if (peek(p, 1)->kind == TOK_COLON && !is_bool_word(t)) {
             TokKind after = peek(p, 2)->kind;
+            if (after == TOK_LBRACE && !brace_is_block(p, p->i + 2)) {
+                /* 花括号是值（`{}` / `{a, b}`）而不是块：这是收割，
+                 * 与语句位置同一套判定。 */
+                return parse_yield(p);
+            }
             if (after == TOK_LBRACE || after == TOK_KW_FOR || after == TOK_KW_WHILE ||
                 after == TOK_KW_SWITCH || after == TOK_KW_IF) {
                 const char *label = dup_tok(advance(p));
@@ -1176,10 +1182,20 @@ static bool ends_arm_here(TokKind k) {
  * 普通表达式（老写法），不能读成捕获。 */
 static Node *parse_if_arm(P *p, const char **capture, bool implicit_ok) {
     if (at(p, TOK_IDENT) && peek(p, 1)->kind == TOK_COLON) {
+        /* `lbl:` 后面跟什么决定它是标签还是收割，臂位置也得照着分：
+         *   构造（if/while/for/switch）→ 带标签的构造
+         *   块（里面真有语句）        → 带标签的块
+         *   其余（`{}` / `{a, b}` / 表达式）→ 收割
+         * 少了这条，`if (c) tag: {};` 会静默变成"带标签的空块"（什么都
+         * 不做，看着像 break），`if (c) tag: 0;` 则报"expected '{'"。 */
+        TokKind after = peek(p, 2)->kind;
+        bool ctor = after == TOK_KW_IF || after == TOK_KW_WHILE ||
+                    after == TOK_KW_FOR || after == TOK_KW_SWITCH;
+        bool blk = after == TOK_LBRACE && brace_is_block(p, p->i + 2);
+        if (!ctor && !blk) return parse_yield(p);
         const char *lb = dup_tok(advance(p));
         advance(p);                       /* ':' */
-        Node *b = parse_block(p);
-        b->label = lb;
+        Node *b = parse_construct(p, lb);
         return b;
     }
     if (at(p, TOK_IDENT) && peek(p, 1)->kind == TOK_LBRACE) {

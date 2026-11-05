@@ -5364,8 +5364,11 @@ static char *g_initname[64];
 static int   g_ninit;
 
 static void gen_params(Buf *b, Node *fn, bool is_main) {
+    /* 形参别叫 argc/argv：用户局部变量是**原名**发的，叫 `argv` 就跟 C 层形参重定义。
+     * 翻译错误还是 "redefinition of 'argv' with a different
+     * type" —— 读起来像用户的错。 */
     if (is_main && g_need_proc) {          /* std.process 要接住命令行 */
-        buf_puts(b, "int argc, char **argv");
+        buf_puts(b, "int zx_argc, char **zx_argv");
         return;
     }
     Type *ft = fn->type_val;
@@ -5445,8 +5448,8 @@ static void gen_fn(Node *fn, const char *name, bool is_main, bool exported) {
     if (is_main) {
         for (int i = 0; i < g_ninit; i++) line("%s();", g_initname[i]);
         if (g_need_proc) {
-            line("zx_proc_argc = argc;");
-            line("zx_proc_argv = argv;");
+            line("zx_proc_argc = zx_argc;");
+            line("zx_proc_argv = zx_argv;");
         }
     }
 

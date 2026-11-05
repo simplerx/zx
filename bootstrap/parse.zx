@@ -1381,6 +1381,11 @@ pub const Parser = struct {
             // 表达式位置的标签：body: { … }（true/false 是字面量不是标签）
             if (self.peek_tok(1).kind == lex.Kind.colon && !self.is_bool_word(t)) {
                 let after = self.peek_tok(2).kind;
+                // 花括号是值（`{}` / `{a, b}`）而不是块：这是收割，
+                // 与语句位置同一套判定。
+                if (after == lex.Kind.lbrace && !self.brace_is_block(self.i + 2)) {
+                    return self.parse_yield();
+                }
                 if (after == lex.Kind.lbrace || after == lex.Kind.kw_for ||
                     after == lex.Kind.kw_while || after == lex.Kind.kw_switch ||
                     after == lex.Kind.kw_if) {
@@ -1664,11 +1669,20 @@ pub const Parser = struct {
     // implicit_ok 只在真值臂上为真：else 臂的裸名字一直是普通表达式。
     const parse_if_arm = fn (self: *Parser, implicit_ok: bool) !*Node {
         if (self.at(lex.Kind.ident) && self.peek_tok(1).kind == lex.Kind.colon) {
+            // `lbl:` 后面跟什么决定它是标签还是收割，臂位置也得照着分：
+            //   构造（if/while/for/switch）→ 带标签的构造
+            //   块（里面真有语句）        → 带标签的块
+            //   其余（`{}` / `{a, b}` / 表达式）→ 收割
+            // 少了这条，`if (c) tag: {};` 会静默变成"带标签的空块"（什么都不
+            // 做，看着像 break），`if (c) tag: 0;` 则报"expected '{'"。
+            let after = self.peek_tok(2).kind;
+            let ctor = after == lex.Kind.kw_if || after == lex.Kind.kw_while ||
+                       after == lex.Kind.kw_for || after == lex.Kind.kw_switch;
+            let blk = after == lex.Kind.lbrace && self.brace_is_block(self.i + 2);
+            if (!ctor && !blk) { return self.parse_yield(); }
             let lb = self.advance();
             self.advance();
-            let b = try self.parse_block();
-            b.label = self.tok_text(lb);
-            return b;
+            return self.parse_construct(self.tok_text(lb));
         }
         if (self.at(lex.Kind.ident) && self.peek_tok(1).kind == lex.Kind.lbrace) {
             self.cap = try self.take_ident();
