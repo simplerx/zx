@@ -1,0 +1,59 @@
+// 编译期折叠的克隆体不得把局部符号泄进调用方的 E0410 检查（回归）。
+//
+// 场景：调用方函数里以常量实参调用带结构的函数 → 编译器克隆被调体
+// 做检查期折叠。克隆体自己声明的局部变量若是混进调用方的 g_locals 链，
+// 调用方收尾 check_unused 就会把克隆里"还没走到使用点"的局部报成
+// unused——真身明明每个都用到了。克隆是借道折叠，局部一律不外借。
+const std = module("std");
+
+const Lattice = fn (T: type) type {
+    return struct {
+        rank: usize,
+        total: usize,
+        flat: *T,
+
+        const get = fn (self: *Self, idx: []const usize) ?T {
+            if (idx.len != self.rank) { return null; }
+            var off: usize = 0;
+            var i: usize = 0;
+            while (i < self.rank) {
+                off = off + idx[i] * (i + 1);
+                i = i + 1;
+            }
+            if (off >= self.total) { return null; }
+            return (self.flat + off).0;
+        };
+
+        const make = fn (t: *const [6]T) ?Self {
+            return Self{ .rank = 3, .total = 6, .flat = (*T)t };
+        };
+    };
+};
+
+const data: *const [6]i64 = &.{ 0, 7, 14, 21, 28, 35 };
+
+// 包一层：让 make(…)/get(…) 以常量实参走进克隆折叠路径。
+const check = fn () u8 {
+    var g = Lattice(i64).make(data);
+    if (g) ok {
+        var m = ok;
+        var i: usize = 0;
+        while (i < 3) {
+            var idx: *[3]usize = &.{ i, 0, 0 };
+            let v = m.get(idx[0..]);
+            if (v) val {
+                if (val != (i64)(i * 7)) { return 2; }
+            } else { return 3; }
+            i = i + 1;
+        }
+        var wrong: *[2]usize = &.{ 0, 0 };
+        let bad = m.get(wrong[0..]);
+        if (bad) b { return 4; }
+        return 0;
+    }
+    return 1;
+};
+
+const main = fn () u8 {
+    return check();
+};

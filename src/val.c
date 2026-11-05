@@ -4,6 +4,8 @@
 #include "ty.h"
 #include "val.h"
 
+extern bool g_ct_soft_div;   /* sema.c：投机折叠期间除零软失败 */
+
 static Value *valloc(ValKind k, Type *t) {
     Value *v = calloc(1, sizeof(Value));
     v->kind = k;
@@ -173,11 +175,11 @@ static Value *int_bin(int op, Value *a, Value *b, int line, int col) {
     case TOK_MINUS:    return val_from_i64(t, wrap_to(t, (uint64_t)x - (uint64_t)y));
     case TOK_STAR:     return val_from_i64(t, wrap_to(t, (uint64_t)x * (uint64_t)y));
     case TOK_SLASH:
-        if (y == 0) { err_at(line, col, "division by zero in a compile-time expression"); return NULL; }
+        if (y == 0) { if (!g_ct_soft_div) { err_at(line, col, "division by zero in a compile-time expression"); } return NULL; }
         if (x == INT64_MIN && y == -1) return val_from_i64(t, INT64_MIN);
         return val_from_i64(t, wrap_to(t, (uint64_t)(x / y)));
     case TOK_PERCENT:
-        if (y == 0) { err_at(line, col, "division by zero in a compile-time expression"); return NULL; }
+        if (y == 0) { if (!g_ct_soft_div) { err_at(line, col, "division by zero in a compile-time expression"); } return NULL; }
         if (y == -1) return val_from_i64(t, 0);
         return val_from_i64(t, wrap_to(t, (uint64_t)(x % y)));
     case TOK_AMP:      return val_from_i64(t, wrap_to(t, (uint64_t)x & (uint64_t)y));

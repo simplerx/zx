@@ -1,0 +1,120 @@
+// stair.zx —— 稀疏表（Sparse Table，倍增表）。
+//
+// 静态数组上的 O(1) 区间聚合。只适用于**可重复贡献**的运算——
+// min / max / 按位与 / 按位或 / gcd 这类满足 f(x, f(x, y)) == f(x, y) 的：
+//
+//   预处理 O(n log n)，查询 O(1)，不支持改——改一个元素整表重建。
+//   要"能改 + O(log n) 查询"的那是线段树，不在这里。
+//
+// 名字里的"阶梯"是它的存储形状：floor_log2(n)+1 层，第 k 层每个格子
+// 管从 i 出发长 2^k 的区间。层间递推只有一句"左半和右半拼一格"，
+// 查询也只有一句"两块可重叠的 2^k 拼起来"——重叠不脏结果，靠的正是
+// 可重复贡献性（这就是为什么 sum 不行）。
+//
+// 存储：一块 n*k 的扁平大数组 + 一张行指针表，跟 lattice.zx 一个底子：
+// 数据一次要齐，行只是借地址，不做二次分配。
+//
+// 用法：
+//   const less_i64 = fn (a: i64, b: i64) bool { return a < b; };
+//   var t = x.stair.SparseTable(i64).init(std.heap.page, &data, less_i64);
+//   if (t) st {
+//       let m = st.query(2, 9);      // ?i64，区间 [2, 9] 的最小值
+//       st.deinit();
+//   }
+//
+// 比较器：less(a, b) == true 就取 a。要最大值把比较器写成 `a > b`，
+// 聚合逻辑只有一处，比较器换向即换语义。
+
+const numkit = module("numkit.zx");
+
+pub const SparseTable = fn (T: type) type {
+    return struct {
+        n: usize,          // 元素个数
+        k: usize,          // 层数 = floor_log2(n) + 1
+        flat: *T,          // n*k 个 T 的扁平大块（第 i 层在 offset i*n 处）
+        rows: **T,         // k 个行指针，rows[i] == flat + i*n
+        less: fn (T, T) bool,
+        alloc: Allocator,
+
+        // ---- 构造 / 释放 ----
+
+        const init = fn (alloc: Allocator, data: []const T, less: fn (T, T) bool) ?Self {
+            if (data.len == 0) { return null; }
+
+            var s = Self{ .n = data.len, .k = 0, .flat = undefined,
+                          .rows = undefined, .less = less, .alloc = alloc };
+            s.k = numkit.floorLog2(s.n) + 1;
+
+            // 先要行指针表；再要数据大块。后半失败要记得把前半还掉。
+            let rows_bytes = s.k * @sizeOf(*T);
+            let rows_raw = alloc.alloc(alloc.ctx, rows_bytes);
+            if (rows_raw) rp { s.rows = (**T)rp; } else { return null; }
+
+            let flat_bytes = s.n * s.k * @sizeOf(T);
+            let flat_raw = alloc.alloc(alloc.ctx, flat_bytes);
+            if (flat_raw) fp { s.flat = (*T)fp; } else {
+                alloc.free(alloc.ctx, rows_raw.?, rows_bytes);
+                return null;
+            }
+
+            // 行指针各就各位：rows[i] == flat + i*n。
+            var i: usize = 0;
+            while (i < s.k) {
+                (s.rows + i).0 = s.flat + i * s.n;
+                i = i + 1;
+            }
+
+            // 第 0 层：原数组搬进来（表自己管数据，生命周期不牵扯调用方）。
+            i = 0;
+            while (i < s.n) {
+                (s.flat + i).0 = data[i];
+                i = i + 1;
+            }
+
+            // 第 k 层：两半拼一格。左半 rows[k-1][i]，右半 rows[k-1][i+2^(k-1)]。
+            var k: usize = 1;
+            while (k < s.k) {
+                let half = (usize)1 << (k - 1);
+                let prev = (s.rows + (k - 1)).0;
+                let row = (s.rows + k).0;
+                var j: usize = 0;
+                while (j + (half << 1) <= s.n) {
+                    let a = (prev + j).0;
+                    let b = (prev + j + half).0;
+                    if (s.less(b, a)) { (row + j).0 = b; } else { (row + j).0 = a; }
+                    j = j + 1;
+                }
+                k = k + 1;
+            }
+
+            return s;
+        };
+
+        const deinit = fn (self: *Self) void {
+            self.alloc.free(self.alloc.ctx, (*u8)self.rows, self.k * @sizeOf(*T));
+            self.alloc.free(self.alloc.ctx, (*u8)self.flat, self.n * self.k * @sizeOf(T));
+        };
+
+        // ---- 查询 ----
+
+        // 闭区间 [l, r] 的聚合值。l > r 或 r 越界给 null。
+        const query = fn (self: *Self, l: usize, r: usize) ?T {
+            if (l > r || r >= self.n) { return null; }
+            let k = numkit.floorLog2(r - l + 1);   // 能盖住区间的最大 2^k
+            let row = (self.rows + k).0;
+            let a = (row + l).0;
+            // 另一半从右端往回 2^k——两块加起来盖满 [l, r]，中间可以重叠。
+            let b = (row + (r - ((usize)1 << k) + 1)).0;
+            if (self.less(b, a)) { return b; }
+            return a;
+        };
+
+        const len = fn (self: *Self) usize { return self.n; };
+
+        // 原始下标直取（第 0 层就是原数组）。
+        const at = fn (self: *Self, i: usize) ?T {
+            if (i >= self.n) { return null; }
+            return (self.flat + i).0;
+        };
+    };
+};

@@ -1,0 +1,155 @@
+// lattice.zx —— 多重数组（任意维数的规整数组）。
+//
+// 跟 stair.zx 一个底子：**一块扁平大数组扛所有数据**。维数和形状是
+// 运行时的事，访问靠行主序步长（strides）折算成一维下标——
+//
+//   offset(i0, i1, ..., i_{r-1}) = i0*strides[0] + ... + i_{r-1}*strides[r-1]
+//
+// 行主序：最后一维步长 1，往左每维步长 = 右边所有维的乘积。C 的
+// a[i][j]、稀疏表的"第 k 层在 flat + k*n 处"，都是这个公式的特例。
+//
+// 和稀疏表的分工：stair 管"聚合查询"（值是算出来的），lattice 管
+// "装东西"（值是放进去的）。一个只会读，一个读写都行。
+//
+// 用法：
+//   var g = x.lattice.Lattice(f64).init(std.heap.page, &.{ 2, 3, 4 });
+//   if (g) m {
+//       m.set2(1, 2, 3.14);            // rank==2 的便捷读写
+//       var idx: [3]usize = .{ 1, 2, 3 };
+//       m.set(idx[0..], 1.0);          // 任意维：下标切片
+//       m.deinit();
+//   }
+//
+// 形状建好后固定——不规整（锯齿）数组请用 ArrayList 的 ArrayList，
+// 或自己拿 flat + offset 当地图画。
+
+pub const Lattice = fn (T: type) type {
+    return struct {
+        rank: usize,       // 维数
+        dims: *usize,      // 每维大小（rank 个）
+        strides: *usize,   // 行主序步长（rank 个），strides[rank-1] == 1
+        flat: *T,          // 全部元素，一维摊开
+        total: usize,      // 元素总数 = 各维乘积
+        alloc: Allocator,
+
+        // ---- 构造 / 释放 ----
+
+        const init = fn (alloc: Allocator, dims: []const usize) ?Self {
+            if (dims.len == 0) { return null; }
+
+            var s = Self{ .rank = dims.len, .dims = undefined, .strides = undefined,
+                          .flat = undefined, .total = 1, .alloc = alloc };
+
+            // 总元素数。任一维为 0 直接拒——空格子阵列表达不了，别装。
+            var i: usize = 0;
+            while (i < s.rank) {
+                if (dims[i] == 0) { return null; }
+                s.total = s.total * dims[i];
+                i = i + 1;
+            }
+
+            let dim_bytes = s.rank * @sizeOf(usize);
+            let stride_bytes = s.rank * @sizeOf(usize);
+            let flat_bytes = s.total * @sizeOf(T);
+
+            // 三块一起要，谁失败就把前面要到的还干净。
+            let dims_raw = alloc.alloc(alloc.ctx, dim_bytes);
+            if (dims_raw) dp { s.dims = (*usize)dp; } else { return null; }
+            let strides_raw = alloc.alloc(alloc.ctx, stride_bytes);
+            if (strides_raw) sp { s.strides = (*usize)sp; } else {
+                alloc.free(alloc.ctx, dims_raw.?, dim_bytes);
+                return null;
+            }
+            let flat_raw = alloc.alloc(alloc.ctx, flat_bytes);
+            if (flat_raw) fp { s.flat = (*T)fp; } else {
+                alloc.free(alloc.ctx, dims_raw.?, dim_bytes);
+                alloc.free(alloc.ctx, strides_raw.?, stride_bytes);
+                return null;
+            }
+
+            i = 0;
+            while (i < s.rank) {
+                (s.dims + i).0 = dims[i];
+                i = i + 1;
+            }
+
+            // 步长从右往左：最后一维 1，往左累乘。
+            (s.strides + (s.rank - 1)).0 = 1;
+            i = s.rank - 1;
+            while (i > 0) {
+                (s.strides + (i - 1)).0 = (s.strides + i).0 * dims[i];
+                i = i - 1;
+            }
+
+            return s;
+        };
+
+        const deinit = fn (self: *Self) void {
+            self.alloc.free(self.alloc.ctx, (*u8)self.dims, self.rank * @sizeOf(usize));
+            self.alloc.free(self.alloc.ctx, (*u8)self.strides, self.rank * @sizeOf(usize));
+            self.alloc.free(self.alloc.ctx, (*u8)self.flat, self.total * @sizeOf(T));
+        };
+
+        // ---- 访问 ----
+
+        // 多维下标 → 一维偏移。维数不对或越界给 null。
+        const offset = fn (self: *Self, idx: []const usize) ?usize {
+            if (idx.len != self.rank) { return null; }
+            var off: usize = 0;
+            var i: usize = 0;
+            while (i < self.rank) {
+                if (idx[i] >= (self.dims + i).0) { return null; }
+                off = off + idx[i] * (self.strides + i).0;
+                i = i + 1;
+            }
+            return off;
+        };
+
+        const get = fn (self: *Self, idx: []const usize) ?T {
+            let off = self.offset(idx);
+            if (off) o { return (self.flat + o).0; }
+            return null;
+        };
+
+        const set = fn (self: *Self, idx: []const usize, v: T) bool {
+            let off = self.offset(idx);
+            if (off) o { (self.flat + o).0 = v; return true; }
+            return false;
+        };
+
+        // 线性下标直取（把 lattice 当一维数组用，或自己算偏移）。
+        const at = fn (self: *Self, i: usize) ?*T {
+            if (i >= self.total) { return null; }
+            return self.flat + i;
+        };
+
+        // ---- 二维便捷（rank == 2 才有意义，别的维数会给 null/false） ----
+
+        const get2 = fn (self: *Self, r: usize, c: usize) ?T {
+            if (self.rank != 2) { return null; }
+            var idx: *[2]usize = &.{ r, c };
+            return self.get(idx[0..]);
+        };
+
+        const set2 = fn (self: *Self, r: usize, c: usize, v: T) bool {
+            if (self.rank != 2) { return false; }
+            var idx: *[2]usize = &.{ r, c };
+            return self.set(idx[0..], v);
+        };
+
+        const rows = fn (self: *Self) usize {
+            if (self.rank != 2) { return 0; }
+            return (self.dims + 0).0;
+        };
+
+        const cols = fn (self: *Self) usize {
+            if (self.rank != 2) { return 0; }
+            return (self.dims + 1).0;
+        };
+
+        // 形状（dims 的切片视图，只读）。
+        const shape = fn (self: *Self) []const usize {
+            return self.dims[0..self.rank];
+        };
+    };
+};

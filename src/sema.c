@@ -197,6 +197,11 @@ static Module  *g_mod;
 static bool g_root_stmts;
 static bool g_ct_stuck;
 static int  g_ct_exec;
+/* 检查期投机折叠（fold_expr）期间置位：这段折叠只为填 ct 缓存，
+ * 折不出值是常态。除零这类"值域错误"在这期间软失败（返回 NULL），
+ * 不做硬错误——循环体这类死代码里的 0/0 不是用户的错（isqrt(0) 误报）。
+ * 真正的 const 上下文（R1 初始化器、数组长度）不走这条路，照旧硬报。 */
+bool g_ct_soft_div;
 /* 一个 Comptime 栈帧：返回值 / 收割都靠它往上冒 */
 typedef struct { int kind; Value *val; const char *label; } CtFlow;
 static CtFlow g_ct_flow;
@@ -289,6 +294,7 @@ static Symbol *scope_add(Scope *sc, const char *name, int kind) {
 /* 登记一个局部绑定。line/col 只在符号自己没记的时候补——声明处的
  * 位置就是报"未使用"时要指的地方。 */
 static void local_track(Symbol *s, int line, int col) {
+    if (getenv("ZX_PROBE") && s && s->name && (!strcmp(s->name, "myidx") || !strcmp(s->name, "idx") || !strcmp(s->name, "dims3"))) fprintf(stderr, "[probe] TRACK %s sym=%p@%d:%d\n", s->name, (void*)s, line, col);
     if (!s || s->locals_next) return;
     s->locals_next = g_locals;
     g_locals = s;
@@ -3463,6 +3469,7 @@ static Type *check_expr_raw(Node *n, Type *expect) {
             return BAD(n, "unknown identifier '%s'", n->name);
         }
         n->sym = s;
+        if (getenv("ZX_PROBE") && (!strcmp(n->name, "myidx") || !strcmp(n->name, "idx") || !strcmp(n->name, "dims3"))) fprintf(stderr, "[probe] USE %s sym=%p tracked=%d@%d:%d\n", n->name, (void*)s, (int)(s->locals_next != 0), n->line, n->col);
         s->used = true;      /* 求值路径就是"用到了"：读、写、取地址都算 */
         /* 正在构造的聚合类型：外壳已经挂上了，名字就能用（`Color.red` 写在
          * Color 自己的体里）。成员表填完之前它只能当类型用。 */
@@ -4457,7 +4464,10 @@ static Type *check_fn_body(Node *fn) {
     Type *ret = ft->ret ? ft->ret : ty_void();
 
     Symbol *save_locals = g_locals;
-    int save_errs = g_error_count;      /* ç¨æ¥å¤æ­"è¿ä¸ªå½æ°ä½éæ¥è¿éæ²¡"ï¼è§ check_unusedï¼ */
+    int save_errs = g_error_count;      /* 函数体里已经报过错就不再问"有没有没用过的变量"：
+ * 错误恢复下这条判断多半是假象（表达式出错→
+ * 检查提前收尾→后面的使用没被记上），
+ * 而且这种噪音会盖住真正的根因。修完错重编，它自然会出现。 */
     g_locals = NULL;
 
     Scope sc;
@@ -5878,7 +5888,19 @@ static Value *ct_call(Node *n) {
     g_ct_stack[g_ct_nstack++] = callee->fn;
     bool save_checking = g_ct_checking;
     g_ct_checking = true;
+    /* 克隆体只是借道折叠：它的局部符号不进调用方的 g_locals 链——
+     * 不隔离的话，调用方收尾 check_unused 会把克隆里"没走到使用点"的
+     * 局部报成 unused（调用方自己的 check_fn_body 会重新查一遍真身）。 */
+    Symbol *save_ct_locals = g_locals;
+    g_locals = NULL;
+    /* 克隆检查是"借道路过"：体里的局部槽位还没被执行写过，折叠若在此
+     * 撞上除零（比如死循环体里的 n/xi），那是槽位假象不是用户错误——
+     * 软失败（折不动=运行时值）。真要执行到了，下面的 ct_run 照旧硬报。 */
+    bool save_soft = g_ct_soft_div;
+    g_ct_soft_div = true;
     check_block(g->b);
+    g_ct_soft_div = save_soft;
+    g_locals = save_ct_locals;
     g_ct_checking = save_checking;
 
     g_ct_flow = ct_normal();

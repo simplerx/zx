@@ -1,0 +1,34 @@
+// 检查期投机折叠不能把死代码里的 0/0 折成硬错（E0505 误报回归）。
+//
+// 场景：调用方函数里用常量 0 调 isqrt 式函数 → 编译器折叠整个被调体
+// → 早退 return 让循环体成为死代码，但检查器路过循环体里的 `n / xi`
+// 时，xi 的槽位还是初值 0 → 旧编译器在这里报 E0505。
+// 语义上这段除法永远不会执行，折叠失败就该当"运行时值"。
+const std = module("std");
+
+const isqrt = fn (n: u64) u64 {
+    if (n < 2) { return n; }
+    var x = n;
+    var y = (x + 1) / 2;
+    while (y < x) {
+        x = y;
+        let xi = x;
+        y = (xi + n / xi) / 2;
+    }
+    return x;
+};
+
+// 包一层函数：让 isqrt(0) 走"调用方函数体内的常量调用"折叠路径。
+const check = fn () u8 {
+    if (isqrt(0) != 0) { return 1; }
+    if (isqrt(1) != 1) { return 2; }
+    if (isqrt(99) != 9) { return 3; }
+    if (isqrt(101) != 10) { return 4; }
+    var big: u64 = 120;
+    if (isqrt(big) != 10) { return 5; }
+    return 0;
+};
+
+const main = fn () u8 {
+    return check();
+};
