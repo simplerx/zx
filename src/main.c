@@ -761,10 +761,7 @@ static void usage(FILE *f) {
 }
 
 static void print_version(FILE *f) {
-    fprintf(f, "zxc %s — Zx 语言编译器\n", ZXC_VERSION);
-    fprintf(f, "  前端: zxfe（bootstrap/zxfe.zx 自举，默认 Zx 前端）\n");
-    fprintf(f, "  后端: %s（ZX_CC 可覆盖）\n", (g_cc && *g_cc) ? g_cc : "(未解析)");
-    fprintf(f, "  帮助: zxc -h\n");
+    fprintf(f, "zxc %s\n", ZXC_VERSION);
 }
 
 /* 子命令级帮助。返回 0 = 认得的子命令，-1 = 没有这个子命令。 */
