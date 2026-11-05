@@ -1,14 +1,64 @@
-// OpenGL 绑定 —— wgl 上下文管理 + 少量核心 GL 入口。
-// opengl32.dll 直接导出这些符号，glGetString 不需要 wglGetProcAddress。
+// OpenGL 绑定 —— wgl 上下文管理 + GL 1.1 固定管线。
+//
+// opengl32.dll 直接导出 GL 1.1 的全部入口，所以这一层不用 wglGetProcAddress：
+// 画东西够用，也就不必碰"把 void* 转成函数指针"这种语言还没开的门。
 
 @link("opengl32");
 
 extern "C" {
+    // ---- 上下文 ------------------------------------------------------------
     pub fn wglCreateContext(dc: *u8) *u8;
     pub fn wglMakeCurrent(dc: *u8, ctx: *u8) bool;
     pub fn wglDeleteContext(ctx: *u8) bool;
     pub fn glGetString(name: u32) *const u8;
-    pub fn glClearColor(r: f32, g: f32, b: f32, a: f32) void;
-    pub fn glClear(mask: u32) void;
     pub fn glGetError() u32;
+
+    // ---- 帧与视口 ----------------------------------------------------------
+    pub fn glViewport(x: i32, y: i32, w: i32, h: i32) void;
+    pub fn glClearColor(r: f32, g: f32, b: f32, a: f32) void;
+    pub fn glClearDepth(d: f64) void;
+    pub fn glClear(mask: u32) void;
+    pub fn glEnable(cap: u32) void;
+    pub fn glDisable(cap: u32) void;
+    pub fn glDepthFunc(f: u32) void;
+    pub fn glShadeModel(m: u32) void;
+    pub fn glLineWidth(w: f32) void;
+    pub fn glPixelStorei(pname: u32, param: i32) void;
+    pub fn glReadPixels(x: i32, y: i32, w: i32, h: i32,
+                        fmt: u32, ty: u32, pixels: *u8) void;
+
+    // ---- 矩阵（固定管线） --------------------------------------------------
+    pub fn glMatrixMode(m: u32) void;
+    pub fn glLoadIdentity() void;
+    pub fn glFrustum(l: f64, r: f64, b: f64, t: f64, n: f64, f: f64) void;
+    pub fn glTranslatef(x: f32, y: f32, z: f32) void;
+    pub fn glRotatef(deg: f32, x: f32, y: f32, z: f32) void;
+
+    // ---- 立即模式 ----------------------------------------------------------
+    pub fn glBegin(mode: u32) void;
+    pub fn glEnd() void;
+    pub fn glColor3f(r: f32, g: f32, b: f32) void;
+    pub fn glVertex3f(x: f32, y: f32, z: f32) void;
 }
+
+// ---- 常量（只列用到的） ----------------------------------------------------
+pub const GL_VENDOR: u32 = 0x1F00;
+pub const GL_RENDERER: u32 = 0x1F01;
+pub const GL_VERSION: u32 = 0x1F02;
+
+pub const GL_COLOR_BUFFER_BIT: u32 = 0x00004000;
+pub const GL_DEPTH_BUFFER_BIT: u32 = 0x00000100;
+
+pub const GL_PROJECTION: u32 = 0x1701;
+pub const GL_MODELVIEW: u32 = 0x1700;
+
+pub const GL_DEPTH_TEST: u32 = 0x0B71;
+pub const GL_LEQUAL: u32 = 0x0203;
+pub const GL_SMOOTH: u32 = 0x1D01;
+
+pub const GL_QUADS: u32 = 0x0007;
+pub const GL_LINES: u32 = 0x0001;
+
+pub const GL_PACK_ALIGNMENT: u32 = 0x0D05;
+pub const GL_RGB: u32 = 0x1907;
+pub const GL_UNSIGNED_BYTE: u32 = 0x1401;

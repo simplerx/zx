@@ -1,5 +1,9 @@
-// Win32 user32 绑定 —— 只收 OpenGL 演示用到的最小面。
+// Win32 user32 绑定 —— OpenGL 演示用到的那一面。
 // 句柄一律 *u8（C 的 HWND/HINSTANCE 都是指针宽度的黑盒）。
+//
+// 两套用法共用一份绑定：
+//   def_proc   最小探针（main.zx）：隐藏 1x1 窗口，只建上下文问 GL 版本
+//   window.zx  真窗口：ShowWindow + PeekMessage 驱动的逐帧渲染循环
 
 @link("user32");
 
@@ -27,16 +31,50 @@ extern "C" {
         pt: Point,                                        // 嵌套 extern struct
     };
     pub const Point = struct { x: i32, y: i32 };
+    pub const Rect = struct { left: i32, top: i32, right: i32, bottom: i32 };
 
     pub fn RegisterClassW(wc: *WndClassW) u16;
     pub fn CreateWindowExW(ex: u32, cls: *const u16, title: *const u16,
                        style: u32, x: i32, y: i32, w: i32, h: i32,
                        parent: *u8, menu: *u8, inst: *u8, param: *u8) *u8;
     pub fn DestroyWindow(h: *u8) bool;
+
+    // ---- 真窗口额外要的 ----------------------------------------------------
+    pub fn ShowWindow(h: *u8, cmd: i32) bool;
+    pub fn UpdateWindow(h: *u8) bool;
+    pub fn GetClientRect(h: *u8, r: *Rect) bool;
+    pub fn AdjustWindowRect(r: *Rect, style: u32, menu: bool) bool;
+    pub fn GetModuleHandleW(name: *const u16) *u8;
+    pub fn LoadCursorW(inst: *u8, name: *const u16) *u8;
+
+    // ---- 消息循环 ----------------------------------------------------------
+    pub fn PeekMessageW(m: *Msg, h: *u8, lo: u32, hi: u32, remove: u32) bool;
+    pub fn TranslateMessage(m: *const Msg) bool;
+    pub fn DispatchMessageW(m: *const Msg) usize;
+    pub fn PostQuitMessage(code: i32) void;
+    pub fn DefWindowProcW(h: *u8, msg: u32, wp: usize, lp: usize) usize;
 }
 
 // DefWindowProcW 包一层 Zx 函数：给 WNDPROC 字段用（回调走 (void*) 中转）。
 pub const def_proc = fn (h: *u8, msg: u32, wp: usize, lp: usize) usize {
     return DefWindowProcW(h, msg, wp, lp);
 };
-extern fn DefWindowProcW(h: *u8, msg: u32, wp: usize, lp: usize) usize;
+
+// ---- 常量（Windows SDK 里的原值） ------------------------------------------
+pub const WS_OVERLAPPEDWINDOW: u32 = 0x00CF0000;
+pub const SW_SHOW: i32 = 5;
+pub const PM_REMOVE: u32 = 0x0001;
+
+pub const WM_DESTROY: u32 = 0x0002;
+pub const WM_CLOSE: u32 = 0x0010;
+pub const WM_QUIT: u32 = 0x0012;
+pub const WM_ERASEBKGND: u32 = 0x0014;
+pub const WM_KEYDOWN: u32 = 0x0100;
+
+pub const VK_ESCAPE: usize = 0x1B;
+
+// 系统光标 IDC_ARROW == MAKEINTRESOURCE(32512)：整数转指针只有在运行时
+// 才做得了（R1 要求 const 初值编译期可算），所以这里给函数而不是常量。
+pub const idc_arrow = fn () *const u16 {
+    return (*const u16)(32512);
+};

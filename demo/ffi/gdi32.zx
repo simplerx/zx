@@ -38,4 +38,5 @@ extern "C" {
     pub fn ChoosePixelFormat(dc: *u8, pfd: *PixelFormatDescriptor) i32;
     pub fn SetPixelFormat(dc: *u8, fmt: i32, pfd: *const PixelFormatDescriptor) bool;
     pub fn SwapBuffers(dc: *u8) bool;
+    pub fn ReleaseDC(h: *u8, dc: *u8) i32;
 }

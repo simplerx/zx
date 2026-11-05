@@ -1,0 +1,360 @@
+// demo/ffi/window.zx —— zxc 实战：用 OpenGL 开一个真窗口，画一个转动的立方体。
+//
+//   构建：./bin/zxc.exe demo/ffi/window.zx -o .tmp/window.exe
+//   运行：.tmp/window.exe        （Esc 或关窗口退出）
+//
+// 和 main.zx（隐藏 1x1 探针）的区别：这里窗口是**看得见**的，而且有
+// 消息循环 + 逐帧渲染。要做到这三件事，得多踩两个坑：
+//
+//   1. Zx 没有 `break`：消息循环的"退出"靠收割（`done: v;`）跳两层，
+//      所以外层写成 `done: while (true)`，内层用标志位收敛。
+//   2. 每帧的宽高要重取（GetClientRect），窗口能拖就说明视口跟得上；
+//      窗口类必须带 CS_OWNDC，否则私有 DC 不存在，像素格式会丢。
+//
+// 配色借用《剑影仙途》的四色（墨黑/鎏金/玉青/朱砂）——纯属眼熟，与引擎无关。
+
+const std = module("std");
+const win = module("user32.zx");
+const gdi = module("gdi32.zx");
+const gl = module("opengl32.zx");
+
+// kernel32 的 Sleep：没有纳秒级定时器就先这么节流（见帧循环注释）。
+extern fn Sleep(ms: u32) void;
+
+// ---- 《剑影仙途》四色（线性化前的 sRGB 分量，直接除 255） -------------------
+const INK_R: f32 = 0.043;   // 墨黑 #0B0A08
+const INK_G: f32 = 0.039;
+const INK_B: f32 = 0.031;
+
+// ---- 窗口过程 ---------------------------------------------------------------
+//
+// 只处理三件事，剩下的全丢回 DefWindowProcW：
+//   关窗口 → DestroyWindow（进而 WM_DESTROY → 退出消息）
+//   Esc    → 同上
+//   WM_ERASEBKGND → 返回 1。不这么写，GDI 会先把背景刷一遍白，
+//                   每帧交界处闪一下（GL 换缓冲时露出的正是这块）。
+const wnd_proc = fn (h: *u8, msg: u32, wp: usize, lp: usize) usize {
+    if (msg == win.WM_CLOSE) { win.DestroyWindow(h); return 0; }
+    if (msg == win.WM_DESTROY) { win.PostQuitMessage(0); return 0; }
+    if (msg == win.WM_ERASEBKGND) { return 1; }
+    if (msg == win.WM_KEYDOWN && wp == win.VK_ESCAPE) { win.DestroyWindow(h); return 0; }
+    return win.def_proc(h, msg, wp, lp);
+};
+
+// ---- 一个立方体 -------------------------------------------------------------
+//
+// 立即模式（glBegin/glEnd）。GL 1.1 的入口全在 opengl32.dll 里导出，
+// 所以不需要 wglGetProcAddress —— 也就不需要在 Zx 里把 void* 转成函数指针。
+// 每面一个颜色 + 深度测试，转起来才看得出前后。
+const cube = fn (s: f32) void {
+    gl.glBegin(gl.GL_QUADS);
+
+    // +X 鎏金 #C8A951
+    gl.glColor3f(0.784, 0.663, 0.318);
+    gl.glVertex3f(s, -s, -s); gl.glVertex3f(s, -s, s);
+    gl.glVertex3f(s, s, s);   gl.glVertex3f(s, s, -s);
+
+    // -X 玉青 #7FB38A
+    gl.glColor3f(0.498, 0.702, 0.541);
+    gl.glVertex3f(-s, -s, -s); gl.glVertex3f(-s, s, -s);
+    gl.glVertex3f(-s, s, s);   gl.glVertex3f(-s, -s, s);
+
+    // +Y 朱砂 #A8332A
+    gl.glColor3f(0.659, 0.200, 0.165);
+    gl.glVertex3f(-s, s, -s); gl.glVertex3f(s, s, -s);
+    gl.glVertex3f(s, s, s);   gl.glVertex3f(-s, s, s);
+
+    // -Y 墨黑偏亮（不然底面全黑，看不出在转）
+    gl.glColor3f(0.125, 0.118, 0.098);
+    gl.glVertex3f(-s, -s, -s); gl.glVertex3f(-s, -s, s);
+    gl.glVertex3f(s, -s, s);   gl.glVertex3f(s, -s, -s);
+
+    // +Z 鎏金偏暗
+    gl.glColor3f(0.443, 0.376, 0.180);
+    gl.glVertex3f(-s, -s, s); gl.glVertex3f(s, -s, s);
+    gl.glVertex3f(s, s, s);   gl.glVertex3f(-s, s, s);
+
+    // -Z 玉青偏暗
+    gl.glColor3f(0.282, 0.400, 0.310);
+    gl.glVertex3f(-s, -s, -s); gl.glVertex3f(-s, s, -s);
+    gl.glVertex3f(s, s, -s);   gl.glVertex3f(s, -s, -s);
+
+    gl.glEnd();
+};
+
+const main = fn () u8 {
+    // 参数（顺序随意）：
+    //   --frames N     跑满 N 帧自动退出（冒烟测试用：无需有人点关闭）
+    //   --shot a.bmp   最后一帧存成 24 位 BMP（GL 原点在左下，BMP 也是
+    //                  自下而上，所以行序天然对齐，只需换一下 RGB→BGR）
+    var limit: u64 = 0;
+    var shot: []const u8 = "";
+    let argv = std.process.args();
+    var ai: usize = 0;
+    while (ai < argv.len) {
+        let a = argv[ai];
+        if (std.str.eq(a, "--frames") && ai + 1 < argv.len) { limit = parse_dec(argv[ai + 1]); }
+        if (std.str.eq(a, "--shot") && ai + 1 < argv.len) { shot = argv[ai + 1]; }
+        ai = ai + 1;
+    }
+
+    // ---- 1. 窗口类 ---------------------------------------------------------
+    var cls: *[5]u16 = &.{ 122, 120, 103, 108, 0 };                       // "zxgl"
+    var title: *[12]u16 = &.{ 90, 120, 32, 47, 32, 79, 112, 101, 110, 71, 76, 0 };  // "Zx / OpenGL"
+
+    let inst = win.GetModuleHandleW((*const u16)(0));
+
+    var wc = win.WndClassW{
+        // CS_OWNDC 必须留：私有 DC 才保得住像素格式，少了这句
+        // SetPixelFormat 之后换 DC 就前功尽弃。CS_HREDRAW|CS_VREDRAW 随宽高重绘。
+        .style = 0x0020 | 0x0002 | 0x0001,
+        .lpfnWndProc = wnd_proc,              // Zx 函数直接当 C 回调
+        .cbClsExtra = 0,
+        .cbWndExtra = 0,
+        .hInstance = inst,
+        .hIcon = (*u8)(0),
+        .hCursor = win.LoadCursorW((*u8)(0), win.idc_arrow()),
+        .hbrBackground = (*u8)(0),
+        .lpszMenuName = (*const u16)(0),
+        .lpszClassName = cls,
+        .hIconSm = (*u8)(0),
+    };
+    if (win.RegisterClassW(&wc) == 0) { std.println("RegisterClassW 失败"); return 1; }
+
+    // 客户区定 900x640，外框尺寸让系统算（标题栏/边框差多少不写死）。
+    var frame = win.Rect{ .left = 0, .top = 0, .right = 900, .bottom = 640 };
+    win.AdjustWindowRect(&frame, win.WS_OVERLAPPEDWINDOW, false);
+    let ww = frame.right - frame.left;
+    let wh = frame.bottom - frame.top;
+
+    let hwnd = win.CreateWindowExW(
+        0, cls, title, win.WS_OVERLAPPEDWINDOW,
+        120, 120, ww, wh,
+        (*u8)(0), (*u8)(0), inst, (*u8)(0));
+    if (hwnd == (*u8)(0)) { std.println("CreateWindowExW 失败"); return 2; }
+
+    // ---- 2. 像素格式与 GL 上下文 -------------------------------------------
+    let dc = gdi.GetDC(hwnd);
+    if (dc == (*u8)(0)) { std.println("GetDC 失败"); return 3; }
+
+    // PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER
+    var pfd = gdi.PixelFormatDescriptor{
+        .nSize = (u16)(@sizeOf(gdi.PixelFormatDescriptor)),
+        .nVersion = 1,
+        .dwFlags = 0x04 | 0x20 | 0x01,
+        .iPixelType = 0,                     // PFD_TYPE_RGBA
+        .cColorBits = 24,
+        .cRedBits = 0, .cRedShift = 0,
+        .cGreenBits = 0, .cGreenShift = 0,
+        .cBlueBits = 0, .cBlueShift = 0,
+        .cAlphaBits = 0, .cAlphaShift = 0,
+        .cAccumBits = 0,
+        .cAccumRedBits = 0, .cAccumGreenBits = 0, .cAccumBlueBits = 0, .cAccumAlphaBits = 0,
+        .cDepthBits = 24,
+        .cStencilBits = 8,
+        .cAuxBuffers = 0,
+        .iLayerType = 0,                     // PFD_MAIN_PLANE
+        .bReserved = 0,
+        .dwLayerMask = 0, .dwVisibleMask = 0, .dwDamageMask = 0,
+    };
+    let pf = gdi.ChoosePixelFormat(dc, &pfd);
+    if (pf == 0) { std.println("ChoosePixelFormat 失败"); return 4; }
+    if (!gdi.SetPixelFormat(dc, pf, &pfd)) { std.println("SetPixelFormat 失败"); return 5; }
+
+    let ctx = gl.wglCreateContext(dc);
+    if (ctx == (*u8)(0)) { std.println("wglCreateContext 失败"); return 6; }
+    if (!gl.wglMakeCurrent(dc, ctx)) { std.println("wglMakeCurrent 失败"); return 7; }
+
+    // 先亮出来，再报驱动信息：这两行是"链路全通"的运行时证据。
+    win.ShowWindow(hwnd, win.SW_SHOW);
+    win.UpdateWindow(hwnd);
+    std.println("GL {} | {}", cstr(gl.glGetString(gl.GL_VERSION)),
+                cstr(gl.glGetString(gl.GL_RENDERER)));
+
+    // ---- 3. GL 状态（设一次就够） ------------------------------------------
+    gl.glEnable(gl.GL_DEPTH_TEST);
+    gl.glDepthFunc(gl.GL_LEQUAL);
+    gl.glShadeModel(gl.GL_SMOOTH);
+    gl.glClearDepth(1.0);
+    gl.glClearColor(INK_R, INK_G, INK_B, 1.0);
+
+    // ---- 4. 帧循环 ---------------------------------------------------------
+    var msg: win.Msg = undefined;
+    var angle: f32 = 0.0;
+    var last = std.time.counter();
+    var frames: u64 = 0;
+    var acc: u64 = 0;
+    var total: u64 = 0;
+    let t_start = std.time.counter();
+
+    const quit = done: while (true) {
+        // 抽干消息队列。PeekMessage 不阻塞，所以渲染不会被消息拖住；
+        // 反过来，队列空的时候也不能停在这——出循环继续画下一帧。
+        var alive = true;
+        while (alive) {
+            if (!win.PeekMessageW(&msg, (*u8)(0), 0, 0, win.PM_REMOVE)) {
+                alive = false;
+            } else {
+                if (msg.message == win.WM_QUIT) { done: 0; }   // 收割：一次跳出两层
+                win.TranslateMessage(&msg);
+                win.DispatchMessageW(&msg);
+            }
+        }
+
+        // 客户端尺寸每帧重取：拖窗口边框时视口跟着走，不取就会拉伸。
+        var rc = win.Rect{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
+        win.GetClientRect(hwnd, &rc);
+        let cw = rc.right - rc.left;
+        let ch = rc.bottom - rc.top;
+        if (cw > 0 && ch > 0) {
+            let aspect: f32 = (f32)cw / (f32)ch;
+
+            gl.glViewport(0, 0, cw, ch);
+            gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT);
+
+            // 投影：glFrustum 手搓 53° 视角。近平面 0.2、远平面 100。
+            gl.glMatrixMode(gl.GL_PROJECTION);
+            gl.glLoadIdentity();
+            gl.glFrustum(-0.1 * (f64)aspect, 0.1 * (f64)aspect, -0.1, 0.1, 0.2, 100.0);
+
+            gl.glMatrixMode(gl.GL_MODELVIEW);
+            gl.glLoadIdentity();
+            gl.glTranslatef(0.0, 0.0, -4.0);        // 相机后退 4 个单位
+            gl.glRotatef(angle, 1.0, 1.0, 0.0);     // 绕 x/y 对角线转
+            cube(1.0);
+
+            // 截帧要在 SwapBuffers **之前**：后缓冲里才是刚画完的这一帧，
+            // 交换之后前缓冲的内容由驱动决定（多缓冲下可能是上一帧或空）。
+            if (shot.len > 0 && limit > 0 && total + 1 >= limit) {
+                if (shot_bmp(shot, cw, ch)) { std.println("shot: {}", shot); }
+                shot = "";
+            }
+
+            gdi.SwapBuffers(dc);
+        }
+
+        // 节流。没有 wglSwapIntervalEXT（要 wglGetProcAddress + 函数指针转换），
+        // 就先 Sleep(1)：系统定时器粒度下实际约 60 帧，够稳也够省 CPU。
+        Sleep(1);
+
+        // ---- 计时：给个 fps，顺便证明 std.time 在 GUI 程序里也能用 ----------
+        let now = std.time.counter();
+        let dt_ns = std.time.nsBetween(last, now);
+        last = now;
+        angle = angle + (f32)(dt_ns / 1000000) * 0.060;     // 60°/秒
+        if (angle > 360.0) { angle = angle - 360.0; }
+
+        frames = frames + 1;
+        acc = acc + dt_ns;
+        if (acc >= 1000000000) {
+            std.println("{} fps", frames * 1000000000 / acc);
+            frames = 0;
+            acc = 0;
+        }
+
+        total = total + 1;
+        if (limit > 0 && total >= limit) { done: 0; }
+    };
+
+    let elapsed = std.time.nsSince(t_start);
+    if (elapsed > 0) {
+        std.println("共 {} 帧 / {} ms", total, elapsed / 1000000);
+    }
+    // glGetError 是整条渲染链路的体检：命令都合法才会是 0。
+    let glerr = gl.glGetError();
+    if (glerr != 0) { std.println("GL error: {}", glerr); return 9; }
+
+    // ---- 5. 收摊（顺序：解绑 → 删上下文 → 还 DC → 销毁窗口） --------------
+    gl.wglMakeCurrent((*u8)(0), (*u8)(0));
+    gl.wglDeleteContext(ctx);
+    gdi.ReleaseDC(hwnd, dc);
+    win.DestroyWindow(hwnd);
+    return (u8)quit;
+};
+
+// GL 字符串是 NUL 结尾的 C 串，Zx 串是 (ptr,len)：按定长视图读，扫到 NUL 为止。
+const cstr = fn (p: *const u8) []const u8 {
+    if (p == (*const u8)(0)) { return "?"; }
+    let buf = (*const [256]u8)p;
+    var n: usize = 0;
+    while (n < 255) {
+        if (buf[n] == 0) { return buf[0..n]; }
+        n = n + 1;
+    }
+    return buf[0..255];
+};
+
+// 十进制转 u64，非数字字符跳过（`--frames 120` 这种简单场景够用）。
+const parse_dec = fn (s: []const u8) u64 {
+    var v: u64 = 0;
+    for (s) c {
+        if (c >= 48 && c <= 57) { v = v * 10 + (u64)(c - 48); }
+    }
+    return v;
+};
+
+// ---- 截帧：把后缓冲存成 24 位 BMP -------------------------------------------
+//
+// 为什么不存 PNG：要 zlib。为什么不存 PPM：看一眼还要转格式。
+// BMP 头固定 54 字节、小端、自下而上——刚好和 GL 的行序一致，
+// 只需要把 RGB 换成 BGR（BMP 的通道顺序）。
+const put32 = fn (b: []u8, at: usize, v: u32) void {
+    b[at] = (u8)(v & 0xFF);
+    b[at + 1] = (u8)((v >> 8) & 0xFF);
+    b[at + 2] = (u8)((v >> 16) & 0xFF);
+    b[at + 3] = (u8)((v >> 24) & 0xFF);
+};
+
+const put16 = fn (b: []u8, at: usize, v: u32) void {
+    b[at] = (u8)(v & 0xFF);
+    b[at + 1] = (u8)((v >> 8) & 0xFF);
+};
+
+const shot_bmp = fn (path: []const u8, w: i32, h: i32) bool {
+    let ww: usize = (usize)w;
+    let hh: usize = (usize)h;
+    let stride: usize = (ww * 3 + 3) / 4 * 4;        // BMP 每行 4 字节对齐
+    let n: usize = stride * hh;
+
+    // alloc() 给的是**可选指针**（分配可能失败），拿到手再切出切片用：
+    // heapAlloc 那条路要求长度编译期已知，这里的宽高是运行时的。
+    let p_px = std.heap.page.alloc(std.heap.page.ctx, ww * hh * 3);
+    if (p_px) raw_px {
+        let px = raw_px[0..ww * hh * 3];
+
+        // PACK_ALIGNMENT 默认 4：宽度乘 3 不是 4 的倍数时 GL 会往行尾塞空洞。
+        gl.glPixelStorei(gl.GL_PACK_ALIGNMENT, 1);
+        gl.glReadPixels(0, 0, w, h, gl.GL_RGB, gl.GL_UNSIGNED_BYTE, raw_px);
+
+        let p_out = std.heap.page.alloc(std.heap.page.ctx, 54 + n);
+        if (p_out) raw_out {
+            let out = raw_out[0..54 + n];
+            for (0..54) i { out[i] = 0; }
+
+            out[0] = 66; out[1] = 77;                // "BM"
+            put32(out, 2, (u32)(54 + n));            // 文件总长
+            put32(out, 10, 54);                      // 像素数据偏移
+            put32(out, 14, 40);                      // DIB 头长度
+            put32(out, 18, (u32)w);
+            put32(out, 22, (u32)h);                  // 正高度 = 自下而上，跟 GL 同序
+            put16(out, 26, 1);                       // planes
+            put16(out, 28, 24);                      // 每像素 24 位
+            put32(out, 34, (u32)n);                  // 图像字节数
+            put32(out, 38, 2835);                    // 72 DPI
+            put32(out, 42, 2835);
+
+            for (0..hh) r {
+                for (0..ww) c {
+                    let s = (r * ww + c) * 3;
+                    let d = 54 + r * stride + c * 3;
+                    out[d] = px[s + 2];              // B
+                    out[d + 1] = px[s + 1];          // G
+                    out[d + 2] = px[s];              // R
+                }
+            }
+            std.file.write(path, out);
+            return true;
+        }
+    }
+    return false;
+};
