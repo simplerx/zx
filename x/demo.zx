@@ -1,12 +1,10 @@
-// demo.zx —— x/ 扩展库验收：稀疏表 + 多重数组 + 数学小件。
+// demo.zx —— x/ 扩展库验收：稀疏表。
 //
 // 跑法：zxc x/demo.zx -o .tmp/xdemo.exe && .tmp/xdemo.exe
 // 全部断言过了打印 ok 并退出 0；哪条不对就非零退出，好接 CI。
 
 const std = module("std");
 const stair = module("stair.zx");
-const lattice = module("lattice.zx");
-const numkit = module("numkit.zx");
 
 const less_i64 = fn (a: i64, b: i64) bool { return a < b; };
 const greater_i64 = fn (a: i64, b: i64) bool { return a > b; };
@@ -90,91 +88,9 @@ const checkStair = fn () u8 {
     return 1;
 };
 
-const checkLattice = fn () u8 {
-    var dims3: *[3]usize = &.{ 2, 3, 4 };
-    var g = lattice.Lattice(i64).init(std.heap.page, dims3[0..]);
-    if (g) ok3 {
-        var m = ok3;
-        defer m.deinit();
-
-        // 全量写入再读出，顺带验证行主序偏移公式。
-        var i: usize = 0;
-        while (i < m.total) {
-            m.at(i).?.0 = (i64)(i * 7);
-            i = i + 1;
-        }
-        var a: usize = 0;
-        while (a < 2) {
-            var b: usize = 0;
-            while (b < 3) {
-                var c: usize = 0;
-                while (c < 4) {
-                    var idx: *[3]usize = &.{ a, b, c };
-                    let v = m.get(idx[0..]);
-                    if (v) val {
-                        let off = a * 12 + b * 4 + c;
-                        if (val != (i64)(off * 7)) { return 13; }
-                    } else { return 12; }
-                    c = c + 1;
-                }
-                b = b + 1;
-            }
-            a = a + 1;
-        }
-
-        // 越界与维数不符要挡住（sentinel 探测）。
-        var bad: *[3]usize = &.{ 2, 0, 0 };
-        let o1 = m.get(bad[0..]) orelse -997;
-        if (o1 != -997) { return 19; }
-        var wrong: *[2]usize = &.{ 0, 0 };
-        let o2 = m.get(wrong[0..]) orelse -998;
-        if (o2 != -998) { return 20; }
-
-        // 便捷 2D + shape 视图。
-        var dims2: *[2]usize = &.{ 3, 5 };
-        var g2 = lattice.Lattice(f64).init(std.heap.page, dims2[0..]);
-        if (g2) ok4 {
-            var n = ok4;
-            defer n.deinit();
-            if (!n.set2(1, 3, 2.5)) { return 15; }
-            if (n.get2(1, 3).? != 2.5) { return 16; }
-            if (n.rows() != 3 || n.cols() != 5) { return 17; }
-            let sh = n.shape();
-            if (sh.len != 2 || sh[0] != 3 || sh[1] != 5) { return 18; }
-            std.println("lattice ok: 2x3x4 flat, m[1][3]={}", n.get2(1, 3).?);
-            return 0;
-        }
-        return 14;
-    }
-    return 11;
-};
-
-const checkNumkit = fn () u8 {
-    if (numkit.gcd(48, 18) != 6) { return 21; }
-    if (numkit.gcd(-48, 18) != 6) { return 22; }
-    if (numkit.lcm(4, 6) != 12) { return 23; }
-    if (numkit.powMod(2, 10, 1000) != 24) { return 24; }
-    if (numkit.powMod(7, 0, 13) != 1) { return 25; }
-    if (numkit.isqrt(0) != 0 || numkit.isqrt(1) != 1 || numkit.isqrt(99) != 9
-        || numkit.isqrt(100) != 10 || numkit.isqrt(101) != 10) { return 26; }
-    if (numkit.floorLog2(1) != 0 || numkit.floorLog2(2) != 1
-        || numkit.floorLog2(37) != 5) { return 27; }
-    if (numkit.nextPow2(37) != 64 || numkit.nextPow2(64) != 64
-        || numkit.nextPow2(1) != 1) { return 28; }
-    if (!numkit.isPow2(64) || numkit.isPow2(37) || numkit.isPow2(0)) { return 29; }
-
-    std.println("numkit ok: gcd={}, isqrt(101)={}, nextPow2(37)={}",
-                numkit.gcd(48, 18), numkit.isqrt(101), numkit.nextPow2(37));
-    return 0;
-};
-
 const main = fn () u8 {
     let a = checkStair();
     if (a != 0) { return a; }
-    let b = checkLattice();
-    if (b != 0) { return b; }
-    let c = checkNumkit();
-    if (c != 0) { return c; }
     std.println("x/ all ok");
-    return 0;
+    return a;
 };

@@ -249,9 +249,7 @@ LSP 补全/跳转/诊断。zxls（语言服务器）走 vendored zig 0.17.0；�
 std 之外的第二层：常用但不值得让每个人都编译的库。不进 std、不进聚合，用哪个拉哪个——`module("../x/…")` 相对导入，或写进 `zx.json` 的 `deps` 搜索路径。
 
 ```zx
-const stair   = module("../x/stair.zx");     // 稀疏表：O(n log n) 预处理，O(1) 区间 min/max/gcd
-const lattice = module("../x/lattice.zx");   // 多重数组：任意维数，行主序扁平存储
-const numkit  = module("../x/numkit.zx");    // 数学小件：gcd / powMod / isqrt / floorLog2
+const stair = module("../x/stair.zx");    // 稀疏表：O(n log n) 预处理，O(1) 区间 min/max/gcd
 
 const less = fn (a: i64, b: i64) bool { return a < b; };
 var t = stair.SparseTable(i64).init(std.heap.page, &data, less);
@@ -261,7 +259,7 @@ if (t) st {
 };
 ```
 
-稀疏表只吃**可重复贡献**的运算（min/max/与/或/gcd），不支持改——要"能改 + O(log n)"是线段树的事。多重数组跟它同一个底子：一块扁平大数组扛所有数据，步长折算下标。`x/demo.zx` 是全套验收（暴力对拍 + 偏移公式 + 断言清单）。
+稀疏表只吃**可重复贡献**的运算（min/max/与/或/gcd），不支持改——要"能改 + O(log n)"是线段树的事。`x/demo.zx` 是验收：37 个伪随机数（故意不是 2 的幂）的全部子区间和暴力对拍，外加比较器换向取最大值的用例。
 ---
 
 ## 代码结构（给想读源码 / 贡献的人）
@@ -271,9 +269,9 @@ if (t) st {
 | `src/` | 编译器 C 实现：`parse.c`（前端 parser）、`sema.c`（类型/语义）、`backend.c`（C 发射）、`zxc.c`（诊断/缓冲）等 |
 | `bootstrap/` | 自举前端（Zx 代码）：`parse.zx` / `lex.zx`，编译成 `bin/zxfe.exe`，zxc 默认走它 |
 | `std/` | 标准库（Zx 代码，可读可改）：`str/map/fs/json/time/pool/task.zx` + 聚合 `std.zx` |
-| `x/` | 扩展库（不进 std，按需 `module("../x/…")`，不付编译速度）：`stair.zx` 稀疏表、`lattice.zx` 多重数组、`numkit.zx` 数学小件，`demo.zx` 验收 |
+| `x/` | 扩展库（不进 std，按需 `module("../x/…")`，不付编译速度）：`stair.zx` 稀疏表 + `demo.zx` 验收 |
 | `docs/` | `manual.md` 语言手册、`guide.md` 教程、`errors.md` 错误码参考 |
-| `spec/` | `zx-spec.md` 规格、`zx.ebnf` 文法、`decisions.md` 设计裁定记录（102 条） |
+| `spec/` | `zx-spec.md` 规格、`zx.ebnf` 文法、`decisions.md` 设计裁定记录（103 条） |
 | `tests/` | `good/`（正例，带 `// expect-output:`）+ `bad/`（反例）+ `multi/`（多文件） |
 | `demo/` | `ffi/`：Windows API + OpenGL 全链路例子（extern "C" 绑定的真实用户） |
 | `bench/` | 基准（JSON 解析等） |

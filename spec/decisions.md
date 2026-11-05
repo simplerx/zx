@@ -3321,3 +3321,12 @@ lbl: 其余（{} / {a,b} / expr）→ 收割
 **② E0410 误伤调用方。** 同一条克隆路径还有个副作用：克隆体声明的局部符号混进了调用方的 `g_locals` 链，克隆检查没走到使用点，调用方收尾 `check_unused` 就把真身明明用到的变量报成 unused。裁定：**克隆检查期间 `g_locals` 置空**——克隆的局部一律不外借，真身由调用方自己的 `check_fn_body` 重新查一遍。
 
 回归：`passed 270, failed 0`（新增 `good/ct-dead-div`、`good/ct-clone-unused` 钉住两个修复；既有 `bad/div-zero-comptime`、`bad/div-zero-dedup` 钉住硬错误不松动）。版本号升 `1.0.0`。
+
+
+## 103. 1.0.0 定稿：x/ 收窄到只留稀疏表
+
+首发三件（stair/lattice/numkit）review 之后砍到一件：**`x/` 只留 `stair.zx`**。lattice 与 numkit 删除。原因：扩展库的价值在"少而精"——每个成员都得是发布理由，凑数的东西放进目录只会稀释信噪比；真需要多重数组或数学小件，到时候单独进，目录结构不动。
+
+连带改动：stair.zx 原本 `module("numkit.zx")` 借用 `floorLog2`（init 算层数、query 算覆盖宽度两处），现在就地内联为私有 `floorLog2`——**扩展库成员应当自包含**，单文件拷走就能用，这是 x/ 的准入标准之一。
+
+`x/demo.zx` 相应收窄：只验收稀疏表（37 个伪随机数全子区间与暴力对拍、单点相等、越界 null、比较器换向取最大）。README 的 x/ 小节与代码结构表同步。

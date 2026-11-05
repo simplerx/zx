@@ -11,8 +11,8 @@
 // 查询也只有一句"两块可重叠的 2^k 拼起来"——重叠不脏结果，靠的正是
 // 可重复贡献性（这就是为什么 sum 不行）。
 //
-// 存储：一块 n*k 的扁平大数组 + 一张行指针表，跟 lattice.zx 一个底子：
-// 数据一次要齐，行只是借地址，不做二次分配。
+// 存储：一块 n*k 的扁平大数组 + 一张行指针表——数据一次要齐，
+// 行只是借地址，不做二次分配。
 //
 // 用法：
 //   const less_i64 = fn (a: i64, b: i64) bool { return a < b; };
@@ -25,7 +25,17 @@
 // 比较器：less(a, b) == true 就取 a。要最大值把比较器写成 `a > b`，
 // 聚合逻辑只有一处，比较器换向即换语义。
 
-const numkit = module("numkit.zx");
+// 本文件唯一用到的数学件，就地内联，不牵扯第二个模块。
+// 前置条件 x >= 1（init 挡了空数组，query 挡了空区间）；x == 0 返回 0。
+const floorLog2 = fn (x: usize) usize {
+    var v = x;
+    var r: usize = 0;
+    while (v > 1) {
+        v = v >> 1;
+        r = r + 1;
+    }
+    return r;
+};
 
 pub const SparseTable = fn (T: type) type {
     return struct {
@@ -43,7 +53,7 @@ pub const SparseTable = fn (T: type) type {
 
             var s = Self{ .n = data.len, .k = 0, .flat = undefined,
                           .rows = undefined, .less = less, .alloc = alloc };
-            s.k = numkit.floorLog2(s.n) + 1;
+            s.k = floorLog2(s.n) + 1;
 
             // 先要行指针表；再要数据大块。后半失败要记得把前半还掉。
             let rows_bytes = s.k * @sizeOf(*T);
@@ -100,7 +110,7 @@ pub const SparseTable = fn (T: type) type {
         // 闭区间 [l, r] 的聚合值。l > r 或 r 越界给 null。
         const query = fn (self: *Self, l: usize, r: usize) ?T {
             if (l > r || r >= self.n) { return null; }
-            let k = numkit.floorLog2(r - l + 1);   // 能盖住区间的最大 2^k
+            let k = floorLog2(r - l + 1);   // 能盖住区间的最大 2^k
             let row = (self.rows + k).0;
             let a = (row + l).0;
             // 另一半从右端往回 2^k——两块加起来盖满 [l, r]，中间可以重叠。
