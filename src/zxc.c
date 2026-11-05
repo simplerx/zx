@@ -262,6 +262,26 @@ static void render_snippet(const char *path, int line, int col) {
 static struct { char path[512]; int line, col; char text[200]; } g_note;
 static bool g_note_pending;
 
+/* 兜底修法：没有具体 fix-it 时，把该码在 errors.c 里的通用修法当 help 行
+ * 印出来——用户不必再 `zxc explain` 一次就知道往哪改。
+ *
+ * 每个码**只印一次**：一类错误常常连成一片（十个 E0301），同一句修法重复
+ * 十遍只是噪音，反而把真正的诊断挤出屏幕。后面同码的只留消息。 */
+static char g_fix_shown[16][8];
+static int g_fix_shown_n;
+
+static bool fix_shown(const char *code) {
+    for (int i = 0; i < g_fix_shown_n; i++)
+        if (!strcmp(g_fix_shown[i], code)) return true;
+    return false;
+}
+
+static void fix_mark(const char *code) {
+    if (g_fix_shown_n >= (int)(sizeof g_fix_shown / sizeof g_fix_shown[0])) return;
+    snprintf(g_fix_shown[g_fix_shown_n], sizeof g_fix_shown[0], "%s", code);
+    g_fix_shown_n++;
+}
+
 void diag_note(const char *path, int line, int col, const char *fmt, ...) {
     if (!path || !*path) path = g_srcpath;
     snprintf(g_note.path, sizeof g_note.path, "%s", path);
@@ -300,8 +320,16 @@ static void diag_emit(const char *code, int line, int col, const char *msg) {
     fprintf(stderr, "%s:%d:%d: error[%s]: %s\n", g_srcpath, line, col, code, msg);
     /* D1：头下面跟源码行 + 指位 */
     render_snippet(g_srcpath, line, col);
-    /* fix-it（A2）：diag_help 预挂的建议行；note（D2）带声明点片段。 */
+    /* fix-it（A2）：diag_help 预挂的建议行；note（D2）带声明点片段。
+     * 没有预挂建议时用错误码目录里的通用修法兜底（每码只印一次）。 */
     if (g_help_pending) fprintf(stderr, "  help: %s\n", g_help);
+    else {
+        const char *fix = errors_fix(code);
+        if (fix && !fix_shown(code)) {
+            fprintf(stderr, "  help: %s\n", fix);
+            fix_mark(code);
+        }
+    }
     if (g_note_pending) {
         if (strcmp(g_note.path, g_srcpath) == 0)
             fprintf(stderr, "  note: %s\n", g_note.text);

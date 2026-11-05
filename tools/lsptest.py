@@ -139,7 +139,9 @@ def check(tag, cond, detail=""):
 # 1 initialize
 send({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
     "rootUri": "file:///" + TESTDIR.replace("\\", "/"),
-    "capabilities": {}}})
+    # codeDescriptionSupport：模拟 Zed/VS Code。不支持这个能力的客户端
+    # 不该收到 codeDescription（老客户端严格校验会丢掉整条诊断）。
+    "capabilities": {"textDocument": {"publishDiagnostics": {"codeDescriptionSupport": True}}}}})
 r, _ = recv_id("initialize", 1)
 caps = r["result"]["capabilities"] if r and "result" in r else {}
 check("initialize.caps", all(k in caps for k in (
@@ -272,13 +274,15 @@ check("definition.vendor", "vendor" in target, str(loc)[:200])
 
 # 10b 诊断带 help/note：改出个错，publishDiagnostics 的 message 里应有
 #     did you mean（渲染器的 help 行被 zxls 挂进诊断消息）。
-BADTXT = MAIN.replace("let n = o.count;", "let n = o.coutn;")
+#     第二处是类型错误：那条没有具体建议，靠 errors.c 的通用修法兜底。
+BADTXT = MAIN.replace("let n = o.count;", "let n = o.coutn;\n    let bad: i32 = \"x\";")
 send({"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {
     "textDocument": {"uri": uri, "version": 7},
     "contentChanges": [{"text": BADTXT}]}})
 # 诊断由后台 worker 异步发布：轮询通知流，直到拿到该文档带诊断的发布。
 import time as _t2
 diag_msgs = []
+diags = []
 deadline = _t2.time() + 60
 while _t2.time() < deadline:
     try:
@@ -294,10 +298,22 @@ while _t2.time() < deadline:
     if (m.get("method") == "textDocument/publishDiagnostics"
             and m["params"].get("uri", "").endswith("main.zx")
             and m["params"].get("diagnostics")):
-        diag_msgs = [d.get("message", "") for d in m["params"]["diagnostics"]]
+        diags = m["params"]["diagnostics"]
+        diag_msgs = [d.get("message", "") for d in diags]
         break
 ok_help = any("did you mean" in m for m in diag_msgs)
 check("diagnostics.helpInMsg", ok_help, str(diag_msgs)[:300])
+
+# 10c 诊断上的码要能点开文档：codeDescription.href 指向 docs/errors.md 的锚点
+href = ""
+for d in diags:
+    if d.get("code") == "E0304":
+        href = (d.get("codeDescription") or {}).get("href", "")
+check("diagnostics.codeDescription", href.endswith("docs/errors.md#e0304"), href or str(diags)[:300])
+
+# 10d 没有具体 fix-it 的诊断，消息里要带上该码的通用修法（errors.c 的文案）
+ok_fix = any(d.get("code") == "E0301" and "@intCast" in d.get("message", "") for d in diags)
+check("diagnostics.genericFix", ok_fix, str(diag_msgs)[:300])
 
 # 9 shutdown/exit
 send({"jsonrpc": "2.0", "id": 8, "method": "shutdown", "params": None})
@@ -309,6 +325,57 @@ except Exception:
     proc.kill()
 
 print("=" * 40)
+
+# 10e 反过来的那条：客户端**没**声明 codeDescriptionSupport 时不能发这个字段。
+# 老客户端对未知字段做严格校验，一条不认识的字段就能让整包诊断被丢弃——
+# 表现为"编辑器里一条波浪线都没有"，最难查的一类。这里单起一个短命服务器验。
+def no_cd_client():
+    p = subprocess.Popen([ZXLS_BIN], stdin=subprocess.PIPE,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    def raw_send(msg):
+        d = json.dumps(msg).encode()
+        p.stdin.write(f"Content-Length: {len(d)}\r\n\r\n".encode() + d)
+        p.stdin.flush()
+    def raw_recv(timeout=30):
+        import time as _t3
+        deadline = _t3.time() + timeout
+        buf = b""
+        while _t3.time() < deadline:
+            c = p.stdout.read(1)
+            if not c:
+                return None
+            buf += c
+            if buf.endswith(b"\r\n\r\n"):
+                hdr = dict(l.split(b": ", 1) for l in buf.split(b"\r\n") if b": " in l)
+                n = int(hdr[b"Content-Length"])
+                body = p.stdout.read(n)
+                return json.loads(body)
+        return None
+    raw_send({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "rootUri": "file:///" + TESTDIR.replace("\\", "/"), "capabilities": {}}})
+    raw_recv()
+    raw_send({"jsonrpc": "2.0", "method": "initialized", "params": {}})
+    raw_send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+        "textDocument": {"uri": uri, "languageId": "zx", "version": 1, "text": BADTXT}}})
+    got = []
+    for _ in range(20):
+        m = raw_recv()
+        if not m:
+            break
+        if m.get("method") == "textDocument/publishDiagnostics" and m["params"].get("diagnostics"):
+            got = m["params"]["diagnostics"]
+            break
+    raw_send({"jsonrpc": "2.0", "id": 2, "method": "shutdown", "params": None})
+    raw_recv()
+    raw_send({"jsonrpc": "2.0", "method": "exit", "params": None})
+    try: p.wait(timeout=5)
+    except Exception: p.kill()
+    return got
+
+plain = no_cd_client()
+check("diagnostics.noCodeDescriptionForOldClients",
+      bool(plain) and all("codeDescription" not in d for d in plain), str(plain)[:300])
+
 if fails:
     print(f"SMOKE FAILED: {len(fails)} -> {fails}"); sys.exit(1)
 print("SMOKE ALL PASS"); sys.exit(0)

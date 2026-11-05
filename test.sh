@@ -46,7 +46,7 @@ if [ "${ZX_CHECKED:-0}" = "1" ]; then
     printf "== 构建编译器（Debug -O0，zig 的运行时检查开着）\n"
     $ZYG cc -std=c11 -O0 -g -o bin/zxc_checked.exe \
         src/zxc.c src/ty.c src/val.c src/lex.c src/parse.c src/sema.c \
-        src/backend.c src/main.c src/fe.c src/astload.c
+        src/backend.c src/main.c src/fe.c src/astload.c src/errors.c
     ZXC=./bin/zxc_checked.exe
 fi
 # zxc 从自己的路径推 zig cc 的位置，给反斜杠路径它就不必靠 cwd
@@ -177,13 +177,44 @@ else
     printf "  ok   explain 对未知码返回非零\n"
 fi
 doc_miss=""
+anchor_miss=""
 for c in $codes; do
     grep -q "$c" docs/errors.md || doc_miss="$doc_miss $c"
+    # 锚点：lsp 的 codeDescription 与 `zxc explain` 都靠 `#e0304` 直接跳转
+    lc=$(printf '%s' "$c" | tr 'A-Z' 'a-z')
+    grep -q "id=\"$lc\"" docs/errors.md || anchor_miss="$anchor_miss $c"
 done
 if [ -z "$doc_miss" ]; then
     printf "  ok   docs/errors.md 覆盖全部 %s 个码\n" "$ncodes"
 else
     printf "  FAIL docs/errors.md 缺:%s\n" "$doc_miss"; fail=1
+fi
+if [ -z "$anchor_miss" ]; then
+    printf "  ok   docs/errors.md 每个码都有锚点\n"
+else
+    printf "  FAIL docs/errors.md 缺锚点:%s\n" "$anchor_miss"; fail=1
+fi
+# 文档地址在 C（zxc explain 输出）和 Zig（lsp codeDescription）各存一份，
+# 只能靠这里挡住漂移：两处字面量必须一致，否则编辑器里的链接指向旧位置。
+url_c=$(grep -oE 'https://[^"]*docs/errors\.md' src/errors.c | head -1)
+url_zig=$(grep -oE 'https://[^"]*docs/errors\.md' tools/zxls.zig | head -1)
+if [ -n "$url_c" ] && [ "$url_c" = "$url_zig" ]; then
+    printf "  ok   errors.c 与 zxls.zig 的文档地址一致\n"
+else
+    printf "  FAIL 文档地址漂移\n        errors.c:%s\n        zxls.zig:%s\n" "$url_c" "$url_zig"; fail=1
+fi
+# 兜底修法：诊断里没有具体建议时，help 行要换成该码的通用修法
+printf 'const main = fn () void {\n    let y: i32 = "abc";\n};\n' > "$TPFX.fix.zx"
+$ZXC "$TPFX.fix.zx" --check > "$TPFX.fix.log" 2>&1 || true
+if grep -q "E0301" "$TPFX.fix.log" && grep -q "help: .*@intCast" "$TPFX.fix.log"; then
+    printf "  ok   无具体建议时诊断带通用修法\n"
+else
+    printf "  FAIL 诊断没带通用修法\n"; cat "$TPFX.fix.log"; fail=1
+fi
+if $ZXC explain E0304 2>&1 | grep -q "#e0304"; then
+    printf "  ok   zxc explain 给出文档链接\n"
+else
+    printf "  FAIL zxc explain 没给文档链接\n"; fail=1
 fi
 
 

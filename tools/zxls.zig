@@ -74,6 +74,15 @@ var quitting = false;
 var root_path: ?[]const u8 = null;
 var zxc_path: []const u8 = "zxc.exe";
 
+/// 错误码说明文档的地址（`<base>#e0304` 直达一条）。与 src/errors.c 的
+/// ZX_DOCS_URL 是同一个字面量——C 常量传不到 Zig 这边，只能各存一份，
+/// test.sh 会校验两处一致，改地址记得两边一起改。
+const docs_base = "https://gitcode.com/simplex/zx/blob/main/docs/errors.md";
+
+/// 客户端有没有在 initialize 里声明 codeDescriptionSupport。
+/// 没有就别发 codeDescription（见 publishDiags 里的注释）。
+var cap_code_desc = false;
+
 var out_mu: Io.Mutex = .init;
 var g_out_buf: [8192]u8 = undefined;
 var g_out_writer: Io.File.Writer = undefined;
@@ -2035,6 +2044,20 @@ fn publishDiags(doc: *const Document, diags: []const Diag) void {
         j.raw("{d},\"character\":{d}", .{ d.line, rg.e });
         j.buf.appendSlice(gpa, "}},\"severity\":1,\"code\":") catch @panic("oom");
         j.str(d.code);
+        // codeDescription：编辑器把诊断上那个码变成可点的链接，点开就是
+        // docs/errors.md 里对应的一条（锚点 = 小写码）。
+        // 只在客户端声明支持时才发——不支持的老客户端看到未知字段会
+        // 严格校验失败，整条 publishDiagnostics 就被丢弃，诊断全没了。
+        if (cap_code_desc and d.code.len == 5) {
+            j.buf.appendSlice(gpa, ",\"codeDescription\":{\"href\":\"") catch @panic("oom");
+            j.buf.appendSlice(gpa, docs_base) catch @panic("oom");
+            j.buf.append(gpa, '#') catch @panic("oom");
+            for (d.code) |ch| {
+                const lo: u8 = if (ch >= 'A' and ch <= 'Z') ch + 32 else ch;
+                j.buf.append(gpa, lo) catch @panic("oom");
+            }
+            j.buf.appendSlice(gpa, "\"}") catch @panic("oom");
+        }
         j.buf.appendSlice(gpa, ",\"source\":\"zxc\",\"message\":") catch @panic("oom");
         j.str(d.msg);
         j.buf.appendSlice(gpa, "}") catch @panic("oom");
@@ -2128,6 +2151,22 @@ fn handle(v: std.json.Value) ?[]const u8 {
                         if (rp == .string and rp.string.len > 0) root_path = dupe(rp.string);
                     }
                 }
+                // 客户端能力：支持 codeDescription 才发那个字段
+                if (pm.object.get("capabilities")) |caps| {
+                    if (caps == .object) {
+                        if (caps.object.get("textDocument")) |td| {
+                            if (td == .object) {
+                                if (td.object.get("publishDiagnostics")) |pd| {
+                                    if (pd == .object) {
+                                        if (pd.object.get("codeDescriptionSupport")) |cd| {
+                                            if (cd == .bool and cd.bool) cap_code_desc = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
         var j = Json{};
@@ -2136,6 +2175,9 @@ fn handle(v: std.json.Value) ?[]const u8 {
         j.buf.appendSlice(gpa, ",\"result\":{\"capabilities\":{\"textDocumentSync\":{\"openClose\":true,\"change\":1},\"completionProvider\":{\"triggerCharacters\":[\".\",\"@\"]},\"definitionProvider\":true,\"hoverProvider\":true,\"signatureHelpProvider\":{\"triggerCharacters\":[\"(\",\",\"]},\"documentFormattingProvider\":true,\"documentSymbolProvider\":true,\"referencesProvider\":true}}}") catch @panic("oom");
         // 工程根的 vendor/ 与 deps：补全/跳转/悬停都靠这张表找模块文件
         initModuleDirs();
+        // 落一行能力协商结果：改了 codeDescription 相关逻辑后，看这条就知道
+        // 是"客户端没声明"还是"我们没发"——省得去猜编辑器版本。
+        logLine(if (cap_code_desc) "init: codeDescription=yes" else "init: codeDescription=no");
         return j.buf.items;
     }
     if (std.mem.eql(u8, method, "initialized")) return null;

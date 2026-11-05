@@ -522,7 +522,11 @@ static int build_program(Node *root, const char *out, const char *cachedir, OutK
         char base[1024];
         path_basename(out, base, sizeof base);
         path_strip_ext(base);
-        const char *mtag = (g_cflags == CC_REL) ? "-rel" : "-dev";
+        /* 别写 `g_cflags == CC_REL`：那是拿指针比字面量地址，只有编译器
+         * 恰好把两份字面量合并才成立。合并与否随优化级别变——一次没合并
+         * 就是 -O2 与 -O0 的 .o 混进同一个目录，症状是"改个 flag 后
+         * 编译出来的程序行为莫名其妙"。按内容认。 */
+        const char *mtag = (g_cflags && strstr(g_cflags, "ZX_RELEASE")) ? "-rel" : "-dev";
         snprintf(stem, sizeof stem, "%s/%s%s", cachedir, base, mtag);
     } else {
         snprintf(stem, sizeof stem, "%s", out);
@@ -1493,7 +1497,7 @@ static int cmd_run(int argc, char **argv, int argi) {
  * 一个用例炸掉不影响后面的用例。测试文件引用工程源码用
  * module("../xxx.zx")（测试目录的上一级就是 src/）。 * ---- */
 
-/* 收集 src/test/*.zx。返回 malloc 的路径数组。 */
+/* 收集 src/test/ 下的 *.zx。返回 malloc 的路径数组。 */
 static char **collect_test_files(int *out_n) {
     return collect_zx_files("src/test", out_n);
 }

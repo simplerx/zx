@@ -112,7 +112,7 @@ static void bmap_note(Buf *b, Node *n) {
 }
 
 /* 驱动层查询：生成的 .c 第 cline 行（含开头两行 include）对应哪个 zx 位置。
- * 找到就填 *zx_line/*zx_col 并返回 true；没有映射则 false（调用方按
+ * 找到就填 *zx_line 与 *zx_col 并返回 true；没有映射则 false（调用方按
  * "无法定位"处理，不要编造行号）。 */
 bool backend_map_lookup(int unit, int cline, int *zx_line, int *zx_col) {
     if (getenv("ZX_TRACE_MAP")) fprintf(stderr, "[map] unit=%d cline=%d n=%d\n", unit, cline, g_nbmap);

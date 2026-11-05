@@ -3089,3 +3089,55 @@ unknown-type-suggest / cascade-arith 四个用例钉行为）。
 
 回归：`passed 257, failed 0`；LSP 冒烟 17 项（诊断 range 由探针钉住：
 ASCII 与含中文两行都精确命中 `coutn`）。
+
+## 98. 诊断的"下一步"：兜底修法 + 可点的错误码（M63）
+
+§97 解决的是"诊断指得准不准"，这一条解决"看到了之后怎么办"。
+
+**问题**：
+
+1. 没有具体 fix-it 的诊断只报症状（`initializer: expected i32, found
+   []const u8`），用户还得自己想到去 `zxc explain E0301`。错误码目录建好了，
+   但没人会主动去查。
+2. 编辑器里 `error[E0304]` 只是一串字符，点不动。文档在仓库里，路径还得自己拼。
+
+**裁定一：没有具体建议时，用该码的通用修法兜底（每码只印一次）**
+
+`diag_emit` 里 `g_help_pending` 为空时，查 `errors_fix(code)` 印一行
+`help: <修法>`。两点取舍：
+
+- **为什么不印全部**：一类错误常连成一片（十个 E0301）。同一句修法重复十遍
+  只会把真正的诊断挤出屏幕，也把 LSP 的诊断面板刷满。
+- **为什么不是"只给码"**：`error[E0301]` 已经给过码了，再补一句"去跑
+  `zxc explain`"等于让用户多敲一条命令换同一句话。直接把话说完。
+- **代价**：第二个起同码诊断不再带修法。可接受——修好第一个重编，下一个
+  自然带着修法出现（自愈），且 `zxc explain` 永远能查全。
+- 精确建议优先：`diag_help` 有内容时不用兜底（`did you mean \`count\`?` 比
+  "查拼写"有用得多），也不占用该码的一次名额。
+
+**裁定二：LSP `codeDescription` 指向 docs/errors.md 的锚点**
+
+- `docs/errors.md` 每条标题前加显式锚点 `<a id="e0304"></a>`，锚点是小写码。
+  不用平台自动生成的标题 slug：它取决于各家的中文与标点处理
+  （GitHub/Gitee/GitCode 三家不一样），而显式锚点是确定的。
+- `zxc explain` 末尾也印同一个链接（`详解：…/errors.md#e0301`）。
+- **能力门控**：只在 initialize 的 `capabilities.textDocument.publishDiagnostics.codeDescriptionSupport`
+  为真时才发这个字段。老客户端对未知字段严格校验，一条不认识就能丢掉整包
+  `publishDiagnostics`——症状是"编辑器里一条波浪线都没有"，属于最难查的那类。
+  `lsptest.py` 两头都钉住（支持时 href 正确、不支持时字段不存在）。
+- **地址存两份**：C 的 `ZX_DOCS_URL`（编译器输出用）与 Zig 的 `docs_base`
+  （LSP 用）。跨语言拿不到同一个常量，只能靠 `test.sh` 校验两处字面量一致；
+  这类"文档漂移"比代码同步问题更隐蔽——链接全绿之前没人点。
+
+**顺带修的两个隐患**（都在 `sh build.sh` 的告警里露头）：
+
+1. `test.sh` 的 `ZX_CHECKED=1` 分支编译 zxc 时漏了 `src/errors.c`——自从
+   §97 加了 errors.c，这条路径直接链接失败。已补。
+2. `src/main.c` 的 `g_cflags == CC_REL`：拿指针比字面量地址，只有编译器
+   恰好合并两份字面量才成立。一次没合并就是 `-O0` 与 `-O2` 的 `.o` 混进
+   同一个缓存目录（`-rel`/`-dev` 判错），症状是"改了 `--release` 后行为
+   莫名其妙"。改成按内容认（`strstr(g_cflags, "ZX_RELEASE")`）。
+
+回归：`passed 257, failed 0`；CLI 冒烟 6+9 项（新增"无具体建议时诊断带通用
+修法""explain 给出文档链接""每个码都有锚点""两处文档地址一致"）；LSP 冒烟
+20 项（新增 codeDescription 正反两条 + genericFix）。

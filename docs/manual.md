@@ -736,6 +736,8 @@ sh editor/zed/install.sh    # 装 Zed 扩展（高亮 + 大纲 + LSP 接线）
   `formatter = "language_server"`），要求 `bin/` 里三件套齐全。
 - 点补全支持：`X.` 出容器成员与方法、`X{ .` 只出字段/变体（字面量上下文）、
   `std.` / 模块绑定 / `@` 内建各归各位。
+- 诊断上的码可点：点了打开 `docs/errors.md` 里那一条（`codeDescription`）；
+  诊断消息下方自动带 `help:` 修法，不必再跑一次 `zxc explain`。
 
 ---
 
@@ -869,11 +871,19 @@ path:line:col: error[E0301]: initializer: expected `i32`, found `[]const u8`
 
 ```
 zxc errors            # 按类别列出全部码
-zxc explain E0304     # 单条：什么意思、通常怎么修（大小写不敏感）
+zxc explain E0304     # 单条：什么意思、通常怎么修（大小写不敏感），末尾给本文链接
 ```
 
 完整参考见 [`docs/errors.md`](errors.md)：每条带触发条件、典型消息和示例。
 **码一旦发布就不再改**，可以拿它搜索、贴进 issue、写进 CI 的失败判定。
+
+诊断本身也带修法：
+
+- 编译器知道具体改法时给精确建议（`help: did you mean \`count\`?`）。
+- 不知道时退到该码的通用修法（`help: 加显式转换 \`@intCast\` …`），**每个码只印一次**——
+  同类错误连成一片时重复同一句只是噪音；想看全了用 `zxc explain`。
+- 编辑器里诊断上的码可以直接点开（`docs/errors.md` 的对应一条），靠语言服务器
+  的 `codeDescription`；客户端不支持这个能力时不会发（见 `spec/decisions.md` §98）。
 
 - 诊断会尽量多报（一次编译能报几个就报几个）；操作数已经报过错的地方
   （比如未知标识符参与算术）不再跟连锁的次生诊断，根因一条就够。

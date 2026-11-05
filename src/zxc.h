@@ -15,7 +15,7 @@
 /* 唯一版本源：`zxc -v` / `zxc --version` 与生成的工程清单都读这里。
  * 编号跟 README 的里程碑走：次版本 = 里程碑号（M49 → 0.49），修订号
  * 留给同一里程碑里的修补。改这个数就顺手在 README 的「状态」里改一行。 */
-#define ZXC_VERSION "0.61.0"
+#define ZXC_VERSION "0.62.0"
 
 /* ---------- diagnostics ---------- */
 
@@ -42,6 +42,10 @@ void        errors_print_all(FILE *out);
 int         errors_print_one(FILE *out, const char *code);   /* 0=找到 */
 int         errors_count(void);
 const char *errors_code_at(int i);
+/* 没有具体 fix-it 时诊断渲染器的兜底：该码的通用修法（没有这个码返回 NULL） */
+const char *errors_fix(const char *code);
+/* 错误码说明文档的公开地址（不带锚点） */
+const char *errors_doc_url(void);
 
 /* fix-it：预挂一条 help 行，跟在下一条诊断后面（A2）。 */
 void diag_help(const char *fmt, ...);

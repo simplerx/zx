@@ -1398,7 +1398,7 @@ static Node *parse_switch(P *p, const char *label) {
             for (;;) {
                 /* pattern: .name | int | char | (error)Err.x | … */
                 if (at(p, TOK_DOT) && peek(p, 1)->kind == TOK_IDENT) {
-                    Token *dot = advance(p);
+                    advance(p);
                     Token *id = advance(p);
                     Node *pat = node_new(NK_FIELD, id->line, id->col);
                     pat->name = dup_tok(id);
