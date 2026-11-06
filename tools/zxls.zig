@@ -553,6 +553,113 @@ fn extractBraceMembers(text: []const u8, is_enum: bool, out: *std.ArrayList(Decl
     }
 }
 
+/// 参数列表顶层逗号切段里收一个字段：`a:i32` / `a : struct{x:i32}` 都算，
+/// 方法（`name = fn …`）与残缺段不收。
+fn anonFieldOne(seg: []const u8, out: *std.ArrayList(Decl)) void {
+    var i: usize = 0;
+    while (i < seg.len and (seg[i] == ' ' or seg[i] == '\t' or seg[i] == '\n' or seg[i] == '\r')) i += 1;
+    const s = i;
+    while (i < seg.len and isIdentChar(seg[i])) i += 1;
+    if (i == s) return;
+    const name = seg[s..i];
+    while (i < seg.len and (seg[i] == ' ' or seg[i] == '\t')) i += 1;
+    if (i >= seg.len or seg[i] != ':') return;
+    out.append(gpa, .{ .name = dupe(name), .kind = .field }) catch {};
+}
+
+/// struct 体里按顶层逗号拆字段：嵌套 struct / fn / 字符串里的逗号不算。
+fn anonFieldsOf(body: []const u8, out: *std.ArrayList(Decl)) void {
+    var d_br: usize = 0;
+    var d_par: usize = 0;
+    var in_str = false;
+    var start: usize = 0;
+    var i: usize = 0;
+    while (i < body.len) : (i += 1) {
+        const c = body[i];
+        if (in_str) {
+            if (c == '\\' and i + 1 < body.len) { i += 1; continue; }
+            if (c == '"') in_str = false;
+            continue;
+        }
+        if (c == '"') {
+            in_str = true;
+        } else if (c == '{') {
+            d_br += 1;
+        } else if (c == '}') {
+            d_br -= 1;
+        } else if (c == '(') {
+            d_par += 1;
+        } else if (c == ')') {
+            d_par -= 1;
+        } else if (c == ',' and d_br == 0 and d_par == 0) {
+            anonFieldOne(body[start..i], out);
+            start = i + 1;
+        }
+    }
+    anonFieldOne(body[start..], out);
+}
+
+/// 匿名 struct 当参数类型的字段补全：`fn (info: struct{a:i32})` + 调用点
+/// `push(.{ …`。在文件文本里找 `const <fname> = fn (`，参数列表中第一个
+/// `struct{…}` 形参的字段就是要补的名字。找到 struct 即算命中（哪怕一个
+/// 字段都没解析出来——空 struct 也是确定答案，别再掉去别的候选）。
+fn anonStructFieldsOf(files: []const []const u8, fname: []const u8, out: *std.ArrayList(Decl)) bool {
+    var pat: std.ArrayList(u8) = .empty;
+    defer pat.deinit(gpa);
+    pat.appendSlice(gpa, "const ") catch return false;
+    pat.appendSlice(gpa, fname) catch return false;
+    pat.appendSlice(gpa, " = fn (") catch return false;
+    for (files) |ftext| {
+        var idx: usize = 0;
+        while (std.mem.indexOfPos(u8, ftext, idx, pat.items)) |hit| {
+            if (hit > 0 and isIdentChar(ftext[hit - 1])) {
+                idx = hit + 1;
+                continue;
+            }
+            var i = hit + pat.items.len;   // 参数列表第一个字符
+            var depth: usize = 0;
+            while (i < ftext.len) : (i += 1) {
+                const c = ftext[i];
+                if (c == '(') { depth += 1; continue; }
+                if (c == ')') {
+                    if (depth == 0) break;   // 参数列表结束：没有 struct 形参
+                    depth -= 1;
+                    continue;
+                }
+                if (depth != 0 or c != 's' or !std.mem.startsWith(u8, ftext[i..], "struct")) continue;
+                var j = i + "struct".len;
+                while (j < ftext.len and (ftext[j] == ' ' or ftext[j] == '\t' or ftext[j] == '\n' or ftext[j] == '\r')) j += 1;
+                if (j >= ftext.len or ftext[j] != '{') { i = j; continue; }
+                // 配对这个 '}'（字符串里的花括号不算）
+                var d2: usize = 0;
+                var in_str = false;
+                var k = j;
+                while (k < ftext.len) : (k += 1) {
+                    const ch = ftext[k];
+                    if (in_str) {
+                        if (ch == '\\' and k + 1 < ftext.len) { k += 1; continue; }
+                        if (ch == '"') in_str = false;
+                        continue;
+                    }
+                    if (ch == '"') {
+                        in_str = true;
+                    } else if (ch == '{') {
+                        d2 += 1;
+                    } else if (ch == '}') {
+                        d2 -= 1;
+                        if (d2 == 0) break;
+                    }
+                }
+                if (k >= ftext.len) return true;
+                anonFieldsOf(ftext[j + 1 .. k], out);
+                return true;
+            }
+            idx = hit + 1;
+        }
+    }
+    return false;
+}
+
 // ------------------------------------------------------------- 模块搜索目录
 //
 // 编译器的 module_load 只有一条解析链：**相对导入文件所在目录** → 打不开时
@@ -1859,6 +1966,53 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
             }
             var decls: std.ArrayList(Decl) = .empty;
             defer decls.deinit(gpa);
+
+            // 函数实参位置的匿名 struct 字面量：push(.{ …）——'{' 紧跟 '('，
+            // 函数名在 '(' 左侧，字段来自签名里第一个 struct{…} 形参。
+            // lit_ctx 时 path 是 ".{ " 这类残段（. \{ 之后敲没敲字段前缀都
+            // 一样，且常带尾随空白），判定前先 trim。
+            var p2 = path;
+            while (p2.len > 0 and (p2[p2.len - 1] == ' ' or p2[p2.len - 1] == '\t' or
+                p2[p2.len - 1] == '\n' or p2[p2.len - 1] == '\r')) p2 = p2[0 .. p2.len - 1];
+            if (lit_ctx and p2.len > 0 and p2[p2.len - 1] == '{') {
+                var q2 = base_start;
+                while (q2 > 0 and (text[q2 - 1] == ' ' or text[q2 - 1] == '\t')) q2 -= 1;
+                if (q2 > 0 and text[q2 - 1] == '(') {
+                    var e2 = q2 - 1;
+                    while (e2 > 0 and (text[e2 - 1] == ' ' or text[e2 - 1] == '\t')) e2 -= 1;
+                    var s2 = e2;
+                    while (s2 > 0 and isIdentChar(text[s2 - 1])) s2 -= 1;
+                    const fname = text[s2..e2];
+                    if (fname.len > 0) {
+                        // 同目录文件也扫：函数可能定义在别的模块里
+                        var afiles: std.ArrayList([]const u8) = .empty;
+                        defer afiles.deinit(gpa);
+                        afiles.append(gpa, text) catch {};
+                        var ad = Io.Dir.cwd().openDir(g_io, doc_dir, .{ .iterate = true }) catch null;
+                        if (ad) |*dd| {
+                            defer dd.close(g_io);
+                            var ait = dd.iterate();
+                            while (ait.next(g_io) catch null) |entry| {
+                                if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".zx")) continue;
+                                if (std.mem.eql(u8, entry.name, baseName(doc.path))) continue;
+                                var fp: std.ArrayList(u8) = .empty;
+                                defer fp.deinit(gpa);
+                                fp.appendSlice(gpa, doc_dir) catch continue;
+                                fp.append(gpa, '/') catch continue;
+                                fp.appendSlice(gpa, entry.name) catch continue;
+                                if (readFileSmall(fp.items)) |txt| afiles.append(gpa, txt) catch {};
+                            }
+                        }
+                        if (anonStructFieldsOf(afiles.items, fname, &decls)) {
+                            handled = true;
+                            for (decls.items) |dcl| {
+                                if (dcl.kind != .field) continue;
+                                addItem(&list, &seen, dcl.name, 5, "匿名 struct 字段", 0);
+                            }
+                        }
+                    }
+                }
+            }
             if (mod) |m| {
                 moduleDecls(doc_dir, m, &decls);
                 handled = decls.items.len > 0;
@@ -2070,12 +2224,23 @@ fn runCheck(doc: *const Document, out_diags: *std.ArrayList(Diag)) void {    // 
             continue;
         }
         const marker = std.mem.indexOf(u8, line, ": error[") orelse continue;
+        // 行号/列号解析失败不能整条丢弃：E0101 这类词法错误是
+        // "file: error[E0101]: lexical error(s)"，没有 line:col 段——
+        // 以前这里 continue，编辑器里一条波浪线都不出。
         var seg = line[0..marker];
-        const c1 = std.mem.lastIndexOfScalar(u8, seg, ':') orelse continue;
-        const col = std.fmt.parseInt(u32, seg[c1 + 1 ..], 10) catch continue;
-        seg = seg[0..c1];
-        const c2 = std.mem.lastIndexOfScalar(u8, seg, ':') orelse continue;
-        const ln = std.fmt.parseInt(u32, seg[c2 + 1 ..], 10) catch continue;
+        var ln: u32 = 0;
+        var col: u32 = 0;
+        if (std.mem.lastIndexOfScalar(u8, seg, ':')) |c1| {
+            if (std.fmt.parseInt(u32, seg[c1 + 1 ..], 10)) |v| {
+                col = v;
+                const seg2 = seg[0..c1];
+                if (std.mem.lastIndexOfScalar(u8, seg2, ':')) |c2| {
+                    if (std.fmt.parseInt(u32, seg2[c2 + 1 ..], 10)) |v2| {
+                        ln = v2;
+                    } else |_| {}
+                }
+            } else |_| {}
+        }
         const after = line[marker..];
         const lb = std.mem.indexOfScalar(u8, after, '[') orelse continue;
         const rb = std.mem.indexOfScalar(u8, after, ']') orelse continue;

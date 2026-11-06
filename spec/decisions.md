@@ -3339,3 +3339,30 @@ lbl: 其余（{} / {a,b} / expr）→ 收割
 README 同时重写：只留语言介绍、构建、上手 demo（hello + 错误处理速览）、常用命令与目录表——特性清单、Task 详表、FFI、编辑器细节全部让位给`docs/manual.md`。
 
 顺手修了重写 demo 撞出的 backend bug：`emit_debug_runtime` 发射的 `zx_debug_errname` 引用 `ZxSlice_u8` 却不 ensure 该类型，调用点传常量错误码时被别处顺带 ensure 而侥幸通过，传运行期错误值直接编不过（B1003）。修法：emit_debug_runtime 开头自己 `ensure_type(ty_slice(ty_u8(), true))`；`good/errname-runtime` 钉住。
+
+
+## 105. 编译进度可见 + 匿名 struct 参数补全
+
+两件都是 1.0.0 之后的第一批体感反馈。
+
+**编译进度（stderr，`[zx] ` 前缀）。** "停几秒不知道发生了什么"是编译体验
+最直接的伤手点。裁定：每个可能超过半秒的阶段在开始/结束各打一行
+（checked / compiling N units / compiled ok / linking / done 总耗时），
+**只打成功路径**——失败时 stderr 已有诊断，进度行是噪音；增量命中打
+`up to date`。ZX_VERBOSE=1 时跳过（已有逐单元细节）。行首 `[zx] ` 与诊断、
+`  cc ` 细节行区分：test.sh 的断言（`grep -c "^  cc "`、expect-count 数
+`error[E`）都靠这个互不干扰。`--check`/`--emit-c` 等诊断场景一律不打。
+
+**匿名 struct 参数的字段补全。** `fn (info: struct{a:i32})` + 调用点
+`push(.{ …` 之前没有候选。裁定：字面量上下文里 `{` 紧跟 `(` 时取函数名，
+扫当前文件 + 同目录 `.zx` 里 `const <名> = fn (` 的参数列表，第一个
+`struct{…}` 形参的字段就是要补的名字。命名 struct（`push(Point{.`）走原有
+容器成员路径，无需重复做。命中即短路——空 struct 也是确定答案，不落回
+工作区标识符噪音。
+
+**连带发现：bin/zxls.exe 的发布时序。** 用户"error 不提示"的根因不是代码：
+error 补全代码 11-05 15:01 提交，但 bin/zxls.exe 停在当天 13:13——Zed 锁着
+exe，build.sh 一直 skip，功能进了源码却没进用户手里的二进制。处理：运行中
+的 exe 可以改名（mv 不受锁限制），旧改名 .old、新文件 cp 进位，用户重启
+Zed 即加载。教训：**改了 tools/zxls.zig 必须确认 bin/zxls.exe 真的被替换**，
+skip 提示要当成失败对待。

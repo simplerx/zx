@@ -35,8 +35,15 @@ pub const main = fn () i32 {
     let o = make();
     let n = o.count;
     var s = Shape{ .circle = 1.0 };
+    push(.{ .a = 1010, .msg = "hi" });
     std.println("{}", n);
     return 0;
+};
+
+// 匿名 struct 当参数类型：调用点 `.{ …` 要能补出字段（3d 用例）
+const push = fn (info: struct{a: i32, msg: []const u8}) {
+    let i = info.a;
+    std.println("push:{}", i);
 };
 
 const IOErr = error{ open, read };
@@ -189,6 +196,14 @@ send({"jsonrpc": "2.0", "id": 10, "method": "textDocument/completion", "params":
 r, _ = recv_id("completion.literal.union", 10)
 labels = {i["label"] for i in r["result"]["items"]} if r and r.get("result") else set()
 check("completion.literal.union", {"circle", "rect"} <= labels, str(sorted(labels)))
+
+# 3d 匿名 struct 参数：push(.{ . → 字段来自签名里的 struct{…} 形参
+off = MAIN.index("push(.{ .a") + len("push(.{ .")
+send({"jsonrpc": "2.0", "id": 11, "method": "textDocument/completion", "params": {
+    "textDocument": {"uri": uri}, "position": pos(MAIN, off)}})
+r, _ = recv_id("completion.anon", 11)
+labels = {i["label"] for i in r["result"]["items"]} if r and r.get("result") else set()
+check("completion.anon.fields", {"a", "msg"} <= labels, str(sorted(labels)))
 
 # 4 completion `std.p`（带前缀点补全，旧版这里只会出关键字）
 off = MAIN.rindex("std.p") + len("std.p")   # 光标在 p 后面

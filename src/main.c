@@ -32,6 +32,7 @@
 #include "ty.h"
 #include "val.h"
 #include <stdarg.h>
+#include <time.h>
 #include <sys/stat.h>
 #include <errno.h>
 #ifndef _WIN32
@@ -496,6 +497,28 @@ static const char *archiver_of(const char *cc) {
     return "ar";
 }
 
+/* ---------------- 编译进度（stderr，"[zx] " 前缀） ----------------
+ * "停几秒没动静"是最伤手的体感：每个可能超过半秒的阶段在开始/结束
+ * 各打一行。只打成功路径——失败时 stderr 已经有诊断，进度行是噪音。
+ * ZX_VERBOSE=1 时本来就有逐单元细节，跳过不重复。行首 "[zx] " 和
+ * 诊断、`  cc ` 细节行区分开，互不干扰（test.sh 的断言都靠这个）。
+ * 计时用 clock()：MinGW 下即进程启动以来的墙钟时间，秒级阶段够用。 */
+static double prog_clock(void) {
+    return (double)clock() / (double)CLOCKS_PER_SEC;
+}
+static double g_prog_t0;   /* main() 一进来记的起点：总结行报总耗时 */
+
+static void prog(const char *fmt, ...) {
+    if (getenv("ZX_VERBOSE")) return;
+    va_list ap;
+    fprintf(stderr, "[zx] ");
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    fputc('\n', stderr);
+    fflush(stderr);
+}
+
 /* cachedir 非空：中间文件（.h/.c/.o/.flags）全部落进 cachedir/，
  * out 是最终产物路径；cachedir 为空则维持旧行为——中间文件挨着 out 放。 */
 static int build_program(Node *root, const char *out, const char *cachedir, OutKind kind) {
@@ -622,7 +645,12 @@ static int build_program(Node *root, const char *out, const char *cachedir, OutK
         buf_printf(&objs, "\"%s\"", opath);
     }
 
+    double t_cc = prog_clock();
+    if (njobs > 0) prog("compiling %d unit%s...", njobs, njobs == 1 ? "" : "s");
     int ccfail = run_cc_jobs(g_jobs, njobs);
+    if (njobs > 0)
+        prog(ccfail ? "compiling failed (%.2f s)" : "compiled ok (%.2f s)",
+             prog_clock() - t_cc);
     /* 成功时把日志清掉（失败时留着，ZX_TRACE/ZX_VERBOSE 还要看） */
     if (!ccfail && !getenv("ZX_VERBOSE"))
         for (int i = 0; i < njobs; i++) remove(g_jobs[i].log);
@@ -653,6 +681,7 @@ static int build_program(Node *root, const char *out, const char *cachedir, OutK
         long long om = fmtime(absout);
         if (om > 0 && om >= maxobj && !lchanged) {
             if (getenv("ZX_VERBOSE")) fprintf(stderr, "  link skipped (up to date: %s)\n", out);
+            prog("up to date: %s (%.2f s total)", out, prog_clock() - g_prog_t0);
             return 0;
         }
     }
@@ -683,6 +712,8 @@ static int build_program(Node *root, const char *out, const char *cachedir, OutK
                 snprintf(cmd + strlen(cmd), sizeof cmd - strlen(cmd), " -l%s", L);
         }
     }
+    prog("%s...", kind == OUT_STATIC ? "archiving" : "linking");
+    double t_link = prog_clock();
     {
         char llog[2048];
         snprintf(llog, sizeof llog, "%s.link.log", stem);
@@ -695,6 +726,9 @@ static int build_program(Node *root, const char *out, const char *cachedir, OutK
         }
         remove(llog);
     }
+    prog("%s ok (%.2f s) — done: %s (%.2f s total)",
+         kind == OUT_STATIC ? "archived" : "linked", prog_clock() - t_link,
+         out, prog_clock() - g_prog_t0);
     return 0;
 }
 
@@ -1748,6 +1782,7 @@ static int cmd_fmt(int argc, char **argv, int argi, bool check_only) {
 }
 
 int main(int argc, char **argv) {
+    g_prog_t0 = prog_clock();
     sema_set_argv0(argv[0]);
     /* zxfe.exe 与 zxc.exe 同目录，位置从 argv[0] 推——必须在这里就交给
      * 前端。以前只有单文件模式设，子命令（check / build / run / test，
@@ -1884,7 +1919,12 @@ int main(int argc, char **argv) {
     if (dump_ast) {
         ast_dump(root, 0);
     } else {
-        if (check && g_error_count == 0) sema_check(root);
+        if (check && g_error_count == 0) {
+            sema_check(root);
+            /* 只查不编（没 -o）不打进度：那是诊断场景，输出越干净越好 */
+            if (out && g_error_count == 0)
+                prog("checked ok (%.2f s)", prog_clock() - g_prog_t0);
+        }
         if ((emit_c || out) && g_error_count == 0) {
             if (out) {
                 if (build_program(root, out, NULL, OUT_EXE) != 0) return 1;
