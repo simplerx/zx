@@ -1631,17 +1631,18 @@ static bool check_c_able(Node *at, Type *t, const char *fname) {
         if (t->decl && t->decl->is_extern) return true;
         err_at(at->line, at->col,
                "field '%s': nested aggregates in `extern struct`/`extern union` "
-               "must be `extern` too (Zx 聚合体带运行时信息，布局与 C 不保证一致)",
+               "must be `extern` too (Zx aggregates carry runtime metadata; "
+               "the C layout is not guaranteed to match)",
                fname ? fname : "?");
         return false;
     case TY_OPT:
         err_at(at->line, at->col,
-               "field '%s': ?T carries a Zx tag bool — a C pointer is just "
+               "field '%s': ?T carries a Zx tag bool -- a C pointer is just "
                "`*T` (null is 0)", fname ? fname : "?");
         return false;
     case TY_SLICE:
         err_at(at->line, at->col,
-               "field '%s': []T is a {ptr, len} pair with no C equivalent — "
+               "field '%s': []T is a {ptr, len} pair with no C equivalent -- "
                "pass a pointer `*T` and the length as separate fields",
                fname ? fname : "?");
         return false;
@@ -1676,17 +1677,17 @@ static Type *resolve_struct_body(Node *n, Type *agg, bool is_union) {
                    "the platform's natural layout");
         if (is_union && n->op == 1)
             err_at(n->line, n->col,
-                   "extern union cannot be union(enum) — tagged unions are a "
+                   "extern union cannot be union(enum) -- tagged unions are a "
                    "Zx layout ({payload, tag}); a C union is plain");
         for (int i = 0; i < n->nitems; i++) {
             Node *it = n->items[i];
             if (it->kind == NK_FN)
                 err_at(it->line, it->col,
-                       "extern struct/union cannot have methods — attach free "
+                       "extern struct/union cannot have methods -- attach free "
                        "functions to the type from outside");
             else if (it->kind == NK_DECL)
                 err_at(it->line, it->col,
-                       "extern struct/union cannot have static members — "
+                       "extern struct/union cannot have static members -- "
                        "only plain `name: Type` fields");
         }
     }
@@ -2038,7 +2039,7 @@ static Type *ptr_offset_type(Node *n, Type *p, Type *o, Node *onode) {
         return p;
     }
     if (!ty_eq(o, ty_usize()))
-        return BAD(n, "pointer arithmetic needs a `usize` offset, found `%s`; write `(usize)…`",
+        return BAD(n, "pointer arithmetic needs a `usize` offset, found `%s`; write `(usize)...`",
                    ty_str(o));
     return p;
 }
@@ -2363,11 +2364,11 @@ static Type *check_cast(Node *n) {
         }
         if (known && cv == 0)
             return BAD_CODE("E0508", n, "error code 0 means \"no error\": this would be read as "
-                                        "success and hand back an uninitialized payload — "
+                                        "success and hand back an uninitialized payload -- "
                                         "number your error codes from 1");
         if (known && cv == 65535)
-            return BAD_CODE("E0508", n, "error code 65535 is reserved for `error.null` — "
-                                        "the code a null optional throws when you `try` it (§5)");
+            return BAD_CODE("E0508", n, "error code 65535 is reserved for `error.null` -- "
+                                        "the code a null optional throws when you `try` it (spec rule 5)");
     }
 
     if ((from->kind == TY_COMPTIME_INT || from->kind == TY_COMPTIME_FLOAT) &&
@@ -2716,7 +2717,7 @@ static Symbol *ns_member_symbol(Node *field) {
     Symbol *ns = lookup(field->a->name);
     if (!ns) return NULL;
     /* 惰性模块别名此刻可能还是未解析的 SK_CONST（文件根声明推迟了
-     * module("…") 的加载），先按需解析成 SK_NS 再看成员。 */
+     * module("...") 的加载），先按需解析成 SK_NS 再看成员。 */
     ensure(ns);
     if (ns->kind != SK_NS || !ns->mod) return NULL;
     return module_member(ns->mod, field->name);
@@ -2884,7 +2885,7 @@ static Type *check_method_call(Node *n) {
     Type *rt   = fld->a->ty;
     if (!fld->flag || mft->nparams == 0)
         return BAD(recv, "`%s` is not a method (its first parameter is not `self`); "
-                         "call it as `%s.%s(…)`",
+                         "call it as `%s.%s(...)`",
                    fld->name ? fld->name : "?", rt ? ty_str(rt) : "Type",
                    fld->name ? fld->name : "?");
     Type *want = mft->params[0];
@@ -3500,7 +3501,7 @@ static Type *check_expr_raw(Node *n, Type *expect) {
         if (t->kind == TY_NULL)
             /* `null` 自己没有类型——它只是"给 ?T 填空"的那个字面量，不是 ?T。
              * 所以 `null.?` 不是"运行时空解包"，而是压根没东西可解。 */
-            return BAD(n, "`.?` needs an optional or an error union, found `null` — "
+            return BAD(n, "`.?` needs an optional or an error union, found `null` -- "
                           "`null` only fills a `?T`, it is not one");
         if (t->kind != TY_OPT && t->kind != TY_ERR)
             return BAD(n, "`.?` needs an optional or an error union, found `%s`", ty_str(t));
@@ -3508,7 +3509,7 @@ static Type *check_expr_raw(Node *n, Type *expect) {
          * 能定就在编译期报，不要留到运行期。 */
         Value *cv = ct_eval_probe(n->a);
         if (cv && (cv->kind == V_NULL || cv->kind == V_UNDEF))
-            return BAD_CODE("E0506", n, "`.?` on a value that is `null` at compile time — "
+            return BAD_CODE("E0506", n, "`.?` on a value that is `null` at compile time -- "
                                         "it would abort every time");
         return type_of(n, t->elem);
     }
@@ -3522,17 +3523,17 @@ static Type *check_expr_raw(Node *n, Type *expect) {
         /* `defer` / `errdefer` 体里不能往外抛：两者都在返回路径上执行，
          * 自己再"提前返回"没有意义（会把正在返回的值覆盖掉）。就地处理掉。 */
         if (g_in_defer)
-            return BAD(n, "`try` is not allowed inside `defer`/`errdefer` — a defer body "
+            return BAD(n, "`try` is not allowed inside `defer`/`errdefer` -- a defer body "
                           "cannot propagate; handle the error there (`if` capture / `orelse`)");
         /* `?T` 也行（v0.26）：空值当错误——null 抛保留错误码 error.null（65535）。
          * "可能没有"和"可能出错"不靠嵌套表达（?!T 非法），靠同一条传播路。 */
         if (t->kind != TY_ERR && t->kind != TY_OPT)
-            return BAD(n, "`try` needs an error union or an optional, found `%s` — "
+            return BAD(n, "`try` needs an error union or an optional, found `%s` -- "
                           "use `orelse` or `if` capture to handle the empty case here",
                        ty_str(t));
         /* 往外抛要有地方抛：所在函数必须能返回错误（`!U`）。 */
         if (!g_ret || g_ret->kind != TY_ERR)
-            return BAD(n, "`try` inside a function that cannot return an error — "
+            return BAD(n, "`try` inside a function that cannot return an error -- "
                           "declare it `!%s` or handle the error here (`if` capture / `orelse`)",
                        ty_str(t->elem));
         /* 声明了错误集就得守住：往上抛的码必须都在集合里（§5.2）。 */
@@ -3546,7 +3547,7 @@ static Type *check_expr_raw(Node *n, Type *expect) {
                         ty_errset_str(want));
             } else if (!t->eset) {
                 return BAD_CODE("E0903", n,
-                    "this `try` can propagate any error (`!%s`), but the function declares %s — "
+                    "this `try` can propagate any error (`!%s`), but the function declares %s -- "
                     "widen the return type to `!%s`, or handle the error here",
                     ty_str(t->elem), ty_errset_str(want), ty_str(t->elem));
             } else if (!ty_errset_subset(t->eset, want)) {
@@ -3573,7 +3574,7 @@ static Type *check_expr_raw(Node *n, Type *expect) {
         if (t->kind == TY_NULL)
             /* 同 `null.?`：`null` 只在"有 ?T 落点"的位置成立。`null orelse x`
              * 没有落点，也就没有左值可看——直接报错，别退化成"右边恒为答案"。 */
-            return BAD(n, "`orelse` needs an optional or an error union, found `null` — "
+            return BAD(n, "`orelse` needs an optional or an error union, found `null` -- "
                           "`null` only fills a `?T`, it is not one");
         if (t->kind != TY_OPT && t->kind != TY_ERR)
             return BAD(n, "`orelse` needs an optional or an error union, found `%s`", ty_str(t));
@@ -3677,7 +3678,7 @@ static Type *check_expr_raw(Node *n, Type *expect) {
         return sema_construct(n, expect);
 
     case NK_RANGE:
-        return BAD(n, "a range `lo..hi` is only valid inside `for (…)`");
+        return BAD(n, "a range `lo..hi` is only valid inside `for (...)`");
 
     case NK_DEFER:
     case NK_ERRDEFER:
@@ -3725,7 +3726,7 @@ static void err_unreachable(Node *s, Node *prev) {
     case NK_RETURN:   w = "`return`";        break;
     case NK_CONTINUE: w = "`continue`";      break;
     case NK_YIELD:    w = "yield";           break;
-    case NK_BLOCK:    w = "`{…}` block";     break;
+    case NK_BLOCK:    w = "`{...}` block";     break;
     case NK_IF:       w = "`if`/`else`";     break;
     case NK_SWITCH:   w = "`switch`";        break;
     case NK_WHILE:    w = "`while (true)`";  break;
@@ -3787,7 +3788,7 @@ static Symbol *module_member(Module *m, const char *name) {
     return NULL;
 }
 
-/* 顶层 const 的初值是不是"惰性模块引用"：module("…") 本身，或者指向
+/* 顶层 const 的初值是不是"惰性模块引用"：module("...") 本身，或者指向
  * 这类别名的成员链（std.zx 顶层的 `pub const HashMap = map.HashMap;`
  * 就是后者）。
  *
@@ -3938,11 +3939,11 @@ static void ensure_raw(Symbol *s) {
     if (d->is_extern) {
         if (g_fn_depth > 0) {
             err_at(d->line, d->col,
-                   "extern var belongs at file scope — function-local extern "
+                   "extern var belongs at file scope -- function-local extern "
                    "declarations have no Zx semantics");
         } else if (d->op != 2) {
             err_at(d->line, d->col,
-                   "`extern var` is the only extern binding — const/let imply "
+                   "`extern var` is the only extern binding -- const/let imply "
                    "a Zx-side initializer, which would fight the C definition");
         } else if (!d->a) {
             err_at(d->line, d->col,
@@ -3950,7 +3951,7 @@ static void ensure_raw(Symbol *s) {
                    s->name ? s->name : "?", s->name ? s->name : "?");
         } else if (d->b) {
             err_at(d->line, d->col,
-                   "extern var '%s' takes no initializer — the C side owns the storage",
+                   "extern var '%s' takes no initializer -- the C side owns the storage",
                    s->name ? s->name : "?");
         } else {
             Type *t = resolve_type(d->a);
@@ -4708,7 +4709,7 @@ static Type *check_if(Node *n, Type *expect) {
     if (!is_opt && !is_err && n->name && arm_is_capture_value(n->b, n->name)) {
         if (ty_eq(c, ty_bool()) && !lookup(n->name)) {
             err_at(n->line, n->col,
-                   "`%s` is not declared — an `if` on a bool has nothing to capture; "
+                   "`%s` is not declared -- an `if` on a bool has nothing to capture; "
                    "write `if (c) { %s }` for a value arm", n->name, n->name);
             /* 这一臂别再往下检查：`cap` 必然也是"未声明"，级联只会多一条
              * 同义诊断。臂按 void 算，和 `!void` 捕获那条路一样，让调用处
@@ -4726,7 +4727,7 @@ static Type *check_if(Node *n, Type *expect) {
      * 想要错误码写 `else e`。放过去会让后端生成 `void v = x.payload;`。 */
     if ((is_opt || is_err) && cap_ty && cap_ty->kind == TY_VOID && n->name) {
         err_at(n->line, n->col,
-               "`%s` has no payload to capture — write `if (x) { … }` for the success "
+               "`%s` has no payload to capture -- write `if (x) { ... }` for the success "
                "branch, or `else e` for the error code", ty_str(c));
         cap_ty = NULL;
     }
@@ -4769,8 +4770,8 @@ static Type *check_if(Node *n, Type *expect) {
         if (is_opt && n->d && n->d->kind == NK_IDENT && !n->meth_done) {
             n->meth_done = true;
             err_at(n->line, n->col,
-                   "a `?T` capture cannot have an `else e` capture — `?T` and `!T` "
-                   "do not nest (?!T is illegal); use plain `else { … }` for the empty "
+                   "a `?T` capture cannot have an `else e` capture -- `?T` and `!T` "
+                   "do not nest (?!T is illegal); use plain `else { ... }` for the empty "
                    "case, or `try` to treat null as the error `error.null`");
         }
         if (n->d && n->d->kind == NK_IDENT) {
@@ -5218,7 +5219,7 @@ static Type *check_switch(Node *n, Type *expect) {
              * 和 `if (x) v { … }` 同一条规则，否则后端会发 `void v = …`。 */
             else if (cap_ty->kind == TY_VOID) {
                 err_at(arm->line, arm->col,
-                       "this arm has no payload to capture (`%s` carries no value) — "
+                       "this arm has no payload to capture (`%s` carries no value) -- "
                        "drop the capture and match the pattern alone", ty_str(s));
                 cap_ty = NULL;
             }

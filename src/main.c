@@ -261,12 +261,12 @@ static int report_cc_log(CCJob *j, int mode) {
 
             if (j->unit < 0) {
                 fprintf(stderr, "error[B1003]: the bundled C runtime (zxrt) does not compile: %s\n", msg);
-                fprintf(stderr, "  help: this is the compiler's own support code, not your zx source —\n"
+                fprintf(stderr, "  help: this is the compiler's own support code, not your zx source;\n"
                                 "        check ZX_CC / .toolchain, or rerun with ZX_VERBOSE=1\n");
             } else if (mapped && zl > 0) {
                 fprintf(stderr, "%s:%d:%d: error[B1001]: generated C was rejected by the C compiler: %s\n",
                         mod ? mod : cbase, zl, zc > 0 ? zc : 1, msg);
-                fprintf(stderr, "  help: zx type checking passed, so this is a code-generation bug —\n"
+                fprintf(stderr, "  help: zx type checking passed, so this is a code-generation bug;\n"
                                 "        rerun with ZX_VERBOSE=1 to see the raw backend output\n");
             } else {
                 fprintf(stderr, "error[B1002]: generated C for module `%s` does not compile "
@@ -726,7 +726,7 @@ static int build_program(Node *root, const char *out, const char *cachedir, OutK
         }
         remove(llog);
     }
-    prog("%s ok (%.2f s) — done: %s (%.2f s total)",
+    prog("%s ok (%.2f s) | done: %s (%.2f s total)",
          kind == OUT_STATIC ? "archived" : "linked", prog_clock() - t_link,
          out, prog_clock() - g_prog_t0);
     return 0;
@@ -757,40 +757,40 @@ static void dump_toklist(Lexer *lx) {
  * 不是错误（参数写错时才走 stderr + rc=2）。 */
 static void usage(FILE *f) {
     fprintf(f,
-        "zxc %s — Zx 语言编译器\n"
+        "zxc %s -- Zx language compiler\n"
         "\n"
-        "用法:\n"
-        "  zxc <file.zx> [选项]             解析 + 类型检查（默认）\n"
-        "  zxc <file.zx> -o <prog>          生成 C 并编成可执行文件\n"
-        "  zxc <子命令> [参数]              工程级操作（读当前目录的 zx.json）\n"
+        "usage:\n"
+        "  zxc <file.zx> [options]          parse + type check (default)\n"
+        "  zxc <file.zx> -o <prog>          generate C and build an executable\n"
+        "  zxc <subcommand> [args]          project-level ops (reads zx.json in cwd)\n"
         "\n"
-        "工程子命令:\n"
-        "  init [name]                      创建工程：src/ 源码、vendor/ 外部模块根、zx.json\n"
-        "  build [选项]                     按 zx.json 构建到 out/（中间文件在 .zxc-cache/）\n"
-        "  run [选项] [-- 程序参数...]      build 后直接运行\n"
-        "  test [名字过滤]                  运行 src/test/ 的用例（零参 pub 函数即用例）\n"
-        "  check [file...]                  静态检查（缺省当前目录，回落 src/、src/test/）\n"
-        "  fmt [file...] [--check]          格式化（--check 只报告不写回）\n"
-        "  errors                           列出全部错误码（按类别）\n"
-        "  explain <CODE>                   解释单个错误码：什么意思、怎么修\n"
+        "project subcommands:\n"
+        "  init [name]                      create a project: src/ sources, vendor/ module root, zx.json\n"
+        "  build [options]                  build per zx.json into out/ (intermediates in .zxc-cache/)\n"
+        "  run [options] [-- prog args...]  build, then run\n"
+        "  test [name filter]               run src/test/ cases (zero-arg pub functions)\n"
+        "  check [file...]                  static check (defaults to cwd, falls back to src/, src/test/)\n"
+        "  fmt [file...] [--check]          format (--check reports without writing)\n"
+        "  errors                           list all error codes (by category)\n"
+        "  explain <CODE>                   explain one error code: meaning and fix\n"
         "\n"
-        "单文件选项:\n"
-        "  --check        只做检查（默认行为，显式写法）\n"
-        "  --tokens       打印 token 流\n"
-        "  --ast          打印语法树（s-expression）\n"
-        "  --emit-c       只输出生成的 C 到 stdout\n"
-        "  -o <path>      输出可执行文件\n"
-        "  --release      -O2 发布档（默认 dev 档 -O0）\n"
-        "  --fe=zx|c      前端选择（默认 zx；c 仅用于交叉验证）\n"
+        "single-file options:\n"
+        "  --check        check only (default behavior, explicit form)\n"
+        "  --tokens       print the token stream\n"
+        "  --ast          print the syntax tree (s-expression)\n"
+        "  --emit-c       print generated C to stdout only\n"
+        "  -o <path>      output executable\n"
+        "  --release      -O2 release profile (default dev profile is -O0)\n"
+        "  --fe=zx|c      frontend choice (default zx; c is for cross-validation only)\n"
         "\n"
-        "通用:\n"
-        "  -h, --help     显示本帮助；带子命令看细节（zxc build -h）\n"
-        "  -v, --version  显示版本\n"
-        "  help [cmd]     同 -h / -h <cmd>\n"
+        "general:\n"
+        "  -h, --help     show this help; add a subcommand for details (zxc build -h)\n"
+        "  -v, --version  show version\n"
+        "  help [cmd]     same as -h / -h <cmd>\n"
         "\n"
-        "环境变量:\n"
-        "  ZX_CC          C 编译器命令（缺省 zxc 同级的 ../.toolchain/zig.exe cc）\n"
-        "  ZX_VERBOSE=1   打印构建细节（cc 命令行、后端原始报错）\n",
+        "environment:\n"
+        "  ZX_CC          C compiler command (default ../.toolchain/zig.exe cc next to zxc)\n"
+        "  ZX_VERBOSE=1   print build details (cc command lines, raw backend errors)\n",
         ZXC_VERSION);
 }
 
@@ -802,76 +802,78 @@ static void print_version(FILE *f) {
 static int help_sub(FILE *f, const char *cmd) {
     if (!strcmp(cmd, "init")) {
         fprintf(f,
-            "zxc init [name] — 创建 zx 工程\n"
+            "zxc init [name] -- create a zx project\n"
             "\n"
-            "  zxc init          在当前目录建（工程名取目录名）\n"
-            "  zxc init demo     新建 demo/ 并在其中建\n"
+            "  zxc init          create in the current directory (project name = dir name)\n"
+            "  zxc init demo     create demo/ and scaffold inside it\n"
             "\n"
-            "生成:\n"
-            "  src/main.zx       入口（示例：module(\"std\") + greet/main）\n"
-            "  zx.json           工程清单：name / version / main / out / deps\n"
-            "  vendor/           外部模块根（见下）\n"
+            "generated:\n"
+            "  src/main.zx       entry (example: module(\"std\") + greet/main)\n"
+            "  zx.json           project manifest: name / version / main / out / deps\n"
+            "  vendor/           external module root (see below)\n"
             "  README.md .gitignore\n"
             "\n"
             "vendor/:\n"
-            "  把第三方 *.zx 模块放进来就能被 module(\"名字\") 找到，例如\n"
-            "  vendor/ext.zx → module(\"ext\")、vendor/lib/util.zx → module(\"lib/util\")。\n"
-            "  搜索顺序：相对导入所在目录 → vendor/ → zx.json 的 deps；\n"
-            "  vendor/ 存在即自动参与搜索，不必写进 deps。\n"
+            "  drop third-party *.zx modules here and module(\"name\") finds them:\n"
+            "  vendor/ext.zx -> module(\"ext\"), vendor/lib/util.zx -> module(\"lib/util\").\n"
+            "  search order: dir of the importing file -> vendor/ -> deps in zx.json;\n"
+            "  vendor/ joins the search automatically once it exists, no deps entry needed.\n"
             "\n"
-            "建完会顺手检查一遍 src/main.zx，失败时返回 1。\n");
+            "src/main.zx is checked once after scaffolding; failures return 1.\n");
         return 0;
     }
     if (!strcmp(cmd, "build")) {
         fprintf(f,
-            "zxc build [选项] — 按 zx.json 构建\n"
+            "zxc build [options] -- build per zx.json\n"
             "\n"
-            "  --exe        可执行文件（默认）\n"
-            "  --lib        库：默认静态 .a，配 --shared 出动态库 .dll/.so\n"
-            "  --static     静态库（默认）\n"
-            "  --shared     动态库（需配 --lib）\n"
-            "  --release    -O2 发布档；默认 dev 档 -O0（迭代快）\n"
+            "  --exe        executable (default)\n"
+            "  --lib        library: static .a by default, pair with --shared for .dll/.so\n"
+            "  --static     static library (default)\n"
+            "  --shared     shared library (requires --lib)\n"
+            "  --release    -O2 release profile; default dev profile is -O0 (fast iteration)\n"
             "\n"
-            "产物: out/<out>（exe） / out/<out>.a / out/<out>.dll\n"
-            "中间文件: .zxc-cache/<产物名>_*.c|.o|.h（内容没变不重编）\n"
-            "失败时把后端 C 的报错翻回 zx 源码行列；ZX_VERBOSE=1 看原始输出。\n");
+            "outputs: out/<out> (exe) / out/<out>.a / out/<out>.dll\n"
+            "intermediates: .zxc-cache/<out>_*.c|.o|.h (unchanged files are not recompiled)\n"
+            "backend C errors are mapped back to zx source lines; ZX_VERBOSE=1 for raw output.\n");
         return 0;
     }
     if (!strcmp(cmd, "run")) {
         fprintf(f,
-            "zxc run [--release] [-- 程序参数...] — 构建后立刻运行\n"
+            "zxc run [--release] [-- prog args...] -- build, then run immediately\n"
             "\n"
-            "先做一次 build，再跑 out/<out>.exe；退出码是程序的退出码。\n"
-            "程序自己的参数必须写在 `--` 之后（否则会被当成 zxc 的旗标）。\n");
+            "builds once, then runs out/<out>.exe; the exit code is the program's.\n"
+            "program arguments must come after `--` (otherwise they are read as zxc flags).\n");
         return 0;
     }
     if (!strcmp(cmd, "test")) {
         fprintf(f,
-            "zxc test [名字过滤] [--release] — 运行测试用例\n"
+            "zxc test [name filter] [--release] -- run test cases\n"
             "\n"
-            "约定: src/test/*.zx 里的每个零参 pub 函数都是一个用例（不需要\n"
-            "test_ 前缀；带参数/泛型的函数当辅助）。名字过滤是子串匹配。\n"
-            "失败判定: @trap、返回 false、返回非 0 整数、或 std.process.exit(非 0)。\n"
-            "每个用例独立进程，一个炸掉不影响后面的；测试引用工程源码用\n"
-            "module(\"../xxx.zx\")。\n");
+            "convention: every zero-arg pub function in src/test/*.zx is a case (no\n"
+            "test_ prefix needed; functions with params/generics count as helpers). The\n"
+            "name filter is substring match.\n"
+            "failure: @trap, returning false, returning a non-zero integer, or std.process.exit(non-zero).\n"
+            "each case runs in its own process, so one crash does not affect the rest; tests\n"
+            "reference project sources via module(\"../xxx.zx\").\n");
         return 0;
     }
     if (!strcmp(cmd, "check")) {
         fprintf(f,
-            "zxc check [file...] — 静态检查（不产物）\n"
+            "zxc check [file...] -- static check (no artifacts)\n"
             "\n"
-            "只做解析 + 类型检查。不给文件时：先看当前目录的 *.zx，没有\n"
-            "则回落 src/ 与 src/test/（工程模式会带上 deps / vendor 搜索路径，\n"
-            "有 zx.json 就自动读）。有错返回 1，否则 0——适合当提交前钩子。\n");
+            "parse + type check only. Without files: *.zx in cwd first, falling back\n"
+            "to src/ and src/test/ (project mode adds deps / vendor search paths and\n"
+            "reads zx.json automatically). Returns 1 on errors, else 0 -- fits a pre-commit hook.\n");
         return 0;
     }
     if (!strcmp(cmd, "fmt")) {
         fprintf(f,
-            "zxc fmt [file...] [--check] — 格式化\n"
+            "zxc fmt [file...] [--check] -- format\n"
             "\n"
-            "规整缩进（4 空格）、去尾空白、连续空行压成 1、末尾补单个换行；\n"
-            "CRLF 保持 CRLF。只动空白，不改语义。\n"
-            "  --check   只报告哪些文件需要格式化，不写回（返回 1 表示有差异）\n");
+            "normalizes indentation (4 spaces), strips trailing whitespace, collapses\n"
+            "blank runs to 1, ensures a single trailing newline; CRLF stays CRLF.\n"
+            "Whitespace only, no semantic changes.\n"
+            "  --check   report which files need formatting without writing (exit 1 means diff)\n");
         return 0;
     }
     if (!strcmp(cmd, "version")) { print_version(f); return 0; }
@@ -1842,7 +1844,7 @@ int main(int argc, char **argv) {
         if (!strcmp(sub, "errors")) { errors_print_all(stdout); return 0; }
         if (!strcmp(sub, "explain")) {
             if (argc < 3) {
-                fprintf(stderr, "用法：zxc explain <CODE>    例如 zxc explain E0304\n");
+                fprintf(stderr, "usage: zxc explain <CODE>    e.g. zxc explain E0304\n");
                 return 2;
             }
             return errors_print_one(stdout, argv[2]);

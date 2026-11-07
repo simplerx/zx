@@ -89,7 +89,7 @@ if $ZXC -v > "$TPFX.cli.v" 2>&1 && grep -q "^zxc " "$TPFX.cli.v"; then
 else
     printf "  FAIL zxc -v\n"; fail=1
 fi
-if $ZXC --help > "$TPFX.cli.h" 2>&1 && grep -q "用法" "$TPFX.cli.h" \
+if $ZXC --help > "$TPFX.cli.h" 2>&1 && grep -q "usage" "$TPFX.cli.h" \
    && $ZXC build -h 2>&1 | grep -q "zxc build"; then
     printf "  ok   zxc -h / zxc build -h\n"
 else

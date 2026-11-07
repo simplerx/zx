@@ -1080,7 +1080,7 @@ static Node *parse_fn(P *p, bool allow_name) {
          * "一个值被绑到名字上"变成两套东西。 */
         Token *id = cur(p);
         if (!allow_name)
-            perr(p, "functions are values: write `const %.*s = fn (…) … { … };`",
+            perr(p, "functions are values: write `const %.*s = fn (...) ... { ... };`",
                  (int)(id->len < 40 ? id->len : 40), id->start);
         n->name = take_ident(p);
     }
@@ -1250,7 +1250,7 @@ static Node *parse_if_arm(P *p, const char **capture, bool implicit_ok) {
      * 通过，而语义完全不同（后者会先判断 o、丢掉结果，然后无条件判断 v）。
      * 与其猜，不如要求写块：`if (o) v { if (v > 0) { … } }`。 */
     if (at(p, TOK_IDENT) && starts_stmt_kw(peek(p, 1)->kind)) {
-        perr(p, "a capture name must be followed by `{ … }` or a single value; "
+        perr(p, "a capture name must be followed by `{ ... }` or a single value; "
                 "put the statement inside a block");
     }
     /* 捕获名 + 单个返回值（语法糖）：`if (o) v v else 0`。
@@ -1338,7 +1338,7 @@ static Node *parse_while(P *p, const char *label) {
         if (n->label)
             perr(p, "`while` is already labeled before the keyword");
         else
-            perr(p, "the label of a loop goes before the keyword: `%.*s: while (…) { … }`",
+            perr(p, "the label of a loop goes before the keyword: `%.*s: while (...) { ... }`",
                  (int)(id->len < 40 ? id->len : 40), id->start);
         advance(p); advance(p);           /* 名字 + ':' */
     }
@@ -1385,7 +1385,7 @@ static Node *parse_for(P *p, const char *label, bool allow_nobind) {
         if (n->label)
             perr(p, "`for` is already labeled before the keyword");
         else
-            perr(p, "the label of a loop goes before the keyword: `%.*s: for (…) x { … }`",
+            perr(p, "the label of a loop goes before the keyword: `%.*s: for (...) x { ... }`",
                  (int)(id->len < 40 ? id->len : 40), id->start);
         advance(p); advance(p);           /* 名字 + ':' */
     }
@@ -1427,7 +1427,7 @@ static Node *parse_switch(P *p, const char *label) {
                 if (at(p, TOK_COMMA)) {
                     advance(p);
                     if (!starts_pattern(cur(p)))
-                        perr(p, "expected another pattern after ',' — ',' joins patterns of one arm, arms end with ';'");
+                        perr(p, "expected another pattern after ',' -- ',' joins patterns of one arm, arms end with ';'");
                 }
                 else
                     break;
@@ -1437,7 +1437,7 @@ static Node *parse_switch(P *p, const char *label) {
          * 旧的 `模式 标签:` 写法在这里点一下，省得报一句没头没脑的
          * "expected ':'"。 */
         if (at(p, TOK_IDENT) && peek(p, 1)->kind == TOK_COLON && !is_bool_word(cur(p)))
-            perr(p, "the arm label goes after the `:` — write `pattern: [cap] lbl: { … }`");
+            perr(p, "the arm label goes after the `:` -- write `pattern: [cap] lbl: { ... }`");
         expect(p, TOK_COLON);
         /* 冒号后面、臂体前面最多两个名字（v0.22）：
          *   cap { … }        捕获：名字后紧跟 `{`——绑定的就是"匹配到的东西"
@@ -1602,8 +1602,8 @@ static Node *parse_stmt(P *p) {
             if (at(p, TOK_KW_STRUCT) || at(p, TOK_KW_UNION)) {
                 /* `extern struct Name { … };` 语句形式：Zx 的类型是值，
                  * 命名类型一律 `const Name = …`，这里给出对齐写法的提示。 */
-                perr(p, "named types are values in Zx — write "
-                        "`const Name = extern struct { … };`");
+                perr(p, "named types are values in Zx -- write "
+                        "`const Name = extern struct { ... };`");
                 return node_new(NK_BLOCK, t->line, t->col);
             }
             perr(p, "expected `fn` after `extern`");
