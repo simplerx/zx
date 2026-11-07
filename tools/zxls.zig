@@ -308,7 +308,49 @@ fn dirName(path: []const u8) []const u8 {
 
 const DeclKind = enum { value, field, variant };
 
-const Decl = struct { name: []const u8, kind: DeclKind };
+// KEEP — 补全弹窗里字段候选的 detail 必须是字段声明类型，不是容器名
+//（用户 2026-11-08 02:15 拍板：字段类型不做行内 inlay，太吵；写的时候给提示）。
+// 配套四处：Decl.ty、extractBraceMembers / anonFieldOne 填类型、readFieldTy、
+// completeAt 的 addItem。lsptest.py 的 completion.*.fieldType 4 条是守门断言。
+const Decl = struct { name: []const u8, kind: DeclKind, ty: []const u8 = "" };
+
+/// 从 ':' 之后读字段类型，直到顶层分隔符（, } ; 换行）。
+/// 括号/方括号/花括号内部的分隔符不算——`rect: {f64, f64}`、`[]const u8`、
+/// `struct{a:i32,b:u32}` 都要完整保留。返回去掉首尾空白的切片。
+fn readFieldTy(src: []const u8, from: usize) []const u8 {
+    var i = from;
+    while (i < src.len and (src[i] == ' ' or src[i] == '\t' or src[i] == '\r' or src[i] == '\n')) i += 1;
+    const s = i;
+    var d_par: usize = 0;
+    var d_br: usize = 0;
+    var d_sq: usize = 0;
+    while (i < src.len) : (i += 1) {
+        const c = src[i];
+        if (c == '"') {
+            i += 1;
+            while (i < src.len and src[i] != '"' and src[i] != '\n') {
+                if (src[i] == '\\' and i + 1 < src.len) i += 1;
+                i += 1;
+            }
+            continue;
+        }
+        switch (c) {
+            '(' => d_par += 1,
+            ')' => if (d_par > 0) { d_par -= 1; },
+            '{' => d_br += 1,
+            '}' => {
+                if (d_br > 0) {
+                    d_br -= 1;
+                } else if (d_par == 0 and d_sq == 0) break; // 容器体结束
+            },
+            '[' => d_sq += 1,
+            ']' => if (d_sq > 0) { d_sq -= 1; },
+            ',', ';', '\n' => if (d_par == 0 and d_br == 0 and d_sq == 0) break,
+            else => {},
+        }
+    }
+    return trimSl(src[s..i]);
+}
 
 /// 顶层声明：`[pub] (const|var|type) NAME =`
 fn topLevelDecls(text: []const u8, out: *std.ArrayList(Decl), pub_only: bool) void {
@@ -902,8 +944,12 @@ fn extractBraceMembers(text: []const u8, is_enum: bool, out: *std.ArrayList(Decl
                     }
                 }
                 const prev: u8 = if (b >= 2) text[b - 1] else '{';
-                if (prev == '{' or prev == ',' or prev == '\n' or prev == ';')
-                    out.append(gpa, .{ .name = text[i..j], .kind = kd }) catch {};
+                if (prev == '{' or prev == ',' or prev == '\n' or prev == ';') {
+                    // 字段顺手记下声明类型：补全时 detail 显示 `i32` 而不是容器名
+                    var ty: []const u8 = "";
+                    if (kd == .field and k < text.len and text[k] == ':') ty = readFieldTy(text, k + 1);
+                    out.append(gpa, .{ .name = text[i..j], .kind = kd, .ty = ty }) catch {};
+                }
             }
             i = j - 1;
         }
@@ -921,7 +967,8 @@ fn anonFieldOne(seg: []const u8, out: *std.ArrayList(Decl)) void {
     const name = seg[s..i];
     while (i < seg.len and (seg[i] == ' ' or seg[i] == '\t')) i += 1;
     if (i >= seg.len or seg[i] != ':') return;
-    out.append(gpa, .{ .name = dupe(name), .kind = .field }) catch {};
+    const ty = readFieldTy(seg, i + 1);
+    out.append(gpa, .{ .name = dupe(name), .kind = .field, .ty = ty }) catch {};
 }
 
 /// struct 体里按顶层逗号拆字段：嵌套 struct / fn / 字符串里的逗号不算。
@@ -3164,7 +3211,8 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                             handled = true;
                             for (decls.items) |dcl| {
                                 if (dcl.kind != .field) continue;
-                                addItem(&list, &seen, dcl.name, 5, "匿名 struct 字段", 0);
+                                const d: []const u8 = if (dcl.ty.len > 0) dcl.ty else "struct 字段";
+                                addItem(&list, &seen, dcl.name, 5, d, 0);
                             }
                         }
                     }
@@ -3211,7 +3259,10 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                         .variant => 20,
                         .value => 6,
                     };
-                    addItem(&list, &seen, dcl.name, k, path, 0);
+                    // 字段右侧说明写声明类型（i32 / []const u8 / {f64,f64}），
+                    // 而不是原来的容器名；方法/变体没有类型串，保持容器名。
+                    const detail: []const u8 = if (dcl.kind == .field and dcl.ty.len > 0) dcl.ty else path;
+                    addItem(&list, &seen, dcl.name, k, detail, 0);
                 }
             } else if (!std.mem.eql(u8, path, "std")) {
                 // 未知容器：不给工作区噪音，宁可空列表

@@ -196,8 +196,13 @@ off = MAIN.index("o.count") + 2          # 光标在 '.' 之后的 'c' 上
 send({"jsonrpc": "2.0", "id": 2, "method": "textDocument/completion", "params": {
     "textDocument": {"uri": uri}, "position": pos(MAIN, off)}})
 r, _ = recv_id("completion.o", 2)
-labels = {i["label"] for i in r["result"]["items"]} if r and r.get("result") else set()
+items = r["result"]["items"] if r and r.get("result") else []
+labels = {i["label"] for i in items}
 check("completion.o.members", {"count", "name", "bump"} <= labels, str(labels))
+# GUARD: 字段候选右侧说明必须是声明类型，不能是容器名/实例名（截图反馈线）
+details = {i["label"]: i.get("detail") for i in items}
+check("completion.o.fieldType", details.get("count") == "i32"
+      and details.get("name") == "[]const u8", str(details))
 
 # 3b 字面量成员补全：`Obj{ .` → 只要字段，方法（bump）不出
 off = MAIN.index("Obj{ .count") + len("Obj{ .")   # 光标贴在 '.' 之后
@@ -206,6 +211,9 @@ send({"jsonrpc": "2.0", "id": 9, "method": "textDocument/completion", "params": 
 r, _ = recv_id("completion.literal", 9)
 labels = {i["label"] for i in r["result"]["items"]} if r and r.get("result") else set()
 check("completion.literal.obj", {"count", "name"} <= labels and "bump" not in labels, str(sorted(labels)))
+details = {i["label"]: i.get("detail") for i in r["result"]["items"]} if r and r.get("result") else {}
+check("completion.literal.fieldType", details.get("count") == "i32"
+      and details.get("name") == "[]const u8" and "Obj" not in details.values(), str(details))
 
 # 3c union 字面量：`Shape{ .` → 变体（enum/union 成员）
 off = MAIN.index("Shape{ .circle") + len("Shape{ .")
@@ -214,6 +222,10 @@ send({"jsonrpc": "2.0", "id": 10, "method": "textDocument/completion", "params":
 r, _ = recv_id("completion.literal.union", 10)
 labels = {i["label"] for i in r["result"]["items"]} if r and r.get("result") else set()
 check("completion.literal.union", {"circle", "rect"} <= labels, str(sorted(labels)))
+details = {i["label"]: i.get("detail") for i in r["result"]["items"]} if r and r.get("result") else {}
+# {f64, f64} 里的逗号不能被当成分隔符截断
+check("completion.literal.variantType", details.get("circle") == "f64"
+      and details.get("rect") == "{f64, f64}", str(details))
 
 # 3d 匿名 struct 参数：push(.{ . → 字段来自签名里的 struct{…} 形参
 off = MAIN.index("push(.{ .a") + len("push(.{ .")
@@ -222,6 +234,9 @@ send({"jsonrpc": "2.0", "id": 11, "method": "textDocument/completion", "params":
 r, _ = recv_id("completion.anon", 11)
 labels = {i["label"] for i in r["result"]["items"]} if r and r.get("result") else set()
 check("completion.anon.fields", {"a", "msg"} <= labels, str(sorted(labels)))
+details = {i["label"]: i.get("detail") for i in r["result"]["items"]} if r and r.get("result") else {}
+check("completion.anon.fieldType", details.get("a") == "i32"
+      and details.get("msg") == "[]const u8", str(details))
 
 # 3e std.Task 静态成员：std.Task. → 全方法集（group 在列；方法签名里的
 # 参数名 f/ctx/h/v 不得混入——extractBraceMembers 的圆括号深度守卫）
