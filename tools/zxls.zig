@@ -2064,9 +2064,13 @@ fn signatureHelpAt(doc: *const Document, line: u32, character: u32) ?[]const u8 
     j.buf.appendSlice(gpa, "{\"signatures\":[{\"label\":") catch return null;
     j.str(label);
     j.buf.appendSlice(gpa, ",\"parameters\":[") catch return null;
+    // ParameterInformation 必须是 {"label": …} 对象（label 是签名 label 里的
+    // 子串供编辑器定位高亮），发纯字符串 Zed 反序列化直接拒收整条响应。
     for (params, 0..) |p, idx| {
         if (idx > 0) j.buf.append(gpa, ',') catch {};
+        j.buf.appendSlice(gpa, "{\"label\":") catch {};
         j.str(p);
+        j.buf.append(gpa, '}') catch {};
     }
     j.buf.appendSlice(gpa, "]}]") catch return null;
     j.raw(",\"activeSignature\":0,\"activeParameter\":{d}}}", .{ap});
@@ -2660,6 +2664,29 @@ fn sendRaw(payload: []const u8) void {
     g_out_writer.interface.writeAll(h) catch return;
     g_out_writer.interface.writeAll(payload) catch return;
     g_out_writer.interface.flush() catch {};
+    // 出站审计：方法 + 时间戳 + 字节数。宿主（Zed）日志里的报错只有
+    // 时间没有内容，靠这两边的时间戳对齐才能定位是哪条消息被拒收。
+    {
+        var meth: []const u8 = "";
+        if (std.mem.indexOf(u8, payload, "\"method\":\"")) |mi| {
+            const ms = mi + "\"method\":\"".len;
+            const me = std.mem.indexOfPos(u8, payload, ms, "\"") orelse payload.len;
+            meth = payload[ms..me];
+        } else if (std.mem.indexOf(u8, payload, "\"id\":")) |_| {
+            meth = "<response>";
+        }
+        const now_ns = Io.Clock.now(.real, g_io).nanoseconds;
+        var secs: u64 = @intCast(@divFloor(now_ns, std.time.ns_per_s));
+        secs = secs % (24 * 3600) + 8 * 3600; // UTC+8
+        if (secs >= 24 * 3600) secs -= 24 * 3600;
+        const hh = secs / 3600;
+        const mm = (secs / 60) % 60;
+        const ss = secs % 60;
+        var b: std.ArrayList(u8) = .empty;
+        b.print(gpa, "{d:0>2}:{d:0>2}:{d:0>2} out {s} {d}B\n", .{ hh, mm, ss, meth, payload.len }) catch {};
+        logLine(b.items);
+        b.deinit(gpa);
+    }
 }
 
 fn readLine(rin: *Io.Reader, out: *std.ArrayList(u8)) bool {
