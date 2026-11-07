@@ -31,6 +31,7 @@
 #include "ast.h"
 #include "ty.h"
 #include "val.h"
+#include "cbind.h"
 #include <stdarg.h>
 #include <time.h>
 #include <sys/stat.h>
@@ -766,6 +767,7 @@ static void usage(FILE *f) {
         "\n"
         "project subcommands:\n"
         "  init [name]                      create a project: src/ sources, vendor/ module root, zx.json\n"
+        "  add <name|header.h>            add a C library: generate a Zx binding into vendor/\n"
         "  build [options]                  build per zx.json into out/ (intermediates in .zxc-cache/)\n"
         "  run [options] [-- prog args...]  build, then run\n"
         "  test [name filter]               run src/test/ cases (zero-arg pub functions)\n"
@@ -800,6 +802,25 @@ static void print_version(FILE *f) {
 
 /* 子命令级帮助。返回 0 = 认得的子命令，-1 = 没有这个子命令。 */
 static int help_sub(FILE *f, const char *cmd) {
+    if (!strcmp(cmd, "add")) {
+        fprintf(f,
+            "zxc add <name|header.h> [options] -- add a C library, no manual bindings\n"
+            "\n"
+            "  zxc add ./vendor/raylib.h     parse a local header -> vendor/raylib.zx\n"
+            "  zxc add sqlite3               built-in recipe: locate header + set @link\n"
+            "  zxc add --list                show built-in recipes\n"
+            "\n"
+            "options:\n"
+            "  --lib NAME     override the library passed to @link\n"
+            "  --force        overwrite an existing vendor/<name>.zx\n"
+            "\n"
+            "The generated file is ordinary, editable Zx source:\n"
+            "  const ray = module(\"raylib\");   ray.InitWindow(800, 600, \"hi\");\n"
+            "Completion / hover / inlay hints work on it like any other module.\n"
+            "Declarations clang cannot translate are listed as comments at the end.\n"
+            "No network access and no package download involved.\n");
+        return 0;
+    }
     if (!strcmp(cmd, "init")) {
         fprintf(f,
             "zxc init [name] -- create a zx project\n"
@@ -1301,6 +1322,192 @@ static int cmd_init(int argc, char **argv, int argi) {
     printf("zxc init: created src/main.zx, zx.json, README.md, .gitignore, vendor/%s\n",
            ok ? " (main.zx check ok)" : " (warning: main.zx check FAILED)");
     return ok ? 0 : 1;
+}
+
+/* ---- add：一条命令把 C 库接进工程 ------------------------------------
+ * 不做包管理器：不联网、不拉源码。消灭的是手写 FFI 里最费心的那一步——
+ * 抄函数签名、抄 C 结构体布局。头文件交给 vendored clang 解析，产物是
+ * 一份普通 Zx 源码放进 vendor/，之后 module("名字") 直接调。
+ * 生成物是普通源码，所以 LSP 的补全 / hover / inlayHint 全部照常生效。
+ */
+typedef struct {
+    const char *alias;      /* zxc add <alias> */
+    const char *header;     /* 头文件名 */
+    const char *lib;        /* @link 名，"" = 不用额外链接 */
+} CRecipe;
+
+/* 常见库配方：给个名字就能定位头文件 + 自动写 @link。
+ * 本地找不到头文件副本时，用 `#include <...>` 走工具链自带的 SDK 头。 */
+static const CRecipe g_crecipes[] = {
+    { "c",        "stdio.h",     "" },
+    { "libc",     "stdio.h",     "" },
+    { "m",        "math.h",      "" },
+    { "ws2_32",   "winsock2.h",  "ws2_32" },
+    { "user32",   "windows.h",   "user32" },
+    { "gdi32",    "windows.h",   "gdi32" },
+    { "kernel32", "windows.h",   "kernel32" },
+    { "opengl32", "windows.h",   "opengl32" },
+    { "sqlite3",  "sqlite3.h",   "sqlite3" },
+    { "z",        "zlib.h",      "z" },
+    { "zlib",     "zlib.h",      "z" },
+    { "raylib",   "raylib.h",    "raylib" },
+    { "sdl2",     "SDL.h",       "SDL2" },
+    { NULL, NULL, NULL }
+};
+
+static const CRecipe *crecipe_of(const char *name) {
+    for (int i = 0; g_crecipes[i].alias; i++)
+        if (!strcmp(g_crecipes[i].alias, name)) return &g_crecipes[i];
+    return NULL;
+}
+
+static void cadd_stem(const char *s, char *out, size_t cap) {
+    path_basename(s, out, cap);
+    path_strip_ext(out);
+    for (char *q = out; *q; q++) {
+        int ok = (*q >= 'a' && *q <= 'z') || (*q >= 'A' && *q <= 'Z') ||
+                 (*q >= '0' && *q <= '9') || *q == '_';
+        if (!ok) *q = '_';
+    }
+    if (!out[0]) snprintf(out, cap, "clib");
+}
+
+/* 头文件旁边若有同名 .lib/.a，自动挂上，省得再敲 --lib。 */
+static int cadd_probe_lib(const char *stem, char *buf, size_t cap) {
+    static const char *pat[] = {
+        "vendor/%s.lib", "vendor/lib%s.a", "vendor/%s.a",
+        "%s.lib", "lib%s.a", "%s.a", NULL
+    };
+    for (int i = 0; pat[i]; i++) {
+        snprintf(buf, cap, pat[i], stem, stem);
+        if (fexists(buf)) return 1;
+    }
+    return 0;
+}
+
+static int cmd_add(int argc, char **argv, int argi) {
+    const char *name = NULL, *ulib = NULL;
+    int force = 0, list = 0;
+    for (int i = argi; i < argc; i++) {
+        if (!strcmp(argv[i], "--list")) list = 1;
+        else if (!strcmp(argv[i], "--force")) force = 1;
+        else if (!strcmp(argv[i], "--lib")) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "zxc add: --lib needs a library name\n");
+                return 2;
+            }
+            ulib = argv[++i];
+        } else if (argv[i][0] == '-') {
+            fprintf(stderr, "zxc add: unknown option '%s'\n", argv[i]);
+            return 2;
+        } else if (!name) name = argv[i];
+        else {
+            fprintf(stderr, "zxc add: unexpected argument '%s'\n", argv[i]);
+            return 2;
+        }
+    }
+    if (list) {
+        printf("zxc add -- built-in C library recipes\n\n");
+        printf("  name        header        link\n");
+        for (int i = 0; g_crecipes[i].alias; i++)
+            printf("  %-11s %-13s %s\n", g_crecipes[i].alias,
+                   g_crecipes[i].header,
+                   g_crecipes[i].lib[0] ? g_crecipes[i].lib : "(none)");
+        printf("\nA plain .h path works too:  zxc add ./vendor/foo.h\n");
+        printf("Use --lib NAME / --force to override the link name / overwrite.\n");
+        return 0;
+    }
+    if (!name) {
+        fprintf(stderr, "usage: zxc add <name|header.h> [--lib NAME] [--force]\n"
+                        "       zxc add --list\n");
+        return 2;
+    }
+
+    const CRecipe *r = crecipe_of(name);
+    char header[1024] = "";
+    const char *want_h = r ? r->header : NULL;
+    int allow_system = 0;
+
+    /* 1) 显式头文件路径 */
+    if (!r && fexists(name)) snprintf(header, sizeof header, "%s", name);
+    /* 2) 本地能找到的头文件：配方名 / 当前目录 / vendor/ */
+    if (!header[0]) {
+        const char *stem = want_h ? want_h : name;
+        char cand[1024];
+        if (fexists(stem)) snprintf(header, sizeof header, "%s", stem);
+        if (!header[0]) {
+            snprintf(cand, sizeof cand, "vendor/%s", stem);
+            if (fexists(cand)) snprintf(header, sizeof header, "%s", cand);
+        }
+        if (!header[0]) {
+            snprintf(cand, sizeof cand, "%s.h", name);
+            if (fexists(cand)) snprintf(header, sizeof header, "%s", cand);
+        }
+        if (!header[0]) {
+            snprintf(cand, sizeof cand, "vendor/%s.h", name);
+            if (fexists(cand)) snprintf(header, sizeof header, "%s", cand);
+        }
+    }
+    /* 3) 都没有 → 落一个包装头，走工具链自带的系统 SDK 头 */
+    if (!header[0]) {
+        char incbuf[512];
+        const char *inc = want_h;
+        if (!inc) { snprintf(incbuf, sizeof incbuf, "%s.h", name); inc = incbuf; }
+        if (mkdir_one(".zxc-cache") != 0) {
+            fprintf(stderr, "zxc add: cannot create .zxc-cache/\n");
+            return 1;
+        }
+        char wrap[1024];
+        snprintf(wrap, sizeof wrap, "#include <%s>\n", inc);
+        if (write_text_file(".zxc-cache/zxc-add-wrap.h", wrap) != 0) return 1;
+        snprintf(header, sizeof header, ".zxc-cache/zxc-add-wrap.h");
+        allow_system = 1;
+        printf("zxc add: <%s> not found locally, using toolchain headers\n", inc);
+    }
+
+    char stem[256];
+    cadd_stem(r ? name : header, stem, sizeof stem);
+    char libbuf[1024] = "";
+    const char *lib = ulib;
+    if (!lib && r && r->lib[0]) lib = r->lib;
+    if (!lib && !allow_system) {
+        char probe[1024];
+        if (cadd_probe_lib(stem, probe, sizeof probe)) {
+            snprintf(libbuf, sizeof libbuf, "%s", probe);
+            lib = libbuf;
+            printf("zxc add: found local library %s, linking it\n", probe);
+        }
+    }
+
+    if (mkdir_one("vendor") != 0) {
+        fprintf(stderr, "zxc add: cannot create vendor/\n");
+        return 1;
+    }
+    char outpath[1024];
+    snprintf(outpath, sizeof outpath, "vendor/%s.zx", stem);
+    if (!force && fexists(outpath)) {
+        fprintf(stderr, "zxc add: '%s' already exists (use --force to overwrite)\n", outpath);
+        return 1;
+    }
+
+    char err[1024];
+    int nskip = 0;
+    char *text = cbind_generate(header, g_cc, lib, allow_system,
+                                err, sizeof err, &nskip);
+    if (!text) { fprintf(stderr, "zxc add: %s\n", err); return 1; }
+    int rc = write_text_file(outpath, text);
+    free(text);
+    if (rc != 0) return 1;
+
+    printf("zxc add: wrote %s (%d declaration(s) skipped)\n", outpath, nskip);
+    printf("  use:  const %s = module(\"%s\");\n", stem, stem);
+    if (lib && lib[0])
+        printf("  link: @link(\"%s\") is already in the binding\n", lib);
+    else
+        printf("  note: no library linked yet; rerun with --lib NAME if the linker complains\n");
+    if (!fexists("zx.json"))
+        printf("  note: no zx.json here; run this inside a project (or use vendor/ directly)\n");
+    return 0;
 }
 
 /* ---- build / run：读 zx.json 的工程级构建 ---- */
@@ -1850,6 +2057,7 @@ int main(int argc, char **argv) {
             return errors_print_one(stdout, argv[2]);
         }
         if (!strcmp(sub, "init"))  return cmd_init(argc, argv, 2);
+        if (!strcmp(sub, "add"))   return cmd_add(argc, argv, 2);
         if (!strcmp(sub, "check")) return cmd_check(argc, argv, 2);
         if (!strcmp(sub, "fmt"))   return cmd_fmt(argc, argv, 2, false);
         if (!strcmp(sub, "build")) return cmd_build(argc, argv, 2);

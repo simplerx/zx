@@ -133,6 +133,31 @@ if ( cd "$pdir" && "$ZXCW" init demo > "$TPFX.cli.init" 2>&1 ); then
 else
     printf "  FAIL zxc init\n"; cat "$TPFX.cli.init"; fail=1
 fi
+
+# 2.52 `zxc add`：C 头 -> Zx 绑定。守的是整条链路（clang AST 解析、
+# 类型映射、extern var 文件作用域、生成物能被 Zx 自己检查），
+# 不是只测命令有没有打印成功。
+printf "\n== zxc add（C 头自动生成绑定）\n"
+cat > "$pdir/demo/vendor/cliadd.h" <<'CHDR'
+#define CLI_MAGIC 7
+typedef struct Pt { int x; int y; } Pt;
+enum CliMode { CLI_A = 2, CLI_B };
+extern int cli_g;
+int cli_sum(int a, int b);
+void cli_move(Pt *p, int dx);
+CHDR
+if ( cd "$pdir/demo" && "$ZXCW" add cliadd > "$TPFX.cli.add" 2>&1 ) \
+   && grep -q "pub fn cli_sum(a: i32, b: i32) i32;" "$pdir/demo/vendor/cliadd.zx" \
+   && grep -q "pub const CLI_MAGIC: i32 = 7;" "$pdir/demo/vendor/cliadd.zx" \
+   && grep -q "pub extern var cli_g: i32;" "$pdir/demo/vendor/cliadd.zx" \
+   && ( cd "$pdir/demo" && "$ZXCW" check vendor/cliadd.zx > "$TPFX.cli.addcheck" 2>&1 ); then
+    printf "  ok   zxc add 生成可检查的 C 绑定\n"
+else
+    printf "  FAIL zxc add\n"
+    cat "$TPFX.cli.add" "$TPFX.cli.addcheck" 2>/dev/null
+    cat "$pdir/demo/vendor/cliadd.zx" 2>/dev/null
+    fail=1
+fi
 rm -rf "$pdir" 2>/dev/null || true
 
 # 2.55 错误码目录：诊断里出现的每个码都必须查得到。

@@ -111,6 +111,7 @@ zxc <file.zx> -o <prog>           单文件：生成 C 并编成可执行文件
 
 | 子命令 | 作用 | 关键细节 |
 | --- | --- | --- |
+| `add <name\|header.h>` | 接入 C 库 | 自动生成 `vendor/<name>.zx` 绑定；见 §3.17 |
 | `init [name]` | 创建工程 | 生成 `src/`、`vendor/`、`zx.json`、`.gitignore`；建完自检 `main.zx` |
 | `build` | 按 `zx.json` 构建到 `out/` | 中间文件在 `.zxc-cache/`，见 §5 |
 | `run` | `build` 后直接运行 | `--` 之后的参数传给程序 |
@@ -558,6 +559,55 @@ extern "C" {
 - 绑定模块的组织方式见 `demo/ffi/`：一库一模块，`@link` 收在模块里，
   应用代码只见 Zx。OpenGL 全链路演示（窗口 → 像素格式 → GL 上下文 →
   打印驱动字符串）也在这里。
+
+### 3.17 zxc add —— 一条命令接入 C 库
+
+手写 FFI 里最费心的不是 `extern fn`，而是抄函数签名、逐字段镜像 C 结构体布局。
+`zxc add` 把 C 头交给项目内 vendored 的 clang 解析，产出一份**普通、可读可改的
+Zx 源码**放进 `vendor/`：
+
+```sh
+zxc add ./vendor/raylib.h     # 本地头文件：完整绑定
+zxc add sqlite3               # 内置配方：自动定位头文件 + 配好 @link
+zxc add --list                # 列出内置配方
+zxc add ./vendor/foo.h --lib foo --force
+```
+
+生成物形如：
+
+```zx
+@link("vendor/libfoo.a");
+
+pub extern var foo_counter: i32;
+
+extern "C" {
+    pub const Point = struct {
+        x: i32,
+        y: i32
+    };
+    pub fn foo_sum(a: i32, b: i32) i32;
+}
+
+// C constants / enum values
+pub const FOO_MAGIC: i32 = 7;
+```
+
+之后 `const foo = module("foo");` 就能直接调。`vendor/` 本来就是模块搜索根，
+生成物是普通 Zx 源码，所以补全、hover、行内类型提示全部照常生效。
+
+- **自动翻译**：函数（含参数名）、`extern var`、`struct`/`union` 字段、`typedef`、
+  枚举常量、纯数字 `#define`。`void*` 用 `*u8` 占位（ABI 上都是一个机器字）。
+- **翻不了的会跳过**，并在文件末尾以注释列出原因（变参函数、多级指针、位域、
+  函数指针之外的复杂声明、Zx 同名的关键字符号）。宁可留白也不猜一个错布局。
+- **链接**：配方自带 `@link`；本地头文件旁边若有 `vendor/<名>.lib` /
+  `vendor/lib<名>.a` / `vendor/<名>.a` 会自动挂上；否则用 `--lib NAME` 指定。
+  静态库要按 C 编译器的同一套 sanitizer 标志编（工程默认 `-fno-sanitize=undefined`），
+  否则链接时会缺 `__ubsan_handle_*` 符号。
+- **系统头配方**（`m` / `c` / `ws2_32` / `user32` …）走工具链自带头文件，
+  只导出基础类型的函数签名：SDK 内部结构互相引用、带位域和匿名 union，
+  硬生成只会得到编译不过的绑定。要结构体和常量，把库的头文件放进工程，
+  用路径方式 `zxc add`（Win32/OpenGL 的手写范例见 `demo/ffi/`）。
+- 重新生成用 `--force`（会覆盖手改）。命令不联网、不下载源码，不是包管理器。
 
 ---
 

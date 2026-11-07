@@ -3872,7 +3872,9 @@ static void hoist(Scope *sc, Node *blk) {
                 s->is_pub = it->is_pub;
                 /* extern var 同 extern fn：外部符号用**原名**当 C 名 */
                 s->cname = it->is_extern ? it->name : mangle_name(it->name);
-                s->in_fn = (g_fn_depth > 0);   /* 槽位在当前栈帧上（逃逸检查用） */
+                /* 模块是在函数体里懒加载的，g_fn_depth 已 > 0；
+                判文件作用域要看 sc->is_module，否则模块顶层的 extern var 会被误判成局部。 */
+                s->in_fn = (!sc->is_module && g_fn_depth > 0);
                 it->sym = s;
                 if (!sc->is_module) local_track(s, it->line, it->col);
                 /* 泛型 lambda（`const L = fn (T: type) type { … }`）也要知道自己
@@ -3937,7 +3939,7 @@ static void ensure_raw(Symbol *s) {
      * 不能有初始化值；只在文件根有意义（函数里的 extern 声明没有 Zx 语义）。
      * 类型同样要过 C 布局校验：这个变量要跟 C 那边的定义逐字节对上。 */
     if (d->is_extern) {
-        if (g_fn_depth > 0) {
+        if (s->in_fn) {
             err_at(d->line, d->col,
                    "extern var belongs at file scope -- function-local extern "
                    "declarations have no Zx semantics");
