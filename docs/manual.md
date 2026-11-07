@@ -576,7 +576,7 @@ extern "C" {
 | `std.io` | `openRead/openWrite/openAppend(path)`、`read/write/seek/tell/close/flush`、`stdin/stdout/stderr`、`print/println` |
 | `std.process` | `args()`、`getEnv(name)`、`setEnv`、`exit(code)` |
 | `std.debug` | `panic(msg)`、`assert(cond, msg)`、`errName(err)`、`printTrace()` |
-| `std.Task` | 唯一的并发类型：`coro/single/pool` 建实例；`spawn/await/awaitAll/cancel/yield/send/recv/close` 是实例方法（§4.6/§4.8） |
+| `std.Task` | 唯一的并发类型：`coro/single/pool` 建实例，`group()` 取内核调度线程组；`spawn/await/awaitAll/cancel/yield/send/recv/close` 是实例方法（§4.6/§4.8） |
 | `std.atomic` | `Add/Sub/Load/Store/Swap/CAS`，usize，SEQ_CST（纯函数，不是并发类型） |
 | `std.stackAlloc(T, N)` / `std.heapAlloc(al, T, N)` | 数组分配（OOM abort） |
 
@@ -691,6 +691,22 @@ const main = fn () !i32 {
 那组工作线程之间的调度、任务表、等待链与通信由运行时自己保证线程安全**
 （decisions §94）。跨实例 await 是允许的：A 的任务等 B 的任务，B 完成时
 等待者会被推回 A 的队列，不会留在 B 上跑。
+
+**`Task.group()`：内核调度线程组（零锁）**。与实例形态互补的另一极：
+不建用户态线程池、不建队列、不建纤程，`spawn` 即起一条 OS 线程，调度
+完全交给内核。分组只是一个原子计数（先加计数、后起线程，起线程失败自动
+回退），`wait` 用 让步 → 短睡 的退避循环读到计数归零——全程无互斥锁、
+无条件变量。内存序保证「计数归零即数据就绪」：任务体内的 `std.atomic`
+写 happens-before 完成方减计数，等待方读到 0 时全部可见。任务即发即忘：
+返回值与错误不回收（要结果、取消、通道就用实例形态）；组可复用，wait 后
+可继续 spawn。
+
+```zx
+let g = Task.group();
+var i: usize = 0;
+while (i < 4) { _ = g.spawn(work, i); i = i + 1; }   // false = 起线程失败
+g.wait();                                            // 无锁等全部完成
+```
 
 ### 4.7 await 门与错误捕获 trace
 

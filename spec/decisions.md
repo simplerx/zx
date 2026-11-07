@@ -3366,3 +3366,31 @@ exe，build.sh 一直 skip，功能进了源码却没进用户手里的二进制
 的 exe 可以改名（mv 不受锁限制），旧改名 .old、新文件 cp 进位，用户重启
 Zed 即加载。教训：**改了 tools/zxls.zig 必须确认 bin/zxls.exe 真的被替换**，
 skip 提示要当成失败对待。
+
+## 106. Task.group()：内核调度线程组，零锁
+
+用户拍板：重做一个「全局的、类似线程池的东西」，要求**利用内核调度、不是
+真的线程池、不使用锁**。定位成与实例形态互补的另一极：实例（coro/single/
+pool）是物理隔离的用户态调度器；组是零设施——spawn 即起一条 OS 线程，
+调度完全交给内核，分组只是原子计数，wait 让步退避。
+
+实现（backend.c emit_task_runtime 尾部，随 g_need_task 按需发射）：
+
+- `zx_tg_new`：calloc 一个 `{ uint64_t pending }` 当组句柄，指针即 id，
+  进程内不回收（与实例表同策略，8 字节/组）。
+- `zx_tg_spawn`：**先** pending+1（ACQ_REL）再 CreateThread /
+  pthread_create（句柄即弃 / detach），起线程失败回退减一——等待方不会
+  丢任何完成事件；tramp 跑完 `f(ctx)`（返回的 err-union 直接丢弃）减计数。
+- `zx_tg_wait`：ACQUIRE 读计数归零即返回；让步（Sleep(0)/sched_yield）
+  64 次后睡 1ms。无锁、无条件变量，睡眠/唤醒全部交给内核。
+  内存序保证「计数归零即数据就绪」：任务体内 SEQ_CST 原子写
+  happens-before 完成方减计数，等待方 ACQUIRE 读到 0 时全部可见——
+  这就是「安全的多线程」的全部开销。
+- Zx 侧 std/task.zx：`Group` struct（spawn 返回 bool、wait void）+
+  `Task.group()` 构造。任务即发即忘，返回值/错误不回收。
+
+取舍：一个任务一条线程，任务数大时开销高于 pool；组内任务不能 await/通信
+（不是纤程，没有调度器可挂）。要结果、取消、通道用实例形态。
+
+验证：tests/good/task_group.zx（4 任务 × 100 次原子加，wait 后 400 精确，
+三连跑稳定）；全量回归通过。

@@ -1,0 +1,22 @@
+// task_group.zx —— Task.group()：内核调度线程组，零锁。
+// spawn 即起 OS 线程（调度交给内核），分组只是原子计数；wait 让步退避。
+// 共享数据的线程安全由 std.atomic 保证 —— 计数归零即写入全部可见。
+// expect-output:group:400
+const std = module("std");
+const Task = std.Task;
+
+var hits: usize = 0;
+const work = fn (x: usize) !usize {
+    var i: usize = 0;
+    while (i < 100) { std.atomic.atomicAdd(&hits, 1); i = i + 1; }
+    return x + 1;
+};
+
+const main = fn () !i32 {
+    let g = Task.group();
+    var i: usize = 0;
+    while (i < 4) { _ = g.spawn(work, i); i = i + 1; }
+    g.wait();
+    std.println("group:{}", hits);
+    return 0;
+};

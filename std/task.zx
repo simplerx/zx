@@ -21,6 +21,27 @@ extern fn zx_task_try_send(s: usize, v: usize) !void;
 extern fn zx_task_try_recv(s: usize) !usize;
 extern fn zx_task_close(s: usize) void;
 
+// Task.group()：内核调度线程组（零锁）。spawn 即起 OS 线程交给内核调度，
+// 分组只是原子计数，wait 无锁等待。任务即发即忘（返回值与错误不回收）。
+extern fn zx_tg_new() usize;
+extern fn zx_tg_spawn(g: usize, f: fn (usize) !usize, ctx: usize) usize;
+extern fn zx_tg_wait(g: usize) void;
+
+// 分组：spawn 每个任务一条 OS 线程（内核调度），完成计数原子递减；
+// wait 让步退避到计数归零。组可复用（wait 后还能继续 spawn）。
+pub const Group = struct {
+    id: usize,
+
+    // 起线程失败（句柄耗尽/内存不足）返回 false，计数不残留。
+    const spawn = fn (self: *const Self, f: fn (usize) !usize, ctx: usize) bool {
+        return zx_tg_spawn(self.id, f, ctx) == 1;
+    };
+
+    const wait = fn (self: *const Self) void {
+        zx_tg_wait(self.id);
+    };
+};
+
 pub const Task = struct {
     id: usize,
 
@@ -92,5 +113,15 @@ pub const Task = struct {
 
     const close = fn (self: *const Self) void {
         zx_task_close(self.id);
+    };
+
+    // ---- 全局内核调度组 ----
+    //
+    // Task.group() 与实例形态互补：实例是「物理隔离的用户态调度器」，
+    // 组是「零设施的内核调度」——不建线程池、不建队列、不锁任何东西。
+    // 适合即发即忘的批量工作；要结果、要取消、要通道就用实例。
+
+    const group = fn () Group {
+        return Group{ .id = zx_tg_new() };
     };
 };
