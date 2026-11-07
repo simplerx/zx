@@ -452,7 +452,7 @@ ok_fix = any(d.get("code") == "E0301" and "@intCast" in d.get("message", "") for
 check("diagnostics.genericFix", ok_fix, str(diag_msgs)[:300])
 
 # 3n 行内类型提示（textDocument/inlayHint）：没写类型的绑定要出 `: Type`
-#     GUARD: 这 12 条是 inlayHint 能力线的守门断言，实现被删/被回退会在这里
+#     GUARD: 3n/3o/3p 共 19 条是 inlayHint 能力线的守门断言，实现被删/被回退会在这里
 #     连挂。改 zxls 时不要为了"让测试变绿"删用例，先修实现。
 #     放在诊断断言之后：didChange 会异步推诊断，放前面会污染 10b 的轮询。
 #     10b 把文档改成了 BADTXT，这里先改回 MAIN 再按 MAIN 的行号断言。
@@ -479,7 +479,17 @@ check("inlayHint.literalSecond", hint_at("var o2") == ": Obj", detail)
 check("inlayHint.inlineStructField", hint_at("let i") == ": i32", detail)
 check("inlayHint.skipNonValue",
       all(hint_at(k) is None for k in ("const Obj", "const Shape", "const std", "const push")), detail)
-check("inlayHint.kind", all(h.get("kind") == 1 for h in hints), str(hints[:2]))
+# 类型提示是 kind=1；参数名提示是 kind=2，按 label 前缀区分
+check("inlayHint.kind", all(h.get("kind") == 1 for h in hints if h["label"].startswith(":")), str(hints[:2]))
+# 匿名 struct 当实参也有参数名提示：`push(info: .{…})`
+def label_at_call(call):
+    p = pos(MAIN, MAIN.index(call) + len(call))
+    return byline.get((p["line"], p["character"]))
+
+check("inlayHint.param.anonStruct", label_at_call("push(") == "info: ", detail)
+check("inlayHint.param.kind",
+      all(h.get("kind") == 2 and h["label"].endswith(": ") for h in hints if not h["label"].startswith(":")),
+      str(hints[:2]))
 
 # 3o 显式写了类型 / 注释 / 字符串里的伪声明都不该插 hint
 TYPED = """const T = struct { a: i32 };
@@ -514,6 +524,46 @@ check("inlayHint.typed.skipExplicit", thint("let t") is None, tdetail)
 check("inlayHint.typed.skipComment", len(th) == 3, tdetail)
 send({"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {
     "textDocument": {"uri": uri, "version": 10},
+    "contentChanges": [{"text": MAIN}]}})
+
+# 3p 参数名 inlay（含 struct 形参）+ 匿名 struct 绑定的类型推断
+#     守门：fn 定义 / if ( / 注释 / 字符串 / cast 前缀都不该被当成调用。
+PARAM = """const std = module("std");
+const Person = struct{ age: i32, name: []const u8 };
+const add = fn (a: i32, b: i32) i32 { return a + b; };
+const take = fn (v: Person, n: i32) void { std.println("{}", n); };
+pub const main = fn () i32 {
+    var p = Person{.age = 1, .name = "x"};
+    let anon = .{ .x = 1, .y = "s" };
+    let n = add(1, 2);
+    take(p, n);
+    if (n > 0) { std.println("hi"); }
+    // add(9, 9);
+    std.println("add(1, 2)");
+    return 0;
+};
+"""
+send({"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {
+    "textDocument": {"uri": uri, "version": 11},
+    "contentChanges": [{"text": PARAM}]}})
+send({"jsonrpc": "2.0", "id": 23, "method": "textDocument/inlayHint", "params": {
+    "textDocument": {"uri": uri},
+    "range": {"start": {"line": 0, "character": 0},
+              "end": {"line": PARAM.count("\n") + 1, "character": 0}}}})
+r, _ = recv_id("inlayHint.params", 23)
+ph = r["result"] if r and r.get("result") is not None else []
+params = [h for h in ph if h.get("kind") == 2]
+types = [h["label"] for h in ph if h.get("kind") == 1]
+pdetail = str(sorted((h["position"]["line"], h["position"]["character"], h["label"]) for h in ph))[:300]
+check("inlayHint.param.count", len(params) == 4, pdetail)
+check("inlayHint.param.labels",
+      sorted(h["label"] for h in params) == ["a: ", "b: ", "n: ", "v: "], pdetail)
+check("inlayHint.param.lines",
+      sorted(set(h["position"]["line"] for h in params)) == [7, 8], pdetail)
+check("inlayHint.type.anonStruct", ": struct{x:i32,y:str}" in types, pdetail)
+check("inlayHint.type.namedStruct", ": Person" in types, pdetail)
+send({"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {
+    "textDocument": {"uri": uri, "version": 12},
     "contentChanges": [{"text": MAIN}]}})
 
 # 9 shutdown/exit

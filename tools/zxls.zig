@@ -1859,6 +1859,23 @@ fn inlineStructFieldTy(text: []const u8, base: []const u8, member: []const u8) ?
     return null;
 }
 
+/// 匿名 struct 字段初值的类型。cast 前缀 `(u32)expr` 直接取目标类型；
+/// 其余交给 inferExprType（字面量、成员访问、调用返回值等）。
+fn inferAnonFieldTy(text: []const u8, doc: *const Document, val: []const u8, depth: u8) ?[]const u8 {
+    const v = trimSl(val);
+    if (v.len > 2 and v[0] == '(') {
+        if (std.mem.indexOfScalar(u8, v, ')')) |rp| {
+            const t = trimSl(v[1..rp]);
+            var ok = t.len > 0 and t.len <= 24 and isIdentChar(t[0]);
+            for (t) |ch| {
+                if (!isIdentChar(ch)) { ok = false; break; }
+            }
+            if (ok) return t;
+        }
+    }
+    return inferExprType(text, doc, v, depth + 1);
+}
+
 fn inferExprType(text: []const u8, doc: *const Document, expr: []const u8, depth: u8) ?[]const u8 {
     const e = trimSl(expr);
     if (e.len == 0) return null;
@@ -1894,6 +1911,80 @@ fn inferExprType(text: []const u8, doc: *const Document, expr: []const u8, depth
             }
             return null;
         }
+    }
+    // 匿名 struct 字面量 `.{ .a = 1, .b = "x" }`：没有期望类型时自成
+    // 一个匿名结构体，字段类型由初值推（spec/decisions.md §33）。
+    // 拼出 `struct{a:i32,b:str}` 给行内类型提示用。
+    if (std.mem.startsWith(u8, e, ".{") and depth < 2) {
+        var d: usize = 0;
+        var in_str = false;
+        var rb: ?usize = null;
+        var q: usize = 1;
+        while (q < e.len) : (q += 1) {
+            const ch = e[q];
+            if (in_str) {
+                if (ch == '\\') { q += 1; continue; }
+                if (ch == '"') in_str = false;
+                continue;
+            }
+            if (ch == '"') { in_str = true; continue; }
+            if (ch == '{') { d += 1; continue; }
+            if (ch == '}') {
+                if (d > 0) d -= 1;
+                if (d == 0) { rb = q; break; }
+                continue;
+            }
+        }
+        const end = rb orelse return null;
+        const body = e[2..end];
+        var out: std.ArrayList(u8) = .empty;
+        out.appendSlice(gpa, "struct{") catch return null;
+        var seg: usize = 0;
+        d = 0;
+        in_str = false;
+        var count: usize = 0;
+        var i: usize = 0;
+        while (i <= body.len) : (i += 1) {
+            const at_end = i == body.len;
+            if (!at_end) {
+                const ch = body[i];
+                if (in_str) {
+                    if (ch == '\\') { i += 1; continue; }
+                    if (ch == '"') in_str = false;
+                    continue;
+                }
+                if (ch == '"') { in_str = true; continue; }
+                if (ch == '{' or ch == '(' or ch == '[') { d += 1; continue; }
+                if (ch == '}' or ch == ')' or ch == ']') { if (d > 0) d -= 1; continue; }
+                if (ch != ',' or d != 0) continue;
+            }
+            const item = trimSl(body[seg..i]);
+            seg = i + 1;
+            if (item.len == 0) continue;
+            var fname: []const u8 = "";
+            var val = item;
+            if (item[0] == '.') {
+                var ni: usize = 1;
+                while (ni < item.len and isIdentChar(item[ni])) ni += 1;
+                if (ni > 1) {
+                    fname = item[1..ni];
+                    const eqp = std.mem.indexOfScalarPos(u8, item, ni, '=') orelse continue;
+                    val = trimSl(item[eqp + 1 ..]);
+                }
+            }
+            if (fname.len == 0)
+                fname = std.fmt.allocPrint(gpa, "{d}", .{count}) catch return null;
+            const t = inferAnonFieldTy(text, doc, val, depth) orelse return null;
+            if (t.len == 0 or t.len > 24) return null;
+            if (count > 0) out.append(gpa, ',') catch return null;
+            out.print(gpa, "{s}:{s}", .{ fname, t }) catch return null;
+            count += 1;
+            if (count >= 6) break;
+        }
+        if (count == 0) return null;
+        out.append(gpa, '}') catch return null;
+        if (out.items.len > 80) return null;
+        return out.items;
     }
     // 结构体字面量：X{…} → X（X 是扫描集里的容器）
     // var p = Person{.name = …} 的类型就是 Person。
@@ -2320,7 +2411,157 @@ fn declStartsHere(text: []const u8, c: usize) bool {
     };
 }
 
-const Hint = struct { line: u32, character: u32, ty: []const u8 };
+const Hint = struct {
+    off: usize,
+    line: u32,
+    character: u32,
+    label: []const u8,
+    kind: u32,
+    pad_right: bool,
+};
+
+/// 调用处参数名 inlay（kind=2）：`push(.{…})` → `push(info: .{…})`。
+/// 这些 `(` 不是调用：fn 定义、控制流、分组表达式、cast 前缀。
+fn isCallKeyword(w: []const u8) bool {
+    const kws = [_][]const u8{ "fn", "if", "else", "while", "for", "switch", "catch", "defer", "return", "try", "and", "or", "not" };
+    for (kws) |k| if (std.mem.eql(u8, w, k)) return true;
+    return false;
+}
+
+fn validHintName(nm: []const u8) bool {
+    if (nm.len == 0 or nm.len > 32) return false;
+    if (nm[0] == '_' or (nm[0] >= '0' and nm[0] <= '9')) return false;
+    for (nm) |c| if (!isIdentChar(c)) return false;
+    return true;
+}
+
+/// 已经写了 `name: value` 的实参不再插提示。
+fn argAlreadyNamed(seg: []const u8) bool {
+    const s = trimSl(seg);
+    var i: usize = 0;
+    while (i < s.len and isIdentChar(s[i])) i += 1;
+    return i > 0 and i < s.len and s[i] == ':';
+}
+
+/// 被调方签名里的形参名（切片指向声明文本，不复制）。支持本文件函数、
+/// 模块函数（std.x / mod.fn）、实例方法与容器限定调用。
+fn calleeParamNames(text: []const u8, doc: *const Document, callee: []const u8) ?[]const []const u8 {
+    var stmt: ?[]const u8 = null;
+    if (std.mem.lastIndexOfScalar(u8, callee, '.')) |dot| {
+        const bind = callee[0..dot];
+        const member = callee[dot + 1 ..];
+        if (member.len == 0) return null;
+        var mm: ?[]const u8 = moduleOfBinding(text, bind);
+        if (mm == null and std.mem.eql(u8, bind, "std")) mm = "std";
+        if (mm) |mod| {
+            if (resolveModuleFile(doc, mod)) |p| {
+                if (readFileSmall(p)) |t| stmt = findDeclStmt(t, member);
+            }
+        }
+        if (stmt == null) {
+            var sf = scanFiles(doc, text);
+            defer sf.deinit(gpa);
+            if (instanceContainerTy(sf.items, text, bind)) |ty| {
+                if (findContainerBody(sf.items, ty)) |ch| stmt = findDeclStmt(ch.body, member);
+            }
+            if (stmt == null) stmt = resolvePathStmt(sf.items, doc, text, callee);
+        }
+    } else {
+        stmt = findDeclStmt(text, callee);
+    }
+    const s = stmt orelse return null;
+    const sig = sigOfStmt(s);
+    if (!sig.is_fn or sig.params.len == 0) return null;
+    var names: std.ArrayList([]const u8) = .empty;
+    for (sig.params) |p| {
+        var nm = trimSl(p);
+        if (std.mem.indexOfScalar(u8, nm, ':')) |c| nm = trimSl(nm[0..c]);
+        if (nm.len == 0) return null;
+        names.append(gpa, nm) catch return null;
+    }
+    return names.items;
+}
+
+/// 扫全文的调用括号，按顶层逗号切实参，在每个实参起点插 `name: `。
+fn appendParamHints(text: []const u8, doc: *const Document, mask: []const bool, hints: *std.ArrayList(Hint), start_line: u32, end_line: u32) void {
+    var lp: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, text, lp, '(')) |p0| {
+        lp = p0 + 1;
+        if (!mask[p0]) continue;
+        var q = p0;
+        while (q > 0 and (text[q - 1] == ' ' or text[q - 1] == '\t' or
+            text[q - 1] == '\n' or text[q - 1] == '\r')) q -= 1;
+        var cs = q;
+        while (cs > 0 and (isIdentChar(text[cs - 1]) or text[cs - 1] == '.')) cs -= 1;
+        if (cs == q) continue; // 分组表达式 / cast 前缀，'(' 前没有标识符
+        const callee = text[cs..q];
+        if (callee[0] == '.' or isCallKeyword(callee)) continue;
+
+        // 配对的 ')'
+        var d: usize = 0;
+        var in_str = false;
+        var rp: ?usize = null;
+        var i = p0 + 1;
+        while (i < text.len) : (i += 1) {
+            const ch = text[i];
+            if (in_str) {
+                if (ch == '\\') { i += 1; continue; }
+                if (ch == '"') in_str = false;
+                continue;
+            }
+            if (ch == '"') { in_str = true; continue; }
+            if (ch == '(') { d += 1; continue; }
+            if (ch == ')') {
+                if (d == 0) { rp = i; break; }
+                d -= 1;
+                continue;
+            }
+        }
+        const end = rp orelse continue;
+        const names = calleeParamNames(text, doc, callee) orelse continue;
+        // 实例方法的第一个形参 self 不占实参位置
+        var offset: usize = 0;
+        if (std.mem.indexOfScalar(u8, callee, '.') != null and names.len > 0 and
+            std.mem.eql(u8, names[0], "self")) offset = 1;
+
+        var seg: usize = p0 + 1;
+        d = 0;
+        in_str = false;
+        var argi: usize = 0;
+        var k = p0 + 1;
+        while (k <= end) : (k += 1) {
+            const at_end = k == end;
+            if (!at_end) {
+                const ch = text[k];
+                if (in_str) {
+                    if (ch == '\\') { k += 1; continue; }
+                    if (ch == '"') in_str = false;
+                    continue;
+                }
+                if (ch == '"') { in_str = true; continue; }
+                if (ch == '(' or ch == '[' or ch == '{') { d += 1; continue; }
+                if (ch == ')' or ch == ']' or ch == '}') { if (d > 0) d -= 1; continue; }
+                if (ch != ',' or d != 0) continue;
+            }
+            var s0 = seg;
+            while (s0 < k and (text[s0] == ' ' or text[s0] == '\t' or
+                text[s0] == '\n' or text[s0] == '\r')) s0 += 1;
+            if (s0 < k and mask[s0] and argi + offset < names.len) {
+                const nm = names[argi + offset];
+                if (validHintName(nm) and !argAlreadyNamed(text[s0..k])) {
+                    const lc = offsetToLineCol(text, s0);
+                    if (lc.line >= start_line and lc.line <= end_line) {
+                        const lab = std.fmt.allocPrint(gpa, "{s}: ", .{nm}) catch continue;
+                        hints.append(gpa, .{ .off = s0, .line = lc.line, .character = lc.character,
+                            .label = lab, .kind = 2, .pad_right = false }) catch {};
+                    }
+                }
+            }
+            argi += 1;
+            seg = k + 1;
+        }
+    }
+}
 
 /// 行内类型提示（textDocument/inlayHint）：未显式写类型的 const/let/var
 /// 绑定，在名字后插 `: Type`。推断复用 hover 的 inferExprType，两处一致。
@@ -2328,7 +2569,8 @@ const Hint = struct { line: u32, character: u32, ty: []const u8 };
 /// KEEP — 用户 2026-11-08 明确要求保留的能力线。Zed 的 inlay_hints.enabled
 /// 一直是 true，会持续发这个请求；能力声明或本函数一旦被删，编辑器里
 /// `var p = Person{...}` 就会重新变回没有 `: Person`。删除/重写 zxls 前
-/// 先跑 tools/lsptest.py：3n/3o 共 12 条用例是这条线的守门断言。
+/// 先跑 tools/lsptest.py：3n/3o/3p 共 19 条用例是这条线的守门断言
+///（含调用处参数名 kind=2 与匿名 struct 绑定的类型推断）。
 fn inlayHintsAt(doc: *const Document, start_line: u32, end_line: u32) []const u8 {
     const text = doc.text;
     const kws = [_][]const u8{ "const ", "let ", "var " };
@@ -2479,7 +2721,23 @@ fn inlayHintsAt(doc: *const Document, start_line: u32, end_line: u32) []const u8
         if (!valid) continue;
         const lc = offsetToLineCol(text, ne);
         if (lc.line < start_line or lc.line > end_line) continue;
-        hints.append(gpa, .{ .line = lc.line, .character = lc.character, .ty = ty }) catch @panic("oom");
+        var lab: std.ArrayList(u8) = .empty;
+        lab.appendSlice(gpa, ": ") catch @panic("oom");
+        lab.appendSlice(gpa, ty) catch @panic("oom");
+        hints.append(gpa, .{ .off = ne, .line = lc.line, .character = lc.character,
+            .label = lab.items, .kind = 1, .pad_right = true }) catch @panic("oom");
+    }
+
+    appendParamHints(text, doc, mask, &hints, start_line, end_line);
+
+    // 类型提示与参数提示按文档偏移合并（插入排序，数量很小）
+    var si: usize = 1;
+    while (si < hints.items.len) : (si += 1) {
+        const v = hints.items[si];
+        var sj = si;
+        while (sj > 0 and hints.items[sj - 1].off > v.off) : (sj -= 1)
+            hints.items[sj] = hints.items[sj - 1];
+        hints.items[sj] = v;
     }
 
     var j = Json{};
@@ -2487,12 +2745,12 @@ fn inlayHintsAt(doc: *const Document, start_line: u32, end_line: u32) []const u8
     for (hints.items, 0..) |h, idx| {
         if (idx > 0) j.buf.append(gpa, ',') catch @panic("oom");
         j.raw("{{\"position\":{{\"line\":{d},\"character\":{d}}},\"label\":", .{ h.line, h.character });
-        var label: std.ArrayList(u8) = .empty;
-        defer label.deinit(gpa);
-        label.appendSlice(gpa, ": ") catch @panic("oom");
-        label.appendSlice(gpa, h.ty) catch @panic("oom");
-        j.str(label.items);
-        j.raw(",\"kind\":1,\"paddingLeft\":false,\"paddingRight\":true}}", .{});
+        j.str(h.label);
+        if (h.pad_right) {
+            j.raw(",\"kind\":{d},\"paddingLeft\":false,\"paddingRight\":true}}", .{h.kind});
+        } else {
+            j.raw(",\"kind\":{d},\"paddingLeft\":false,\"paddingRight\":false}}", .{h.kind});
+        }
     }
     j.buf.append(gpa, ']') catch @panic("oom");
     return j.buf.items;

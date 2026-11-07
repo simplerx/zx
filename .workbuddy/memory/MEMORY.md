@@ -4,8 +4,10 @@
 - **LSP 行内类型提示 inlayHint**：未写类型的 `const/let/var` 绑定要在名字后显示灰色 `: Type`。Zed 侧 `inlay_hints.enabled` 一直是 `true`、`lsp.zx-lsp.binary.path` 指向 `E:/workbuddy/zx/bin/zxls`，所以能力完全由 zxls 决定，Zed 只渲染。hover 卡片同理（内容来自 `textDocument/hover` 响应）。
 - 用户记忆里"以前做过、后来那条线删了"：审计日志显示 Zed 从 01:03 起就持续发 `textDocument/inlayHint`，旧 exe 无能力；本地 `bin/zxls.exe` 被反复覆盖、源码若不进版本库就找不回来了。因此这条线以 **git commit + 守门用例** 的形式保存，定位：`git log --oneline --grep=inlayHint`。
 - 三处配套、缺一不可：`inlayHintProvider:true` capability 声明、`textDocument/inlayHint` 请求分派、`inlayHintsAt`（复用 `inferExprType` 推断，跳过显式类型/容器/fn/module/注释/字符串）。源码里有 `KEEP` 标记注释。
-- 守门：`tools/lsptest.py` 3n/3o 共 12 条 inlayHint 用例，全套 45 项；`sh test.sh` 会从源码重编 zxls 再跑。实现被删会连挂，**不许删用例来变绿**。
+- 守门：`tools/lsptest.py` 3n/3o/3p 共 19 条 inlayHint 用例，全套 52 项；`sh test.sh` 会从源码重编 zxls 再跑。实现被删会连挂，**不许删用例来变绿**。
 - 同属这条类型提示线的还有：hover 用真实关键字（`var/let/const/pub const`）、容器声明贴完整定义、形参/字段/`self.*` 类型推断、成员表达式右值推断、内联 struct 形参字段推断。
+- 调用处参数名 inlay（kind=2）：`push(info: .{…})` / `add(a: 1, b: 2)`，覆盖本文件函数、模块函数、实例方法、struct 形参与匿名 struct 实参；排除 fn 定义/控制流/注释/字符串/cast 前缀。匿名 struct 绑定 `let anon = .{ .x = 1 }` 推成 `struct{x:i32}`（spec/decisions.md §33 无期望类型的情形）。
+- 暂未做：struct/匿名 struct **字面量字段的类型** inlay（`.age: i32 = 10` 那种），视觉较吵，等用户确认；`std.println` 等编译器内建没有可读签名，不插参数名提示。
 
 ## 工程习惯 / 踩过的坑
 - 改 `tools/zxls.zig` 后必须确认 `bin/zxls.exe` **真的被替换**：Zed 锁 exe 会让 `build.sh` skip；用 `mv bin/zxls.exe bin/zxls-bak.exe` 绕锁再 `zig build-exe ... -femit-bin=bin/zxls.exe`，skip 一律当失败处理。替换后用户需重启 Zed 重新协商 capabilities。
