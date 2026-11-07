@@ -74,6 +74,43 @@ var quitting = false;
 var root_path: ?[]const u8 = null;
 var zxc_path: []const u8 = "zxc.exe";
 
+// std 目录：与编译器 find_std_path（src/sema.c）同一条解析链——
+// <exe>/std → <exe>/../std（编译器还认 ZX_STD 与 cwd/std，LSP 这里
+// 只实现 exe 相对两档：zxls 与 zxc 同源同目录，真实部署必中第二档）。
+// 仓库外工程（如 hello-zx）的文档目录里没有 std.zx，缺了它
+// std. / std.Task. 的补全整个断掉。
+var g_std_dir: ?[]const u8 = null;
+
+/// <dir> 下存在 std.zx 或 std/std.zx 即算 std 目录。
+fn stdDirProbe(dir: []const u8) bool {
+    var p: std.ArrayList(u8) = .empty;
+    p.appendSlice(gpa, dir) catch return false;
+    p.appendSlice(gpa, "/std.zx") catch return false;
+    if (readFileSmall(p.items)) |_| return true;
+    p.items.len = dir.len;
+    p.appendSlice(gpa, "/std/std.zx") catch return false;
+    if (readFileSmall(p.items)) |_| return true;
+    p.deinit(gpa);
+    return false;
+}
+
+fn findStdDir() ?[]const u8 {
+    const ed = exeDir();
+    {
+        var p: std.ArrayList(u8) = .empty;
+        p.appendSlice(gpa, ed) catch return null;
+        p.appendSlice(gpa, "/std") catch return null;
+        if (stdDirProbe(p.items)) return p.items;
+    }
+    {
+        var p: std.ArrayList(u8) = .empty;
+        p.appendSlice(gpa, ed) catch return null;
+        p.appendSlice(gpa, "/../std") catch return null;
+        if (stdDirProbe(p.items)) return p.items;
+    }
+    return null;
+}
+
 /// 错误码说明文档的地址（`<base>#e0304` 直达一条）。与 src/errors.c 的
 /// ZX_DOCS_URL 是同一个字面量——C 常量传不到 Zig 这边，只能各存一份，
 /// test.sh 会校验两处一致，改地址记得两边一起改。
@@ -740,6 +777,9 @@ fn modDirsInto(doc_dir: []const u8, out: *std.ArrayList([]const u8)) void {
         if (!std.mem.eql(u8, r, doc_dir)) out.append(gpa, r) catch return;
     }
     for (g_mod_dirs[0..g_mod_dir_n]) |d| out.append(gpa, d) catch return;
+    // std 兜底目录放最后：工程与 vendor/deps 都没命中才生效，
+    // 对齐编译器「module("std") 走 find_std_path 特例」的语义。
+    if (g_std_dir) |sd| out.append(gpa, sd) catch return;
 }
 
 /// module("…") 字符串 → 模块基名（去 .zx 后缀）。编译器两种形式都收：
@@ -2040,6 +2080,27 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                         if (readFileSmall(fp.items)) |txt| files.append(gpa, txt) catch {};
                     }
                 }
+                // std 目录的 .zx 也进容器扫描：仓库外工程里 std.Task. 的成员
+                // （group/spawn/…）定义在 <exe>/../std/task.zx，文档目录永远
+                // 扫不到。别名（std.zx 的 `pub const Task = task.Task`）会被
+                // containerMembers 的 struct 头检查跳过，命中的是 task.zx 的
+                // 真身，不会出两份。
+                if (g_std_dir) |sd| {
+                    var sd_d = Io.Dir.cwd().openDir(g_io, sd, .{ .iterate = true }) catch null;
+                    if (sd_d) |*dd| {
+                        defer dd.close(g_io);
+                        var it = dd.iterate();
+                        while (it.next(g_io) catch null) |entry| {
+                            if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".zx")) continue;
+                            var fp: std.ArrayList(u8) = .empty;
+                            defer fp.deinit(gpa);
+                            fp.appendSlice(gpa, sd) catch continue;
+                            fp.append(gpa, '/') catch continue;
+                            fp.appendSlice(gpa, entry.name) catch continue;
+                            if (readFileSmall(fp.items)) |txt| files.append(gpa, txt) catch {};
+                        }
+                    }
+                }
                 // 错误集成员：`error.`（全局码名）或 `Err.`（`const Err = error{…}`）。
                 if (!handled) {
                     if (std.mem.eql(u8, container, "error"))
@@ -2824,6 +2885,9 @@ pub fn main() !void {
         p.appendSlice(gpa, "/zxc.exe") catch {};
         zxc_path = p.items;
     }
+
+    // std 目录（与编译器同链路）：仓库外工程 std.Task 补全的命脉
+    g_std_dir = findStdDir();
 
     const worker = try std.Thread.spawn(.{}, diagnosticsWorker, .{});
 
