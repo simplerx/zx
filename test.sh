@@ -203,6 +203,72 @@ else
     printf "  FAIL cbuild 增量失效\n"; cat "$TPFX.cli.cb" 2>/dev/null; fail=1
 fi
 
+# 2.54 目录树模式：库原本就是 include/ + src/ 多层结构、还在工程外。
+# 守的是「不用复制任何文件」以及自动发现、自动排除测试目录、深层 .c 改动
+# 能触发重编重链。库文件一旦被要求摊平到 vendor/ 一层，这个用例就废了。
+printf "\n== zxc add <库目录>（多层路径，不复制文件）\n"
+TLIB="$pdir/treelib"
+mkdir -p "$TLIB/include/treelib" "$TLIB/src/core" "$TLIB/src/util" "$TLIB/tests"
+cat > "$TLIB/include/treelib.h" <<'THDR'
+#include "treelib/vec.h"
+#define TREE_VER 4
+extern int tree_g;
+int tree_add(int a, int b);
+int tree_hash(void);
+THDR
+cat > "$TLIB/include/treelib/vec.h" <<'VHDR'
+typedef struct Vec { int x; int y; } Vec;
+VHDR
+cat > "$TLIB/src/util/hash.h" <<'HHDR'
+int tree_hash_impl(int v);
+HHDR
+cat > "$TLIB/src/core/calc.c" <<'CSRC'
+#include "treelib.h"
+#include "hash.h"
+int tree_g = 2;
+int tree_add(int a, int b) { return a + b; }
+int tree_hash(void) { return tree_hash_impl(tree_g); }
+CSRC
+cat > "$TLIB/src/util/hash.c" <<'HSRC'
+#include "hash.h"
+int tree_hash_impl(int v) { return v * 3; }
+HSRC
+printf 'int main(void){ return 1; }\n' > "$TLIB/tests/main.c"
+
+cat > "$pdir/demo/src/main.zx" <<'ZSRC'
+const std = module("std");
+const t = module("treelib");
+const main = fn () i32 {
+    std.println("add={} hash={} g={} ver={}",
+                t.tree_add(2, 3), t.tree_hash(), t.tree_g, t.TREE_VER);
+    return 0;
+};
+ZSRC
+if ( cd "$pdir/demo" && "$ZXCW" add ../treelib > "$TPFX.cli.tree" 2>&1 ) \
+   && [ -f "$pdir/demo/vendor/treelib.clib" ] \
+   && [ -f "$pdir/demo/vendor/libtreelib.a" ] \
+   && [ "$(grep -c '^source = ' "$pdir/demo/vendor/treelib.clib")" = "2" ] \
+   && ! grep -q 'tests/main.c' "$pdir/demo/vendor/treelib.clib" \
+   && ! [ -f "$pdir/demo/vendor/calc.c" ] \
+   && ! grep -q 'tree_hash_impl' "$pdir/demo/vendor/treelib.zx" \
+   && ( cd "$pdir/demo" && "$ZXCW" run > "$TPFX.cli.trun" 2>&1 ) \
+   && grep -q "add=5 hash=6 g=2 ver=4" "$TPFX.cli.trun"; then
+    printf "  ok   目录树自动发现 / 不复制 / 排除 tests / 端到端可调用\n"
+else
+    printf "  FAIL zxc add <库目录>\n"
+    cat "$TPFX.cli.tree" "$TPFX.cli.trun" 2>/dev/null
+    cat "$pdir/demo/vendor/treelib.clib" 2>/dev/null
+    fail=1
+fi
+# 深层子目录里的 .c 改了，只跑 run（内部 build）必须自动重编重链
+sed -i 's/return v \* 3;/return v * 5;/' "$TLIB/src/util/hash.c"
+if ( cd "$pdir/demo" && "$ZXCW" run > "$TPFX.cli.trun2" 2>&1 ) \
+   && grep -q "hash=10" "$TPFX.cli.trun2"; then
+    printf "  ok   深层 .c 改动触发自动重编重链\n"
+else
+    printf "  FAIL 深层 .c 改动没有重编\n"; cat "$TPFX.cli.trun2" 2>/dev/null; fail=1
+fi
+
 rm -rf "$pdir" 2>/dev/null || true
 
 # 2.55 错误码目录：诊断里出现的每个码都必须查得到。

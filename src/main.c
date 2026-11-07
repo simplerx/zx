@@ -33,6 +33,7 @@
 #include "val.h"
 #include "cbind.h"
 #include "csrc.h"
+#include "clib.h"
 #include <stdarg.h>
 #include <time.h>
 #include <sys/stat.h>
@@ -542,6 +543,31 @@ static int build_program(Node *root, const char *out, const char *cachedir, OutK
             free(libs[i]);
         }
         free(libs);
+
+        /* 目录树模式：.clib 清单里可以是指向任意深度、任意位置的源码
+         * （库本身一个文件都没复制过来）。build/run/test 走这里自动
+         * 增量重编，重编过同样必须强制重链。 */
+        int nman = 0;
+        char **mans = clib_scan_manifests("vendor", &nman);
+        for (int i = 0; i < nman; i++) {
+            char clib[1024], merr[1024];
+            int mcomp = 0;
+            int mr = clib_build(g_cc, g_cflags, mans[i], ZX_CACHE_DIR, 0,
+                                clib, sizeof clib, merr, sizeof merr, &mcomp);
+            free(mans[i]);
+            if (mr < 0) {
+                fprintf(stderr, "zxc: %s\n", merr);
+                free(mans);
+                return 1;
+            }
+            if (mr > 0 && clib[0]) zx_add_link_lib(clib);
+            if (mcomp > 0) {
+                csrc_relink = 1;
+                prog("compiled %d C unit(s) from a .clib manifest", mcomp);
+            }
+        }
+        free(mans);
+
         if (ncomp > 0) {
             csrc_relink = 1;
             prog("compiled %d C unit(s) from vendor/", ncomp);
@@ -738,6 +764,7 @@ static int build_program(Node *root, const char *out, const char *cachedir, OutK
                 snprintf(cmd + strlen(cmd), sizeof cmd - strlen(cmd), " -l%s", L);
         }
     }
+    if (getenv("ZX_VERBOSE")) fprintf(stderr, "  link cmd: %s\n", cmd);
     prog("%s...", kind == OUT_STATIC ? "archiving" : "linking");
     double t_link = prog_clock();
     {
@@ -792,7 +819,8 @@ static void usage(FILE *f) {
         "\n"
         "project subcommands:\n"
         "  init [name]                      create a project: src/ sources, vendor/ module root, zx.json\n"
-        "  add <name|header.h>            add a C library: generate a Zx binding into vendor/\n"
+        "  add <name|header.h|dir>       add a C library: generate a Zx binding into vendor/\n"
+        "  add ./third_party/foo          point at a library tree; no files are copied\n"
         "  cbuild [group]                 compile vendor/*.c into lib<group>.a (auto on add/build)\n"
         "  build [options]                  build per zx.json into out/ (intermediates in .zxc-cache/)\n"
         "  run [options] [-- prog args...]  build, then run\n"
@@ -832,8 +860,8 @@ static int help_sub(FILE *f, const char *cmd) {
         fprintf(f,
             "zxc cbuild [group] [options] -- compile C sources in vendor/\n"
             "\n"
-            "  zxc cbuild              compile every *.c group -> vendor/lib<group>.a\n"
-            "  zxc cbuild mini         only the group belonging to vendor/mini.h\n"
+            "  zxc cbuild              compile every *.c group + every vendor/*.clib\n"
+            "  zxc cbuild mini         only group / manifest named 'mini'\n"
             "  zxc cbuild --force      ignore timestamps, rebuild all\n"
             "  zxc cbuild --release    use the -O2 profile\n"
             "\n"
@@ -842,28 +870,37 @@ static int help_sub(FILE *f, const char *cmd) {
             "C sources use the exact same cc + flags as the C that zxc generates,\n"
             "so there is no sanitizer / ABI mismatch at link time.\n"
             "Grouping: <stem>.c with <stem>.h -> lib<stem>.a; mini_extra.c also\n"
-            "joins libmini.a; a .c without a matching header gets its own group.\n");
+            "joins libmini.a; a .c without a matching header gets its own group.\n"
+            "A vendor/<name>.clib manifest (made by `zxc add <dir>`) builds all its\n"
+            "listed sources into one lib<name>.a, whatever their directory depth.\n");
         return 0;
     }
     if (!strcmp(cmd, "add")) {
         fprintf(f,
-            "zxc add <name|header.h> [options] -- add a C library, no manual bindings\n"
+            "zxc add <name|header.h|dir> [options] -- add a C library, no manual bindings\n"
             "\n"
-            "  zxc add ./vendor/raylib.h     parse a local header -> vendor/raylib.zx\n"
+            "  zxc add ../third_party/foo    point at a LIBRARY DIRECTORY (recommended)\n"
+            "  zxc add ./vendor/raylib.h     parse one local header -> vendor/raylib.zx\n"
             "  zxc add sqlite3               built-in recipe: locate header + set @link\n"
             "  zxc add --list                show built-in recipes\n"
             "\n"
+            "Directory mode: zxc walks the library's own tree (include/, src/, any\n"
+            "number of nested dirs), writes vendor/<name>.clib listing what it found,\n"
+            "and compiles those sources into one lib<name>.a. NO FILES ARE COPIED --\n"
+            "the library can live anywhere. Comment out lines in the .clib to trim.\n"
+            "\n"
             "options:\n"
             "  --lib NAME     override the library passed to @link\n"
-            "  --no-build     skip compiling .c files next to the header\n"
+            "  --name NAME    override the module name in directory mode\n"
+            "  --no-build     skip compiling C sources\n"
             "  --force        overwrite an existing vendor/<name>.zx\n"
             "\n"
             "The generated file is ordinary, editable Zx source:\n"
             "  const ray = module(\"raylib\");   ray.InitWindow(800, 600, \"hi\");\n"
             "Completion / hover / inlay hints work on it like any other module.\n"
             "Declarations clang cannot translate are listed as comments at the end.\n"
-            "C sources next to the header are compiled into a static library\n"
-            "and linked automatically; zxc build recompiles them on change.\n"
+            "C sources are compiled into a static library and linked automatically;\n"
+            "zxc build recompiles them on change. tests/examples/build dirs are skipped.\n"
             "No network access and no package download involved.\n");
         return 0;
     }
@@ -1418,6 +1455,12 @@ static void cadd_stem(const char *s, char *out, size_t cap) {
     if (!out[0]) snprintf(out, cap, "clib");
 }
 
+/* 参数是目录 -> 目录树模式；是 .h 文件 -> 单头模式；否则走内置配方。 */
+static int path_is_dir(const char *p) {
+    struct stat st;
+    return stat(p, &st) == 0 && (st.st_mode & S_IFDIR) != 0;
+}
+
 /* 取头文件所在目录：C 源码与头放一起，编出的库也落在那里。 */
 static void cadd_dir_of(const char *path, char *out, size_t cap) {
     const char *slash = NULL;
@@ -1443,14 +1486,125 @@ static int cadd_probe_lib(const char *stem, char *buf, size_t cap) {
     return 0;
 }
 
+/* ---- 目录树模式：zxc add <库目录> --------------------------------------
+ * 库文件保持原位：include/ 与 src/ 分离、任意深度子目录、甚至工程外的路径。
+ * 只写一张 vendor/<name>.clib 清单（编译输入，可直接注释行裁剪），
+ * 再把清单里所有 .c 合成一个 lib<name>.a。一个文件都不复制。
+ */
+static int cmd_add_tree(const char *root, const char *uname,
+                        const char *ulib, int force, int no_build) {
+    char err[1024];
+    ClibManifest m;
+    if (clib_discover(root, uname, &m, err, sizeof err) != 0) {
+        fprintf(stderr, "zxc add: %s\n", err);
+        return 1;
+    }
+    if (mkdir_one("vendor") != 0) {
+        fprintf(stderr, "zxc add: cannot create vendor/\n");
+        clib_free(&m); return 1;
+    }
+    char modname[256];
+    snprintf(modname, sizeof modname, "%s", m.name);
+    char regen[1200];
+    if (uname) snprintf(regen, sizeof regen, "%s --name %s", root, uname);
+    else snprintf(regen, sizeof regen, "%s", root);
+    char mf[1024], zxpath[1024], libpath[1024];
+    snprintf(mf, sizeof mf, "vendor/%s.clib", modname);
+    snprintf(zxpath, sizeof zxpath, "vendor/%s.zx", modname);
+    snprintf(libpath, sizeof libpath, "vendor/lib%s.a", modname);
+    if (!force && (fexists(mf) || fexists(zxpath))) {
+        fprintf(stderr, "zxc add: '%s' already exists (use --force to overwrite)\n",
+                fexists(mf) ? mf : zxpath);
+        clib_free(&m); return 1;
+    }
+    if (clib_write_manifest(mf, &m, root, regen, err, sizeof err) != 0) {
+        fprintf(stderr, "zxc add: %s\n", err);
+        clib_free(&m); return 1;
+    }
+    printf("zxc add: %s\n", root);
+    printf("  found %d header(s), %d include dir(s), %d C source(s)\n",
+           m.nhdr, m.ninc, m.nsrc);
+    printf("  wrote %s -- nothing copied; comment out lines to trim\n", mf);
+
+    /* 同一库改 --name 再 add 一次会留下两份清单：build 会编两遍、注入两个
+     * 内容相同的 .a。只提醒，不擅自删用户文件。 */
+    int nmans = 0;
+    char **omans = clib_scan_manifests("vendor", &nmans);
+    for (int i = 0; i < nmans; i++) {
+        if (strcmp(omans[i], mf)) {
+            ClibManifest om;
+            char oerr[256];
+            if (clib_read_manifest(omans[i], &om, oerr, sizeof oerr) == 0) {
+                if (!strcmp(om.root, root))
+                    printf("  note: %s points at the same library;"
+                           " delete it if this was a rename\n", omans[i]);
+                clib_free(&om);
+            }
+        }
+        free(omans[i]);
+    }
+    free(omans);
+
+    char header[1024];
+    if (clib_umbrella(&m, ZX_CACHE_DIR, header, sizeof header,
+                      err, sizeof err) != 0) {
+        fprintf(stderr, "zxc add: %s\n", err);
+        clib_free(&m); return 1;
+    }
+    char *incs = clib_inc_flags(&m);
+    if (!incs) {
+        fprintf(stderr, "zxc add: out of memory\n");
+        clib_free(&m); return 1;
+    }
+
+    const char *lib = ulib;
+    if (!no_build && !ulib && m.nsrc > 0) {
+        int ncomp = 0;
+        if (clib_build(g_cc, g_cflags ? g_cflags : CC_DEV, mf, ZX_CACHE_DIR, 0,
+                       libpath, sizeof libpath, err, sizeof err, &ncomp) < 0) {
+            fprintf(stderr, "zxc add: %s\n", err);
+            free(incs); clib_free(&m); return 1;
+        }
+        printf("zxc add: compiled %d C unit(s) -> %s\n", ncomp, libpath);
+    }
+    /* 纯头库不写 @link；其它情况即使 --no-build 也先把路径写进绑定，
+     * 之后 zxc build 会自动把库编出来。 */
+    if (!lib && m.nsrc > 0) lib = libpath;
+
+    int nskip = 0;
+    char *text = cbind_generate(header, g_cc, lib, 0, incs,
+                                (const char *const *)m.hdr, m.nhdr, regen,
+                                err, sizeof err, &nskip);
+    free(incs);
+    clib_free(&m);
+    if (!text) { fprintf(stderr, "zxc add: %s\n", err); return 1; }
+    int rc = write_text_file(zxpath, text);
+    free(text);
+    if (rc != 0) return 1;
+    printf("zxc add: wrote %s (%d declaration(s) skipped)\n", zxpath, nskip);
+    printf("  use:  const %s = module(\"%s\");\n", modname, modname);
+    if (lib && lib[0])
+        printf("  link: @link(\"%s\") is already in the binding\n", lib);
+    else
+        printf("  note: header-only, nothing to link\n");
+    printf("  later: edit %s, then `zxc build` recompiles automatically\n", mf);
+    return 0;
+}
+
 static int cmd_add(int argc, char **argv, int argi) {
-    const char *name = NULL, *ulib = NULL;
+    const char *name = NULL, *ulib = NULL, *uname = NULL;
     int force = 0, list = 0, no_build = 0;
     for (int i = argi; i < argc; i++) {
         if (!strcmp(argv[i], "--list")) list = 1;
         else if (!strcmp(argv[i], "--force")) force = 1;
         else if (!strcmp(argv[i], "--no-build")) no_build = 1;
-        else if (!strcmp(argv[i], "--lib")) {
+        else if (!strcmp(argv[i], "--name")) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "zxc add: --name needs a module name\n");
+                return 2;
+            }
+            uname = argv[++i];
+        } else if (!strcmp(argv[i], "--lib")) {
             if (i + 1 >= argc) {
                 fprintf(stderr, "zxc add: --lib needs a library name\n");
                 return 2;
@@ -1477,10 +1631,13 @@ static int cmd_add(int argc, char **argv, int argi) {
         return 0;
     }
     if (!name) {
-        fprintf(stderr, "usage: zxc add <name|header.h> [--lib NAME] [--no-build] [--force]\n"
+        fprintf(stderr, "usage: zxc add <name|header.h|dir> [--name NAME] [--lib NAME] [--no-build] [--force]\n"
                         "       zxc add --list\n");
         return 2;
     }
+
+    /* 目录参数 = 库原本的目录树：不复制文件，走清单模式。 */
+    if (path_is_dir(name)) return cmd_add_tree(name, uname, ulib, force, no_build);
 
     const CRecipe *r = crecipe_of(name);
     char header[1024] = "";
@@ -1577,7 +1734,7 @@ static int cmd_add(int argc, char **argv, int argi) {
 
     char err[1024];
     int nskip = 0;
-    char *text = cbind_generate(header, g_cc, lib, allow_system,
+    char *text = cbind_generate(header, g_cc, lib, allow_system, NULL, NULL, 0, name,
                                 err, sizeof err, &nskip);
     if (!text) { fprintf(stderr, "zxc add: %s\n", err); return 1; }
     int rc = write_text_file(outpath, text);
@@ -1623,17 +1780,58 @@ static int cmd_cbuild(int argc, char **argv, int argi) {
     int nlib = csrc_build(g_cc, g_cflags, "vendor", ZX_CACHE_DIR, group, force,
                           &libs, err, sizeof err, &ncomp);
     if (nlib < 0) { fprintf(stderr, "zxc cbuild: %s\n", err); return 1; }
-    if (nlib == 0) {
+
+    /* 清单模式：`zxc cbuild foo` 只编 vendor/foo.clib，不带名字则编全部。 */
+    char **mans = NULL;
+    int nman = 0;
+    if (group) {
+        char mf[1024];
+        snprintf(mf, sizeof mf, "vendor/%s.clib", group);
+        if (fexists(mf)) {
+            mans = malloc(sizeof *mans);
+            mans[0] = strdup(mf);
+            nman = 1;
+        }
+    } else {
+        mans = clib_scan_manifests("vendor", &nman);
+    }
+    char **extra = NULL;
+    int nextra = 0;
+    for (int i = 0; i < nman; i++) {
+        char clib[1024];
+        int mcomp = 0;
+        int mr = clib_build(g_cc, g_cflags, mans[i], ZX_CACHE_DIR, force,
+                            clib, sizeof clib, err, sizeof err, &mcomp);
+        free(mans[i]);
+        if (mr < 0) {
+            fprintf(stderr, "zxc cbuild: %s\n", err);
+            free(mans); free(extra); free(libs);
+            return 1;
+        }
+        ncomp += mcomp;
+        if (mr > 0 && clib[0]) {
+            extra = realloc(extra, (size_t)(nextra + 1) * sizeof *extra);
+            extra[nextra++] = strdup(clib);
+        }
+    }
+    free(mans);
+
+    if (nlib == 0 && nextra == 0) {
         printf("zxc cbuild: no C sources in vendor/ (nothing to do)\n");
-        free(libs);
+        free(libs); free(extra);
         return 0;
     }
-    printf("zxc cbuild: %d C unit(s) recompiled, %d library(ies):\n", ncomp, nlib);
+    printf("zxc cbuild: %d C unit(s) recompiled, %d library(ies):\n",
+           ncomp, nlib + nextra);
     for (int i = 0; i < nlib; i++) {
         printf("  %s\n", libs[i]);
         free(libs[i]);
     }
-    free(libs);
+    for (int i = 0; i < nextra; i++) {
+        printf("  %s\n", extra[i]);
+        free(extra[i]);
+    }
+    free(libs); free(extra);
     printf("  run 'zxc build' to relink\n");
     return 0;
 }

@@ -92,23 +92,25 @@ bin/zxc.exe init [name]           # 创建工程：src/、vendor/、zx.json
 bin/zxc.exe build [--release]     # 工程构建 → out/<名>.exe
 bin/zxc.exe run [-- args...]      # 构建后直接运行
 bin/zxc.exe fmt [--check]         # 格式化
-bin/zxc.exe add <name|header.h>   # 一条命令接入 C 库 → vendor/<name>.zx
+bin/zxc.exe add <name|header.h|dir> # 一条命令接入 C 库 → vendor/<name>.zx
 bin/zxc.exe cbuild [group]        # 重编 vendor/ 下的 C 源码（一般不用手动跑）
 ```
 
 ## 调用 C 库
 
-不用手写 `extern` 声明。在工程根跑一条命令，`zxc` 会用项目内 vendored 的 clang
-解析头文件，生成一份**普通、可编辑的 Zx 绑定**放进 `vendor/`：
+不用手写 `extern` 声明，也**不用把库文件复制或摊平到 `vendor/`**。直接指向库原本的目录：
 
 ```sh
-zxc add ./vendor/raylib.h     # 本地头文件：函数 / 结构体 / 全局变量 / 枚举 / 常量
-zxc add m                     # 内置常见库配方：自动定位头文件并配好 @link
-zxc add --list                # 看有哪些配方
+zxc add ../third_party/raylib  # 推荐：库目录（include/、src/、任意多层，工程外也行）
+zxc add ./vendor/raylib.h      # 单个头文件（小库简写）
+zxc add m                      # 内置常见库配方：自动定位头文件并配好 @link
+zxc add --list                 # 看有哪些配方
 ```
 
-头文件旁放上 `.c` 实现，`zxc add` 会顺手把它编成 `vendor/lib<名>.a` 并写好 `@link`；
-之后改了 C 源码，直接 `zxc build` 就会自动增量重编、重新链接，不用记额外命令。
+目录模式下 `zxc` 递归扫描整个库目录，写出一张 `vendor/<名>.clib` 清单，列明发现了哪些
+头文件、源文件、include 路径，然后把清单里的 `.c` 编成 `vendor/lib<名>.a` 并写好 `@link`。
+**库文件一个都不动**；多选了就在清单里注释掉那行，库里新增文件就 `zxc add <目录> --force`
+刷新。之后改了任意 C 源码，直接 `zxc build` 会自动增量重编、重新链接，不用记额外命令。
 
 ```zx
 const ray = module("raylib");
@@ -117,7 +119,7 @@ ray.InitWindow(800, 600, "hello");
 
 生成物是普通 Zx 源码，`vendor/` 本来就是模块搜索根，所以补全、hover、行内类型提示
 全部照常生效；要微调直接编辑，`--force` 可重新生成。命令不联网、不下载源码。
-细节与边界见 `docs/manual.md` §3.17。
+细节与边界见 `docs/manual.md` §3.17 / §3.19。
 
 编辑器支持（Zed 扩展 + 通用 LSP 客户端，`bin/zxls.exe`）见 `editor/README.md`。
 
