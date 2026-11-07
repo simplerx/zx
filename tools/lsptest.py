@@ -58,6 +58,13 @@ const thrower = fn (b: bool) IOErr!i32 {
     if (b) { return IOErr.open; }
     return error.read;
 };
+
+// 字面量续补：'{ ' 后无空格 + 已有字段（3l 用例）
+const lit2 = fn () i32 {
+    var o2 = Obj{.count = 1, .name = "x"};
+    std.println("{} {}", o2.count, o2.name);
+    return 0;
+};
 """
 
 uri = "file:///" + TESTDIR.replace("\\", "/") + "/main.zx"
@@ -242,7 +249,7 @@ send({"jsonrpc": "2.0", "id": 14, "method": "textDocument/hover", "params": {
     "textDocument": {"uri": uri}, "position": pos(MAIN, off)}})
 r, _ = recv_id("hover.varType", 14)
 hv = r["result"]["contents"]["value"] if r and r.get("result") else ""
-check("hover.varType", "const s: Shape = " in hv, repr(hv[:80]))
+check("hover.varType", "var s: Shape = " in hv, repr(hv[:80]))
 
 # 3h hover 容器名 → Zig 式 `: type`
 off = MAIN.index("Shape{ .circle")     # 停在类型名上
@@ -251,6 +258,47 @@ send({"jsonrpc": "2.0", "id": 15, "method": "textDocument/hover", "params": {
 r, _ = recv_id("hover.containerType", 15)
 hv = r["result"]["contents"]["value"] if r and r.get("result") else ""
 check("hover.containerType", ": type = struct" in hv or ": type = union" in hv, repr(hv[:80]))
+
+# 3i hover 函数形参 → `b: bool`（namedTypeNear 的 `name: Type` 形状扫描）
+off = MAIN.index("fn (b: bool)") + len("fn (b")
+send({"jsonrpc": "2.0", "id": 16, "method": "textDocument/hover", "params": {
+    "textDocument": {"uri": uri}, "position": pos(MAIN, off)}})
+r, _ = recv_id("hover.param", 16)
+hv = r["result"]["contents"]["value"] if r and r.get("result") else ""
+check("hover.param", "b: bool" in hv, repr(hv[:80]))
+
+# 3j hover 结构体字段声明 → `count: i32`
+off = MAIN.index("    count: i32,") + len("    count")
+send({"jsonrpc": "2.0", "id": 17, "method": "textDocument/hover", "params": {
+    "textDocument": {"uri": uri}, "position": pos(MAIN, off)}})
+r, _ = recv_id("hover.field", 17)
+hv = r["result"]["contents"]["value"] if r and r.get("result") else ""
+check("hover.field", "count: i32" in hv, repr(hv[:80]))
+
+# 3k hover 成员表达式右值 → 字段类型穿透（const n = o.count → i32，
+# 不得把 "o.count" 整串当类型名）
+off = MAIN.index("let n = o.count;") + len("let n")
+send({"jsonrpc": "2.0", "id": 18, "method": "textDocument/hover", "params": {
+    "textDocument": {"uri": uri}, "position": pos(MAIN, off)}})
+r, _ = recv_id("hover.memberRhs", 18)
+hv = r["result"]["contents"]["value"] if r and r.get("result") else ""
+check("hover.memberRhs", "let n: i32 = " in hv and "o.count" not in hv.split("\n")[1].split("=")[0], repr(hv[:80]))
+
+# 3l 字面量续补：Obj{.count = 1, . → 跨过已有字段找到 '{'（'{ ' 后无空格也认）
+off = MAIN.index("var o2 = Obj{.count = 1, .") + len("var o2 = Obj{.count = 1, .")
+send({"jsonrpc": "2.0", "id": 19, "method": "textDocument/completion", "params": {
+    "textDocument": {"uri": uri}, "position": pos(MAIN, off)}})
+r, _ = recv_id("completion.literalSecond", 19)
+labels = {i["label"] for i in r["result"]["items"]} if r and r.get("result") else set()
+check("completion.literalSecond", {"count", "name"} <= labels and "bump" not in labels, str(sorted(labels)))
+
+# 3m 字面量续补（带前缀）：Obj{.c → Zed 会带着已敲的 'c' 请求，字段仍要全量给
+off = MAIN.index("var o2 = Obj{.count = 1, .n") + len("var o2 = Obj{.count = 1, .n")
+send({"jsonrpc": "2.0", "id": 20, "method": "textDocument/completion", "params": {
+    "textDocument": {"uri": uri}, "position": pos(MAIN, off)}})
+r, _ = recv_id("completion.literalSecondPrefix", 20)
+labels = {i["label"] for i in r["result"]["items"]} if r and r.get("result") else set()
+check("completion.literalSecondPrefix", "name" in labels, str(sorted(labels)))
 
 # 4 completion `std.p`（带前缀点补全，旧版这里只会出关键字）
 off = MAIN.rindex("std.p") + len("std.p")   # 光标在 p 后面
@@ -402,6 +450,71 @@ check("diagnostics.codeDescription", href.endswith("docs/errors.md#e0304"), href
 # 10d 没有具体 fix-it 的诊断，消息里要带上该码的通用修法（errors.c 的文案）
 ok_fix = any(d.get("code") == "E0301" and "@intCast" in d.get("message", "") for d in diags)
 check("diagnostics.genericFix", ok_fix, str(diag_msgs)[:300])
+
+# 3n 行内类型提示（textDocument/inlayHint）：没写类型的绑定要出 `: Type`
+#     GUARD: 这 12 条是 inlayHint 能力线的守门断言，实现被删/被回退会在这里
+#     连挂。改 zxls 时不要为了"让测试变绿"删用例，先修实现。
+#     放在诊断断言之后：didChange 会异步推诊断，放前面会污染 10b 的轮询。
+#     10b 把文档改成了 BADTXT，这里先改回 MAIN 再按 MAIN 的行号断言。
+send({"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {
+    "textDocument": {"uri": uri, "version": 8},
+    "contentChanges": [{"text": MAIN}]}})
+send({"jsonrpc": "2.0", "id": 21, "method": "textDocument/inlayHint", "params": {
+    "textDocument": {"uri": uri},
+    "range": {"start": {"line": 0, "character": 0},
+              "end": {"line": MAIN.count("\n"), "character": 0}}}})
+r, _ = recv_id("inlayHint.main", 21)
+hints = r["result"] if r and r.get("result") is not None else []
+byline = {(h["position"]["line"], h["position"]["character"]): h["label"] for h in hints}
+
+def hint_at(decl):
+    p = pos(MAIN, MAIN.index(decl) + len(decl))
+    return byline.get((p["line"], p["character"]))
+
+detail = str(sorted(byline.items()))[:240]
+check("inlayHint.varLiteral", hint_at("var s") == ": Shape", detail)
+check("inlayHint.callRet", hint_at("let o") == ": Obj", detail)
+check("inlayHint.memberRhs", hint_at("let n") == ": i32", detail)
+check("inlayHint.literalSecond", hint_at("var o2") == ": Obj", detail)
+check("inlayHint.inlineStructField", hint_at("let i") == ": i32", detail)
+check("inlayHint.skipNonValue",
+      all(hint_at(k) is None for k in ("const Obj", "const Shape", "const std", "const push")), detail)
+check("inlayHint.kind", all(h.get("kind") == 1 for h in hints), str(hints[:2]))
+
+# 3o 显式写了类型 / 注释 / 字符串里的伪声明都不该插 hint
+TYPED = """const T = struct { a: i32 };
+pub const main = fn () i32 {
+    var p = T{.a = 1};
+    let n = 10;
+    let t: i32 = 20;
+    const label = "hi";
+    // const fake = 1;
+    return 0;
+};
+"""
+send({"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {
+    "textDocument": {"uri": uri, "version": 9},
+    "contentChanges": [{"text": TYPED}]}})
+send({"jsonrpc": "2.0", "id": 22, "method": "textDocument/inlayHint", "params": {
+    "textDocument": {"uri": uri},
+    "range": {"start": {"line": 0, "character": 0}, "end": {"line": 9, "character": 0}}}})
+r, _ = recv_id("inlayHint.typed", 22)
+th = r["result"] if r and r.get("result") is not None else []
+tbody = {(h["position"]["line"], h["position"]["character"]): h["label"] for h in th}
+
+def thint(decl):
+    p = pos(TYPED, TYPED.index(decl) + len(decl))
+    return tbody.get((p["line"], p["character"]))
+
+tdetail = str(sorted(tbody.items()))[:240]
+check("inlayHint.typed.var", thint("var p") == ": T", tdetail)
+check("inlayHint.typed.number", thint("let n") == ": i32", tdetail)
+check("inlayHint.typed.string", thint("const label") == ": str", tdetail)
+check("inlayHint.typed.skipExplicit", thint("let t") is None, tdetail)
+check("inlayHint.typed.skipComment", len(th) == 3, tdetail)
+send({"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {
+    "textDocument": {"uri": uri, "version": 10},
+    "contentChanges": [{"text": MAIN}]}})
 
 # 9 shutdown/exit
 send({"jsonrpc": "2.0", "id": 8, "method": "shutdown", "params": None})
