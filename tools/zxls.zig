@@ -479,11 +479,15 @@ fn namedErrInner(files: []const []const u8, name: []const u8, out: *std.ArrayLis
 }
 
 /// 在 files 里找 `const BASE = struct/union/enum …{`，提取成员
-fn containerMembers(files: []const []const u8, base: []const u8, fields: *std.ArrayList(Decl)) bool {
+const ContainerHit = struct { body: []const u8, is_enum: bool };
+
+/// 在 files 里找 `const <base> = struct/union/enum {`，返回从 '{' 起的体
+/// 与是否 enum。containerMembers 与方法返回类型解析共用这条匹配。
+fn findContainerBody(files: []const []const u8, base: []const u8) ?ContainerHit {
     var pat: std.ArrayList(u8) = .empty;
     defer pat.deinit(gpa);
-    pat.appendSlice(gpa, "const ") catch return false;
-    pat.appendSlice(gpa, base) catch return false;
+    pat.appendSlice(gpa, "const ") catch return null;
+    pat.appendSlice(gpa, base) catch return null;
     for (files) |ftext| {
         var idx: usize = 0;
         while (std.mem.indexOfPos(u8, ftext, idx, pat.items)) |hit| {
@@ -511,15 +515,61 @@ fn containerMembers(files: []const []const u8, base: []const u8, fields: *std.Ar
                 idx = hit + 1;
                 continue;
             }
-            extractBraceMembers(ftext[p..], is_enum, fields);
-            return true;
+            return .{ .body = ftext[p..], .is_enum = is_enum };
         }
     }
-    return false;
+    return null;
+}
+
+fn containerMembers(files: []const []const u8, base: []const u8, fields: *std.ArrayList(Decl)) bool {
+    const hit = findContainerBody(files, base) orelse return false;
+    extractBraceMembers(hit.body, hit.is_enum, fields);
+    return true;
+}
+
+/// 容器内方法（`const <m> = fn (…) Ret {`）的返回类型。
+/// std.Task.group() → Group 这类推断靠它；解析不出返回 null。
+fn methodRetIn(files: []const []const u8, base: []const u8, method: []const u8) ?[]const u8 {
+    const body = (findContainerBody(files, base) orelse return null).body;
+    var pat: std.ArrayList(u8) = .empty;
+    defer pat.deinit(gpa);
+    pat.appendSlice(gpa, "const ") catch return null;
+    pat.appendSlice(gpa, method) catch return null;
+    var idx: usize = 0;
+    while (std.mem.indexOfPos(u8, body, idx, pat.items)) |hit| {
+        idx = hit + 1;
+        if (hit > 0 and isIdentChar(body[hit - 1])) continue;
+        var p = hit + pat.items.len;
+        while (p < body.len and (body[p] == ' ' or body[p] == '\t')) p += 1;
+        if (p >= body.len or body[p] != '=') continue;
+        p += 1;
+        while (p < body.len and (body[p] == ' ' or body[p] == '\t')) p += 1;
+        if (p >= body.len or body[p] != 'f') continue; // 只要方法（fn …）
+        // 参数列表的匹配 ')'，之后到 '{' 之间是返回类型
+        var d: usize = 0;
+        var q = p;
+        while (q < body.len) : (q += 1) {
+            if (body[q] == '(') d += 1;
+            if (body[q] == ')') {
+                d -= 1;
+                if (d == 0) break;
+            }
+        }
+        if (q >= body.len or d != 0) continue;
+        q += 1;
+        while (q < body.len and (body[q] == ' ' or body[q] == '\t')) q += 1;
+        var n = q;
+        while (n < body.len and isIdentChar(body[n])) n += 1;
+        if (n == q) continue;
+        return dupe(body[q..n]);
+    }
+    return null;
 }
 
 fn extractBraceMembers(text: []const u8, is_enum: bool, out: *std.ArrayList(Decl)) void {
     var depth: usize = 0;
+    var d_par: usize = 0; // 圆括号深度：方法签名 fn (f: …, ctx: …) 里的参数名
+    // 形状与字段一致，括号内一律不收，否则混进成员列表。
     var i: usize = 1; // text[0] == '{'
     while (i < text.len) : (i += 1) {
         const c = text[i];
@@ -533,12 +583,14 @@ fn extractBraceMembers(text: []const u8, is_enum: bool, out: *std.ArrayList(Decl
             while (i < text.len and text[i] != '"' and text[i] != '\n') i += 1;
             continue;
         }
+        if (c == '(') d_par += 1;
+        if (c == ')' and d_par > 0) d_par -= 1;
         if (c == '{') depth += 1;
         if (c == '}') {
             if (depth == 0) return;
             depth -= 1;
         }
-        if (depth == 0 and isIdentChar(c) and !(c >= '0' and c <= '9')) {
+        if (depth == 0 and d_par == 0 and isIdentChar(c) and !(c >= '0' and c <= '9')) {
             var j = i + 1;
             while (j < text.len and isIdentChar(text[j])) j += 1;
             var k = j;
@@ -1590,8 +1642,9 @@ fn isContainerIn(files: []const []const u8, base: []const u8) bool {
     return containerMembers(files, base, &tmp);
 }
 
-/// 初始化表达式 → 容器类型名。识别三类：
+/// 初始化表达式 → 容器类型名。识别四类：
 ///   `X{…}` 字面量、`X.static(...)` 静态调用（X 是容器且不是模块绑定）、
+///   `std.X.method(...)`（容器是第二段，files 需含 std 目录）、
 ///   裸别名链（`const v = w` 递归追初始化）。识别不了返回 null。
 fn inferContainer(files: []const []const u8, text: []const u8, expr: []const u8, depth: u8) ?[]const u8 {
     const e = trimSl(expr);
@@ -1621,8 +1674,40 @@ fn inferContainer(files: []const []const u8, text: []const u8, expr: []const u8,
         }
         return null;
     }
-    if (e[k] == '.' and moduleOfBinding(text, head) == null and !std.mem.eql(u8, head, "std")) {
-        if (isContainerIn(files, head)) return head; // X.static(...) 静态调用
+    if (e[k] == '.') {
+        // 容器候选：std.X.method 的第二段，或 X.static 的首段
+        var cont: []const u8 = "";
+        var after: usize = 0; // 容器名结束位置
+        if (std.mem.eql(u8, head, "std")) {
+            // std.X.method(...) / std.X{…}：判定靠 isContainerIn(files, …)，
+            // 补全调用点的 files 已含 std 目录；std.print 这类内建不是容器，
+            // isContainerIn 返回 false 自然落空。
+            var m = k + 1;
+            while (m < e.len and (e[m] == ' ' or e[m] == '\t')) m += 1;
+            var n = m;
+            while (n < e.len and isIdentChar(e[n])) n += 1;
+            if (n == m) return null;
+            cont = e[m..n];
+            after = n;
+        } else if (moduleOfBinding(text, head) == null) {
+            if (!isContainerIn(files, head)) return null; // X.static(...) 静态调用
+            cont = head;
+            after = j;
+        } else return null;
+        // cont 后跟 .method(...)：追方法返回类型（std.Task.group() → Group，
+        // let g = … 之后 g. 出的是 Group 的 spawn/wait，不是 Task 的）。
+        if (after < e.len and e[after] == '.') {
+            var m2 = after + 1;
+            while (m2 < e.len and (e[m2] == ' ' or e[m2] == '\t')) m2 += 1;
+            var n2 = m2;
+            while (n2 < e.len and isIdentChar(e[n2])) n2 += 1;
+            if (n2 > m2 and n2 < e.len and e[n2] == '(') {
+                if (methodRetIn(files, cont, e[m2..n2])) |ret| {
+                    if (isContainerIn(files, ret)) return ret;
+                }
+            }
+        }
+        return cont;
     }
     return null;
 }

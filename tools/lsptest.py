@@ -1,5 +1,5 @@
 # zxls 冒烟测试：stdio LSP 会话模拟
-import subprocess, json, os, sys, threading, queue
+import subprocess, json, os, sys, shutil, threading, queue
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # 仓库根（脚本在 tools/ 下）
 TESTDIR = os.path.join(ROOT, ".tmp", "lsptest")
@@ -36,6 +36,8 @@ pub const main = fn () i32 {
     let n = o.count;
     var s = Shape{ .circle = 1.0 };
     push(.{ .a = 1010, .msg = "hi" });
+    let g = std.Task.group();
+    g.wait();
     std.println("{}", n);
     return 0;
 };
@@ -65,6 +67,15 @@ SRC_DIR = os.path.join(TESTDIR, "src")
 os.makedirs(SRC_DIR, exist_ok=True)
 os.makedirs(os.path.join(TESTDIR, "vendor"), exist_ok=True)
 os.makedirs(os.path.join(TESTDIR, "libs"), exist_ok=True)
+# 真 std 目录拷到 <exe>/../std（即 .tmp/std）：3e/3f 用例依赖 LSP 与编译器
+# 同一条 std 解析链（find_std_path / findStdDir），仓库外测试工程够不着
+# 仓库的 std/，必须在 exe 旁备一份。
+STD_COPY = os.path.join(ROOT, ".tmp", "std")
+if not os.path.exists(os.path.join(STD_COPY, "task.zx")):
+    os.makedirs(STD_COPY, exist_ok=True)
+    for f in os.listdir(os.path.join(ROOT, "std")):
+        if f.endswith(".zx"):
+            shutil.copy(os.path.join(ROOT, "std", f), os.path.join(STD_COPY, f))
 open(os.path.join(TESTDIR, "zx.json"), "w", encoding="utf-8").write(
     '{\n  "name": "lsptest",\n  "main": "src/extuser.zx",\n  "out": "lsptest",\n  "deps": ["libs"]\n}\n')
 open(os.path.join(TESTDIR, "vendor", "ext.zx"), "w", encoding="utf-8").write(
@@ -204,6 +215,26 @@ send({"jsonrpc": "2.0", "id": 11, "method": "textDocument/completion", "params":
 r, _ = recv_id("completion.anon", 11)
 labels = {i["label"] for i in r["result"]["items"]} if r and r.get("result") else set()
 check("completion.anon.fields", {"a", "msg"} <= labels, str(sorted(labels)))
+
+# 3e std.Task 静态成员：std.Task. → 全方法集（group 在列；方法签名里的
+# 参数名 f/ctx/h/v 不得混入——extractBraceMembers 的圆括号深度守卫）
+off = MAIN.index("std.Task.") + len("std.Task.")
+send({"jsonrpc": "2.0", "id": 12, "method": "textDocument/completion", "params": {
+    "textDocument": {"uri": uri}, "position": pos(MAIN, off)}})
+r, _ = recv_id("completion.stdTask", 12)
+labels = {i["label"] for i in r["result"]["items"]} if r and r.get("result") else set()
+check("completion.stdTask", {"group", "coro", "spawn"} <= labels
+      and not labels & {"ctx", "f", "h", "v"}, str(sorted(labels)))
+
+# 3f 实例类型穿透：let g = std.Task.group() → g. 出 Group 的成员
+# （spawn/wait/id），不是 Task 的（coro/single/pool 不得出现）
+off = MAIN.index("g.wait();") + len("g.")
+send({"jsonrpc": "2.0", "id": 13, "method": "textDocument/completion", "params": {
+    "textDocument": {"uri": uri}, "position": pos(MAIN, off)}})
+r, _ = recv_id("completion.groupInst", 13)
+labels = {i["label"] for i in r["result"]["items"]} if r and r.get("result") else set()
+check("completion.groupInst", {"id", "spawn", "wait"} <= labels
+      and not labels & {"coro", "single", "pool"}, str(sorted(labels)))
 
 # 4 completion `std.p`（带前缀点补全，旧版这里只会出关键字）
 off = MAIN.rindex("std.p") + len("std.p")   # 光标在 p 后面
