@@ -158,6 +158,51 @@ else
     cat "$pdir/demo/vendor/cliadd.zx" 2>/dev/null
     fail=1
 fi
+# 2.53 zxc 自己编 C 库：add 自动编译 vendor/*.c，改 .c 后 build 自动
+# 增量重编并重链。挡的是两件事：① 手工编库时 sanitizer 档位对不上；
+# ② "无改动重建"跳过链接，导致改了 C 源码却还在跑旧二进制。
+printf "\n== zxc 编译 C 库（add / build / cbuild）\n"
+cat > "$pdir/demo/vendor/cliadd.c" <<'CSRC'
+#include "cliadd.h"
+int cli_g = 4;
+int cli_sum(int a, int b) { return a + b; }
+void cli_move(Pt *p, int dx) { p->x += dx; }
+CSRC
+cat > "$pdir/demo/src/main.zx" <<'ZSRC'
+const std = module("std");
+const c = module("cliadd");
+const main = fn () i32 {
+    std.println("sum={} g={}", c.cli_sum(2, 3), c.cli_g);
+    return 0;
+};
+ZSRC
+if ( cd "$pdir/demo" && "$ZXCW" add cliadd --force > "$TPFX.cli.cadd" 2>&1 ) \
+   && [ -f "$pdir/demo/vendor/libcliadd.a" ] \
+   && grep -q '@link("vendor/libcliadd.a")' "$pdir/demo/vendor/cliadd.zx" \
+   && ( cd "$pdir/demo" && "$ZXCW" run > "$TPFX.cli.crun" 2>&1 ) \
+   && grep -q "sum=5 g=4" "$TPFX.cli.crun"; then
+    printf "  ok   add 自动编译 C 源码并链接运行\n"
+else
+    printf "  FAIL add 自动编译 C 库\n"
+    cat "$TPFX.cli.cadd" "$TPFX.cli.crun" 2>/dev/null
+    fail=1
+fi
+# 改 .c 后只跑 run（内部就是 build）：必须自动重编、强制重链
+sed -i 's/return a + b;/return a + b + 10;/' "$pdir/demo/vendor/cliadd.c"
+if ( cd "$pdir/demo" && "$ZXCW" run > "$TPFX.cli.crun2" 2>&1 ) \
+   && grep -q "sum=15 g=4" "$TPFX.cli.crun2"; then
+    printf "  ok   改 .c 后 build 自动重编重链\n"
+else
+    printf "  FAIL 改 .c 后没有重编重链\n"; cat "$TPFX.cli.crun2" 2>/dev/null; fail=1
+fi
+# 内容没变：cbuild 增量应跳过（内容指纹，不靠 mtime）
+if ( cd "$pdir/demo" && "$ZXCW" cbuild > "$TPFX.cli.cb" 2>&1 ) \
+   && grep -q "0 C unit(s) recompiled" "$TPFX.cli.cb"; then
+    printf "  ok   cbuild 内容指纹增量跳过\n"
+else
+    printf "  FAIL cbuild 增量失效\n"; cat "$TPFX.cli.cb" 2>/dev/null; fail=1
+fi
+
 rm -rf "$pdir" 2>/dev/null || true
 
 # 2.55 错误码目录：诊断里出现的每个码都必须查得到。

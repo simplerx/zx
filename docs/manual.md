@@ -112,6 +112,7 @@ zxc <file.zx> -o <prog>           单文件：生成 C 并编成可执行文件
 | 子命令 | 作用 | 关键细节 |
 | --- | --- | --- |
 | `add <name\|header.h>` | 接入 C 库 | 自动生成 `vendor/<name>.zx` 绑定；见 §3.17 |
+| `cbuild [group]` | 编译 C 源码 | `vendor/*.c` → `vendor/lib<组>.a`；见 §3.18 |
 | `init [name]` | 创建工程 | 生成 `src/`、`vendor/`、`zx.json`、`.gitignore`；建完自检 `main.zx` |
 | `build` | 按 `zx.json` 构建到 `out/` | 中间文件在 `.zxc-cache/`，见 §5 |
 | `run` | `build` 后直接运行 | `--` 之后的参数传给程序 |
@@ -599,15 +600,49 @@ pub const FOO_MAGIC: i32 = 7;
   枚举常量、纯数字 `#define`。`void*` 用 `*u8` 占位（ABI 上都是一个机器字）。
 - **翻不了的会跳过**，并在文件末尾以注释列出原因（变参函数、多级指针、位域、
   函数指针之外的复杂声明、Zx 同名的关键字符号）。宁可留白也不猜一个错布局。
-- **链接**：配方自带 `@link`；本地头文件旁边若有 `vendor/<名>.lib` /
-  `vendor/lib<名>.a` / `vendor/<名>.a` 会自动挂上；否则用 `--lib NAME` 指定。
-  静态库要按 C 编译器的同一套 sanitizer 标志编（工程默认 `-fno-sanitize=undefined`），
-  否则链接时会缺 `__ubsan_handle_*` 符号。
+- **链接**：头文件旁边若有 `.c` 源码，`zxc add` 会直接编译并自动写 `@link`
+  （见 §3.18，这一步也顺带消掉了 sanitizer 标志对不上的老问题）；否则找现成的
+  `vendor/<名>.lib` / `vendor/lib<名>.a` / `vendor/<名>.a`，或配方自带的库名；
+  都不满足时用 `--lib NAME` 指定。
 - **系统头配方**（`m` / `c` / `ws2_32` / `user32` …）走工具链自带头文件，
   只导出基础类型的函数签名：SDK 内部结构互相引用、带位域和匿名 union，
   硬生成只会得到编译不过的绑定。要结构体和常量，把库的头文件放进工程，
   用路径方式 `zxc add`（Win32/OpenGL 的手写范例见 `demo/ffi/`）。
 - 重新生成用 `--force`（会覆盖手改）。命令不联网、不下载源码，不是包管理器。
+
+### 3.18 zxc 编译 C 源码 —— 从源码到能调用，一条命令
+
+把 C 库的源码和头文件一起放进 `vendor/`，剩下交给 `zxc`：
+
+```sh
+vendor/foo.h          # 声明
+vendor/foo.c          # 实现（还可以有 foo_extra.c）
+
+zxc add foo           # 解析头文件 + 编译 .c -> vendor/libfoo.a + 写 @link
+zxc build             # 之后改了 .c/.h，自动增量重编并重链
+zxc cbuild --force    # 只想重编 C 库时用
+```
+
+- **为什么让 zxc 编**：C 静态库必须和 zxc 生成的 C 用同一套编译器与参数。
+  手工用别的命令编（哪怕只差 `-fno-sanitize=undefined`），链接时就会缺
+  `__ubsan_handle_*` 之类的运行时符号。`zxc` 直接复用自己的 `g_cc / g_cflags`，
+  这条坑从此不存在；切 `--release` 时 C 库也会跟着用 -O2 重编。
+- **分组**：`vendor/` 一层里的 `*.c`，有同名 `<stem>.h` 的自成一组，
+  编成 `vendor/lib<stem>.a`；`foo_extra.c` 会按 `_` 回退找到 `foo.h`，
+  归进 `libfoo.a`；没有匹配头文件的 `.c` 自己一组。不参与编译的 C 源码
+  放到 `vendor/` 的子目录里（只扫一层）。
+- **增量**：`.zxc-cache/csrc/` 下放 `.o` 与 `.flags`，`.flags` 记
+  cc + flags + 本组所有 `.c/.h` 的**内容指纹**。内容没变、`.o/.a` 都在就跳过；
+  改任一源码/头、换 dev/release 档、删了库文件都会重编，并强制重新链接。
+  不看 mtime——Windows 秒级时间戳、未来时间戳都会误判。
+- **不用记额外命令**：`zxc build` / `run` / `test` 会在链接前自动重编并注入
+  `vendor/lib*.a`，即使绑定里没写 `@link` 也能链上。`zxc cbuild [group]`
+  只是显式入口，用于只想编库或排查 C 编译错误；`--force` 强制全量、
+  `--release` 用 -O2 档。`zxc add --no-build` 可以只生成绑定不编译
+  （已有预编译库、或用 `--lib NAME` 指定系统库时）。
+- C 编译错误会取编译器首行诊断报出来，完整日志留在
+  `.zxc-cache/csrc/<组>_<文件>.log`。归档前会删掉旧 `.a`，避免 `ar rcs`
+  残留已移除源文件留下的旧成员。
 
 ---
 

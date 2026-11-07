@@ -93,6 +93,7 @@ bin/zxc.exe build [--release]     # 工程构建 → out/<名>.exe
 bin/zxc.exe run [-- args...]      # 构建后直接运行
 bin/zxc.exe fmt [--check]         # 格式化
 bin/zxc.exe add <name|header.h>   # 一条命令接入 C 库 → vendor/<name>.zx
+bin/zxc.exe cbuild [group]        # 重编 vendor/ 下的 C 源码（一般不用手动跑）
 ```
 
 ## 调用 C 库
@@ -105,6 +106,9 @@ zxc add ./vendor/raylib.h     # 本地头文件：函数 / 结构体 / 全局变
 zxc add m                     # 内置常见库配方：自动定位头文件并配好 @link
 zxc add --list                # 看有哪些配方
 ```
+
+头文件旁放上 `.c` 实现，`zxc add` 会顺手把它编成 `vendor/lib<名>.a` 并写好 `@link`；
+之后改了 C 源码，直接 `zxc build` 就会自动增量重编、重新链接，不用记额外命令。
 
 ```zx
 const ray = module("raylib");

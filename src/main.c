@@ -32,6 +32,7 @@
 #include "ty.h"
 #include "val.h"
 #include "cbind.h"
+#include "csrc.h"
 #include <stdarg.h>
 #include <time.h>
 #include <sys/stat.h>
@@ -68,6 +69,9 @@ static const char *g_cflags;
  * 这里显式关掉，保持与 -O1 时代一致的语义。 */
 #define CC_DEV  "-std=c11 -O0 -fno-sanitize=undefined"
 #define CC_REL  "-std=c11 -O2 -DZX_RELEASE"
+/* 工程中间文件目录：build_program 也要用，所以定义在文件头。
+ * 注意别和 build.sh 自用的 .zc-cache/ 撞名。 */
+#define ZX_CACHE_DIR ".zxc-cache"
 
 /* 链接失败的翻译：lld 会说 `undefined symbol: zx_main_foo`——模块前缀是
  * 我们自己的编码，翻回 `模块/名字` 才对用户有意义。 */
@@ -523,6 +527,26 @@ static void prog(const char *fmt, ...) {
 /* cachedir 非空：中间文件（.h/.c/.o/.flags）全部落进 cachedir/，
  * out 是最终产物路径；cachedir 为空则维持旧行为——中间文件挨着 out 放。 */
 static int build_program(Node *root, const char *out, const char *cachedir, OutKind kind) {
+    /* vendor/ 下的 C 源码：与 zx 生成的 C 用同一套 cc + flags 编成静态库，
+     * 注入链接。改了 .c/.h、换 dev/release 档都会自动重编；重编过必须强制
+     * 重链，否则"无改动重建"会拿旧 exe 糊弄过去。没有 C 源码时这里零开销。 */
+    bool csrc_relink = 0;
+    if (kind != OUT_STATIC) {
+        char **libs = NULL, cerr[1024];
+        int ncomp = 0;
+        int nlib = csrc_build(g_cc, g_cflags, "vendor", ZX_CACHE_DIR, NULL, 0,
+                              &libs, cerr, sizeof cerr, &ncomp);
+        if (nlib < 0) { fprintf(stderr, "zxc: %s\n", cerr); return 1; }
+        for (int i = 0; i < nlib; i++) {
+            zx_add_link_lib(libs[i]);
+            free(libs[i]);
+        }
+        free(libs);
+        if (ncomp > 0) {
+            csrc_relink = 1;
+            prog("compiled %d C unit(s) from vendor/", ncomp);
+        }
+    }
 #ifdef _WIN32
     /* zig cc -o 不补 .exe：产物没有扩展名时 cmd / 资源管理器都跑不了
      * （表现为"程序明明在却没有任何输出"），这里统一补上。 */
@@ -675,10 +699,11 @@ static int build_program(Node *root, const char *out, const char *cachedir, OutK
      *
      * 判据必须挂在 njobs == 0 上，不能只看时间戳：Windows 的 st_mtime 是秒级，
      * 同一秒内重编出的 .o 与产物无法分先后（见上面 remove(opath) 那段注释）。
-     * 有重编就一定重链，宁可多跑一次也不发旧二进制。 */
+     * 有重编就一定重链，宁可多跑一次也不发旧二进制。
+     * vendor/ 的 C 库刚重编过（csrc_relink）同样不许跳过链接。 */
     char absout[2048];
     path_abs(out, absout, sizeof absout);
-    if (njobs == 0) {
+    if (njobs == 0 && !csrc_relink) {
         long long om = fmtime(absout);
         if (om > 0 && om >= maxobj && !lchanged) {
             if (getenv("ZX_VERBOSE")) fprintf(stderr, "  link skipped (up to date: %s)\n", out);
@@ -768,6 +793,7 @@ static void usage(FILE *f) {
         "project subcommands:\n"
         "  init [name]                      create a project: src/ sources, vendor/ module root, zx.json\n"
         "  add <name|header.h>            add a C library: generate a Zx binding into vendor/\n"
+        "  cbuild [group]                 compile vendor/*.c into lib<group>.a (auto on add/build)\n"
         "  build [options]                  build per zx.json into out/ (intermediates in .zxc-cache/)\n"
         "  run [options] [-- prog args...]  build, then run\n"
         "  test [name filter]               run src/test/ cases (zero-arg pub functions)\n"
@@ -802,6 +828,23 @@ static void print_version(FILE *f) {
 
 /* 子命令级帮助。返回 0 = 认得的子命令，-1 = 没有这个子命令。 */
 static int help_sub(FILE *f, const char *cmd) {
+    if (!strcmp(cmd, "cbuild")) {
+        fprintf(f,
+            "zxc cbuild [group] [options] -- compile C sources in vendor/\n"
+            "\n"
+            "  zxc cbuild              compile every *.c group -> vendor/lib<group>.a\n"
+            "  zxc cbuild mini         only the group belonging to vendor/mini.h\n"
+            "  zxc cbuild --force      ignore timestamps, rebuild all\n"
+            "  zxc cbuild --release    use the -O2 profile\n"
+            "\n"
+            "Normally you do not need this: `zxc add` compiles sibling .c files\n"
+            "and `zxc build` recompiles them incrementally when a .c/.h changes.\n"
+            "C sources use the exact same cc + flags as the C that zxc generates,\n"
+            "so there is no sanitizer / ABI mismatch at link time.\n"
+            "Grouping: <stem>.c with <stem>.h -> lib<stem>.a; mini_extra.c also\n"
+            "joins libmini.a; a .c without a matching header gets its own group.\n");
+        return 0;
+    }
     if (!strcmp(cmd, "add")) {
         fprintf(f,
             "zxc add <name|header.h> [options] -- add a C library, no manual bindings\n"
@@ -812,12 +855,15 @@ static int help_sub(FILE *f, const char *cmd) {
             "\n"
             "options:\n"
             "  --lib NAME     override the library passed to @link\n"
+            "  --no-build     skip compiling .c files next to the header\n"
             "  --force        overwrite an existing vendor/<name>.zx\n"
             "\n"
             "The generated file is ordinary, editable Zx source:\n"
             "  const ray = module(\"raylib\");   ray.InitWindow(800, 600, \"hi\");\n"
             "Completion / hover / inlay hints work on it like any other module.\n"
             "Declarations clang cannot translate are listed as comments at the end.\n"
+            "C sources next to the header are compiled into a static library\n"
+            "and linked automatically; zxc build recompiles them on change.\n"
             "No network access and no package download involved.\n");
         return 0;
     }
@@ -1372,6 +1418,18 @@ static void cadd_stem(const char *s, char *out, size_t cap) {
     if (!out[0]) snprintf(out, cap, "clib");
 }
 
+/* 取头文件所在目录：C 源码与头放一起，编出的库也落在那里。 */
+static void cadd_dir_of(const char *path, char *out, size_t cap) {
+    const char *slash = NULL;
+    for (const char *q = path; *q; q++)
+        if (*q == '/' || *q == '\\') slash = q;
+    if (!slash) { snprintf(out, cap, "."); return; }
+    size_t n = (size_t)(slash - path);
+    if (!n) n = 1;
+    if (n >= cap) n = cap - 1;
+    memcpy(out, path, n); out[n] = 0;
+}
+
 /* 头文件旁边若有同名 .lib/.a，自动挂上，省得再敲 --lib。 */
 static int cadd_probe_lib(const char *stem, char *buf, size_t cap) {
     static const char *pat[] = {
@@ -1387,10 +1445,11 @@ static int cadd_probe_lib(const char *stem, char *buf, size_t cap) {
 
 static int cmd_add(int argc, char **argv, int argi) {
     const char *name = NULL, *ulib = NULL;
-    int force = 0, list = 0;
+    int force = 0, list = 0, no_build = 0;
     for (int i = argi; i < argc; i++) {
         if (!strcmp(argv[i], "--list")) list = 1;
         else if (!strcmp(argv[i], "--force")) force = 1;
+        else if (!strcmp(argv[i], "--no-build")) no_build = 1;
         else if (!strcmp(argv[i], "--lib")) {
             if (i + 1 >= argc) {
                 fprintf(stderr, "zxc add: --lib needs a library name\n");
@@ -1418,7 +1477,7 @@ static int cmd_add(int argc, char **argv, int argi) {
         return 0;
     }
     if (!name) {
-        fprintf(stderr, "usage: zxc add <name|header.h> [--lib NAME] [--force]\n"
+        fprintf(stderr, "usage: zxc add <name|header.h> [--lib NAME] [--no-build] [--force]\n"
                         "       zxc add --list\n");
         return 2;
     }
@@ -1467,8 +1526,34 @@ static int cmd_add(int argc, char **argv, int argi) {
 
     char stem[256];
     cadd_stem(r ? name : header, stem, sizeof stem);
+
+    /* 头文件旁边有 .c：用 zxc 自己的 cc + flags 编成静态库并自动 @link。
+     * 这一步根治了"手工编的 C 库和 zx 的 sanitizer 档位对不上"的链接错误。 */
+    char builtlib[1024] = "";
+    if (!no_build && !ulib && !allow_system) {
+        char hdir[1024];
+        cadd_dir_of(header, hdir, sizeof hdir);
+        char **libs = NULL, cerr[1024];
+        int ncomp = 0;
+        int nlib = csrc_build(g_cc, g_cflags ? g_cflags : CC_DEV,
+                              hdir, ZX_CACHE_DIR, stem, 0,
+                              &libs, cerr, sizeof cerr, &ncomp);
+        if (nlib < 0) {
+            fprintf(stderr, "zxc add: %s\n", cerr);
+            return 1;
+        }
+        if (nlib > 0) {
+            snprintf(builtlib, sizeof builtlib, "%s", libs[0]);
+            if (ncomp > 0) printf("zxc add: compiled %d C unit(s) -> %s\n", ncomp, builtlib);
+            else printf("zxc add: %s is up to date\n", builtlib);
+        }
+        for (int i = 0; i < nlib; i++) free(libs[i]);
+        free(libs);
+    }
+
     char libbuf[1024] = "";
     const char *lib = ulib;
+    if (!lib && builtlib[0]) lib = builtlib;
     if (!lib && r && r->lib[0]) lib = r->lib;
     if (!lib && !allow_system) {
         char probe[1024];
@@ -1510,11 +1595,53 @@ static int cmd_add(int argc, char **argv, int argi) {
     return 0;
 }
 
+/* ---- cbuild：显式重编 vendor/ 下的 C 源码 ----------------------------
+ * 平时用不到：add 会编一次，build 会在 .c/.h 变化时自动增量重编。
+ * 留这个入口是为了"只想编库、不想编整个 zx 工程"和排查 C 编译错误。 */
+static int cmd_cbuild(int argc, char **argv, int argi) {
+    const char *group = NULL;
+    int force = 0, release = 0;
+    for (int i = argi; i < argc; i++) {
+        if      (!strcmp(argv[i], "--force"))   force = 1;
+        else if (!strcmp(argv[i], "--release")) release = 1;
+        else if (argv[i][0] == '-') {
+            fprintf(stderr, "zxc cbuild: unknown option '%s'\n", argv[i]);
+            return 2;
+        } else if (!group) group = argv[i];
+        else {
+            fprintf(stderr, "zxc cbuild: unexpected argument '%s'\n", argv[i]);
+            return 2;
+        }
+    }
+    if (!fexists("vendor")) {
+        fprintf(stderr, "zxc cbuild: vendor/ not found (run inside a project)\n");
+        return 2;
+    }
+    g_cflags = release ? CC_REL : CC_DEV;
+    char **libs = NULL, err[1024];
+    int ncomp = 0;
+    int nlib = csrc_build(g_cc, g_cflags, "vendor", ZX_CACHE_DIR, group, force,
+                          &libs, err, sizeof err, &ncomp);
+    if (nlib < 0) { fprintf(stderr, "zxc cbuild: %s\n", err); return 1; }
+    if (nlib == 0) {
+        printf("zxc cbuild: no C sources in vendor/ (nothing to do)\n");
+        free(libs);
+        return 0;
+    }
+    printf("zxc cbuild: %d C unit(s) recompiled, %d library(ies):\n", ncomp, nlib);
+    for (int i = 0; i < nlib; i++) {
+        printf("  %s\n", libs[i]);
+        free(libs[i]);
+    }
+    free(libs);
+    printf("  run 'zxc build' to relink\n");
+    return 0;
+}
+
 /* ---- build / run：读 zx.json 的工程级构建 ---- */
 
-/* 工程中间文件目录：生成的 .c/.o、共享头、编译参数 stamp 都收在这，
- * 不再散落在工程根（注意别和 build.sh 自用的 .zc-cache/ 撞名）。 */
-#define ZX_CACHE_DIR ".zxc-cache"
+/* 工程中间文件目录 ZX_CACHE_DIR 定义在文件头（build_program 也要用）：
+ * 生成的 .c/.o、共享头、编译参数 stamp 都收在这，不再散落在工程根。 */
 
 /* 抠 "key": "value"——zx.json 由 zxc init 生成、字段就这几个，
  * 不值得为此拖一个真 JSON 解析器进来。 */
@@ -2058,6 +2185,7 @@ int main(int argc, char **argv) {
         }
         if (!strcmp(sub, "init"))  return cmd_init(argc, argv, 2);
         if (!strcmp(sub, "add"))   return cmd_add(argc, argv, 2);
+        if (!strcmp(sub, "cbuild")) return cmd_cbuild(argc, argv, 2);
         if (!strcmp(sub, "check")) return cmd_check(argc, argv, 2);
         if (!strcmp(sub, "fmt"))   return cmd_fmt(argc, argv, 2, false);
         if (!strcmp(sub, "build")) return cmd_build(argc, argv, 2);
