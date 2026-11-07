@@ -135,6 +135,51 @@ const keywords = [_][]const u8{
     "try",
 };
 
+const Snip = struct { label: []const u8, body: []const u8, detail: []const u8 };
+
+/// KEEP — 常用代码片段（LSP snippet，insertTextFormat=2）。用户 2026-11-08
+/// 要求：写 if / fn 按 Tab 展开固定骨架，块尾带 `;`，块内换行缩进 4 空格。
+/// body 里的 $1/${1:默认值}/$0 是 LSP tabstop：确认后光标落在 $1，
+/// 再按 Tab 依次跳到 $2…$0。缩进写死 4 空格（Zed tab_size=4，且
+/// 不设 insertTextMode 以免客户端二次加缩进变成 8 空格）。
+/// 每条模板展开后的形态都过一遍 zxc 编译；lsptest.py 的
+/// completion.snippet.* 用例把 body 内容钉住，改坏会连挂。
+/// 关键字同名项由这段替换普通关键字补全；其余是额外的常用模板。
+const snippets = [_]Snip{
+    .{ .label = "if", .body = "if (${1:cond}) {\n    $0\n};", .detail = "代码片段 if" },
+    .{ .label = "ifelse", .body = "if (${1:cond}) {\n    $2\n} else {\n    $0\n};", .detail = "代码片段 if/else" },
+    .{ .label = "else", .body = "else {\n    $0\n};", .detail = "代码片段 else" },
+    .{ .label = "while", .body = "while (${1:cond}) {\n    $0\n};", .detail = "代码片段 while" },
+    .{ .label = "for", .body = "for (${1:xs}) ${2:x} {\n    $0\n};", .detail = "代码片段 for" },
+    .{ .label = "inline", .body = "inline for (${1:0..n}) ${2:i} {\n    $0\n};", .detail = "代码片段 inline for" },
+    .{ .label = "switch", .body = "switch (${1:x}) {\n    ${2:0}: $3;\n    else: $0;\n};", .detail = "代码片段 switch" },
+    .{ .label = "fn", .body = "fn ($1) ${2:i32} {\n    $0\n};", .detail = "代码片段 fn" },
+    .{ .label = "struct", .body = "struct {\n    ${1:name}: ${2:i32},\n};", .detail = "代码片段 struct" },
+    .{ .label = "union", .body = "union {\n    ${1:name}: ${2:i32},\n};", .detail = "代码片段 union" },
+    .{ .label = "enum", .body = "enum { ${1:a}, ${2:b} };", .detail = "代码片段 enum" },
+    .{ .label = "error", .body = "error { ${1:open}, ${2:read} };", .detail = "代码片段 error" },
+    .{ .label = "const", .body = "const ${1:name} = $0;", .detail = "代码片段 const" },
+    .{ .label = "let", .body = "let ${1:name} = $0;", .detail = "代码片段 let" },
+    .{ .label = "var", .body = "var ${1:name} = $0;", .detail = "代码片段 var" },
+    .{ .label = "module", .body = "module(\"${1:std}\")", .detail = "代码片段 module" },
+    .{ .label = "defer", .body = "defer $0;", .detail = "代码片段 defer" },
+    .{ .label = "errdefer", .body = "errdefer $0;", .detail = "代码片段 errdefer" },
+    .{ .label = "try", .body = "try $0", .detail = "代码片段 try" },
+    .{ .label = "return", .body = "return $0;", .detail = "代码片段 return" },
+    .{ .label = "continue", .body = "continue;", .detail = "代码片段 continue" },
+    .{ .label = "orelse", .body = "orelse $0", .detail = "代码片段 orelse" },
+    .{ .label = "main", .body = "pub const main = fn () !i32 {\n    $0\n    return 0;\n};", .detail = "代码片段 main" },
+    .{ .label = "println", .body = "std.println(\"{}\", $0);", .detail = "代码片段 println" },
+    .{ .label = "test", .body = "pub const ${1:t_name} = fn () void {\n    $0\n};", .detail = "代码片段 test" },
+};
+
+fn snippetFor(label: []const u8) ?Snip {
+    for (snippets) |s| {
+        if (std.mem.eql(u8, s.label, label)) return s;
+    }
+    return null;
+}
+
 const BuiltinNs = struct { name: []const u8, members: []const []const u8, detail: []const u8 };
 
 // std.<ns> 编译器内建命名空间成员（与 src/sema.c std_builtin()/ns_member() 逐字对齐）
@@ -2997,6 +3042,29 @@ fn addItem(list: *Json, seen: *std.StringHashMapUnmanaged(void), label: []const 
     list.raw("}}", .{});
 }
 
+/// LSP snippet 补全项：insertTextFormat=2 让客户端把 insertText 当 snippet
+/// 解析（tabstop / 默认值），确认后按 Tab 在占位符间跳转。
+/// kind=15 是 CompletionItemKind.Snippet；sortText 用 'b' 层，排在
+/// 工作区噪音之前、上下文成员之后。
+fn addSnippet(list: *Json, seen: *std.StringHashMapUnmanaged(void), s: Snip) void {
+    if (seen.contains(s.label)) return;
+    seen.put(gpa, dupe(s.label), {}) catch {};
+    if (seen.count() > 1) list.raw(",", .{});
+    list.raw("{{\"label\":", .{});
+    list.str(s.label);
+    list.raw(",\"kind\":15,\"detail\":", .{});
+    list.str(s.detail);
+    var st: std.ArrayList(u8) = .empty;
+    st.append(gpa, 'a' + 1) catch {};
+    st.appendSlice(gpa, s.label) catch {};
+    list.raw(",\"sortText\":", .{});
+    list.str(st.items);
+    list.raw(",\"insertText\":", .{});
+    list.str(s.body);
+    list.raw(",\"insertTextFormat\":2", .{});
+    list.raw("}}", .{});
+}
+
 /// 工作区补全上限：全仓库标识符再多也不能淹没列表/撑爆报文
 const MAX_WORKSPACE_COMPLETIONS = 250;
 
@@ -3280,11 +3348,26 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
             }
         }
     } else {
+        // 额外模板先占位：main / println / test 常与工作区标识符同名，
+        // 放到 addIdents 之后会被 seen 去重挡掉。空前缀（Ctrl+Space）时
+        // 不列，避免抢走同名标识符的补全。
+        for (snippets) |sn| {
+            if (isKeywordWord(sn.label)) continue;
+            if (prefix.len > 0 and std.mem.startsWith(u8, sn.label, prefix))
+                addSnippet(&list, &seen, sn);
+        }
         // 当前文件标识符 + 关键字 + 工作区标识符（分层排序）
         addIdents(&list, &seen, text, doc_dir, prefix);
         for (keywords) |kw| {
-            if (prefix.len == 0 or std.mem.startsWith(u8, kw, prefix))
-                addItem(&list, &seen, kw, 14, "关键字", 2);
+            if (prefix.len == 0 or std.mem.startsWith(u8, kw, prefix)) {
+                // 关键字里有骨架的走 snippet（写 `if` + Tab 展开），
+                // 其余仍是普通关键字补全。
+                if (snippetFor(kw)) |sn| {
+                    addSnippet(&list, &seen, sn);
+                } else {
+                    addItem(&list, &seen, kw, 14, "关键字", 2);
+                }
+            }
         }
     }
 

@@ -238,6 +238,52 @@ details = {i["label"]: i.get("detail") for i in r["result"]["items"]} if r and r
 check("completion.anon.fieldType", details.get("a") == "i32"
       and details.get("msg") == "[]const u8", str(details))
 
+# 3q LSP snippet 补全：写 `if` / `fn` + Tab 展开骨架
+#     GUARD: 这几条把模板内容钉死——4 空格缩进、块尾 `;`、tabstop，
+#     改坏或删掉 insertTextFormat 会连挂。用 MAIN 里已有关键字当光标点，
+#     不换文档，避免 didChange 的异步诊断污染后面的用例。
+def snip_at(anchor, word, rid):
+    off = MAIN.index(anchor) + anchor.index(word) + len(word)
+    send({"jsonrpc": "2.0", "id": rid, "method": "textDocument/completion", "params": {
+        "textDocument": {"uri": uri}, "position": pos(MAIN, off)}})
+    r, _ = recv_id("completion.snippet", rid)
+    items = r["result"]["items"] if r and r.get("result") else []
+    return {i["label"]: i for i in items}
+
+s_if = snip_at("if (b)", "if", 24)
+i_if = s_if.get("if", {})
+check("completion.snippet.if", i_if.get("insertTextFormat") == 2
+      and i_if.get("kind") == 15
+      and i_if.get("insertText") == "if (${1:cond}) {\n    $0\n};", str(i_if)[:200])
+check("completion.snippet.ifelse", s_if.get("ifelse", {}).get("insertTextFormat") == 2,
+      str(sorted(s_if))[:200])
+
+s_fn = snip_at("fn (b: bool)", "fn", 25)
+check("completion.snippet.fn", s_fn.get("fn", {}).get("insertText") == "fn ($1) ${2:i32} {\n    $0\n};",
+      str(s_fn.get("fn"))[:200])
+
+s_st = snip_at("struct {", "struct", 27)
+check("completion.snippet.struct", s_st.get("struct", {}).get("insertText")
+      == "struct {\n    ${1:name}: ${2:i32},\n};", str(s_st.get("struct"))[:200])
+
+s_main = snip_at("pub const main", "main", 26)
+check("completion.snippet.main", s_main.get("main", {}).get("insertTextFormat") == 2,
+      str(sorted(s_main))[:200])
+
+s_pub = snip_at("pub const make", "pub", 28)
+check("completion.snippet.plainKeyword",
+      s_pub.get("pub", {}).get("insertTextFormat") is None
+      and s_pub.get("pub", {}).get("kind") == 14, str(s_pub.get("pub"))[:200])
+
+all_snips = [i for d in (s_if, s_fn, s_st) for i in d.values() if i.get("insertTextFormat") == 2]
+check("completion.snippet.indent4",
+      all("\n    " in i["insertText"] or "\n" not in i["insertText"] for i in all_snips),
+      str([i["insertText"] for i in all_snips])[:240])
+check("completion.snippet.semicolon",
+      all(i["insertText"].endswith(";") for i in all_snips
+          if i["label"] in ("if", "ifelse", "fn", "struct", "switch", "while", "for")),
+      str([i["label"] for i in all_snips])[:200])
+
 # 3e std.Task 静态成员：std.Task. → 全方法集（group 在列；方法签名里的
 # 参数名 f/ctx/h/v 不得混入——extractBraceMembers 的圆括号深度守卫）
 off = MAIN.index("std.Task.") + len("std.Task.")
