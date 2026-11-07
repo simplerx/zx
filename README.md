@@ -92,13 +92,29 @@ bin/zxc.exe init [name]           # 创建工程：src/、vendor/、zx.json
 bin/zxc.exe build [--release]     # 工程构建 → out/<名>.exe
 bin/zxc.exe run [-- args...]      # 构建后直接运行
 bin/zxc.exe fmt [--check]         # 格式化
-bin/zxc.exe add <name|header.h|dir> # 一条命令接入 C 库 → vendor/<name>.zx
+bin/zxc.exe add <name|header.h|dir> # 显式接入 C 库 → vendor/<name>.zx（一般不用）
+bin/zxc.exe sync                  # 扫 vendor/ 补生成缺失的 C 绑定
 bin/zxc.exe cbuild [group]        # 重编 vendor/ 下的 C 源码（一般不用手动跑）
 ```
 
 ## 调用 C 库
 
-不用手写 `extern` 声明，也**不用把库文件复制或摊平到 `vendor/`**。直接指向库原本的目录：
+**最省事的用法：把库整个丢进 `vendor/`，然后照常 `zxc run`。** 不用手写 `extern`、
+不用跑 `add`、也不用把 `include/` 和 `src/` 摊平复制。`zxc run` / `build` / `test`
+会在解析源码之前扫一遍 `vendor/`，自动为新出现的 C 库生成 `vendor/<名>.zx` 绑定和
+`vendor/<名>.clib` 清单，再用同一套编译器把 `.c` 编成静态库并链接好：
+
+```sh
+cp -r ../third_party/raylib vendor/   # 或者把 foo.h + foo.c 直接放在 vendor/ 一层
+zxc run                               # 完成；源码里 const ray = module("raylib");
+```
+
+只有第一次会生成，之后这两个文件就是普通、可编辑的工程文件，建议进版本库。
+已有同名 `.zx` / `.clib` 的库一律不动（可以手工裁剪清单、改绑定，也能用同名占位
+文件关掉自动接管）。想在写第一行 `module("名字")` 之前就让编辑器有补全，先跑一次
+`zxc sync`。
+
+需要指向工程外的库、指定模块名或刷新清单时，用 `zxc add`：
 
 ```sh
 zxc add ../third_party/raylib  # 推荐：库目录（include/、src/、任意多层，工程外也行）
@@ -118,8 +134,8 @@ ray.InitWindow(800, 600, "hello");
 ```
 
 生成物是普通 Zx 源码，`vendor/` 本来就是模块搜索根，所以补全、hover、行内类型提示
-全部照常生效；要微调直接编辑，`--force` 可重新生成。命令不联网、不下载源码。
-细节与边界见 `docs/manual.md` §3.17 / §3.19。
+全部照常生效；要微调直接编辑，`--force` 可重新生成。整套本地流程不联网、不下载源码。
+细节与边界见 `docs/manual.md` §3.17 / §3.19 / §3.20。
 
 编辑器支持（Zed 扩展 + 通用 LSP 客户端，`bin/zxls.exe`）见 `editor/README.md`。
 

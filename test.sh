@@ -269,6 +269,72 @@ else
     printf "  FAIL 深层 .c 改动没有重编\n"; cat "$TPFX.cli.trun2" 2>/dev/null; fail=1
 fi
 
+# 2.54b vendor/ 自动接管：库直接丢进 vendor，不跑 add，一条 zxc run 就能跑。
+# 守的是：① 绑定必须在解析入口源码之前生成（否则第一次 run 就报找不到模块）；
+# ② 目录树和顶层散头两种放法；③ 幂等且绝不覆盖手工改过的 .zx；
+# ④ 纯 zx 模块目录不误判、同名占位可 opt-out、zxc sync 幂等。
+printf "\n== vendor/ 自动接管（免 zxc add，直接 run）\n"
+AP="$pdir/auto/autodemo"
+mkdir -p "$pdir/auto"
+if ( cd "$pdir/auto" && "$ZXCW" init autodemo > "$TPFX.cli.ainit" 2>&1 ); then
+    mkdir -p "$AP/vendor/geolib/include" "$AP/vendor/geolib/src/core" "$AP/vendor/geolib/src/util"
+    printf '#define GEO_VER 3\nextern int geo_g;\nint geo_add(int a, int b);\nint geo_twice(void);\n' \
+        > "$AP/vendor/geolib/include/geolib.h"
+    printf 'int geo_twice_impl(int v);\n' > "$AP/vendor/geolib/src/util/twice.h"
+    printf '#include "geolib.h"\n#include "twice.h"\nint geo_g = 7;\nint geo_add(int a, int b) { return a + b; }\nint geo_twice(void) { return geo_twice_impl(geo_g); }\n' \
+        > "$AP/vendor/geolib/src/core/calc.c"
+    printf '#include "twice.h"\nint geo_twice_impl(int v) { return v * 2; }\n' \
+        > "$AP/vendor/geolib/src/util/twice.c"
+    printf 'const std = module("std");\nconst g = module("geolib");\nconst main = fn () i32 {\n    std.println("add={} twice={} ver={}", g.geo_add(2, 3), g.geo_twice(), g.GEO_VER);\n    return 0;\n};\n' \
+        > "$AP/src/main.zx"
+    if ( cd "$AP" && "$ZXCW" run > "$TPFX.cli.arun" 2>&1 ) \
+       && grep -q "auto-added C library vendor/geolib" "$TPFX.cli.arun" \
+       && grep -q "add=5 twice=14 ver=3" "$TPFX.cli.arun" \
+       && [ -f "$AP/vendor/geolib.clib" ] \
+       && [ -f "$AP/vendor/geolib.zx" ] \
+       && [ -f "$AP/vendor/libgeolib.a" ]; then
+        printf "  ok   丢库进 vendor 后直接 run，自动 add + 编译 + 链接\n"
+    else
+        printf "  FAIL vendor 自动接管\n"; cat "$TPFX.cli.arun" 2>/dev/null; fail=1
+    fi
+    # 第二次 run 不能重复生成，手改过的绑定不能被冲掉
+    printf '\n// HAND EDIT -- must survive\n' >> "$AP/vendor/geolib.zx"
+    if ( cd "$AP" && "$ZXCW" run > "$TPFX.cli.arun2" 2>&1 ) \
+       && ! grep -q "auto-added" "$TPFX.cli.arun2" \
+       && grep -q "HAND EDIT" "$AP/vendor/geolib.zx"; then
+        printf "  ok   幂等，且不覆盖手工编辑过的绑定\n"
+    else
+        printf "  FAIL 重复生成或覆盖了手改\n"; cat "$TPFX.cli.arun2" 2>/dev/null; fail=1
+    fi
+    # 顶层散头 + 散 .c：更简单的放法同样免 add
+    printf '#define SMALL_K 9\nint small_mul(int a, int b);\n' > "$AP/vendor/small.h"
+    printf '#include "small.h"\nint small_mul(int a, int b) { return a * b; }\n' > "$AP/vendor/small.c"
+    printf 'const std = module("std");\nconst s = module("small");\nconst main = fn () i32 {\n    std.println("mul={} k={}", s.small_mul(4, 5), s.SMALL_K);\n    return 0;\n};\n' \
+        > "$AP/src/main.zx"
+    if ( cd "$AP" && "$ZXCW" run > "$TPFX.cli.arun3" 2>&1 ) \
+       && grep -q "auto-added C header vendor/small.h" "$TPFX.cli.arun3" \
+       && grep -q "mul=20 k=9" "$TPFX.cli.arun3"; then
+        printf "  ok   顶层散头 + 散 .c 也能免 add 直接跑\n"
+    else
+        printf "  FAIL 散头自动接管\n"; cat "$TPFX.cli.arun3" 2>/dev/null; fail=1
+    fi
+    # 纯 zx 模块目录、同名占位 opt-out、sync 幂等
+    mkdir -p "$AP/vendor/myzx" "$AP/vendor/optout/include"
+    printf 'pub const hi = fn () void {};\n' > "$AP/vendor/myzx/util.zx"
+    printf 'int nope(void);\n' > "$AP/vendor/optout/include/optout.h"
+    printf '// not a binding\n' > "$AP/vendor/optout.zx"
+    if ( cd "$AP" && "$ZXCW" sync > "$TPFX.cli.asy" 2>&1 ) \
+       && grep -q "up to date" "$TPFX.cli.asy" \
+       && [ ! -f "$AP/vendor/myzx.zx" ] \
+       && [ ! -f "$AP/vendor/optout.clib" ]; then
+        printf "  ok   纯 zx 目录不误判 / 占位可 opt-out / sync 幂等\n"
+    else
+        printf "  FAIL 误判或 opt-out 失效\n"; cat "$TPFX.cli.asy" 2>/dev/null; fail=1
+    fi
+else
+    printf "  FAIL zxc init（自动接管用例）\n"; cat "$TPFX.cli.ainit" 2>/dev/null; fail=1
+fi
+
 rm -rf "$pdir" 2>/dev/null || true
 
 # 2.55 错误码目录：诊断里出现的每个码都必须查得到。

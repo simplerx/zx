@@ -17,6 +17,7 @@
  *                       中间文件进 .zxc-cache/，最终产物进 out/
  *   zxc run [args]      build 后直接运行 out/<产物>.exe（-- 之后的参数传给程序）
  *   zxc test [过滤]     运行 src/test/ 测试模块（零参 pub 函数即用例）
+ *   zxc sync            扫 vendor/ 补生成缺失的 C 绑定（build/run 自动做）
  *   zxc check / fmt     检查 / 格式化
  *
  * zx.json：工程清单（init 生成）。name/version/main/out 之外，
@@ -61,6 +62,7 @@ void  sema_check(Node *root);
 void  sema_set_search_paths(const char *const *dirs);   /* deps 模块搜索路径 */
 const char *sema_module_path(int i);                    /* 模块 i 的源文件路径 */
 static char *read_source(const char *path, size_t *out_len);
+static int  vendor_autoscan(void);   /* vendor/ 自动接管：build/run/test 解析源码前调 */
 
 static const char *g_cc;
 static const char *g_cflags;
@@ -821,6 +823,7 @@ static void usage(FILE *f) {
         "  init [name]                      create a project: src/ sources, vendor/ module root, zx.json\n"
         "  add <name|header.h|dir>       add a C library: generate a Zx binding into vendor/\n"
         "  add ./third_party/foo          point at a library tree; no files are copied\n"
+        "  sync                            scan vendor/, generate missing C bindings now\n"
         "  cbuild [group]                 compile vendor/*.c into lib<group>.a (auto on add/build)\n"
         "  build [options]                  build per zx.json into out/ (intermediates in .zxc-cache/)\n"
         "  run [options] [-- prog args...]  build, then run\n"
@@ -856,6 +859,19 @@ static void print_version(FILE *f) {
 
 /* 子命令级帮助。返回 0 = 认得的子命令，-1 = 没有这个子命令。 */
 static int help_sub(FILE *f, const char *cmd) {
+    if (!strcmp(cmd, "sync")) {
+        fprintf(f,
+            "zxc sync -- scan vendor/ and generate missing C bindings now\n"
+            "\n"
+            "build / run / test already do this automatically. Use sync when you\n"
+            "want the generated vendor/<name>.zx to exist BEFORE typing code, so\n"
+            "the editor offers module(\"name\") completion and hover right away.\n"
+            "\n"
+            "Only NEW C libraries are touched: an existing .clib or .zx is never\n"
+            "overwritten (edit it freely, or use one to opt a directory out).\n"
+            "C sources are compiled later by `zxc build`, not by sync.\n");
+        return 0;
+    }
     if (!strcmp(cmd, "cbuild")) {
         fprintf(f,
             "zxc cbuild [group] [options] -- compile C sources in vendor/\n"
@@ -1287,6 +1303,18 @@ static const char *INIT_VENDOR_README =
     "搜索顺序：相对导入所在的目录 → 工程根的 `vendor/` → `zx.json` 的\n"
     "`\"deps\"` 数组。`vendor/` 存在即自动参与搜索，不用写进 deps。\n"
     "\n"
+    "C 库也直接放这里，不用跑 `zxc add`：\n"
+    "\n"
+    "```sh\n"
+    "cp -r ../third_party/foo vendor/foo   # include/ + 多层 src/ 原样搬入\n"
+    "# 或者把 foo.h / foo.c 直接放在 vendor/ 一层\n"
+    "zxc run                               # 自动生成绑定、编译 C 源码、链接\n"
+    "```\n"
+    "\n"
+    "第一次会生成 `vendor/foo.zx`（普通 Zx 源码）和 `vendor/foo.clib`（编译清单），\n"
+    "两个都是可编辑的工程文件，建议提交。已有同名文件就不会再动；想让编辑器在写码\n"
+    "前先有补全，跑一次 `zxc sync`。\n"
+    "\n"
     "vendor/ 里的是源码依赖，应该提交进版本控制。\n";
 
 static const char *INIT_README =
@@ -1483,6 +1511,215 @@ static int cadd_probe_lib(const char *stem, char *buf, size_t cap) {
         snprintf(buf, cap, pat[i], stem, stem);
         if (fexists(buf)) return 1;
     }
+    return 0;
+}
+
+/* ---- vendor/ 自动接管：把库放进去，直接 zxc run -----------------------
+ *
+ * build/run/test 在解析源码之前扫一遍 vendor/，把还没接管的 C 库补成
+ * "add 过"的状态：
+ *   - 子目录里含 .h  -> 目录树模式，写 <name>.clib + <name>.zx
+ *   - 顶层散的 *.h   -> 单头模式，写 <stem>.zx（.c 由 csrc_build 编）
+ * 只生成绑定和清单，编译/链接仍由 build_program 里既有的 clib_build /
+ * csrc_build 增量路径负责，不在这里重复编一次。
+ *
+ * 三条硬约束：
+ *   ① 不覆盖：已有同名 .clib/.zx 一律不动。用户可能手工裁剪过清单、
+ *      手改过绑定；放一个同名占位文件也是天然的 opt-out。
+ *   ② 不阻断：某个目录解析失败只警告、继续构建——"丢进去就跑"不能
+ *      因为一个不相干的目录变脆。
+ *   ③ 不半途落盘：绑定文本生成成功后才一起写清单和绑定，避免只留下
+ *      清单、下次却因"已存在"跳过而永远缺绑定。
+ */
+#ifndef _WIN32
+#include <dirent.h>
+#endif
+
+typedef struct { char name[256]; int isdir; } VEntry;
+
+static VEntry *vendor_entries(int *nout) {
+    *nout = 0;
+    VEntry *list = NULL;
+    int n = 0, cap = 0;
+#ifdef _WIN32
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA("vendor/*", &fd);
+    if (h == INVALID_HANDLE_VALUE) return NULL;
+    do {
+        if (fd.cFileName[0] == '.') continue;
+        if (n == cap) {
+            cap = cap ? cap * 2 : 16;
+            list = realloc(list, (size_t)cap * sizeof *list);
+        }
+        VEntry *e = &list[n++];
+        snprintf(e->name, sizeof e->name, "%s", fd.cFileName);
+        e->isdir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+#else
+    DIR *d = opendir("vendor");
+    if (!d) return NULL;
+    struct dirent *de;
+    while ((de = readdir(d))) {
+        if (de->d_name[0] == '.') continue;
+        char full[1024];
+        snprintf(full, sizeof full, "vendor/%s", de->d_name);
+        struct stat st;
+        if (stat(full, &st) != 0) continue;
+        if (n == cap) {
+            cap = cap ? cap * 2 : 16;
+            list = realloc(list, (size_t)cap * sizeof *list);
+        }
+        VEntry *e = &list[n++];
+        snprintf(e->name, sizeof e->name, "%s", de->d_name);
+        e->isdir = S_ISDIR(st.st_mode) != 0;
+    }
+    closedir(d);
+#endif
+    *nout = n;
+    return list;
+}
+
+/* vendor 下的 .c 有没有归到 stem 这一组的（同名或 <stem>_xxx）。
+ * 只用来决定绑定里写不写 @link；链接本身由 build_program 注入。 */
+static int vendor_has_c_for(const VEntry *ents, int n, const char *stem) {
+    char exact[300], pref[300];
+    snprintf(exact, sizeof exact, "%s.c", stem);
+    snprintf(pref, sizeof pref, "%s_", stem);
+    size_t pl = strlen(pref);
+    for (int i = 0; i < n; i++) {
+        if (ents[i].isdir) continue;
+        const char *p = ents[i].name;
+        size_t l = strlen(p);
+        if (l < 3 || strcmp(p + l - 2, ".c") != 0) continue;
+        if (!strcmp(p, exact) || !strncmp(p, pref, pl)) return 1;
+    }
+    return 0;
+}
+
+/* 已有清单是否已经指向这个目录：`zxc add vendor/foo --name bar` 会留下一张
+ * vendor/bar.clib，此时不能再自动补一份 vendor/foo.zx。 */
+static int vendor_root_claimed(const char *root) {
+    int nm = 0, claimed = 0;
+    char **mans = clib_scan_manifests("vendor", &nm);
+    for (int i = 0; i < nm && !claimed; i++) {
+        ClibManifest om;
+        char e[256];
+        if (clib_read_manifest(mans[i], &om, e, sizeof e) == 0) {
+            claimed = !strcmp(om.root, root);
+            clib_free(&om);
+        }
+        free(mans[i]);
+    }
+    free(mans);
+    return claimed;
+}
+
+static int vendor_autoscan(void) {
+    if (!path_is_dir("vendor")) return 0;
+    int n = 0;
+    VEntry *ents = vendor_entries(&n);
+    if (!n) { free(ents); return 0; }
+    const char *cc = (g_cc && *g_cc) ? g_cc : "";
+    if (!cc[0] || mkdir_p(ZX_CACHE_DIR) != 0) { free(ents); return 0; }
+
+    int added = 0;
+    char err[1024];
+
+    /* ① 子目录：整棵库树（include/ + src/ 任意深度） */
+    for (int i = 0; i < n; i++) {
+        if (!ents[i].isdir) continue;
+        const char *dir = ents[i].name;
+        char root[1100], quick1[1100], quick2[1100];
+        snprintf(root, sizeof root, "vendor/%s", dir);
+        snprintf(quick1, sizeof quick1, "vendor/%s.clib", dir);
+        snprintf(quick2, sizeof quick2, "vendor/%s.zx", dir);
+        if (fexists(quick1) || fexists(quick2)) continue;
+        if (vendor_root_claimed(root)) continue;
+
+        ClibManifest m;
+        if (clib_discover(root, NULL, &m, err, sizeof err) != 0 || m.nhdr == 0) {
+            clib_free(&m); continue;          /* 普通 zx 模块目录，不是 C 库 */
+        }
+        /* discover 会剥掉 -src/-master 之类的尾巴，清单名以 m.name 为准；
+         * 否则 vendor/foo-master/ 每次 run 都会重新生成一遍。 */
+        char mf[1100], zxpath[1100], libpath[1100], regen[1200];
+        snprintf(mf, sizeof mf, "vendor/%s.clib", m.name);
+        snprintf(zxpath, sizeof zxpath, "vendor/%s.zx", m.name);
+        if (fexists(mf) || fexists(zxpath)) { clib_free(&m); continue; }
+        snprintf(libpath, sizeof libpath, "vendor/lib%s.a", m.name);
+        snprintf(regen, sizeof regen, "%s", root);
+
+        char header[1100];
+        if (clib_umbrella(&m, ZX_CACHE_DIR, header, sizeof header,
+                          err, sizeof err) != 0) {
+            fprintf(stderr, "zxc: %s: %s (skipped)\n", root, err);
+            clib_free(&m); continue;
+        }
+        char *incs = clib_inc_flags(&m);
+        int nskip = 0;
+        char *text = cbind_generate(header, cc, m.nsrc > 0 ? libpath : NULL, 0,
+                                    incs, (const char *const *)m.hdr, m.nhdr,
+                                    regen, err, sizeof err, &nskip);
+        free(incs);
+        if (!text) {
+            fprintf(stderr, "zxc: %s: %s (skipped)\n", root, err);
+            clib_free(&m); continue;
+        }
+        int ok = (clib_write_manifest(mf, &m, root, regen, err, sizeof err) == 0);
+        if (ok && write_text_file(zxpath, text) != 0) { remove(mf); ok = 0; }
+        if (ok) {
+            added++;
+            printf("zxc: auto-added C library %s -> %s (%d header(s), %d source(s))\n",
+                   root, zxpath, m.nhdr, m.nsrc);
+        } else {
+            fprintf(stderr, "zxc: %s: %s (skipped)\n", root, err);
+        }
+        free(text);
+        clib_free(&m);
+    }
+
+    /* ② 顶层散放的 *.h：小库 / 单头库 */
+    for (int i = 0; i < n; i++) {
+        if (ents[i].isdir) continue;
+        const char *file = ents[i].name;
+        size_t l = strlen(file);
+        if (l < 3 || strcmp(file + l - 2, ".h") != 0) continue;
+        char stem[256];
+        snprintf(stem, sizeof stem, "%.*s", (int)(l - 2), file);
+        char zxpath[1100];
+        snprintf(zxpath, sizeof zxpath, "vendor/%s.zx", stem);
+        if (fexists(zxpath)) continue;
+
+        char header[1100], libpath[1100], regen[1200];
+        snprintf(header, sizeof header, "vendor/%s", file);
+        snprintf(libpath, sizeof libpath, "vendor/lib%s.a", stem);
+        snprintf(regen, sizeof regen, "%s", header);
+        int nskip = 0;
+        char *text = cbind_generate(header, cc,
+                                    vendor_has_c_for(ents, n, stem) ? libpath : NULL,
+                                    0, NULL, NULL, 0, regen, err, sizeof err, &nskip);
+        if (!text) {
+            fprintf(stderr, "zxc: %s: %s (skipped)\n", header, err);
+            continue;
+        }
+        if (write_text_file(zxpath, text) == 0) {
+            added++;
+            printf("zxc: auto-added C header %s -> %s\n", header, zxpath);
+        }
+        free(text);
+    }
+    free(ents);
+    return added;
+}
+
+/* 显式同步入口：编辑器里第一次写 module("foo") 之前先跑一次，
+ * 生成的绑定才会出现在补全里（build/run 自己也会调，不必先 sync）。 */
+static int cmd_sync(int argc, char **argv, int argi) {
+    (void)argc; (void)argv; (void)argi;
+    int n = vendor_autoscan();
+    if (n > 0) printf("zxc sync: added %d C library(ies); `zxc build` will compile them\n", n);
+    else printf("zxc sync: vendor/ is up to date, no new C libraries\n");
     return 0;
 }
 
@@ -1925,6 +2162,9 @@ static int do_build(Proj *pj, bool release, OutKind kind, char *outpath, size_t 
         fprintf(stderr, "zxc: entry source '%s' not found\n", pj->main);
         return 1;
     }
+    /* 必须在 fe_parse_file 之前：入口源码里 module("foo") 要能找到刚
+     * 生成的 vendor/foo.zx，否则第一次 `zxc run` 就报模块找不到。 */
+    vendor_autoscan();
     mkdir_p(ZX_CACHE_DIR);
     mkdir_p("out");
     setup_search_paths(pj);
@@ -2203,6 +2443,7 @@ static int test_run1(const char *file, const char *filter, bool release) {
 }
 
 static int cmd_test(int argc, char **argv, int argi) {
+    vendor_autoscan();                     /* 测试模块可能引用 vendor 里的 C 库 */
     const char *filter = NULL;             /* 名字子串过滤 */
     bool release = false;
     for (int i = argi; i < argc; i++) {
@@ -2383,6 +2624,7 @@ int main(int argc, char **argv) {
         }
         if (!strcmp(sub, "init"))  return cmd_init(argc, argv, 2);
         if (!strcmp(sub, "add"))   return cmd_add(argc, argv, 2);
+        if (!strcmp(sub, "sync"))  return cmd_sync(argc, argv, 2);
         if (!strcmp(sub, "cbuild")) return cmd_cbuild(argc, argv, 2);
         if (!strcmp(sub, "check")) return cmd_check(argc, argv, 2);
         if (!strcmp(sub, "fmt"))   return cmd_fmt(argc, argv, 2, false);

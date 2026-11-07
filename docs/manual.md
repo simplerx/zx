@@ -111,7 +111,8 @@ zxc <file.zx> -o <prog>           单文件：生成 C 并编成可执行文件
 
 | 子命令 | 作用 | 关键细节 |
 | --- | --- | --- |
-| `add <name\|header.h\|dir>` | 接入 C 库 | 指目录即可，不复制库文件；见 §3.17 / §3.19 |
+| `add <name\|header.h\|dir>` | 显式接入 C 库 | 指目录即可，不复制库文件；见 §3.17 / §3.19 |
+| `sync` | 扫 `vendor/` 补生成 C 绑定 | 免 `add` 流程的显式入口；见 §3.20 |
 | `cbuild [group]` | 编译 C 源码 | `vendor/*.c` → `vendor/lib<组>.a`；见 §3.18 |
 | `init [name]` | 创建工程 | 生成 `src/`、`vendor/`、`zx.json`、`.gitignore`；建完自检 `main.zx` |
 | `build` | 按 `zx.json` 构建到 `out/` | 中间文件在 `.zxc-cache/`，见 §5 |
@@ -691,6 +692,45 @@ zxc add ./deps/foo --force       # 库里加了新 .c 时刷新清单
   `--lib NAME` 用现成的预编译库，此时不自动编译但仍会写 `@link`。
 - 翻译不了的声明仍按 §3.17 的规则跳过并在绑定末尾注释说明。系统头配方
   （`m` / `c` / `ws2_32` …）仍只给基础类型的函数签名，不走目录模式。
+
+### 3.20 免 add —— 把库放进 vendor/，直接 zxc run
+
+§3.17–§3.19 解决的是「怎么接一个 C 库」。这一节解决的是「干脆别记这条命令」。
+`zxc run` / `build` / `test` 在解析入口源码**之前**会扫一遍 `vendor/`，把还没接管的
+C 库自动补成 `add` 过的状态：
+
+```sh
+cp -r ../third_party/foo vendor/foo   # include/ + 多层 src/ 原样搬进来
+zxc run                               # 直接跑；源码里 module("foo") 已经能解析
+```
+
+两种放法都认：
+
+| 放法 | 自动产物 | 编译 |
+| --- | --- | --- |
+| `vendor/foo/`（含 `.h`，可带任意深度 `src/`） | `vendor/foo.clib` + `vendor/foo.zx` | 清单里的 `.c` → `vendor/libfoo.a` |
+| `vendor/foo.h` + 可选 `vendor/foo.c` | `vendor/foo.zx` | 顶层 `.c` → `vendor/libfoo.a` |
+
+纯 zx 模块目录（`vendor/mylib/*.zx`，没有 `.h`）不会被误判；`vendor/README.md`、
+已有的 `.clib` / `.zx` / `.a` 也一律跳过。
+
+**三条保证**
+
+- **不覆盖**：已有同名 `.clib` 或 `.zx` 就完全不碰。清单里注释掉几行 `source =`、
+  绑定里手改函数签名，都不会被下一次 `run` 冲掉。这也是天然的 opt-out——放一个
+  同名占位 `.zx`，该目录就永远不会被接管。
+- **不阻断**：某个目录解析 C 头失败只打印一行 `skipped` 警告并继续构建，不会因为
+  `vendor/` 里混了个不相干的目录就让整个工程跑不起来。
+- **不半途落盘**：绑定文本生成成功后才一起写清单和绑定，不会留下「有清单、
+  没绑定」的半残状态（否则下次会因「已存在」跳过、永远补不上）。
+
+自动接管只做**生成绑定 + 清单**，编译与链接仍走 §3.18 / §3.19 的增量路径，所以
+改了 C 源码后 `zxc build` 自动重编重链的行为完全不变。生成物是普通 Zx 源码，
+建议进版本库——团队里其他人不必各自跑一次 clang。
+
+**编辑器里的先后问题**：绑定文件要存在，LSP 才会在补全里列出 `module("foo")`。
+第一次写码前先跑 `zxc sync`（只扫 `vendor/`、不编译），补全、hover、行内类型提示
+就都有了。`zxc sync` 与 `run` 共用同一套逻辑，重复跑是幂等的。
 
 ---
 
