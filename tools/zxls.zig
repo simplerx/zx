@@ -629,19 +629,89 @@ fn resolvePathStmt(files: []const []const u8, doc: *const Document, text: []cons
         n += 1;
     }
     if (n < 2) return null;
-    // 第一段是模块绑定 → 容器/成员都限定在模块文件里找
+    // 第一段是模块绑定 → 先限定在模块文件里找
     if (moduleOfBinding(text, segs[0])) |mod| {
         if (n > 3) return null;
         const p = resolveModuleFile(doc, mod) orelse return null;
         const t = readFileSmall(p) orelse return null;
         if (n == 2) return findDeclStmt(t, segs[1]);
-        const ch = findContainerBody(&.{t}, segs[1]) orelse return null;
-        return findDeclStmt(ch.body, segs[2]);
+        if (findContainerBody(&.{t}, segs[1])) |ch| {
+            if (findDeclStmt(ch.body, segs[2])) |s| return s;
+        }
+        // 门面文件里没有（std.zx 只有别名 pub const Task = task.Task，
+        // 真身在模块目录的 task.zx）——按编译器 module 目录语义扫整个目录。
+        const mdir = dirName(p);
+        var mfiles: std.ArrayList([]const u8) = .empty;
+        var mdir_d = Io.Dir.cwd().openDir(g_io, mdir, .{ .iterate = true }) catch return null;
+        defer mdir_d.close(g_io);
+        var mit = mdir_d.iterate();
+        while (mit.next(g_io) catch null) |entry| {
+            if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".zx")) continue;
+            var fp: std.ArrayList(u8) = .empty;
+            defer fp.deinit(gpa);
+            fp.appendSlice(gpa, mdir) catch continue;
+            fp.append(gpa, '/') catch continue;
+            fp.appendSlice(gpa, entry.name) catch continue;
+            if (readFileSmall(fp.items)) |txt| mfiles.append(gpa, txt) catch {};
+        }
+        if (findContainerBody(mfiles.items, segs[1])) |ch|
+            return findDeclStmt(ch.body, segs[2]);
+        return null;
     }
     // std.X.member / X.member：容器在扫描集里找（std 目录已并入 files）
     if (n == 3) {
         const ch = findContainerBody(files, segs[1]) orelse return null;
         return findDeclStmt(ch.body, segs[2]);
+    }
+    return null;
+}
+
+/// 容器体里的字段类型：`age:i32,` → "i32"（容器内深度 0，名字后跟冒号）。
+/// body 以 '{' 开头，与 extractBraceMembers 同约定：首字符不入深度。
+fn fieldTypeIn(body: []const u8, name: []const u8) ?[]const u8 {
+    var depth: usize = 0;
+    var i: usize = 1; // body[0] == '{'
+    while (i < body.len) : (i += 1) {
+        const c = body[i];
+        if (c == '"') {
+            i += 1;
+            while (i < body.len and body[i] != '"' and body[i] != '\n') i += 1;
+            continue;
+        }
+        if (c == '/' and i + 1 < body.len and body[i + 1] == '/') {
+            while (i < body.len and body[i] != '\n') i += 1;
+            continue;
+        }
+        if (c == '(' or c == '{' or c == '[') {
+            depth += 1;
+            continue;
+        }
+        if (c == ')') {
+            depth -= 1;
+            continue;
+        }
+        if (c == ']' or c == '}') {
+            if (depth == 0) return null; // 容器体结束
+            depth -= 1;
+            continue;
+        }
+        if (depth == 0 and isIdentChar(c) and !(c >= '0' and c <= '9')) {
+            var j = i + 1;
+            while (j < body.len and isIdentChar(body[j])) j += 1;
+            if (std.mem.eql(u8, body[i..j], name)) {
+                var k = j;
+                while (k < body.len and (body[k] == ' ' or body[k] == '\t')) k += 1;
+                if (k < body.len and body[k] == ':') {
+                    k += 1;
+                    while (k < body.len and (body[k] == ' ' or body[k] == '\t')) k += 1;
+                    var e = k;
+                    while (e < body.len and body[e] != ',' and body[e] != '\n' and body[e] != '}') e += 1;
+                    const ty = trimSl(body[k..e]);
+                    if (ty.len > 0) return ty;
+                }
+            }
+            i = j - 1;
+        }
     }
     return null;
 }
@@ -1648,6 +1718,23 @@ fn inferExprType(text: []const u8, doc: *const Document, expr: []const u8, depth
             return null;
         }
     }
+    // 结构体字面量：X{…} → X（X 是扫描集里的容器）
+    // var p = Person{.name = …} 的类型就是 Person。
+    if (std.mem.indexOfScalar(u8, e, '{')) |lb| {
+        var ok = lb > 0;
+        var k: usize = 0;
+        while (k < lb) : (k += 1) {
+            if (!isIdentChar(e[k]) or (e[k] >= '0' and e[k] <= '9' and k == 0)) {
+                ok = false;
+                break;
+            }
+        }
+        if (ok) {
+            var sf = scanFiles(doc, text);
+            defer sf.deinit(gpa);
+            if (isContainerIn(sf.items, e[0..lb])) return e[0..lb];
+        }
+    }
     // 点路径：std.Allocator 这类类型名 → 原样当类型
     if (std.mem.indexOfScalar(u8, e, '.') != null) {
         var ok = true;
@@ -1864,6 +1951,12 @@ fn hoverAt(doc: *const Document, line: u32, character: u32) ?[]const u8 {
                 if (findContainerBody(sf.items, ty)) |ch| {
                     if (hoverMarkdownForDecl(ch.body, member, doc)) |md|
                         return hoverPayload(md);
+                    // 字段成员（p.age 的 age）：出 `age: i32`
+                    if (fieldTypeIn(ch.body, member)) |t| {
+                        var b: std.ArrayList(u8) = .empty;
+                        b.print(gpa, "```zx\n{s}: {s}\n```", .{ member, t }) catch return null;
+                        return hoverPayload(b.items);
+                    }
                 }
             }
             if (resolvePathStmt(sf.items, doc, text, path)) |stmt| {
@@ -1907,6 +2000,17 @@ fn hoverMarkdownForDecl(text: []const u8, name: []const u8, doc: ?*const Documen
     } else {
         // 值声明：推断类型
         const init = declInitOf(stmt) orelse return null;
+        // 容器声明（const X = struct{…}）：Zig 式 `const X: type = struct {`
+        {
+            const it0 = trimSl(init);
+            const is_container = std.mem.startsWith(u8, it0, "struct") or
+                std.mem.startsWith(u8, it0, "union") or
+                std.mem.startsWith(u8, it0, "enum");
+            if (is_container) {
+                b.print(gpa, "const {s}: type = struct {{\n```", .{name}) catch {};
+                return b.items;
+            }
+        }
         if (doc) |d| {
             if (inferExprType(text, d, init, 0)) |t| {
                 b.print(gpa, "const {s}: {s} = ", .{ name, t }) catch {};

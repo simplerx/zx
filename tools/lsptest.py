@@ -236,6 +236,22 @@ labels = {i["label"] for i in r["result"]["items"]} if r and r.get("result") els
 check("completion.groupInst", {"id", "spawn", "wait"} <= labels
       and not labels & {"coro", "single", "pool"}, str(sorted(labels)))
 
+# 3g hover 变量 → 推断类型（var p = Person{…} 式结构体字面量也要出类型）
+off = MAIN.index("var s = Shape") + len("var s")
+send({"jsonrpc": "2.0", "id": 14, "method": "textDocument/hover", "params": {
+    "textDocument": {"uri": uri}, "position": pos(MAIN, off)}})
+r, _ = recv_id("hover.varType", 14)
+hv = r["result"]["contents"]["value"] if r and r.get("result") else ""
+check("hover.varType", "const s: Shape = " in hv, repr(hv[:80]))
+
+# 3h hover 容器名 → Zig 式 `: type`
+off = MAIN.index("Shape{ .circle")     # 停在类型名上
+send({"jsonrpc": "2.0", "id": 15, "method": "textDocument/hover", "params": {
+    "textDocument": {"uri": uri}, "position": pos(MAIN, off)}})
+r, _ = recv_id("hover.containerType", 15)
+hv = r["result"]["contents"]["value"] if r and r.get("result") else ""
+check("hover.containerType", ": type = struct" in hv or ": type = union" in hv, repr(hv[:80]))
+
 # 4 completion `std.p`（带前缀点补全，旧版这里只会出关键字）
 off = MAIN.rindex("std.p") + len("std.p")   # 光标在 p 后面
 send({"jsonrpc": "2.0", "id": 3, "method": "textDocument/completion", "params": {
