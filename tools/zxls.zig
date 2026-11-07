@@ -566,6 +566,86 @@ fn methodRetIn(files: []const []const u8, base: []const u8, method: []const u8) 
     return null;
 }
 
+/// 补全/hover/签名提示共用的扫描文件集：当前文档 + 文档目录 .zx + std 目录 .zx。
+/// 自身文件跳过（text 已含）。调用方 defer deinit。
+fn scanFiles(doc: *const Document, text: []const u8) std.ArrayList([]const u8) {
+    var files: std.ArrayList([]const u8) = .empty;
+    files.append(gpa, text) catch {};
+    const doc_dir = dirName(doc.path);
+    const self_name = baseName(doc.path);
+    var d = Io.Dir.cwd().openDir(g_io, doc_dir, .{ .iterate = true }) catch return files;
+    defer d.close(g_io);
+    var it = d.iterate();
+    while (it.next(g_io) catch null) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".zx")) continue;
+        if (std.mem.eql(u8, entry.name, self_name)) continue;
+        var fp: std.ArrayList(u8) = .empty;
+        defer fp.deinit(gpa);
+        fp.appendSlice(gpa, doc_dir) catch continue;
+        fp.append(gpa, '/') catch continue;
+        fp.appendSlice(gpa, entry.name) catch continue;
+        if (readFileSmall(fp.items)) |txt| files.append(gpa, txt) catch {};
+    }
+    // std 目录：仓库外工程里 std.Task 的成员定义在 <exe>/../std/task.zx，
+    // 文档目录永远扫不到（findStdDir 对齐编译器 find_std_path）。
+    if (g_std_dir) |sd| {
+        var sd_d = Io.Dir.cwd().openDir(g_io, sd, .{ .iterate = true }) catch return files;
+        defer sd_d.close(g_io);
+        var sit = sd_d.iterate();
+        while (sit.next(g_io) catch null) |entry| {
+            if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".zx")) continue;
+            var fp: std.ArrayList(u8) = .empty;
+            defer fp.deinit(gpa);
+            fp.appendSlice(gpa, sd) catch continue;
+            fp.append(gpa, '/') catch continue;
+            fp.appendSlice(gpa, entry.name) catch continue;
+            if (readFileSmall(fp.items)) |txt| files.append(gpa, txt) catch {};
+        }
+    }
+    return files;
+}
+
+/// 实例变量 → 容器类型名：`let g = std.Task.group()` → "Group"。
+/// 推断交给 inferContainer（files 需含 std 目录）。
+fn instanceContainerTy(files: []const []const u8, text: []const u8, name: []const u8) ?[]const u8 {
+    const s = findDeclStmt(text, name) orelse return null;
+    const init = declInitOf(s) orelse return null;
+    return inferContainer(files, text, init, 0);
+}
+
+/// 点路径的函数声明解析（第一段不是模块绑定的形状）：
+///   `std.Task.group` → std 目录文件里 Task 容器内的 group 方法
+///   `task.Obj.make`  → 模块 task 文件里 Obj 容器内的 make
+///   `Obj.make`       → 扫描集里 Obj 容器内的 make（本文件或 std）
+/// 返回声明语句切片（sigOfStmt 可直接消费），找不到返回 null。
+fn resolvePathStmt(files: []const []const u8, doc: *const Document, text: []const u8, path: []const u8) ?[]const u8 {
+    var segs: [4][]const u8 = undefined;
+    var n: usize = 0;
+    var it = std.mem.splitScalar(u8, path, '.');
+    while (it.next()) |seg| {
+        if (seg.len == 0) return null;
+        if (n >= segs.len) return null;
+        segs[n] = seg;
+        n += 1;
+    }
+    if (n < 2) return null;
+    // 第一段是模块绑定 → 容器/成员都限定在模块文件里找
+    if (moduleOfBinding(text, segs[0])) |mod| {
+        if (n > 3) return null;
+        const p = resolveModuleFile(doc, mod) orelse return null;
+        const t = readFileSmall(p) orelse return null;
+        if (n == 2) return findDeclStmt(t, segs[1]);
+        const ch = findContainerBody(&.{t}, segs[1]) orelse return null;
+        return findDeclStmt(ch.body, segs[2]);
+    }
+    // std.X.member / X.member：容器在扫描集里找（std 目录已并入 files）
+    if (n == 3) {
+        const ch = findContainerBody(files, segs[1]) orelse return null;
+        return findDeclStmt(ch.body, segs[2]);
+    }
+    return null;
+}
+
 fn extractBraceMembers(text: []const u8, is_enum: bool, out: *std.ArrayList(Decl)) void {
     var depth: usize = 0;
     var d_par: usize = 0; // 圆括号深度：方法签名 fn (f: …, ctx: …) 里的参数名
@@ -1610,7 +1690,24 @@ fn resolveCalleeRet(text: []const u8, doc: *const Document, callee: []const u8) 
         if (member.len == 0) return null;
         var mm: ?[]const u8 = moduleOfBinding(text, bind);
         if (mm == null and std.mem.eql(u8, bind, "std")) mm = "std";
-        const mod = mm orelse return null;
+        const mod = mm orelse {
+            // 容器限定（std.Task.group）或实例方法（g.spawn）：扫描集里解析
+            var sf = scanFiles(doc, text);
+            defer sf.deinit(gpa);
+            if (resolvePathStmt(sf.items, doc, text, callee)) |stmt| {
+                const sig = sigOfStmt(stmt);
+                if (sig.is_fn and sig.ret.len > 0) return sig.ret;
+            }
+            if (instanceContainerTy(sf.items, text, bind)) |ty| {
+                if (findContainerBody(sf.items, ty)) |ch| {
+                    if (findDeclStmt(ch.body, member)) |stmt| {
+                        const sig = sigOfStmt(stmt);
+                        if (sig.is_fn and sig.ret.len > 0) return sig.ret;
+                    }
+                }
+            }
+            return null;
+        };
         const p = resolveModuleFile(doc, mod) orelse return null;
         const t = readFileSmall(p) orelse return null;
         const stmt = findDeclStmt(t, member) orelse return null;
@@ -1755,6 +1852,29 @@ fn hoverAt(doc: *const Document, line: u32, character: u32) ?[]const u8 {
                         if (hoverMarkdownForDecl(t, member, doc)) |md|
                             return hoverPayload(md);
                     }
+                }
+            }
+        }
+        // 实例方法（g.spawn → Group 体里的 spawn）与容器限定成员
+        //（std.Task.coro / task.Obj.make / Obj.make）
+        if (member.len > 0) {
+            var sf = scanFiles(doc, text);
+            defer sf.deinit(gpa);
+            if (instanceContainerTy(sf.items, text, bind)) |ty| {
+                if (findContainerBody(sf.items, ty)) |ch| {
+                    if (hoverMarkdownForDecl(ch.body, member, doc)) |md|
+                        return hoverPayload(md);
+                }
+            }
+            if (resolvePathStmt(sf.items, doc, text, path)) |stmt| {
+                const sig = sigOfStmt(stmt);
+                if (sig.is_fn) {
+                    var b: std.ArrayList(u8) = .empty;
+                    b.appendSlice(gpa, "```zx\n") catch return null;
+                    b.appendSlice(gpa, member) catch {};
+                    appendSigTail(&b, sig);
+                    b.appendSlice(gpa, "\n```") catch {};
+                    return hoverPayload(b.items);
                 }
             }
         }
@@ -1906,6 +2026,27 @@ fn signatureHelpAt(doc: *const Document, line: u32, character: u32) ?[]const u8 
                 built.appendSlice(gpa, callee) catch {};
                 built.appendSlice(gpa, "(…)") catch {};
                 label = built.items;
+            }
+        }
+        if (label.len == 0) {
+            // 实例方法（g.spawn → Group 体里的 spawn）与容器限定静态调用
+            //（std.Task.coro / task.Obj.make / Obj.make）
+            var sf = scanFiles(doc, text);
+            defer sf.deinit(gpa);
+            var stmt: ?[]const u8 = null;
+            if (instanceContainerTy(sf.items, text, bind)) |ty| {
+                if (findContainerBody(sf.items, ty)) |ch|
+                    stmt = findDeclStmt(ch.body, member);
+            }
+            if (stmt == null) stmt = resolvePathStmt(sf.items, doc, text, callee);
+            if (stmt) |s| {
+                const sig = sigOfStmt(s);
+                if (sig.is_fn) {
+                    built.appendSlice(gpa, member) catch {};
+                    appendSigTail(&built, sig);
+                    label = built.items;
+                    params = sig.params;
+                }
             }
         }
     } else if (findDeclStmt(text, callee)) |stmt| {
@@ -2147,45 +2288,8 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                 var container = path;
                 if (std.mem.lastIndexOfScalar(u8, path, '.')) |dot| container = path[dot + 1 ..];
 
-                var files: std.ArrayList([]const u8) = .empty;
+                var files = scanFiles(doc, text);
                 defer files.deinit(gpa);
-                files.append(gpa, text) catch {};
-                var d = Io.Dir.cwd().openDir(g_io, doc_dir, .{ .iterate = true }) catch null;
-                if (d) |*dd| {
-                    defer dd.close(g_io);
-                    var it = dd.iterate();
-                    while (it.next(g_io) catch null) |entry| {
-                        if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".zx")) continue;
-                        if (std.mem.eql(u8, entry.name, baseName(doc.path))) continue;
-                        var fp: std.ArrayList(u8) = .empty;
-                        defer fp.deinit(gpa);
-                        fp.appendSlice(gpa, doc_dir) catch continue;
-                        fp.append(gpa, '/') catch continue;
-                        fp.appendSlice(gpa, entry.name) catch continue;
-                        if (readFileSmall(fp.items)) |txt| files.append(gpa, txt) catch {};
-                    }
-                }
-                // std 目录的 .zx 也进容器扫描：仓库外工程里 std.Task. 的成员
-                // （group/spawn/…）定义在 <exe>/../std/task.zx，文档目录永远
-                // 扫不到。别名（std.zx 的 `pub const Task = task.Task`）会被
-                // containerMembers 的 struct 头检查跳过，命中的是 task.zx 的
-                // 真身，不会出两份。
-                if (g_std_dir) |sd| {
-                    var sd_d = Io.Dir.cwd().openDir(g_io, sd, .{ .iterate = true }) catch null;
-                    if (sd_d) |*dd| {
-                        defer dd.close(g_io);
-                        var it = dd.iterate();
-                        while (it.next(g_io) catch null) |entry| {
-                            if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".zx")) continue;
-                            var fp: std.ArrayList(u8) = .empty;
-                            defer fp.deinit(gpa);
-                            fp.appendSlice(gpa, sd) catch continue;
-                            fp.append(gpa, '/') catch continue;
-                            fp.appendSlice(gpa, entry.name) catch continue;
-                            if (readFileSmall(fp.items)) |txt| files.append(gpa, txt) catch {};
-                        }
-                    }
-                }
                 // 错误集成员：`error.`（全局码名）或 `Err.`（`const Err = error{…}`）。
                 if (!handled) {
                     if (std.mem.eql(u8, container, "error"))
