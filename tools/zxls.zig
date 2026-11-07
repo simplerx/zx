@@ -2787,7 +2787,21 @@ fn sendRaw(payload: []const u8) void {
         const mm = (secs / 60) % 60;
         const ss = secs % 60;
         var b: std.ArrayList(u8) = .empty;
-        b.print(gpa, "{d:0>2}:{d:0>2}:{d:0>2} out {s} {d}B\n", .{ hh, mm, ss, meth, payload.len }) catch {};
+        // 响应带 id（与入站审计的 id 对齐）；前 90 字节内容片段便于
+        // 直接看返回了什么。
+        var resp_id: []const u8 = "";
+        if (std.mem.indexOf(u8, payload, "\"id\":")) |ii| {
+            const is = ii + "\"id\":".len;
+            const ie = std.mem.indexOfAnyPos(u8, payload, is, ",}") orelse payload.len;
+            resp_id = payload[is..ie];
+        }
+        b.print(gpa, "{d:0>2}:{d:0>2}:{d:0>2} out {s} id={s} {d}B ", .{ hh, mm, ss, meth, resp_id, payload.len }) catch {};
+        if (payload.len > 0) {
+            const snip = if (payload.len > 90) payload[0..90] else payload;
+            b.appendSlice(gpa, "| ") catch {};
+            b.appendSlice(gpa, snip) catch {};
+        }
+        b.append(gpa, '\n') catch {};
         logLine(b.items);
         b.deinit(gpa);
     }
@@ -2823,6 +2837,41 @@ fn handle(v: std.json.Value) ?[]const u8 {
 
     if (method.len == 0) return null; // 对端响应，忽略
     const params = obj.get("params");
+
+    // 入站审计：method + id + 请求位置，与出站时间戳对齐可定位
+    // 客户端发什么、我们答什么。logLine 每次开写，hover 频率低可接受。
+    {
+        var lb: std.ArrayList(u8) = .empty;
+        defer lb.deinit(gpa);
+        const now = Io.Clock.now(.real, g_io);
+        var secs: u64 = @intCast(@divFloor(now.nanoseconds, std.time.ns_per_s));
+        secs = secs % (24 * 3600) + 8 * 3600; // UTC+8
+        if (secs >= 24 * 3600) secs -= 24 * 3600;
+        lb.print(gpa, "{d:0>2}:{d:0>2}:{d:0>2} in {s} id=", .{
+            secs / 3600, (secs / 60) % 60, secs % 60, method,
+        }) catch {};
+        if (id) |iv| {
+            switch (iv) {
+                .integer => |n| lb.print(gpa, "{d}", .{n}) catch {},
+                .string => |s| lb.appendSlice(gpa, s) catch {},
+                else => lb.appendSlice(gpa, "?") catch {},
+            }
+        } else lb.appendSlice(gpa, "-") catch {};
+        if (params) |pm| {
+            if (pm == .object) {
+                if (pm.object.get("position")) |pp| {
+                    if (pp == .object) {
+                        const ln = pp.object.get("line");
+                        const ch = pp.object.get("character");
+                        if (ln != null and ch != null and ln.? == .integer and ch.? == .integer) {
+                            lb.print(gpa, " pos={d}:{d}", .{ ln.?.integer, ch.?.integer }) catch {};
+                        }
+                    }
+                }
+            }
+        }
+        logLine(lb.items);
+    }
 
     if (std.mem.eql(u8, method, "initialize")) {
         if (params) |pm| {
