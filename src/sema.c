@@ -3467,6 +3467,7 @@ static Type *check_expr_raw(Node *n, Type *expect) {
             if (b) { n->type_val = b; return type_of(n, ty_type()); }
             const char *sug = suggest_ident(n->name);
             if (sug) diag_help("did you mean `%s`?", sug);
+            if (getenv("ZX_DBG")) fprintf(stderr, "[dbg] unknown '%s' in fn=%s depth=%d root=%d\n", n->name, g_cur_fn_name ? g_cur_fn_name : "?", g_fn_depth, (int)g_root_stmts);
             return BAD(n, "unknown identifier '%s'", n->name);
         }
         n->sym = s;
@@ -4461,6 +4462,7 @@ static void ensure(Symbol *s) {
 
 static Type *check_fn_body(Node *fn) {
     const char *prev_fn = g_cur_fn_name;
+    if (getenv("ZX_DBG")) fprintf(stderr, "[dbg] body fn=%s nitems=%d line=%d\n", fn->name ? fn->name : "?", fn->nitems, fn->line);
     g_cur_fn_name = fn->name ? fn->name : "?";
     Type *ft = resolve_fn_type(fn);
     if (!ft || ft->kind == TY_INVALID) return ft;
@@ -4479,6 +4481,7 @@ static Type *check_fn_body(Node *fn) {
         Node *pm = fn->items[i];
         if (!pm->name) continue;
         Symbol *s = scope_add(&sc, pm->name, pm->flag ? SK_VAR : SK_PARAM);
+        if (getenv("ZX_DBG")) fprintf(stderr, "[dbg]   bind param '%s' -> %p\n", pm->name ? pm->name : "(null)", (void*)s);
         if (!s) { err_at(pm->line, pm->col, "duplicate parameter '%s'", pm->name); continue; }
         if (sema_ty_ct_only(pm->ty))
             err_at(pm->line, pm->col,
@@ -5868,8 +5871,17 @@ static Value *ct_call(Node *n) {
         g_mod = save_m; g_scope = save_sc; g_srcpath = save_sp;
         return NULL;
     }
+    /* KEEP: 实参个数不匹配就不折叠这个调用——check_call 已报 E0303，
+     * 这里若照常克隆执行函数体，会只绑 min(形参,实参) 个形参，剩下的
+     * 在体里全部假报 unknown identifier（2026-11-08 用户截图踩中）。
+     * 函数体本身由 schedule_body 链路带着完整形参表正常检查。 */
+    if (n->nitems != ft->nparams) {
+        scope_pop(&sc);
+        g_mod = save_m; g_scope = save_sc; g_srcpath = save_sp;
+        return NULL;
+    }
 
-    for (int i = 0; i < g->nitems && i < n->nitems; i++) {
+    for (int i = 0; i < g->nitems; i++) {
         Node *pm = g->items[i];
         if (!pm->name) continue;
         Symbol *s = scope_add(&sc, pm->name, SK_PARAM);

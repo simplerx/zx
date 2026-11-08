@@ -676,6 +676,33 @@ else
     printf "  FAIL 模块文件干扰了局部绑定\n"; cat "$TPFX.modbindshadow"; fail=1
 fi
 
+# 2.57 实参个数不匹配只报 E0303，不得假报形参 unknown identifier。
+#     用户 2026-11-08 截图踩中：ct_call 克隆执行函数体时只绑
+#     min(形参,实参) 个形参，push() 零参调用把 push 体里的 a、b 全部
+#     假报成 unknown identifier（还带 "did you mean 调用者的 h" 的
+#     误导建议）。KEEP 标记在 src/sema.c ct_call。
+printf "\n== 实参个数不匹配不假报形参 unknown identifier\n"
+BP="$TPFX.arity"
+if mkdir -p "$BP/src" \
+   && printf '{"name":"arity","version":"0.1.0","main":"src/main.zx","out":"arity"}\n' > "$BP/zx.json" \
+   && printf 'const push = fn (a: i32, b: i32) i32 {\n    return a + b;\n};\n\nconst quad = fn (x: f32, y: f32, w: f32, h: f32) void {\n    push();\n};\n\npub const main = fn () i32 {\n    quad(1.0, 2.0, 3.0, 4.0);\n    return 0;\n};\n' > "$BP/src/main.zx" \
+   && ( cd "$BP" && "$ZXCW" src/main.zx --check > "$TPFX.aritybad" 2>&1 || true ) \
+   && grep -q "E0303" "$TPFX.aritybad" \
+   && ! grep -q "unknown identifier 'a'" "$TPFX.aritybad" \
+   && ! grep -q "unknown identifier 'b'" "$TPFX.aritybad" \
+   && [ "$(grep -c 'error\[' "$TPFX.aritybad")" -eq 1 ]; then
+    printf "  ok   实参个数不匹配只报 E0303 一条\n"
+else
+    printf "  FAIL 形参被假报 unknown identifier（ct_call 洞回退）\n"; cat "$TPFX.aritybad" 2>/dev/null; fail=1
+fi
+# 对照：实参个数正确时编译期折叠照常工作（常量传播不能被挡）
+if printf 'const add = fn (a: i32, b: i32) i32 {\n    return a + b;\n};\n\npub const main = fn () i32 {\n    return add(1, 2);\n};\n' > "$BP/src/main.zx" \
+   && ( cd "$BP" && "$ZXCW" src/main.zx --check > "$TPFX.arityok" 2>&1 ); then
+    printf "  ok   实参个数正确时折叠不受影响\n"
+else
+    printf "  FAIL 正常调用被误伤\n"; cat "$TPFX.arityok"; fail=1
+fi
+
 printf "\n== LSP 冒烟（tools/lsptest.py：补全/跳转 + vendor/ 与 deps）\n"
 if [ -x "$ZYG" ] && command -v python >/dev/null 2>&1; then
     mkdir -p "$TPFX.lspbin"
