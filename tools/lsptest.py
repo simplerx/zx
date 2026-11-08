@@ -490,6 +490,23 @@ off = EXTUSE.index("util.twice") + len("util.")          # zx.json deps
 labels = complete_at(EXTUSE, off, 22)
 check("completion.deps", "twice" in labels, str(sorted(labels))[:200])
 
+# 10b 模块成员的 detail 必须是函数签名/声明类型，不能落到绑定别名
+# （2026-11-08 截图：`g.` 弹窗每条右侧都标 `g`，看不出哪条是函数）。
+# `pub const hello = fn …` 这种 const 包着的函数同样按函数出（kind=3）。
+def vitems_at(text, off, rid):
+    send({"jsonrpc": "2.0", "id": rid, "method": "textDocument/completion", "params": {
+        "textDocument": {"uri": exturi}, "position": pos(text, off)}})
+    r, _ = recv_id("completion", rid)
+    return r["result"]["items"] if r and r.get("result") else []
+
+off = EXTUSE.index("    ext.\n") + len("    ext.")
+vitems = vitems_at(EXTUSE, off, 200)
+vd = {i["label"]: i.get("detail") for i in vitems}
+vk = {i["label"]: i.get("kind") for i in vitems}
+check("completion.vendorFnDetail",
+      (vd.get("hello") or "").startswith("hello(n: []const u8)"), str(vd)[:240])
+check("completion.vendorFnKind", vk.get("hello") == 3, str(vk)[:160])
+
 # 3b 错误集补全（M64）：`Err.` 出集合成员；`error.` 出全局码名。
 # 错误码名在编译器侧是全局 intern 的，文本层就把工程里见过的都端出来。
 off = MAIN.index("IOErr.") + len("IOErr.")
@@ -741,6 +758,14 @@ check("completion.externVendor.functions",
 check("completion.externVendor.constVar",
       {"GL_COLOR_BUFFER_BIT", "glState"} <= labels, str(sorted(labels))[:240])
 check("completion.externVendor.fnKind", kinds.get("glClear") == 3, str(kinds)[:240])
+# KEEP: fn 成员的 detail 必须是完整签名，不能落到绑定别名（2026-11-08 截图：
+# `g.` 弹窗每条右侧都标 `g`，用户看不出哪条是函数）。带显式类型注解的
+# 常量 detail 是声明类型。
+details = {i["label"]: i.get("detail") for i in items}
+check("completion.externVendor.fnDetail",
+      (details.get("glClear") or "").startswith("glClear(mask: u32)"), str(details)[:300])
+check("completion.externVendor.constDetail",
+      details.get("GL_COLOR_BUFFER_BIT") == "u32", str(details)[:300])
 
 off = BIND.index("    gl.\n") + len("    gl.")
 labels = {i["label"] for i in bind_items(BIND, off, 81)}
@@ -968,6 +993,11 @@ check("completion.exprSnippet.ctor",
 check("completion.exprSnippet.ctorBody",
       bool(ob) and ob[0].get("insertText") ==
       "Obj{ .count = ${1:0}, .name = ${2:0} }$0", str(ob)[:240])
+# 构造骨架发出后裸名不再并存（用户 2026-11-08：`Person 当前文件` 那条不要，
+# 只留 `Obj{...} 构造实例`）。骨架没发成的名字（enum/零字段）裸名照常保留。
+check("completion.exprSnippet.noBareIdent",
+      not any(i["label"] == "Obj" for i in items),
+      str([i["label"] for i in items])[:240])
 off = SNIP3.index("    Sh\n") + len("    Sh")
 items = sp_items(SNIP3, off, 99)
 sh = [i for i in sp_snips(items) if i["label"] == "Shape{...}"]

@@ -439,7 +439,32 @@ fn topLevelDecls(text: []const u8, out: *std.ArrayList(Decl), pub_only: bool) vo
                 const tail = rest[p.len..];
                 var n: usize = 0;
                 while (n < tail.len and isIdentChar(tail[n])) n += 1;
-                if (n > 0) out.append(gpa, .{ .name = tail[0..n], .kind = .value }) catch {};
+                if (n > 0) {
+                    // KEEP: 带显式类型注解的常量把类型记进 ty（detail 显示
+                    // `i32` 而不是绑定别名）；`const NAME = fn (...)` 标
+                    // is_fn——模块里 `pub const hello = fn …` 这种 const 包着
+                    // 的函数也要按函数出补全（kind=3 + 签名 detail），
+                    // 用户 2026-11-08 截图反馈：弹窗里全是别名看不出函数。
+                    var ty: []const u8 = "";
+                    var is_fn = false;
+                    var k = n;
+                    while (k < tail.len and (tail[k] == ' ' or tail[k] == '\t')) k += 1;
+                    if (k < tail.len and tail[k] == ':') {
+                        // 类型段只到 '=' 为止：readFieldTy 的分隔符集合里没有
+                        // '='，直接喂全文会把 `i32 = 1` 整段当类型。
+                        const ty_from = if (std.mem.indexOfScalarPos(u8, tail, k, '=')) |eq|
+                            tail[k + 1 .. eq]
+                        else
+                            tail[k + 1 ..];
+                        ty = readFieldTy(ty_from, 0);
+                    } else if (k < tail.len and tail[k] == '=') {
+                        var e = k + 1;
+                        while (e < tail.len and (tail[e] == ' ' or tail[e] == '\t')) e += 1;
+                        is_fn = std.mem.startsWith(u8, tail[e..], "fn ") or
+                            std.mem.startsWith(u8, tail[e..], "fn(");
+                    }
+                    out.append(gpa, .{ .name = tail[0..n], .kind = .value, .ty = ty, .is_fn = is_fn }) catch {};
+                }
                 break;
             }
         }
@@ -3101,7 +3126,8 @@ fn addSnippet(list: *Json, seen: *std.StringHashMapUnmanaged(void), s: Snip) voi
 /// 跨文件裸名不可用（名字只能来自显式绑定，那类工作区噪音已按用户要求
 /// 删除）；模块成员走 `绑定名.` 点补全。首参 self 是实例方法，不列调用
 /// 骨架（`o.bump()` 由点补全负责）；enum 只出变体，不造字面量骨架。
-/// label 带 `()` / `{...}` 后缀，与普通标识符项并存不互斥；静态模板表
+/// 骨架 label 带 `()` / `{...}` 后缀；构造骨架发出时会把裸名占进 seen，
+/// 裸标识符项不再并存（addCtorSnippet 里做）。静态模板表
 /// （if/fn/new…）先入 seen，与本函数同名也不会撞。展开形态由
 /// lsptest.py completion.exprSnippet.* 钉住。
 fn addSnippetRaw(list: *Json, seen: *std.StringHashMapUnmanaged(void),
@@ -3180,6 +3206,11 @@ fn addCtorSnippet(list: *Json, seen: *std.StringHashMapUnmanaged(void),
     defer lab.deinit(gpa);
     lab.print(gpa, "{s}{{...}}", .{name}) catch return;
     addSnippetRaw(list, seen, lab.items, ins.items, "构造实例");
+    // KEEP: 骨架发出后把裸名占进 seen——本函数在 addIdents **之前**调用，
+    // 裸标识符项（`Person 当前文件`）就不会再和 `Person{...} 构造实例`
+    // 并排弹两条（用户 2026-11-08：只要骨架那条）。骨架没发成（enum/零字段
+    // 容器）裸名照常保留。
+    seen.put(gpa, dupe(name), {}) catch {};
 }
 
 fn addExprSnippets(list: *Json, seen: *std.StringHashMapUnmanaged(void),
@@ -3485,9 +3516,14 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                     }
                 }
             }
+            // 模块文件文本：fn 成员的 detail 要拼真实签名（见 emit 循环）
+            var mod_txt: ?[]const u8 = null;
             if (mod) |m| {
                 moduleDecls(doc_dir, m, &decls);
                 handled = decls.items.len > 0;
+                if (handled) {
+                    if (resolveModuleFile(doc, m)) |mp| mod_txt = readFileSmall(mp);
+                }
             }
             if (!handled) {
                 // 容器成员：用路径最后一段匹配容器名
@@ -3526,9 +3562,29 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                         .variant => 20,
                         .value => 6,
                     };
-                    // 字段右侧说明写声明类型（i32 / []const u8 / {f64,f64}），
-                    // 而不是原来的容器名；方法/变体没有类型串，保持容器名。
-                    const detail: []const u8 = if (dcl.kind == .field and dcl.ty.len > 0) dcl.ty else path;
+                    // detail 三态：字段/带类型注解的常量 → 声明类型
+                    //（i32 / []const u8）；函数 → 完整签名 name(params) ret，
+                    // 绝不能落到绑定别名（`g.` 弹窗每条都标 `g`，用户看不出
+                    // 哪条是函数——2026-11-08 截图反馈）；其余保持原状。
+                    const detail: []const u8 = blk: {
+                        if (dcl.kind == .field and dcl.ty.len > 0) break :blk dcl.ty;
+                        if (dcl.kind == .value and dcl.ty.len > 0) break :blk dcl.ty;
+                        if (dcl.is_fn) {
+                            if (mod_txt) |mt| {
+                                if (findDeclStmt(mt, dcl.name)) |stmt| {
+                                    const sig = sigOfStmt(stmt);
+                                    if (sig.is_fn) {
+                                        var sb: std.ArrayList(u8) = .empty;
+                                        sb.appendSlice(gpa, dcl.name) catch {};
+                                        appendSigTail(&sb, sig);
+                                        break :blk sb.items;
+                                    }
+                                }
+                            }
+                            break :blk "函数";
+                        }
+                        break :blk path;
+                    };
                     addItem(&list, &seen, dcl.name, k, detail, 0);
                 }
             } else if (!std.mem.eql(u8, path, "std")) {
@@ -3558,9 +3614,11 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
         // 当前文件标识符 + 关键字 + 工作区标识符（分层排序）
         // 模块导入项（不创造隐式名字，只插入绑定语句）
         addImportModules(&list, &seen, text, off, doc_dir, prefix);
-        addIdents(&list, &seen, text, prefix);
-        // KEEP - 自定义类型实例 / 函数调用骨架（当前文件声明）
+        // KEEP - 自定义类型实例 / 函数调用骨架（当前文件声明）。
+        // 必须在 addIdents 之前：容器拿到 `Name{...}` 构造骨架后会把裸名
+        // 占进 seen，裸标识符项就不再重复弹（用户 2026-11-08：只要骨架那条）。
         addExprSnippets(&list, &seen, doc, text, prefix);
+        addIdents(&list, &seen, text, prefix);
         for (keywords) |kw| {
             if (prefix.len == 0 or std.mem.startsWith(u8, kw, prefix)) {
                 // 关键字里有骨架的走 snippet（写 `if` + Tab 展开），
