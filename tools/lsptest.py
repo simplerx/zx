@@ -600,7 +600,10 @@ vd = {i["label"]: i.get("detail") for i in vitems}
 vk = {i["label"]: i.get("kind") for i in vitems}
 check("completion.vendorFnDetail",
       (vd.get("hello") or "").startswith("hello(n: []const u8)"), str(vd)[:240])
-check("completion.vendorFnKind", vk.get("hello") == 3, str(vk)[:160])
+vt = {i["label"]: (i.get("insertText") or "", i.get("insertTextFormat")) for i in vitems}
+check("completion.vendorFnKind", vk.get("hello") == 15, str(vk)[:160])
+check("completion.vendorFnSnippet",
+      vt.get("hello") == ("hello(${1:n})$0", 2), str(vt.get("hello")))
 
 # 10c vendor 容器（struct）的字段也要查得到——原生实例/字面量走
 # scanFiles，vendor 的容器体在模块文件里，必须按绑定解析（2026-11-08）。
@@ -717,9 +720,12 @@ def label_at_call(call):
     p = pos(MAIN, MAIN.index(call) + len(call))
     return byline.get((p["line"], p["character"]))
 
-check("inlayHint.param.anonStruct", label_at_call("push(") == "info: ", detail)
+# 2026-11-08 用户第 5 条：匿名 struct 实参要连类型一起标（`info: struct{…}`），
+# 否则模块/本地函数的匿名结构体参数只剩一个名字。
+check("inlayHint.param.anonStruct",
+      (label_at_call("push(") or "").startswith("info: struct{a: i32, msg: []const u8}"), detail)
 check("inlayHint.param.kind",
-      all(h.get("kind") == 2 and h["label"].endswith(": ") for h in hints if not h["label"].startswith(":")),
+      all(h.get("kind") == 2 and ": " in h["label"] for h in hints if not h["label"].startswith(":")),
       str(hints[:2]))
 
 # 3o 显式写了类型 / 注释 / 字符串里的伪声明都不该插 hint
@@ -861,7 +867,12 @@ check("completion.externVendor.functions",
       {"glClearColor", "glClear", "glViewport"} <= labels, str(sorted(labels))[:240])
 check("completion.externVendor.constVar",
       {"GL_COLOR_BUFFER_BIT", "glState"} <= labels, str(sorted(labels))[:240])
-check("completion.externVendor.fnKind", kinds.get("glClear") == 3, str(kinds)[:240])
+# 2026-11-08 用户要求：模块函数补全要给 snippet（带括号 + 预填形参），
+# 所以 kind 从 3（Function）变成 15（Snippet），detail 仍是完整签名。
+texts = {i["label"]: (i.get("insertText") or "", i.get("insertTextFormat")) for i in items}
+check("completion.externVendor.fnKind", kinds.get("glClear") == 15, str(kinds)[:240])
+check("completion.externVendor.fnSnippet",
+      texts.get("glClear") == ("glClear(${1:mask})$0", 2), str(texts.get("glClear")))
 # KEEP: fn 成员的 detail 必须是完整签名，不能落到绑定别名（2026-11-08 截图：
 # `g.` 弹窗每条右侧都标 `g`，用户看不出哪条是函数）。带显式类型注解的
 # 常量 detail 是声明类型。
@@ -1128,6 +1139,131 @@ items = sp_items(SPDOT, off, 100)
 check("completion.exprSnippet.noDotCtx",
       len(sp_snips(items)) == 0, str([i["label"] for i in items])[:240])
 
+# ---------------------------------------------------------------------------
+# 11 模块命名空间线（2026-11-08 用户六条）：
+#  1 std 命名空间：真实成员先出，编译器内建排最后，detail 不再只是绑定名
+#  3 跨模块类型：`a.Cfg` 的 detail 不能落到绑定名 `a`
+#  3 模块实例嵌套：`let v = a.Outer{…}; v.inner.` / hover v.inner.a
+#  4 模块函数 snippet：`a.tw` → twice(${1:x})$0（括号 + 预填形参）
+#  5 模块函数的匿名 struct 参数（含嵌套）补全
+#  6 模块 struct 类型的构造 snippet：`a.C` → Cfg{ .w = ${1:0} … }
+NESTLIB = """pub const Cfg = struct {
+    w: i32,
+    h: i32,
+};
+
+pub const Outer = struct {
+    inner: struct { a: i32, b: []const u8 },
+    name: []const u8,
+};
+
+pub const twice = fn (x: i32) i32 {
+    return x * 2;
+};
+
+pub const deepfn = fn (cfg: struct{ opts: struct{ width: i32, height: i32 }, flag: bool }) void {
+    cfg;
+};
+
+pub const handler = fn (cb: fn (i32) i32, info: struct{ count: i32, name: []const u8 }) void {
+    cb(info.count);
+};
+"""
+open(os.path.join(SRC_DIR, "nestlib.zx"), "w", encoding="utf-8").write(NESTLIB)
+NESTUSE = """const a = module("nestlib");
+const std = module("std");
+
+pub const main = fn () i32 {
+    a.deepfn(.{ .opts = .{ .width = 1 }, .flag = true });
+    a.handler(0, .{ .count = 1, .name = "y" });
+    let v = a.Outer{ .inner = .{ .a = 1 }, .name = "x" };
+    v.inner.a;
+    a.
+    let t = a.tw
+    a.Cfg{.
+    std.
+    return 0;
+};
+"""
+open(os.path.join(SRC_DIR, "nestuser.zx"), "w", encoding="utf-8").write(NESTUSE)
+nesturi = "file:///" + os.path.join(SRC_DIR, "nestuser.zx").replace("\\", "/")
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": nesturi, "languageId": "zx", "version": 1, "text": NESTUSE}}})
+
+def nest_items(off, rid):
+    send({"jsonrpc": "2.0", "id": rid, "method": "textDocument/completion", "params": {
+        "textDocument": {"uri": nesturi}, "position": pos(NESTUSE, off)}})
+    r, _ = recv_id("completion", rid)
+    return r["result"]["items"] if r and r.get("result") else []
+
+# 1 std 命名空间：真实成员在前，内建在后且 detail 只是"编译器内建"
+off = NESTUSE.index("    std.\n") + len("    std.")
+sit = nest_items(off, 300)
+slab = [i["label"] for i in sit]
+sd = {i["label"]: i.get("detail") for i in sit}
+check("completion.std.namespaceOrder",
+      slab[:1] == ["str"] and slab.index("println") > slab.index("Task"), str(slab[:6])[:200])
+check("completion.std.builtinDetail", sd.get("println") == "编译器内建", str(sd.get("println")))
+check("completion.std.moduleDetail", sd.get("str") == 'module("str.zx")', str(sd.get("str")))
+
+# 3/6 跨模块类型：detail 是类型，不是绑定名；构造 skeleton
+off = NESTUSE.index("    a.\n") + len("    a.")
+ait = nest_items(off, 301)
+ad = {i["label"]: i.get("detail") for i in ait}
+ak = {i["label"]: i.get("kind") for i in ait}
+at = {i["label"]: i.get("insertText") for i in ait}
+check("completion.module.typeDetail", ad.get("Cfg") != "a", str(ad)[:200])
+check("completion.module.ctorSnippet",
+      ak.get("Cfg") == 15 and at.get("Cfg") == "Cfg{ .w = ${1:0}, .h = ${2:0} }$0",
+      str(at.get("Cfg")))
+
+# 4 模块函数 snippet：前缀过滤 + 括号 + 预填形参
+off = NESTUSE.index("    let t = a.tw") + len("    let t = a.tw")
+tit = nest_items(off, 302)
+tl = [i["label"] for i in tit]
+td = {i["label"]: i.get("detail") for i in tit}
+tt = {i["label"]: (i.get("insertText") or "", i.get("insertTextFormat")) for i in tit}
+check("completion.module.prefixFilter", tl == ["twice"], str(tl))
+check("completion.module.fnSnippet",
+      tt.get("twice") == ("twice(${1:x})$0", 2), str(tt.get("twice")))
+check("completion.module.fnDetail",
+      (td.get("twice") or "").startswith("twice(x: i32)"), str(td.get("twice")))
+
+# 5 模块函数的匿名 struct 参数（嵌套）
+off = NESTUSE.index("a.deepfn(.{ .opts = .{ .") + len("a.deepfn(.{ .opts = .{ .")
+dl = {i["label"] for i in nest_items(off, 303)}
+check("completion.module.anonNestedArg", {"width", "height"} <= dl, str(sorted(dl)))
+off = NESTUSE.index("a.handler(0, .{ .") + len("a.handler(0, .{ .")
+hl = {i["label"] for i in nest_items(off, 304)}
+check("completion.module.anonArg2", {"count", "name"} <= hl, str(sorted(hl)))
+
+# 6 模块 struct 字面量字段
+off = NESTUSE.index("    a.Cfg{.\n") + len("    a.Cfg{.")
+cl = {i["label"] for i in nest_items(off, 305)}
+check("completion.module.literalFields", {"w", "h"} <= cl, str(sorted(cl)))
+
+# 3 模块实例嵌套：v.inner. 与 hover v.inner.a
+off = NESTUSE.index("v.inner.a") + len("v.inner.")
+il = {i["label"] for i in nest_items(off, 306)}
+check("completion.module.instanceNested", {"a", "b"} <= il, str(sorted(il)))
+send({"jsonrpc": "2.0", "id": 307, "method": "textDocument/hover", "params": {
+    "textDocument": {"uri": nesturi}, "position": pos(NESTUSE, NESTUSE.index("v.inner.a") + 8)}})
+r, _ = recv_id("hover", 307)
+hv = ((r or {}).get("result") or {}).get("contents") or {}
+check("hover.module.instanceNested", "a: i32" in (hv.get("value") or ""), str(hv)[:200])
+
+# 2/5 嵌套匿名字面量的行内类型提示（本地函数与模块函数同一套）
+send({"jsonrpc": "2.0", "id": 308, "method": "textDocument/inlayHint", "params": {
+    "textDocument": {"uri": nesturi},
+    "range": {"start": {"line": 0, "character": 0},
+              "end": {"line": NESTUSE.count("\n"), "character": 0}}}})
+r, _ = recv_id("inlayHint", 308)
+hints = (r or {}).get("result") or []
+hlab = [h["label"] for h in hints]
+check("inlayHint.anonNestedLiteral",
+      ": struct{ width: i32, height: i32 }" in hlab, str(hlab)[:300])
+
+
 # 9 shutdown/exit
 send({"jsonrpc": "2.0", "id": 8, "method": "shutdown", "params": None})
 recv_id("shutdown", 8)
@@ -1189,6 +1325,7 @@ plain = no_cd_client()
 check("diagnostics.noCodeDescriptionForOldClients",
       bool(plain) and all("codeDescription" not in d for d in plain), str(plain)[:300])
 
+# ---------------------------------------------------------------------------
 if fails:
     print(f"SMOKE FAILED: {len(fails)} -> {fails}"); sys.exit(1)
 print("SMOKE ALL PASS"); sys.exit(0)
