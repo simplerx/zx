@@ -798,11 +798,13 @@ pub const Parser = struct {
                             let f = try self.parse_fn(false);
                             self.push_item(n, f);
                         } else {
+                            let ftok = self.cur();
                             let fname = try self.take_ident();
                             try self.expect(lex.Kind.colon);
                             let ty = try self.parse_type();
-                            // C 版：struct 体的字段共用 kw_struct 的位置
-                            let f = self.new_at(NK.param, t);
+                            // 位置取字段名，不取 `struct` 关键字（同 C parse.c）：
+                            // 重名 / 默认值错 / 递归包含都该指在字段那一行。
+                            let f = self.new_at(NK.param, ftok);
                             f.name = fname;
                             f.a = ty;
                             if (self.accept(lex.Kind.assign)) {
@@ -851,11 +853,12 @@ pub const Parser = struct {
                             let f = try self.parse_fn(false);
                             self.push_item(n, f);
                         } else {
+                            let mline = self.cur();
                             let mname = try self.take_ident();
                             try self.expect(lex.Kind.colon);
                             let ty = try self.parse_type();
-                            // C 版：union 体的方法对共用 kw_union 的位置
-                            let m = self.new_at(NK.pair, t);
+                            // 位置取变体名（同 C parse.c）
+                            let m = self.new_at(NK.pair, mline);
                             m.name = mname;
                             m.a = ty;
                             self.accept(lex.Kind.comma);

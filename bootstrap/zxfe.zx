@@ -198,7 +198,17 @@ const main = fn () i32 {
         var lx = lex.Lexer.init(al, src);
         lx.run();
         if (lx.n_errors > 0) {
-            std.io.print(std.io.stderr(), "{s}: error[E0101]: lexical error(s)\n", path);
+            // 逐条打出来（位置 + 具体那句话），格式与语法/语义诊断一致。
+            // 只打一句 "lexical error(s)" 等于把"在哪、错什么"全藏起来。
+            var li: usize = 0;
+            while (li < lx.errs.len) {
+                if (lx.errs.get(li)) e {
+                    std.io.print(std.io.stderr(), "{s}:{}:{}: error[{s}]: {s}\n",
+                                 path, e.line, e.col, e.code, e.msg);
+                }
+                li = li + 1;
+            }
+            std.io.print(std.io.stderr(), "zxc: {} error(s)\n", lx.n_errors);
             return 1;
         }
         var p = parse.Parser.init(al, src, &lx);

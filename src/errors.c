@@ -24,8 +24,6 @@ typedef struct {
  * 下 UTF-8 中文会渲染成乱码（“鈥?”），不再放中文。 */
 static const ErrDoc g_errs[] = {
     /* ---- 词法 ---- */
-    { "E0100", "lexical error (uncategorized)",
-      "look at the character the error points at; the lexer probably rejects this syntax" },
     { "E0101", "unterminated literal or comment",
       "add the matching `\"` / `'` / comment terminator, or check the `\\\"` escape" },
     { "E0102", "illegal character or literal",
@@ -54,8 +52,9 @@ static const ErrDoc g_errs[] = {
       "write multi-level pointers in full `* *T`; `?T` cannot nest `?`; `?*T` is the nullable pointer" },
     { "E0306", "operator or operand type mismatch",
       "arithmetic takes numbers only; pointers cannot be added; slice concat needs matching element types" },
-    { "E0307", "union literal must specify a variant",
-      "write `U{ .circle = 1.0 }`, not `U{}` -- a union has no \"empty\" state" },
+    { "E0307", "aggregate literal is malformed",
+      "a union names exactly one variant (`U{ .circle = 1.0 }`, never `U{}`); "
+      "no field may be initialized twice" },
 
     /* ---- 名字与可见性 ---- */
     { "E0401", "unknown identifier or type",
@@ -78,8 +77,9 @@ static const ErrDoc g_errs[] = {
       "every path of a function with a return value must `return`; `noreturn` functions cannot return" },
     { "E0503", "pointer escapes the current stack frame",
       "do not return pointers/slices to locals; use `std.heapAlloc` for longer lifetimes" },
-    { "E0504", "switch is not exhaustive",
-      "cover every case of the enum/union/`?T`/`!T`/bool, or add an `else` arm" },
+    { "E0504", "switch arms do not form a valid partition of the subject",
+      "cover every case of the enum/union/`?T`/`!T`/bool, or add an `else` arm; "
+      "each pattern (and `else`) may appear only once" },
     { "E0505", "division by zero at compile time",
       "the divisor is 0 at compile time; compute runtime values through variables instead of constants" },
     { "E0506", "`.?` unwrap on a value that is null at compile time",

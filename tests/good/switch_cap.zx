@@ -75,7 +75,7 @@ const main = fn () u8 {
 };
 
 // expect-output
-// area 12.5664 12
+// area 12.56637061435916 12
 // circle rect
 // 0
 // 42 0

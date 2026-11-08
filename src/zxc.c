@@ -129,7 +129,10 @@ static const char *code_for(DiagPhase ph, const char *msg) {
     for (size_t i = 0; i < sizeof g_rules / sizeof g_rules[0]; i++)
         if (strstr(msg, g_rules[i].match)) return g_rules[i].code;
     switch (ph) {
-    case PH_LEX:    return "E0100";
+    /* 词法错误一律按 E0102（非法字符或字面量）；没闭合的字面量/注释由
+     * 上面的规则先命中 E0101。原先的"未分类"兜底码 E0100 已退役：
+     * 每个词法错都能归到这两类之一，留着它只会让诊断更含糊。 */
+    case PH_LEX:    return "E0102";
     case PH_PARSE:  return "E0200";
     case PH_SEMA:   return "E0300";
     default:        return "E0900";

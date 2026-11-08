@@ -504,6 +504,10 @@ const Parser = struct {
                             + ((u32)cp - 0xD800) * 0x400
                             + ((u32)lo - 0xDC00);
                         w = w + putUtf8(dst[w..], full);
+                        // 低代理那半个 \uXXXX 已经并进来算掉了，位置也要跟着跳过——
+                        // 漏掉这一步会把低代理当成独立的 \u 再解一次，写出去的字节
+                        // 比第一遍算的 outLen 多 3 个（越界，落在 dst[w..] 为空处）。
+                        j = j + 6;
                     } else {
                         w = w + putUtf8(dst[w..], cp);
                     }

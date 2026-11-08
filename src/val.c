@@ -153,6 +153,17 @@ bool val_eq(Value *a, Value *b) {
 
 static bool is_floatish(Value *v) { return v && v->kind == V_FLOAT; }
 
+/* 把编译期浮点结果收敛到目标精度。
+ *
+ * 编译期用 double 算，但 f32 的语义是「每步按 32 位舍入」。不收敛的话
+ * `(f32)0.3` 会带着 f64 的 0.3 走，和运行时算出来的 f32 相差 1 ULP，
+ * `(f32)(0.1+0.2) == (f32)0.3` 于是编译期 false、运行时 true——R10 明令禁止
+ * 的「两个答案」。f16 没有可移植的 C 类型，暂时保持 double（已知缺口）。 */
+static double rt_f64(Type *t, double v) {
+    if (t && t->kind == TY_FLOAT && t->bits == 32) return (double)(float)v;
+    return v;
+}
+
 /* 编译期整数运算的结果按"运算数类型"回绕（M19：编译期与运行时一致，
  * 都是二补码回绕）。comptime_int（宽度未定）不截——按 64 位算。 */
 static int64_t wrap_to(Type *t, uint64_t u) {
@@ -162,6 +173,12 @@ static int64_t wrap_to(Type *t, uint64_t u) {
     u &= m;
     if (t->is_signed && b < 64 && ((u >> (b - 1)) & 1)) u |= ~m;
     return (int64_t)u;
+}
+
+/* 移位掩码：目标类型位宽 - 1；宽度未定（comptime_int）按 64 位算。 */
+static int shift_mask_of(Type *t) {
+    if (t && t->kind == TY_INT && t->bits > 0 && t->bits < 64) return t->bits - 1;
+    return 63;
 }
 
 static Value *int_bin(int op, Value *a, Value *b, int line, int col) {
@@ -185,8 +202,20 @@ static Value *int_bin(int op, Value *a, Value *b, int line, int col) {
     case TOK_AMP:      return val_from_i64(t, wrap_to(t, (uint64_t)x & (uint64_t)y));
     case TOK_PIPE:     return val_from_i64(t, wrap_to(t, (uint64_t)x | (uint64_t)y));
     case TOK_CARET:    return val_from_i64(t, wrap_to(t, (uint64_t)x ^ (uint64_t)y));
-    case TOK_SHL:      return val_from_i64(t, wrap_to(t, (uint64_t)x << (y & 63)));
-    case TOK_SHR:      return val_from_i64(t, wrap_to(t, (int64_t)((uint64_t)x >> (y & 63))));
+    /* 移位量按**目标位宽**掩码（R10），不是固定 63：`i32` 的 `1 << 32`
+     * 在编译期必须是 `1 << (32 & 31)` = 1，跟运行时逐位对齐。 */
+    case TOK_SHL: {
+        unsigned sh = (unsigned)((uint64_t)y & (uint64_t)shift_mask_of(t));
+        return val_from_i64(t, wrap_to(t, (uint64_t)x << sh));
+    }
+    case TOK_SHR: {
+        unsigned sh = (unsigned)((uint64_t)y & (uint64_t)shift_mask_of(t));
+        uint64_t u = (uint64_t)x;
+        /* 有符号走算术右移：负数的空位补 1（C 的 `>>` 对负数是实现定义，
+         * 这里显式算，编译期/运行时/各编译器一致） */
+        uint64_t r = (t && t->is_signed && x < 0) ? ~((~u) >> sh) : (u >> sh);
+        return val_from_i64(t, wrap_to(t, r));
+    }
     default: return NULL;
     }
 }
@@ -198,13 +227,14 @@ Value *val_bin(int op, Value *a, Value *b, int line, int col) {
     if (is_floatish(a) || is_floatish(b)) {
         double x = a->kind == V_FLOAT ? a->fval : (double)val_i64(a);
         double y = b->kind == V_FLOAT ? b->fval : (double)val_i64(b);
+        Type *rt = a->ty && a->kind == V_FLOAT ? a->ty : b->ty;
         switch (op) {
-        case TOK_PLUS:  return val_float(a->ty && a->kind == V_FLOAT ? a->ty : b->ty, x + y);
-        case TOK_MINUS: return val_float(a->ty && a->kind == V_FLOAT ? a->ty : b->ty, x - y);
-        case TOK_STAR:  return val_float(a->ty && a->kind == V_FLOAT ? a->ty : b->ty, x * y);
+        case TOK_PLUS:  return val_float(rt, rt_f64(rt, x + y));
+        case TOK_MINUS: return val_float(rt, rt_f64(rt, x - y));
+        case TOK_STAR:  return val_float(rt, rt_f64(rt, x * y));
         case TOK_SLASH:
             /* 浮点除零遵循 IEEE-754（±inf / NaN），编译期与运行时一致（M19） */
-            return val_float(a->ty && a->kind == V_FLOAT ? a->ty : b->ty, x / y);
+            return val_float(rt, rt_f64(rt, x / y));
         case TOK_LT: return val_bool(x <  y);
         case TOK_LE: return val_bool(x <= y);
         case TOK_GT: return val_bool(x >  y);
@@ -318,8 +348,8 @@ Value *val_cast(Type *to, Value *v) {
         return NULL;
     }
     if (ty_is_float(to)) {
-        if (v->kind == V_INT)   return val_float(to, (double)val_i64(v));
-        if (v->kind == V_FLOAT) return val_float(to, v->fval);
+        if (v->kind == V_INT)   return val_float(to, rt_f64(to, (double)val_i64(v)));
+        if (v->kind == V_FLOAT) return val_float(to, rt_f64(to, v->fval));
         return NULL;
     }
     if (to->kind == TY_ENUM && v->kind == V_INT) {

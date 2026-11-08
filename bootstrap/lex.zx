@@ -181,41 +181,34 @@ const is_float_suffix = fn (s: []const u8) bool {
            std.str.eq(s, "f64") || std.str.eq(s, "f128");
 };
 
-// 简版 strtod：十进制浮点文本 → f64（下划线当不存在）。
-// 自举前端只要把常量文本带进 AST，这里的精度足够；对拍不比值。
+// 浮点文本 → f64。**必须正确舍入**：编译期字面量的值就是程序语义的一部分，
+// 「近似」会让 `0.3` 变成 0.30000000000000004 —— 和 C 编译器、和运行时
+// 算出来的不是同一个数（曾经的简版实现就是按 mant*10+digit、scale*=0.1
+// 累加，10 个常见字面量里错 10 个，5.0e-324 直接塌成 0）。
+//
+// 交给 libc 的 strtod：glibc / ucrt / musl 都是正确舍入的。src/lex.c 走的是
+// 同一条路，两条前端（--fe=c 与 Zx 前端）因此逐位一致。
+extern fn strtod(s: *const u8, end: *(*const u8)) f64;
+
 const parse_float = fn (s: []const u8) f64 {
-    var mant: f64 = 0;
+    // 词法文本不含 NUL，先剥下划线拷进栈缓冲再交给 strtod。
+    // 64 字节装得下任何合法字面量（17 位有效数字 + 指数 + 后缀已被切掉）；
+    // 更长的截断到 63——20 位有效数字就足以定位最近的双精度值。
+    var buf: *[64]u8 = &.{
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    };
+    var n: usize = 0;
     var i: usize = 0;
-    while (i < s.len && (is_digit(s[i]) || s[i] == '_')) {
-        if (s[i] != '_') { mant = mant * 10.0 + (f64)(s[i] - '0'); }
+    while (i < s.len && n < 63) {
+        if (s[i] != '_') { buf[n] = s[i]; n = n + 1; }
         i = i + 1;
     }
-    if (i < s.len && s[i] == '.') {
-        i = i + 1;
-        var scale: f64 = 0.1;
-        while (i < s.len && (is_digit(s[i]) || s[i] == '_')) {
-            if (s[i] != '_') { mant = mant + (f64)(s[i] - '0') * scale; scale = scale * 0.1; }
-            i = i + 1;
-        }
-    }
-    if (i < s.len && (s[i] == 'e' || s[i] == 'E')) {
-        i = i + 1;
-        var neg = false;
-        if (i < s.len && (s[i] == '+' || s[i] == '-')) {
-            neg = s[i] == '-';
-            i = i + 1;
-        }
-        var e: i32 = 0;
-        while (i < s.len && is_digit(s[i])) {
-            e = e * 10 + (i32)(s[i] - '0');
-            i = i + 1;
-        }
-        var p: f64 = 1.0;
-        var k: i32 = 0;
-        while (k < e) { p = p * 10.0; k = k + 1; }
-        if (neg) { mant = mant / p; } else { mant = mant * p; }
-    }
-    return mant;
+    buf[n] = 0;
+    var endp: *const u8 = undefined;
+    return strtod((*const u8)buf, &endp);
 };
 
 // ---- token ----
@@ -235,6 +228,15 @@ pub const Tok = struct {
 
 // ---- 词法器本体 ----
 
+// 词法诊断：位置 + 一句具体的话。以前只记条数，zxfe 只能打
+// "error[E0101]: lexical error(s)"——用户既不知道在哪，也不知道错在哪。
+pub const LexErr = struct {
+    line: u32,
+    col: u32,
+    code: []const u8,   // E0101 没闭合 / E0102 非法字符或字面量
+    msg: []const u8,
+};
+
 pub const Lexer = struct {
     src: []const u8,
     p: usize,          // 当前字节偏移
@@ -244,6 +246,7 @@ pub const Lexer = struct {
     strbuf: std.ArrayList(u8),
     al: std.Allocator,
     n_errors: u32,
+    errs: std.ArrayList(LexErr),
 
     const init = fn (al: std.Allocator, src: []const u8) Lexer {
         return Lexer{
@@ -252,12 +255,14 @@ pub const Lexer = struct {
             .strbuf = std.ArrayList(u8).init(al),
             .al = al,
             .n_errors = 0,
+            .errs = std.ArrayList(LexErr).init(al),
         };
     };
 
     const deinit = fn (self: *Lexer) void {
         self.toks.deinit();
         self.strbuf.deinit();
+        self.errs.deinit();
     };
 
     // ---- 基础游标 ----
@@ -285,7 +290,13 @@ pub const Lexer = struct {
         return c;
     };
 
-    const fail = fn (self: *Lexer) void {
+    const fail = fn (self: *Lexer, code: []const u8, msg: []const u8) void {
+        self.n_errors = self.n_errors + 1;
+        _ = self.errs.push(LexErr{ .line = self.line, .col = self.col, .code = code, .msg = msg });
+    };
+
+    // 分配失败（不是用户写错）：只计数，不产生诊断——报"内存不够"没用。
+    const oom = fn (self: *Lexer) void {
         self.n_errors = self.n_errors + 1;
     };
 
@@ -301,7 +312,7 @@ pub const Lexer = struct {
             .str_off = 0, .text_len = 0,
         };
         var ok = self.toks.push(t);
-        if (!ok) { self.fail(); }
+        if (!ok) { self.oom(); }
     };
 
     const emit_int = fn (self: *Lexer, start: usize, v: u64, big: bool) void {
@@ -313,7 +324,7 @@ pub const Lexer = struct {
             .str_off = 0, .text_len = 0,
         };
         var ok = self.toks.push(t);
-        if (!ok) { self.fail(); }
+        if (!ok) { self.oom(); }
     };
 
     const emit_float = fn (self: *Lexer, start: usize, v: f64) void {
@@ -325,7 +336,7 @@ pub const Lexer = struct {
             .str_off = 0, .text_len = 0,
         };
         var ok = self.toks.push(t);
-        if (!ok) { self.fail(); }
+        if (!ok) { self.oom(); }
     };
 
     // STRING/CHAR：解码字节已进 strbuf，记下偏移与长度
@@ -338,7 +349,7 @@ pub const Lexer = struct {
             .str_off = off, .text_len = self.strbuf.len - off,
         };
         var ok = self.toks.push(t);
-        if (!ok) { self.fail(); }
+        if (!ok) { self.oom(); }
     };
 
     // char token：带码点（int_val = char_val，与 C 同）
@@ -351,7 +362,7 @@ pub const Lexer = struct {
             .str_off = off, .text_len = self.strbuf.len - off,
         };
         var ok = self.toks.push(t);
-        if (!ok) { self.fail(); }
+        if (!ok) { self.oom(); }
     };
 
     // ---- 注释与空白 ----
@@ -383,7 +394,7 @@ pub const Lexer = struct {
                         self.adv();
                     }
                 }
-                if (!closed) { self.fail(); }   // unterminated block comment
+                if (!closed) { self.fail("E0101", "unterminated block comment (`/*` without `*/`)"); }
             } else {
                 more = false;
             }
@@ -411,27 +422,41 @@ pub const Lexer = struct {
         if (e == 'x') {
             let hi = hexval(self.adv());
             let lo = hexval(self.adv());
-            if (hi < 0 || lo < 0) { self.fail(); return -1; }   // \x needs two hex digits
+            if (hi < 0 || lo < 0) { self.fail("E0102", "`\\x` needs exactly two hex digits"); return -1; }
             _ = self.strbuf.push((u8)(hi * 16 + lo));
             return 1;
         }
         if (e == 'u') {
-            var cp: u32 = 0;
-            var i: i32 = 0;
-            while (i < 4) {
-                let d = hexval(self.adv());
-                if (d < 0) { self.fail(); return -1; }          // \u needs four hex digits
-                cp = cp * 16 + (u32)d;
-                i = i + 1;
+            // 写法按 EBNF 只有一种：`\u{HEX+}`（1..6 位，按码点解）。
+            // 老的 `\uXXXX` 直接给一句"要加花括号"——两种写法只能让人猜。
+            if (self.peek() != '{') {
+                self.fail("E0102", "`\\u` takes braces: write `\\u{4F60}`");
+                return -1;
             }
+            self.adv();                       // '{'
+            var cp: u32 = 0;
+            var nd: i32 = 0;
+            while (is_hex(self.peek()) && nd < 6) {
+                let d = hexval(self.adv());
+                cp = cp * 16 + (u32)d;
+                nd = nd + 1;
+            }
+            if (nd == 0) { self.fail("E0102", "`\\u{...}` needs at least one hex digit"); return -1; }
+            if (self.peek() != '}') { self.fail("E0102", "`\\u{...}` is missing its closing `}`"); return -1; }
+            self.adv();                       // '}'
             return self.utf8_encode(cp);
         }
-        self.fail();                                            // unknown escape
+        self.fail("E0102", "unknown escape sequence");
         return -1;
     };
 
-    // BMP 码点 → UTF-8（1..4 字节），追加进 strbuf
+    // 码点 → UTF-8（1..4 字节），追加进 strbuf
     const utf8_encode = fn (self: *Lexer, cp: u32) i32 {
+        // 代理区（U+D800..U+DFFF）单独出现不是合法码点，超出 U+10FFFF 更不是
+        if (cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) {
+            self.fail("E0102", "code point out of range (U+0000..U+10FFFF, surrogates excluded)");
+            return -1;
+        }
         if (cp < 0x80) {
             _ = self.strbuf.push((u8)cp);
             return 1;
@@ -478,7 +503,7 @@ pub const Lexer = struct {
                 _ = self.strbuf.push(b);
             }
         }
-        if (bad) { self.fail(); }
+        if (bad) { self.fail("E0101", "unterminated string literal (strings cannot span lines)"); }
         self.emit_text(Kind.string, start, off);
     };
 
@@ -512,7 +537,11 @@ pub const Lexer = struct {
         let off = self.strbuf.len;
         let c = self.peek();
         if (c == '\'' || c == 0 || c == '\n') {
-            self.fail();                  // empty or unterminated char literal
+            if (c == 0 || c == '\n') {
+                self.fail("E0101", "unterminated char literal");
+            } else {
+                self.fail("E0102", "empty char literal");
+            }
             if (c == '\'') { self.adv(); }
             self.emit_text(Kind.char, start, off);
             return;
@@ -536,7 +565,7 @@ pub const Lexer = struct {
             }
         }
         if (self.peek() != '\'') {
-            self.fail();                  // must contain exactly one value
+            self.fail("E0102", "a char literal holds exactly one value");
             var go = self.peek() != 0 && self.peek() != '\'' && self.peek() != '\n';
             while (go) {
                 self.adv();
@@ -558,17 +587,17 @@ pub const Lexer = struct {
             base = 16;
             self.adv();
             self.adv();
-            if (!is_hex(self.peek())) { self.fail(); }       // needs digits after 0x
+            if (!is_hex(self.peek())) { self.fail("E0102", "hex literal needs digits after `0x`"); }
         } else if (self.peek() == '0' && (self.peek2() == 'b' || self.peek2() == 'B')) {
             base = 2;
             self.adv();
             self.adv();
-            if (self.peek() != '0' && self.peek() != '1') { self.fail(); }
+            if (self.peek() != '0' && self.peek() != '1') { self.fail("E0102", "binary literal needs digits after `0b`"); }
         } else if (self.peek() == '0' && (self.peek2() == 'o' || self.peek2() == 'O')) {
             base = 8;
             self.adv();
             self.adv();
-            if (self.peek() < '0' || self.peek() > '7') { self.fail(); }
+            if (self.peek() < '0' || self.peek() > '7') { self.fail("E0102", "octal literal needs digits after `0o`"); }
         }
 
         var val: u64 = 0;
@@ -603,14 +632,36 @@ pub const Lexer = struct {
                 while (is_digit(self.peek()) || self.peek() == '_') { self.adv(); }
                 if (self.peek() == 'e' || self.peek() == 'E') {
                     let save = self.p;
+                    let sline = self.line;
+                    let scol = self.col;
                     self.adv();
                     if (self.peek() == '+' || self.peek() == '-') { self.adv(); }
                     if (is_digit(self.peek())) {
                         while (is_digit(self.peek())) { self.adv(); }
                     } else {
-                        // 刻意与 C 一致：只回退字节不回退列，'e' 留给后缀扫描报错
+                        // 回退（连列号一起）：'e' 留给后缀扫描去报"未知后缀"
                         self.p = save;
+                        self.line = sline;
+                        self.col = scol;
                     }
+                }
+            }
+
+            // 指数可以不带小数点：`1e7` ≡ `1.0e7`（EBNF 两条都收，实现也得都收）。
+            // 后面没有数字就整块回退，交给后缀扫描报错。
+            if (self.peek() == 'e' || self.peek() == 'E') {
+                let save = self.p;
+                let sline = self.line;
+                let scol = self.col;
+                self.adv();
+                if (self.peek() == '+' || self.peek() == '-') { self.adv(); }
+                if (is_digit(self.peek())) {
+                    is_float = true;
+                    while (is_digit(self.peek())) { self.adv(); }
+                } else {
+                    self.p = save;
+                    self.line = sline;
+                    self.col = scol;
                 }
             }
         }
@@ -630,9 +681,9 @@ pub const Lexer = struct {
         if (slen == 0) { return; }
         let suf = self.src[suf_start..self.p];
         if (is_float) {
-            if (!is_float_suffix(suf)) { self.fail(); }      // invalid float suffix
+            if (!is_float_suffix(suf)) { self.fail("E0102", "unknown float type suffix; use f16 / f32 / f64 / f128"); }
         } else {
-            if (!is_int_suffix(suf)) { self.fail(); }        // invalid integer suffix
+            if (!is_int_suffix(suf)) { self.fail("E0102", "unknown integer type suffix; use u8..u128 / i8..i128 / usize / isize"); }
         }
     };
 
@@ -750,7 +801,20 @@ pub const Lexer = struct {
                     self.col = self.col - 1;
                     self.lex_char(start);
                 } else {
-                    self.fail();   // unexpected character
+                    // 非 ASCII 的标识符 / 不认识的标点都落在这里。把字节原样
+                    // 报出来，用户才知道是"这个字符"不行。
+                    if (c >= 0x80) {
+                        // 把这个字符的连续字节一起吃掉：一个中文标识符报一条，
+                        // 不是每个字节各报一条（`中文` 曾经报 4 条）。
+                        var cont = (self.peek() & 0xC0) == 0x80;
+                        while (cont) {
+                            self.adv();
+                            cont = (self.peek() & 0xC0) == 0x80;
+                        }
+                        self.fail("E0102", "identifiers are ASCII only; non-ASCII characters cannot appear in names");
+                    } else {
+                        self.fail("E0102", "unexpected character");
+                    }
                 }
             };
         }
@@ -766,7 +830,7 @@ pub const Lexer = struct {
                 self.emit(Kind.eof, self.p);
                 done = true;
             } else if (self.peek() == 0) {
-                self.fail();          // unexpected NUL byte in source
+                self.fail("E0102", "NUL byte in source (this file is not UTF-8 text)");
                 done = true;
             } else {
                 self.lex_token();

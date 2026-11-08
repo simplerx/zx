@@ -666,11 +666,23 @@ static void ty_print_into(Buf *b, Type *t, int depth) {
 
     case TY_TUPLE: print_tuple(b, t, depth); return;
 
-    case TY_STRUCT:
-    case TY_UNION:
+    /* 匿名枚举只打变体名，**不打变体类型**：枚举成员的 ty 就是枚举自己，
+     * 跟着打会一层层展开成 `enum{x: enum{x: enum{…`, 直到深度上限才停。
+     * 变体的类型恒为枚举本身，写出来也是噪音。 */
     case TY_ENUM:
         if (t->name) { buf_puts(b, t->name); return; }
-        buf_puts(b, t->kind == TY_STRUCT ? "struct{" : t->kind == TY_UNION ? "union{" : "enum{");
+        buf_puts(b, "enum{");
+        for (int i = 0; i < t->nfields; i++) {
+            if (i) buf_puts(b, ", ");
+            buf_puts(b, t->fields[i].name ? t->fields[i].name : "?");
+        }
+        buf_putc(b, '}');
+        return;
+
+    case TY_STRUCT:
+    case TY_UNION:
+        if (t->name) { buf_puts(b, t->name); return; }
+        buf_puts(b, t->kind == TY_STRUCT ? "struct{" : "union{");
         if (depth < 3) {
             for (int i = 0; i < t->nfields; i++) {
                 if (i) buf_puts(b, ", ");

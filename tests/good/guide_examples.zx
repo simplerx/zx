@@ -143,7 +143,7 @@ const main = fn () u8 {
 // arr.len=4 sum=46
 // ann age=0
 // red 3 6
-// area=12.5664
+// area=12.56636
 // len2=500
 // w=70
 // idx=1

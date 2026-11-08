@@ -1,5 +1,5 @@
 # zxls 冒烟测试：stdio LSP 会话模拟
-import subprocess, json, os, sys, shutil, threading, queue
+import subprocess, json, os, sys, shutil, threading, queue, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # 仓库根（脚本在 tools/ 下）
 TESTDIR = os.path.join(ROOT, ".tmp", "lsptest")
@@ -1324,6 +1324,100 @@ def no_cd_client():
 plain = no_cd_client()
 check("diagnostics.noCodeDescriptionForOldClients",
       bool(plain) and all("codeDescription" not in d for d in plain), str(plain)[:300])
+
+# ---------------------------------------------------------------------------
+# 性能守门：inlayHint 必须是线性扫描。
+#
+# 这里踩过两次 O(文件长度) 的坑，都藏在"看起来无害"的写法里：
+#   · 找声明关键字时对三个关键字各做一次 indexOfPos（它一路搜到文件尾），
+#     于是每个绑定 = O(文件长度)，整个请求 O(绑定数 × 文件长度)；
+#   · 每条提示都调 offsetToLineCol（每次从文件头数换行）。
+# 16000 行 / 48000 条提示的老实现要 20s，编辑器里就是"行内提示卡死"。
+# 单测断言一个绝对上限（够宽松，慢机器也不误报）+ 提示条数（防止靠"什么都不返回"
+# 蒙混过关）。
+def inlay_perf():
+    if os.name != "nt":
+        return None
+    n = 16000
+    body = ['const std = module("std");',
+            'const add = fn (left: i32, right: i32) i32 { return left + right; };',
+            'pub const main = fn () u8 {']
+    for i in range(n):
+        body.append(f'    let v{i} = add({i}, {i + 1});')
+    body.append('    return 0;')
+    body.append('};')
+    src = "\n".join(body) + "\n"
+    path = os.path.join(TESTDIR, "_perf_inlay.zx")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(src)
+    uri = "file:///" + path.replace("\\", "/")
+    proc = subprocess.Popen([ZXLS_BIN], stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    def snd(m):
+        d = json.dumps(m).encode()
+        proc.stdin.write(b"Content-Length: %d\r\n\r\n" % len(d) + d)
+        proc.stdin.flush()
+    def rcv():
+        hdr = b""
+        while not hdr.endswith(b"\r\n\r\n"):
+            c = proc.stdout.read(1)
+            if not c:
+                return None
+            hdr += c
+        ln = int([l for l in hdr.split(b"\r\n")
+                  if l.lower().startswith(b"content-length")][0].split(b":")[1])
+        return json.loads(proc.stdout.read(ln))
+    try:
+        snd({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+             "params": {"capabilities": {}, "rootUri": uri}})
+        while True:
+            m = rcv()
+            if m is None or m.get("id") == 1:
+                break
+        snd({"jsonrpc": "2.0", "method": "initialized", "params": {}})
+        snd({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": {"uri": uri, "languageId": "zx", "version": 1, "text": src}}})
+        # 等诊断落地，确保后面测的只有 inlay
+        while True:
+            m = rcv()
+            if m is None:
+                break
+            if m.get("method") == "textDocument/publishDiagnostics":
+                break
+        t0 = time.time()
+        snd({"jsonrpc": "2.0", "id": 2, "method": "textDocument/inlayHint", "params": {
+            "textDocument": {"uri": uri},
+            "range": {"start": {"line": 0, "character": 0},
+                      "end": {"line": len(body), "character": 0}}}})
+        got = None
+        while True:
+            m = rcv()
+            if m is None:
+                break
+            if m.get("id") == 2:
+                got = m
+                break
+        dt = time.time() - t0
+        nh = len((got or {}).get("result") or [])
+        return dt, nh, n
+    finally:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+
+perf = inlay_perf()
+if perf is None:
+    print("skip inlayHint.perf (非 Windows)")
+else:
+    dt, nh, n = perf
+    check(f"inlayHint.perf.{n}行", dt < 6.0 and nh >= n * 3,
+          "%.2fs, %d 条提示（超时或提示数不足：多半又退化成 O(绑定数 × 文件长度)）" % (dt, nh))
+    print("     inlayHint: %.3f s, %d 条提示, %d 行" % (dt, nh, n))
 
 # ---------------------------------------------------------------------------
 if fails:

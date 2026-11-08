@@ -202,6 +202,11 @@ static int  g_ct_exec;
  * 不做硬错误——循环体这类死代码里的 0/0 不是用户的错（isqrt(0) 误报）。
  * 真正的 const 上下文（R1 初始化器、数组长度）不走这条路，照旧硬报。 */
 bool g_ct_soft_div;
+/* 折叠函数调用时，体要"先检查、再执行"（ct_call → check_block → ct_run）。
+ * 检查那一步没有真实的槽位绑定：局部 `var i` 的值可能还留着上一次执行的
+ * 残留，于是 `s[i]` 会用「新实参 + 旧下标」折出越界。那不是用户代码的错，
+ * 真正的执行（ct_run，绑定齐全）紧随其后。这期间越界软失败即可。 */
+static bool g_ct_soft_bounds;
 /* 一个 Comptime 栈帧：返回值 / 收割都靠它往上冒 */
 typedef struct { int kind; Value *val; const char *label; } CtFlow;
 static CtFlow g_ct_flow;
@@ -1068,7 +1073,15 @@ static Symbol *ns_member(Symbol *ns, const char *name, int line, int col) {
             }
             if (best) diag_help("did you mean `%s`?", best);
         }
-        err_at(line, col, "module '%s' has no member '%s'", ns->mod->stem, name);
+        /* 绑定名在前：源码里写的是 `s2.nosuch`，报 "module 'std'" 会让人
+         * 去找一个叫 std 的绑定——而它可能叫 s2、m、util……
+         * 名字一样时不重复说一遍（`std` (module 'std') 只是噪音）。 */
+        if (ns->name && ns->mod->stem && strcmp(ns->name, ns->mod->stem) != 0)
+            err_at(line, col, "`%s` (module '%s') has no member '%s'",
+                   ns->name, ns->mod->stem, name);
+        else
+            err_at(line, col, "module '%s' has no member '%s'",
+                   ns->mod->stem ? ns->mod->stem : "?", name);
         return NULL;
     }
     if (ns->is_std) {
@@ -1706,8 +1719,33 @@ static Type *resolve_struct_body(Node *n, Type *agg, bool is_union) {
     int nfields = 0;
     for (int i = 0; i < n->nitems; i++) {
         Node *it = n->items[i];
-        if (it->kind == NK_PARAM || it->kind == NK_PAIR) nfields++;
-        else if (it->kind == NK_DECL && it->name) {
+        if (it->kind == NK_PARAM || it->kind == NK_PAIR) {
+            /* 字段名也查重。以前只查了静态成员和方法，`struct { a: i32, a: i32 }`
+             * 会静默造出两个同名字段——字面量 `D{ .a = 1 }` 永远"少填一个"，
+             * 报出来的却是 E0300 missing field，读者根本猜不到原因。 */
+            if (it->name) {
+                bool dup = false;
+                for (int j = 0; j < i && !dup; j++) {
+                    Node *pv = n->items[j];
+                    if (pv->name && !strcmp(pv->name, it->name)) {
+                        diag_note(NULL, pv->line, pv->col, "'%s' first declared here", it->name);
+                        err_at(it->line, it->col, "duplicate field '%s' in `%s`",
+                               it->name, is_union ? "union" : "struct");
+                        dup = true;
+                    }
+                }
+                if (!dup) {
+                    Symbol *prev = scope_find_here(&sc, it->name);
+                    if (prev) {
+                        if (prev->decl_line)
+                            diag_note(NULL, prev->decl_line, prev->decl_col,
+                                      "'%s' first declared here", it->name);
+                        err_at(it->line, it->col, "duplicate member '%s'", it->name);
+                    }
+                }
+            }
+            nfields++;
+        } else if (it->kind == NK_DECL && it->name) {
             Symbol *s = scope_add_at(&sc, it->name, it->op == 2 ? SK_VAR : SK_CONST, it->line, it->col);
             if (!s) {
                 Symbol *prev = scope_find_here(&sc, it->name);
@@ -2015,8 +2053,15 @@ static Type *check_num_operands(Node *at, Type *a, Type *b) {
      * 根因诊断在上面发过了——这里跟着喊一嗓子只是噪音。 */
     if ((a && a->kind == TY_INVALID) || (b && b->kind == TY_INVALID))
         return ty_invalid();
-    if (!numeric_like(a) || !numeric_like(b))
+    if (!numeric_like(a) || !numeric_like(b)) {
+        /* `(i32)-3` 读起来像"把 -3 转成 i32"，但 C 风格 cast 只在后面跟
+         * 得上操作数时成立（`-` 不在那个集合里），于是它被读成
+         * `(i32) - 3`——类型值减整数。这儿的原话没人看得懂，补一句写法。 */
+        if ((a && a->kind == TY_TYPE) || (b && b->kind == TY_TYPE))
+            diag_help("a cast needs its operand right after the `)`; write `(i32)(-3)`, "
+                      "not `(i32)-3` -- the latter reads as subtraction");
         return BAD(at, "arithmetic needs numbers, found `%s` and `%s`", ty_str(a), ty_str(b));
+    }
 
     /* R4：没有任何隐式数值转换。字面量（comptime_int/float）例外，它会定型成对方。 */
     if (!ty_eq(a, b) && a->kind != TY_COMPTIME_INT && b->kind != TY_COMPTIME_INT &&
@@ -2164,6 +2209,58 @@ static Type *check_assign(Node *n) {
     return type_of(n, lt);
 }
 
+/* ---------------- 可比较性（E0306） ----------------
+ *
+ * 后端把 `==` / `!=` 原样发成 C 的 `==` / `!=`，所以只有"在 C 里也是标量"
+ * 的类型才成立。切片是 {ptr, len}、结构体/元组/联合体是 C 的 struct、非扁平
+ * 的 `?T` / `!T` 是 {payload, tag}——这些在 C 里根本没有 `==`。原先这几种
+ * 都放过去了，最后在生成 C 时被 C 编译器拒掉、报成 B1001「编译器 bug」
+ * （假 bug，把用户引到错误的方向）。这里在类型检查阶段就拦下，并给出规范
+ * 里本来就有的替代写法。 */
+static bool comparable_in_c(Type *t) {
+    if (!t) return false;
+    switch (t->kind) {
+    case TY_BOOL: case TY_INT: case TY_FLOAT: case TY_ENUM: case TY_ERROR:
+    case TY_PTR:  case TY_FN:  case TY_COMPTIME_INT: case TY_COMPTIME_FLOAT:
+    case TY_NULL:
+        return true;
+    case TY_OPT:  return ty_opt_flat(t);   /* `?*T` 的 C 表示就是裸指针 */
+    default:      return false;
+    }
+}
+
+/* 按类型形状给一条能照做的建议：只说这个语言里真有的东西。 */
+static void cmp_help(Type *t) {
+    if (!t) return;
+    switch (t->kind) {
+    case TY_SLICE:
+        if (t->elem && t->elem->kind == TY_INT && t->elem->bits == 8 &&
+            !t->elem->is_signed)
+            diag_help("slices compare identity, not contents; use `std.str.eq(a, b)`");
+        else
+            diag_help("slices compare identity, not contents; compare element by element");
+        break;
+    case TY_STRUCT: case TY_UNION:
+        diag_help("compare field by field");
+        break;
+    case TY_TUPLE:
+        diag_help("compare element by element");
+        break;
+    case TY_OPT: case TY_ERR:
+        diag_help("test a `?T` with `if (o) v { ... } else { ... }`, "
+                  "or unwrap it with `orelse` / `try`");
+        break;
+    case TY_TYPE:
+        diag_help("type values live only at compile time; both sides must be "
+                  "known while compiling");
+        break;
+    default:
+        diag_help("only integers, floats, bools, enums, errors, pointers and "
+                  "function values can be compared with `==`");
+        break;
+    }
+}
+
 static Type *check_binary(Node *n, Type *expect) {
     TokKind op = (TokKind)n->op;
 
@@ -2190,6 +2287,47 @@ static Type *check_binary(Node *n, Type *expect) {
             (a->kind == TY_ENUM  && b->kind == TY_ERROR);
         if (!ty_eq(a, b) && !same_code_domain && !can_coerce(a, b) && !can_coerce(b, a))
             return BAD(n, "cannot compare `%s` with `%s`", ty_str(a), ty_str(b));
+        /* 类型值的比较是纯编译期的：`@fieldType(S, "b") == u32`。`type` 在
+         * 运行时没有表示（spec §7：size 0，仅编译期），只能折叠成常量。
+         * 以前这里直接放行，最后在 C 里比两个空壳——B1001 假 bug。 */
+        if (a->kind == TY_TYPE && b->kind == TY_TYPE) {
+            Value *va = n->a->ct ? n->a->ct : ct_eval_probe(n->a);
+            Value *vb = n->b->ct ? n->b->ct : ct_eval_probe(n->b);
+            if (va && vb && va->kind == V_TYPE && vb->kind == V_TYPE) {
+                bool same = ty_eq(va->tval, vb->tval);
+                bool r = (n->op == TOK_EQ) ? same : !same;
+                n->kind = NK_BOOL;          /* 折叠成字面量：C 里没有 type */
+                n->ival = r ? 1 : 0;
+                n->ct = val_bool(r);
+                n->ty = ty_bool();
+                return n->ty;
+            }
+            cmp_help(a);
+            diag_code_at("E0306", n->line, n->col,
+                         "cannot compare `type` with `type`: "
+                         "the type is not known at compile time");
+            return ty_invalid();
+        }
+
+        /* 类型对上不代表 C 里能比：聚合体 / 切片 / 带标签的可选值在 C 里是
+         * struct，发出去的 `==` 会被 C 编译器拒掉（旧行为是报 B1001）。
+         * 错误哨兵不参与——级联错误不该再叠一条。
+         *
+         * 例外：两侧都能在编译期算出来的，折叠阶段会把整个比较换成常量，
+         * 永远到不了 C。`@typeName(f.ty) == "u64"` 就是这种写法——字符串
+         * 常量的比较由 val_bin 直接给出结果（V_STR 分支）。 */
+        bool ct_both = (n->a->ct || ct_eval_probe(n->a)) &&
+                       (n->b->ct || ct_eval_probe(n->b));
+        if (!ct_both && a->kind != TY_INVALID && b->kind != TY_INVALID &&
+            (!comparable_in_c(a) || !comparable_in_c(b))) {
+            Type *culprit = comparable_in_c(a) ? b : a;
+            cmp_help(culprit);
+            diag_code_at("E0306", n->line, n->col,
+                         "cannot compare `%s` with `%s`: `%s` has no `%s`",
+                         ty_str(a), ty_str(b), ty_str(culprit),
+                         n->op == TOK_EQ ? "==" : "!=");
+            return ty_invalid();
+        }
         return type_of(n, ty_bool());
     }
 
@@ -3105,7 +3243,20 @@ static Type *check_call(Node *n, Type *expect) {
 
 /* 结构体 / 联合体字面量的字段检查。`t` 已经是目标类型——具名字面量
  * `Vec{…}` 从名字拿到它，匿名字面量 `.{…}` 从期望类型拿到它。 */
+/* 聚合体里有没有重名字段（声明处已报 E0402）。有的话这个类型是坏的：
+ * 字面量永远"少填一个"，再叠一条 missing field 只会把真正的错埋掉。 */
+static bool ty_has_dup_fields(Type *t) {
+    for (int i = 0; i < t->nfields; i++) {
+        if (!t->fields[i].name) continue;
+        for (int j = i + 1; j < t->nfields; j++)
+            if (t->fields[j].name && !strcmp(t->fields[i].name, t->fields[j].name))
+                return true;
+    }
+    return false;
+}
+
 static Type *check_lit_fields(Node *n, Type *t) {
+    bool broken = ty_has_dup_fields(t);
     if (t->kind == TY_UNION || t->kind == TY_STRUCT) {
         bool *seen = calloc((size_t)(t->nfields ? t->nfields : 1), sizeof(bool));
         for (int i = 0; i < n->nitems; i++) {
@@ -3121,6 +3272,16 @@ static Type *check_lit_fields(Node *n, Type *t) {
                 continue;
             }
             seen[idx] = true;
+            /* 同一个字段写两遍：后者静默盖掉前者（`S{ .a = 1, .a = 2 }` 给 2），
+             * 十有八九是复制粘贴错的——这种"能编过、结果是另一个值"的错误
+             * 必须报出来，别等运行时才发现。 */
+            for (int j = 0; j < i; j++)
+                if (ty_field_index(t, n->items[j]->name) == idx) {
+                    diag_code_at("E0307", p->line, p->col,
+                                 "field '%s' is initialized twice in `%s`",
+                                 p->name, ty_str(t));
+                    break;
+                }
             Type *vt = check_expr(p->a, t->fields[idx].ty);
             coerce_node(p->a, vt, t->fields[idx].ty, "field initializer");
         }
@@ -3128,7 +3289,7 @@ static Type *check_lit_fields(Node *n, Type *t) {
         for (int i = 0; i < t->nfields; i++) {
             if (seen[i]) { set++; continue; }
             if (t->kind == TY_UNION || t->fields[i].is_static) continue;
-            if (!t->fields[i].dflt)
+            if (!broken && !t->fields[i].dflt)
                 err_at(n->line, n->col, "missing field '%s' in `%s`",
                        t->fields[i].name ? t->fields[i].name : "?", ty_str(t));
         }
@@ -3752,6 +3913,23 @@ static void check_stmts(Node *blk) {
     }
 }
 
+static const char *mangle_name(const char *name);
+
+/* 局部变量的 C 名：模块前缀之后再按声明位置加后缀。
+ *
+ * C 的块作用域允许遮蔽，但后端把语句**就地**发散在同一层 C 块里（if/loop
+ * 的臂有时是单语句、不额外开块），于是两个同名局部——不论是一个遮蔽外层、
+ * 还是两个兄弟块各写一个——都会撞成 "redefinition of 'x'"。用「行_列」当
+ * 后缀：同一个声明每次检查得到同一个名字（幂等），不需要任何计数器状态，
+ * 生成出来的 C 也还能对着源码看。 */
+static const char *local_cname(const char *name, int line, int col) {
+    Buf b; buf_init(&b);
+    const char *base = mangle_name(name);
+    buf_puts(&b, base ? base : (name && *name ? name : "v"));
+    buf_printf(&b, "_%d_%d", line, col);
+    return b.data;
+}
+
 /* 非入口模块的顶层名字都加前缀：两个文件里的 `add` 在 C 里不能撞车 */
 static const char *mangle_name(const char *name) {
     if (!g_mod || !g_mod->stem || g_mod == g_mods[0] || !name) return NULL;
@@ -3850,7 +4028,8 @@ static void hoist(Scope *sc, Node *blk) {
                     s->index = k;
                     s->mod = g_mod;
                     s->is_pub = it->is_pub;
-                    s->cname = mangle_name(id->name);
+                    s->cname = file_scope ? mangle_name(id->name)
+                                          : local_cname(id->name, id->line, id->col);
                     id->sym = s;
                     if (k == 0) it->sym = s;
                     /* 判据是"当前作用域不是模块"，不能看 g_fn_depth：
@@ -3872,7 +4051,9 @@ static void hoist(Scope *sc, Node *blk) {
                 s->mod = g_mod;
                 s->is_pub = it->is_pub;
                 /* extern var 同 extern fn：外部符号用**原名**当 C 名 */
-                s->cname = it->is_extern ? it->name : mangle_name(it->name);
+                s->cname = it->is_extern ? it->name
+                         : (!sc->is_module ? local_cname(it->name, it->line, it->col)
+                                           : mangle_name(it->name));
                 /* 模块是在函数体里懒加载的，g_fn_depth 已 > 0；
                 判文件作用域要看 sc->is_module，否则模块顶层的 extern var 会被误判成局部。 */
                 s->in_fn = (!sc->is_module && g_fn_depth > 0);
@@ -5192,6 +5373,63 @@ static Type *switch_cap_ty(Node *pat, Type *s) {
     return s;
 }
 
+/* 模式的可比较键：`.x` / `true` / 整数字面量。其余形状（带载荷的模式、
+ * 常量表达式）返回 false——它们不该被当成"肯定重复"来报。 */
+static bool pat_key(Node *p, char *out, size_t cap) {
+    if (p->kind == NK_FIELD && !p->a && p->name) {
+        snprintf(out, cap, ".%s", p->name);
+        return true;
+    }
+    if (p->kind == NK_BOOL) { snprintf(out, cap, "%s", p->ival ? "true" : "false"); return true; }
+    if (p->kind == NK_INT && !p->flag) {
+        snprintf(out, cap, "%llu", (unsigned long long)p->ival);
+        return true;
+    }
+    if (p->kind == NK_CHAR) { snprintf(out, cap, "%llu", (unsigned long long)p->ival); return true; }
+    return false;
+}
+
+/* 重复的臂：`.x` 写两遍、两个 `else`。
+ *
+ * 以前完全不管，一路漏到后端：枚举臂变成 C 的 duplicate case、`else` 变成
+ * 两个 default，用户看到的是 B1001「编译器 bug」——而问题就在他写的那两行。
+ * 这类错**必须**在这里报，因为它不是"多写了没影响"：先匹配到哪一条取决于
+ * 后端的发射顺序，等于让程序行为变成实现细节。 */
+static void check_switch_dup_arms(Node *n) {
+    char keys[64][48];
+    int  kline[64], kcol[64], nk = 0;
+    bool seen_else = false;
+
+    for (int i = 0; i < n->nitems; i++) {
+        Node *arm = n->items[i];
+        if (arm->flag) {
+            if (seen_else)
+                diag_code_at("E0504", arm->line, arm->col,
+                             "duplicate `else` arm: a switch takes at most one");
+            seen_else = true;
+            continue;
+        }
+        for (int k = 0; k < arm->nitems; k++) {
+            Node *p = arm->items[k];
+            char key[48];
+            if (!pat_key(p, key, sizeof key)) continue;
+            bool dup = false;
+            for (int j = 0; j < nk; j++)
+                if (!strcmp(keys[j], key)) {
+                    diag_note(NULL, kline[j], kcol[j], "already matched here");
+                    diag_code_at("E0504", p->line, p->col,
+                                 "duplicate switch pattern `%s`", key);
+                    dup = true;
+                    break;
+                }
+            if (!dup && nk < 64) {
+                snprintf(keys[nk], sizeof keys[0], "%s", key);
+                kline[nk] = p->line; kcol[nk] = p->col; nk++;
+            }
+        }
+    }
+}
+
 static Type *check_switch(Node *n, Type *expect) {
     Label *lb = n->label ? label_push(n->label, false) : NULL;
     Type *s = check_expr(n->a, NULL);
@@ -5247,6 +5485,7 @@ static Type *check_switch(Node *n, Type *expect) {
         }
     }
 
+    check_switch_dup_arms(n);
     check_switch_exhaustive(n, s);
 
     Type *r;
@@ -5725,6 +5964,7 @@ static Value *ct_index(Node *n) {
 
     if (base->kind == V_STR) {
         if (k < 0 || k >= base->slen) {
+            if (g_ct_soft_bounds) return NULL;
             err_at(n->line, n->col,
                    "compile-time index %lld is out of bounds (len %d)",
                    (long long)k, base->slen);
@@ -5735,6 +5975,7 @@ static Value *ct_index(Node *n) {
     }
     if (base->kind != V_AGG) return NULL;
     if (k < 0 || k >= base->nitems) {
+        if (g_ct_soft_bounds) return NULL;
         err_at(n->line, n->col,
                "compile-time index %lld is out of bounds (len %d)",
                (long long)k, base->nitems);
@@ -5768,6 +6009,7 @@ static Value *ct_slice(Node *n) {
         hi = val_i64(h);
     }
     if (lo < 0 || hi < lo || hi > total) {
+        if (g_ct_soft_bounds) return NULL;
         err_at(n->line, n->col,
                "compile-time slice %lld..%lld is out of bounds (len %lld)",
                (long long)lo, (long long)hi, (long long)total);
@@ -5912,9 +6154,12 @@ static Value *ct_call(Node *n) {
      * 撞上除零（比如死循环体里的 n/xi），那是槽位假象不是用户错误——
      * 软失败（折不动=运行时值）。真要执行到了，下面的 ct_run 照旧硬报。 */
     bool save_soft = g_ct_soft_div;
+    bool save_bounds = g_ct_soft_bounds;
     g_ct_soft_div = true;
+    g_ct_soft_bounds = true;
     check_block(g->b);
     g_ct_soft_div = save_soft;
+    g_ct_soft_bounds = save_bounds;
     g_locals = save_ct_locals;
     g_ct_checking = save_checking;
 
@@ -5978,6 +6223,12 @@ static Value *ct_eval(Node *n) {
     case NK_UNDEF: v = val_undef(n->ty); break;
 
     case NK_IDENT: {
+        /* 类型名也是值：基础类型（`u32`）没有符号表条目，靠节点上的
+         * type_val 认（check_expr 的值位置分支解析时填的）。 */
+        if (n->ty && n->ty->kind == TY_TYPE && n->type_val) {
+            v = val_type(n->type_val);
+            break;
+        }
         if (!n->sym) break;
         ensure(n->sym);
         /* 类型名在编译期就是一个类型值（`Color.red` 里的 Color） */

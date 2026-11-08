@@ -160,12 +160,22 @@ static int decode_escape(Lex *l, char esc, char out[4]) {
         return 1;
     }
     case 'u': {
-        /* \uXXXX → UTF-8 (BMP only) */
+        /* \u{HEX+} → UTF-8（EBNF 只写了这一种写法）。老的 \uXXXX 直接
+         * 说"要加花括号"——两种写法只会让人猜该用哪个。 */
+        if (peek(l) != '{') {
+            lex_error(l, l->p, "\\u takes braces: write \\u{4F60}");
+            return -1;
+        }
+        adv(l);
         uint32_t cp = 0;
-        for (int i = 0; i < 4; i++) {
-            int d = hexval(adv(l));
-            if (d < 0) { lex_error(l, l->p, "\\u needs four hex digits"); return -1; }
-            cp = cp * 16 + (uint32_t)d;
+        int nd = 0;
+        while (nd < 6 && hexval(peek(l)) >= 0) { cp = cp * 16 + (uint32_t)hexval(adv(l)); nd++; }
+        if (nd == 0) { lex_error(l, l->p, "\\u{...} needs at least one hex digit"); return -1; }
+        if (peek(l) != '}') { lex_error(l, l->p, "\\u{...} is missing its closing '}'"); return -1; }
+        adv(l);
+        if (cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) {
+            lex_error(l, l->p, "code point out of range (U+0000..U+10FFFF, surrogates excluded)");
+            return -1;
         }
         return utf8_encode(cp, out);
     }
@@ -333,13 +343,30 @@ static void lex_number(Lex *l) {
             /* exponent */
             if (peek(l) == 'e' || peek(l) == 'E') {
                 const char *save = l->p;
+                int sline = l->line, scol = l->col;
                 adv(l);
                 if (peek(l) == '+' || peek(l) == '-') adv(l);
                 if (is_digit(peek(l))) {
                     while (is_digit(peek(l))) adv(l);
                 } else {
-                    l->p = save; /* not an exponent; leave 'e' to suffix scan (error later) */
+                    /* not an exponent; leave 'e' to the suffix scan (error later) */
+                    l->p = save; l->line = sline; l->col = scol;
                 }
+            }
+        }
+
+        /* exponent without a decimal point: `1e7` == `1.0e7` (EBNF allows both,
+         * so the lexer must accept both). Roll back if no digits follow. */
+        if (peek(l) == 'e' || peek(l) == 'E') {
+            const char *save = l->p;
+            int sline = l->line, scol = l->col;
+            adv(l);
+            if (peek(l) == '+' || peek(l) == '-') adv(l);
+            if (is_digit(peek(l))) {
+                is_float = true;
+                while (is_digit(peek(l))) adv(l);
+            } else {
+                l->p = save; l->line = sline; l->col = scol;
             }
         }
     }

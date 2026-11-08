@@ -314,10 +314,13 @@ static Node *parse_type_primary(P *p) {
                 continue;
             }
             if (at(p, TOK_KW_FN)) { push(n, parse_fn(p, false)); continue; }
+            /* 位置取字段名，不取 `struct` 关键字：字段相关的诊断（重名、
+             * 默认值类型不对、递归包含）都该指在那一行那一列上。 */
+            int fline = cur(p)->line, fcol = cur(p)->col;
             const char *fname = take_ident(p);
             expect(p, TOK_COLON);
             Node *ty = parse_type(p);
-            Node *f = node_new(NK_PARAM, t->line, t->col);
+            Node *f = node_new(NK_PARAM, fline, fcol);
             f->name = fname;
             f->a = ty;
             if (accept(p, TOK_ASSIGN)) f->b = parse_expr(p);
@@ -363,10 +366,11 @@ static Node *parse_type_primary(P *p) {
                 continue;
             }
             if (at(p, TOK_KW_FN)) { push(n, parse_fn(p, false)); continue; }
+            int mline = cur(p)->line, mcol = cur(p)->col;
             const char *mname = take_ident(p);
             expect(p, TOK_COLON);
             Node *ty = parse_type(p);
-            Node *m = node_new(NK_PAIR, t->line, t->col);
+            Node *m = node_new(NK_PAIR, mline, mcol);
             m->name = mname;
             m->a = ty;
             accept(p, TOK_COMMA);

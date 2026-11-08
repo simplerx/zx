@@ -2878,6 +2878,48 @@ fn offsetToLineCol(text: []const u8, off_in: usize) LineCol {
     return .{ .line = line, .character = units };
 }
 
+/// 行首偏移表：offsetToLineCol 每次都要从文件头数过来，一次 inlay 请求里
+/// 几千条提示就是 O(提示数 × 文件长度)——2000 行 / 6000 条提示实测 ~300ms，
+/// 时间几乎全花在这个从头扫描上。建一次表 + 二分，整体回到
+/// O(文件长度 + 提示数 × log 行数)。表只活在一次请求里，不做跨请求缓存：
+/// 文档改一个字符长度可能不变，按 (ptr,len) 认缓存会拿到错的行首表。
+const LineIndex = struct {
+    starts: []const u32,
+
+    fn build(text: []const u8) LineIndex {
+        var list: std.ArrayList(u32) = .empty;
+        list.append(gpa, 0) catch @panic("oom");
+        for (text, 0..) |c, i| {
+            if (c == '\n') list.append(gpa, @intCast(i + 1)) catch @panic("oom");
+        }
+        return .{ .starts = list.items };
+    }
+
+    /// 与 offsetToLineCol 同义：行号 + 该行内的 UTF-16 列。
+    fn lineCol(self: LineIndex, text: []const u8, off_in: usize) LineCol {
+        const off = @min(off_in, text.len);
+        var lo: usize = 0;
+        var hi: usize = self.starts.len;
+        while (lo + 1 < hi) {
+            const mid = lo + (hi - lo) / 2;
+            if (self.starts[mid] <= off) lo = mid else hi = mid;
+        }
+        var units: u32 = 0;
+        var q: usize = self.starts[lo];
+        while (q < off) {
+            const n = std.unicode.utf8ByteSequenceLength(text[q]) catch 1;
+            const end = @min(q + n, text.len);
+            const cp = std.unicode.utf8Decode(text[q..end]) catch {
+                units += 1;
+                q += 1;
+                continue;
+            };
+            units += if (cp < 0x10000) 1 else 2;
+            q = end;
+        }
+        return .{ .line = @intCast(lo), .character = units };
+    }
+};
 /// 关键字是否处在语句开头：`[]const u8` / `"const x"` / `// const x` 都不算。
 fn declStartsHere(text: []const u8, c: usize) bool {
     var p = c;
@@ -2888,6 +2930,12 @@ fn declStartsHere(text: []const u8, c: usize) bool {
         '\n', '\r', ';', '{', '}' => true,
         else => false,
     };
+}
+
+/// 按文档偏移排序；偏移相同按 kind，保证同一位置的输出稳定可复现。
+fn hintLess(_: void, a: Hint, b: Hint) bool {
+    if (a.off != b.off) return a.off < b.off;
+    return a.kind < b.kind;
 }
 
 const Hint = struct {
@@ -2938,9 +2986,52 @@ fn paramStructTy(p: []const u8) ?[]const u8 {
     return structTyOf(ty);
 }
 
+/// 一次 inlayHint 请求内的复用缓存。
+///
+/// 一次请求要走过文件里每个 `(`，同一个被调方（`std.println` 之流）会出现
+/// 几十次。每次重扫目录、把全部 .zx 读一遍、再线性找声明，就是
+/// O(调用点 × 全工程字节数)——工程里放几个大文件，单次请求能拖到几百毫秒，
+/// 编辑器里表现为"行内提示要等一下才出来"。这里把三件事各做一次：
+/// 目录扫描（fileList）、按路径读文件（readCached）、被调方签名（calleeStmtCached）。
+/// 缓存的切片指向 text 或只为本次请求分配的缓冲，请求结束即作废（进程不回收，
+/// 与文件里其余路径一致：gpa 是 smp_allocator，LSP 常驻进程按需增长）。
+const InlayCtx = struct {
+    doc: *const Document,
+    text: []const u8,
+    files: ?std.ArrayList([]const u8) = null,
+    paths: std.ArrayList(PathText) = .empty,
+    callees: std.ArrayList(CalleeEntry) = .empty,
+
+    const PathText = struct { path: []const u8, text: []const u8 };
+    const CalleeEntry = struct { name: []const u8, stmt: ?[]const u8 };
+
+    fn fileList(self: *InlayCtx) []const []const u8 {
+        if (self.files == null) self.files = scanFiles(self.doc, self.text);
+        return self.files.?.items;
+    }
+
+    fn readCached(self: *InlayCtx, path: []const u8) ?[]const u8 {
+        for (self.paths.items) |e| if (std.mem.eql(u8, e.path, path)) return e.text;
+        const t = readFileSmall(path) orelse return null;
+        const key = gpa.dupe(u8, path) catch path;
+        self.paths.append(gpa, .{ .path = key, .text = t }) catch {};
+        return t;
+    }
+
+    /// 名字相同就是同一个声明：`callee` 是 text 里的切片，命中率很高。
+    fn stmtCached(self: *InlayCtx, callee: []const u8) ?[]const u8 {
+        for (self.callees.items) |e| if (std.mem.eql(u8, e.name, callee)) return e.stmt;
+        const st = calleeStmt(self, callee);
+        const key = gpa.dupe(u8, callee) catch callee;
+        self.callees.append(gpa, .{ .name = key, .stmt = st }) catch {};
+        return st;
+    }
+};
+
 /// 被调用者的声明语句：`a.fn` → 模块文件里的 fn，`o.m` → 实例容器里的方法，
 /// `fn` → 本文件。参数名/参数类型/嵌套字面量提示共用这一个解析。
-fn calleeStmt(text: []const u8, doc: *const Document, callee: []const u8) ?[]const u8 {
+fn calleeStmt(ctx: *InlayCtx, callee: []const u8) ?[]const u8 {
+    const text = ctx.text;
     if (std.mem.lastIndexOfScalar(u8, callee, '.')) |dot| {
         const bind = callee[0..dot];
         const member = callee[dot + 1 ..];
@@ -2948,35 +3039,21 @@ fn calleeStmt(text: []const u8, doc: *const Document, callee: []const u8) ?[]con
         var mm: ?[]const u8 = moduleOfBinding(text, bind);
         if (mm == null and std.mem.eql(u8, bind, "std")) mm = "std";
         if (mm) |mod| {
-            if (resolveModuleFile(doc, mod)) |p| {
-                if (readFileSmall(p)) |t| {
+            if (resolveModuleFile(ctx.doc, mod)) |p| {
+                if (ctx.readCached(p)) |t| {
                     if (findDeclStmt(t, member)) |st| return st;
                 }
             }
         }
-        var sf = scanFiles(doc, text);
-        defer sf.deinit(gpa);
-        if (instanceContainerTy(sf.items, text, bind)) |ty| {
-            if (findContainerBody(sf.items, ty)) |ch| {
+        const fl = ctx.fileList();
+        if (instanceContainerTy(fl, text, bind)) |ty| {
+            if (findContainerBody(fl, ty)) |ch| {
                 if (findDeclStmt(ch.body, member)) |st| return st;
             }
         }
-        return resolvePathStmt(sf.items, doc, text, callee);
+        return resolvePathStmt(fl, ctx.doc, text, callee);
     }
     return findDeclStmt(text, callee);
-}
-
-fn calleeParamNames(text: []const u8, doc: *const Document, callee: []const u8) ?[]const []const u8 {
-    const s = calleeStmt(text, doc, callee) orelse return null;
-    const sig = sigOfStmt(s);
-    if (!sig.is_fn or sig.params.len == 0) return null;
-    var names: std.ArrayList([]const u8) = .empty;
-    for (sig.params) |p| {
-        const nm = paramName(p);
-        if (nm.len == 0) return null;
-        names.append(gpa, nm) catch return null;
-    }
-    return names.items;
 }
 
 /// KEEP — 匿名形参里的**嵌套匿名字面量**类型提示（用户 2026-11-08 第 2/5 条）：
@@ -2985,7 +3062,8 @@ fn calleeParamNames(text: []const u8, doc: *const Document, callee: []const u8) 
 /// 只给"值本身是匿名字面量"的字段插 `: struct{…}`；标量字段不加
 ///（02:15 已拍板逐字段标太吵）。lb 是外层字面量的 '{'，limit 是它的结束位置。
 fn nestedLitHints(text: []const u8, pty: []const u8, lb: usize, limit: usize,
-                   hints: *std.ArrayList(Hint), start_line: u32, end_line: u32) void {
+                   hints: *std.ArrayList(Hint), lines: LineIndex,
+                   start_line: u32, end_line: u32) void {
     const flds = parseAnonTy(pty) orelse return;
     var depth: usize = 1;
     var in_str = false;
@@ -3023,19 +3101,21 @@ fn nestedLitHints(text: []const u8, pty: []const u8, lb: usize, limit: usize,
         }
         const fty = hit orelse continue;
         if (fty.len == 0 or fty.len > 120) continue;
-        const lc = offsetToLineCol(text, j);
+        const lc = lines.lineCol(text, j);
         if (lc.line >= start_line and lc.line <= end_line) {
             const lab = std.fmt.allocPrint(gpa, ": {s}", .{fty}) catch continue;
             hints.append(gpa, .{ .off = j, .line = lc.line, .character = lc.character,
                 .label = lab, .kind = 1, .pad_right = true }) catch {};
         }
         // 再往里一层：`.opts = .{ .inner = .{ … } }`
-        nestedLitHints(text, fty, k + 1, limit, hints, start_line, end_line);
+        nestedLitHints(text, fty, k + 1, limit, hints, lines, start_line, end_line);
     }
 }
 
 /// 扫全文的调用括号，按顶层逗号切实参，在每个实参起点插 `name: `。
-fn appendParamHints(text: []const u8, doc: *const Document, mask: []const bool, hints: *std.ArrayList(Hint), start_line: u32, end_line: u32) void {
+fn appendParamHints(text: []const u8, doc: *const Document, mask: []const bool, hints: *std.ArrayList(Hint), lines: LineIndex, start_line: u32, end_line: u32) void {
+    // 一次请求一份缓存：目录只扫一次，同名被调方只解析一次（见 InlayCtx）
+    var ctx = InlayCtx{ .doc = doc, .text = text };
     var lp: usize = 0;
     while (std.mem.indexOfScalarPos(u8, text, lp, '(')) |p0| {
         lp = p0 + 1;
@@ -3070,7 +3150,7 @@ fn appendParamHints(text: []const u8, doc: *const Document, mask: []const bool, 
             }
         }
         const end = rp orelse continue;
-        const cstmt = calleeStmt(text, doc, callee) orelse continue;
+        const cstmt = ctx.stmtCached(callee) orelse continue;
         const sig = sigOfStmt(cstmt);
         if (!sig.is_fn or sig.params.len == 0) continue;
         const names = sig.params;
@@ -3106,7 +3186,7 @@ fn appendParamHints(text: []const u8, doc: *const Document, mask: []const bool, 
                 const pty = paramStructTy(names[argi + offset]);
                 const anon_arg = text[s0] == '.' and s0 + 1 < k and text[s0 + 1] == '{';
                 if (validHintName(nm) and !argAlreadyNamed(text[s0..k])) {
-                    const lc = offsetToLineCol(text, s0);
+                    const lc = lines.lineCol(text, s0);
                     if (lc.line >= start_line and lc.line <= end_line) {
                         // 匿名 struct 实参把类型一起标出来：`info: struct{…}`。
                         // 用户 2026-11-08 第 5 条：模块函数的匿名结构体参数
@@ -3125,7 +3205,7 @@ fn appendParamHints(text: []const u8, doc: *const Document, mask: []const bool, 
                         var e2 = k;
                         while (e2 > s0 and (text[e2 - 1] == ' ' or text[e2 - 1] == '\t' or
                             text[e2 - 1] == '\n' or text[e2 - 1] == '\r')) e2 -= 1;
-                        nestedLitHints(text, pty2, s0 + 1, e2, hints, start_line, end_line);
+                        nestedLitHints(text, pty2, s0 + 1, e2, hints, lines, start_line, end_line);
                     }
                 }
             }
@@ -3149,6 +3229,8 @@ fn inlayHintsAt(doc: *const Document, start_line: u32, end_line: u32) []const u8
     // 代码位置掩码：注释和字符串里的 `const x = 1` 不是声明
     const mask = gpa.alloc(bool, text.len) catch @panic("oom");
     defer gpa.free(mask);
+    // 行首表建一次，下面每条提示的 line/character 都靠它查（见 LineIndex）
+    const lines = LineIndex.build(text);
     {
         var i: usize = 0;
         var in_block = false;
@@ -3207,14 +3289,20 @@ fn inlayHintsAt(doc: *const Document, start_line: u32, end_line: u32) []const u8
     defer hints.deinit(gpa);
     var pos: usize = 0;
     while (pos < text.len) {
-        // 三个关键字里取最近的一个，保证 hints 天然按位置有序
+        // 三个关键字里取最近的一个，保证 hints 天然按位置有序。
+        //
+        // 注意这里是**单趟向前扫**，不能对每个关键字各做一次 indexOfPos：
+        // indexOfPos 会一路搜到文件尾，于是每个绑定都是 O(文件长度)，整个
+        // 循环退化成 O(绑定数 × 文件长度)——16000 个 let 实测 15s。
         var best: ?usize = null;
         var best_kw: []const u8 = "";
-        for (kws) |kw| {
-            if (std.mem.indexOfPos(u8, text, pos, kw)) |c| {
-                if (best == null or c < best.?) {
-                    best = c;
+        var scan = pos;
+        outer: while (scan < text.len) : (scan += 1) {
+            for (kws) |kw| {
+                if (std.mem.startsWith(u8, text[scan..], kw)) {
+                    best = scan;
                     best_kw = kw;
+                    break :outer;
                 }
             }
         }
@@ -3294,7 +3382,7 @@ fn inlayHintsAt(doc: *const Document, start_line: u32, end_line: u32) []const u8
             }
         }
         if (!valid) continue;
-        const lc = offsetToLineCol(text, ne);
+        const lc = lines.lineCol(text, ne);
         if (lc.line < start_line or lc.line > end_line) continue;
         var lab: std.ArrayList(u8) = .empty;
         lab.appendSlice(gpa, ": ") catch @panic("oom");
@@ -3303,17 +3391,12 @@ fn inlayHintsAt(doc: *const Document, start_line: u32, end_line: u32) []const u8
             .label = lab.items, .kind = 1, .pad_right = true }) catch @panic("oom");
     }
 
-    appendParamHints(text, doc, mask, &hints, start_line, end_line);
+    appendParamHints(text, doc, mask, &hints, lines, start_line, end_line);
 
-    // 类型提示与参数提示按文档偏移合并（插入排序，数量很小）
-    var si: usize = 1;
-    while (si < hints.items.len) : (si += 1) {
-        const v = hints.items[si];
-        var sj = si;
-        while (sj > 0 and hints.items[sj - 1].off > v.off) : (sj -= 1)
-            hints.items[sj] = hints.items[sj - 1];
-        hints.items[sj] = v;
-    }
+    // 类型提示与参数提示按文档偏移合并。两段各自有序，但要合成一条序列。
+    // 这里原来是插入排序，注释写"数量很小"——大文件里并不小：48000 条提示
+    // 就是 ~1.1e9 次搬移，实测单次请求 16s。改成 pdqsort，O(n log n)。
+    std.mem.sort(Hint, hints.items, {}, hintLess);
 
     var j = Json{};
     j.buf.append(gpa, '[') catch @panic("oom");

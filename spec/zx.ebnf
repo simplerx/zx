@@ -276,22 +276,25 @@ module_call = "module" "(" STRING ")" ;
 
 (* ---------------- 词法 ---------------- *)
 
-INT         = dec_int | hex_int | bin_int | oct_int ;
+INT         = ( dec_int | hex_int | bin_int | oct_int ) [ int_suffix ] ;
 dec_int     = DIGIT { [ "_" ] DIGIT } ;
 hex_int     = "0x" HEXDIGIT { [ "_" ] HEXDIGIT } ;
 bin_int     = "0b" ( "0" | "1" ) { [ "_" ] ( "0" | "1" ) } ;
 oct_int     = "0o" OCTDIGIT { [ "_" ] OCTDIGIT } ;
+int_suffix  = ( "u" | "i" ) ( "8" | "16" | "32" | "64" | "128" ) | "usize" | "isize" ;
+(* 后缀固定字面量的类型：1u8 / 42i64 —— 否则字面量按落点定型 *)
 
-FLOAT       = DIGIT { DIGIT } "." DIGIT { DIGIT } [ exponent ]
-            | DIGIT { DIGIT } exponent ;
+FLOAT       = ( DIGIT { DIGIT } "." DIGIT { DIGIT } [ exponent ] [ float_suffix ]
+              | DIGIT { DIGIT } exponent [ float_suffix ] ) ;
 exponent    = ( "e" | "E" ) [ "+" | "-" ] DIGIT { DIGIT } ;
+float_suffix = "f16" | "f32" | "f64" | "f128" ;
 
 CHAR        = "'" ( escape | %x20-26 | %x28-5B | %x5D-7E ) "'" ;
 STRING      = '"' { escape | %x20-21 | %x23-5B | %x5D-7E } '"' ;
 escape      = "\" ( "\\" | '"' | "'" | "n" | "r" | "t" | "0" | "x" HEXDIGIT HEXDIGIT | "u{" HEXDIGIT { HEXDIGIT } "}" ) ;
 
 IDENT       = ( LETTER | "_" ) { LETTER | DIGIT | "_" } ;
-LETTER      = "A".."Z" | "a".."z" | %x80-10FFFF ;
+LETTER      = "A".."Z" | "a".."z" ;        (* 标识符只有 ASCII：中文名字要报 E0102 *)
 DIGIT       = "0".."9" ;
 HEXDIGIT    = DIGIT | "A".."F" | "a".."f" ;
 OCTDIGIT    = "0".."7" ;

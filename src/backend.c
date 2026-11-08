@@ -706,6 +706,7 @@ static int      g_nitab, g_citab;
 
 static bool g_need_bin;      /* 用过 {b} 就要带上二进制打印辅助函数 */
 static bool g_need_pad;      /* 用过 {:0>2} / {:^7} 这类非 printf 原生填充 */
+static bool g_need_f64str;   /* 浮点按"最短往返"打印，需要 zx_f64_str */
 static bool g_need_fmt;      /* fmt 不是编译期常量 → 带上运行时格式化器 */
 static bool g_need_allocfmt; /* 用过 std.format → 还要带上 zx_format */
 static bool g_need_file;    /* 用过 std.file → 带上 zx_file_* */
@@ -975,6 +976,84 @@ static void cstr(Buf *b, const char *s, int n) {
     buf_putc(b, '"');
 }
 
+/* ---- 运行时越界检查（R10 / §8.3）----
+ *
+ * 下标、切片在编译期算不出来时，dev 档插一次运行时断言：越界就带源码位置
+ * 报错并 abort（和除零、裸解包同一条路子）。release 档里这两个函数退化成
+ * 恒等，零成本。
+ *
+ * 只对**简单基址**（标识符 / 字段链）插下标检查：取 `.len` 需要把基址再发
+ * 一遍，如果基址是调用结果，两次求值就是语义变化——那比越界更糟。 */
+static bool g_need_bounds;
+
+static bool simple_index_base(Node *n) {
+    if (!n) return false;
+    switch (n->kind) {
+    case NK_IDENT: return true;
+    case NK_FIELD: return simple_index_base(n->a);
+    case NK_INDEX: return !n->name && simple_index_base(n->a);
+    default:       return false;
+    }
+}
+
+/* 切片上下界只允许"再算一次也不会变"的表达式 */
+static bool simple_bound_expr(Node *n) {
+    if (!n) return true;
+    if (n->kind == NK_INT || n->kind == NK_CHAR) return true;
+    if (n->kind == NK_BIN && (n->op == TOK_PLUS || n->op == TOK_MINUS))
+        return simple_bound_expr(n->a) && simple_bound_expr(n->b);
+    return simple_index_base(n);
+}
+
+/* "模块:行"——运行时错误消息里的位置（与 zx: division by zero 同一口径） */
+static void bounds_loc(Buf *b, Node *n) {
+    const char *p = g_cur_mod_path ? g_cur_mod_path : "?";
+    const char *base = p;
+    for (const char *q = p; *q; q++)
+        if (*q == '/' || *q == '\\') base = q + 1;
+    buf_putc(b, '"');
+    for (; *base; base++) {
+        char c = *base;
+        if (c == '"' || c == '\\') c = '_';
+        buf_putc(b, c);
+    }
+    buf_printf(b, ":%d\"", n->line);
+}
+
+/* `base[i]` 里的 i：能拿到长度就包一层 zx_bound */
+static void emit_index_checked(Buf *b, Node *n, Type *bt) {
+    bool is_slice = bt && bt->kind == TY_SLICE;
+    bool is_arr   = bt && bt->kind == TY_PTR && bt->has_len;
+    if ((!is_slice && !is_arr) || !simple_index_base(n->a)) {
+        ex(b, n->b);
+        return;
+    }
+    g_need_bounds = true;
+    buf_puts(b, "zx_bound((size_t)(");
+    ex(b, n->b);
+    buf_puts(b, "), (size_t)(");
+    if (is_slice) {
+        ex(b, n->a);
+        buf_puts(b, ").len");
+    } else {
+        buf_printf(b, "%llu)", (unsigned long long)bt->len);
+    }
+    buf_puts(b, ", ");
+    bounds_loc(b, n);
+    buf_putc(b, ')');
+}
+
+/* 切片长度表达式（已算好）→ 包一层 zx_slice_len；total 未知就不包 */
+static void wrap_slice_len(Buf *b, Buf *len, Node *n, const char *total_c) {
+    if (!total_c) { buf_puts(b, len->data); return; }
+    g_need_bounds = true;
+    buf_puts(b, "zx_slice_len(");
+    buf_puts(b, len->data);
+    buf_printf(b, ", (size_t)(%s), ", total_c);
+    bounds_loc(b, n);
+    buf_putc(b, ')');
+}
+
 /* ---- 可写位置（左值） ---- */
 static void lvalue(Buf *b, Node *n) {
     switch (n->kind) {
@@ -1061,7 +1140,7 @@ static void lvalue(Buf *b, Node *n) {
         ex(b, n->a);
         if (bt && bt->kind == TY_SLICE) buf_puts(b, ".ptr");
         buf_putc(b, '[');
-        ex(b, n->b);
+        emit_index_checked(b, n, bt);
         buf_putc(b, ']');
         return;
     }
@@ -1093,6 +1172,18 @@ static void coerce(Buf *b, Node *e, Type *to) {
         ensure_type(to);
         Buf n; buf_init(&n); ctype(&n, to);
         buf_printf(b, "((%s){0})", n.data);
+        return;
+    }
+
+    /* comptime 浮点 → 窄浮点：必须真转一次。
+     * ty_eq 把 comptime_float 与任何浮点视为相容，直接放行会让 f32 常量以
+     * double 身份进 C 表达式，和运行时的 float 运算差 1 ULP。 */
+    if (from->kind == TY_COMPTIME_FLOAT && to->kind == TY_FLOAT && to->bits != 64) {
+        buf_puts(b, "((");
+        ctype(b, to);
+        buf_puts(b, ")(");
+        ex(b, e);
+        buf_puts(b, "))");
         return;
     }
 
@@ -1505,31 +1596,49 @@ static void fmt_spec(Buf *spec, Buf *args, Node *a, int verb, bool *need_bin, co
         return;
     }
     if (ty_is_float(t)) {
+        /* 没点名精度时按"最短往返"打：`%g` 只有 6 位有效数字，
+         * 0.1+0.2 会打成 0.3——打出来的数读回去和原值不是一个值。
+         * 显式写了 `{:.2}` 就照用户说的来。 */
         if (pad) {
             char cf[16];
             if (o->prec >= 0) snprintf(cf, sizeof cf, "%%.%df", o->prec);
-            else snprintf(cf, sizeof cf, "%%g");
+            else snprintf(cf, sizeof cf, "%%s");
             g_need_pad = true;
             buf_puts(spec, "%s");
-            buf_printf(args, ", zx_fmt_pad((char[512]){0}, 512, '%c', %d, '%c', \"%s\", (double)(",
-                       o->fill, o->width, o->align ? o->align : '>', cf);
-            ex(args, a);
-            buf_puts(args, "))");
+            if (o->prec >= 0) {
+                buf_printf(args, ", zx_fmt_pad((char[512]){0}, 512, '%c', %d, '%c', \"%s\", (double)(",
+                           o->fill, o->width, o->align ? o->align : '>', cf);
+                ex(args, a);
+                buf_puts(args, "))");
+            } else {
+                g_need_f64str = true;
+                buf_printf(args, ", zx_fmt_pad((char[512]){0}, 512, '%c', %d, '%c', \"%s\", zx_f64_str((char[64]){0}, 64, (double)(",
+                           o->fill, o->width, o->align ? o->align : '>', cf);
+                ex(args, a);
+                buf_puts(args, ")))");
+            }
             return;
         }
-        if (o && (o->width > 0 || o->prec >= 0)) {
+        if (o && o->prec >= 0) {
             char al = o->align ? o->align : '>';
             const char *neg = al == '<' ? "-" : (zerofill ? "0" : "");
-            if (o->prec >= 0)
-                buf_printf(spec, "%%%s%d.%df", neg, o->width, o->prec);
-            else
-                buf_printf(spec, "%%%s%dg", neg, o->width);
-        } else {
-            buf_puts(spec, "%g");
+            buf_printf(spec, "%%%s%d.%df", neg, o->width, o->prec);
+            buf_puts(args, ", (double)(");
+            ex(args, a);
+            buf_puts(args, ")");
+            return;
         }
-        buf_puts(args, ", (double)(");
+        g_need_f64str = true;
+        if (o && o->width > 0) {
+            char al = o->align ? o->align : '>';
+            const char *neg = al == '<' ? "-" : (zerofill ? "0" : "");
+            buf_printf(spec, "%%%s%ds", neg, o->width);
+        } else {
+            buf_puts(spec, "%s");
+        }
+        buf_puts(args, ", zx_f64_str((char[64]){0}, 64, (double)(");
         ex(args, a);
-        buf_puts(args, ")");
+        buf_puts(args, "))");
         return;
     }
     if (verb == 'b') {
@@ -3245,7 +3354,7 @@ static void emit_fmt_runtime(void) {
         "            else if (verb == 'c') { tmp[0] = (char)(int)a->i; zx_sink_put(out, tmp, 1); }\n"
         "            else if (a->kind == 4 && verb != 'd' && verb != 'x' && verb != 'b')\n"
         "                zx_sink_put(out, a->i ? \"true\" : \"false\", a->i ? 4 : 5);\n"
-        "            else if (a->kind == 3) { snprintf(tmp, sizeof tmp, \"%g\", a->d); zx_sink_put(out, tmp, strlen(tmp)); }\n"
+        "            else if (a->kind == 3) { char fb[64]; const char *fs = zx_f64_str(fb, sizeof fb, a->d); zx_sink_put(out, fs, strlen(fs)); }\n"
         "            else if (a->kind == 9 || a->kind == 10) {\n"
         "                char big[48];\n"
         "                if (a->kind == 9) zx_i128_str(big, (__int128)a->u);\n"
@@ -3404,8 +3513,8 @@ static void emit_any_runtime(void) {
         "        zx_any_put(out, b);\n"
         "        break;\n"
         "    case ZX_AK_FLOAT:\n"
-        "        if (t->size == 4) snprintf(b, sizeof b, \"%g\", (double)*(const float *)p);\n"
-        "        else snprintf(b, sizeof b, \"%g\", *(const double *)p);\n"
+        "        if (t->size == 4) zx_f64_str(b, sizeof b, (double)*(const float *)p);\n"
+        "        else zx_f64_str(b, sizeof b, *(const double *)p);\n"
         "        zx_any_put(out, b);\n"
         "        break;\n"
         "    case ZX_AK_ENUM: {\n"
@@ -3690,6 +3799,19 @@ static void ex_print(Buf *b, Node *n, bool newline) {
             any_addr(&g.out, n->items[which]);
             buf_printf(&g.out, ", %d)", verb == 'a' ? 1 : 0);
             g.nseg++;
+        } else if (at && at->kind == TY_SLICE && fopt.width == 0) {
+            /* 不带宽度的字符串：按长度原样写出去，不走 `%.*s`。
+             * printf 的 %.*s 遇 NUL 就停，"a\0b" 只会打出 "a"——字节切片
+             * 该原样落地（§11.1 的 fwrite 形态）。 */
+            seg_lit(&g.spec, p + lit, i - lit);
+            seg_flush(&g);
+            if (g.nseg) buf_puts(&g.out, ", ");
+            buf_printf(&g.out, "fwrite((const char*)(");
+            ex(&g.out, n->items[which]);
+            buf_printf(&g.out, ").ptr, 1, (size_t)(");
+            ex(&g.out, n->items[which]);
+            buf_printf(&g.out, ").len, stdout)");
+            g.nseg++;
         } else {
             seg_lit(&g.spec, p + lit, i - lit);
             fmt_spec(&g.spec, &g.args, n->items[which], verb, &need_bin, &fopt);
@@ -3781,16 +3903,7 @@ static void emit_big128(Buf *b, uint64_t hi, uint64_t lo, bool neg) {
                    (unsigned long long)hi, (unsigned long long)lo);
 }
 
-/* 整数位宽 → C 无符号类型名（回绕算术用，M19） */
-static void utype_of_bits(Buf *b, int bits) {
-    switch (bits) {
-    case 8:   buf_puts(b, "uint8_t"); break;
-    case 16:  buf_puts(b, "uint16_t"); break;
-    case 32:  buf_puts(b, "uint32_t"); break;
-    case 128: buf_puts(b, "unsigned __int128"); break;
-    default:  buf_puts(b, "uint64_t"); break;
-    }
-}
+/* 整数位宽 → C 无符号类型名（同宽度；带符号比较/位运算用） */
 
 /* M19 数值语义的统一发射：整数二元运算在 C 里的形态。
  *
@@ -3800,41 +3913,68 @@ static void utype_of_bits(Buf *b, int bits) {
  *  - / %：除零是运行时 trap（zx_div_* / zx_mod_* 辅助）。
  *
  * 返回 false = 不归这里管（浮点、比较、位运算照旧直译）。 */
+/* 计算用的"加宽无符号"类型：至少 32 位。
+ *
+ * R10 要求结果按**目标位宽**回绕。C 的整数提升会把 uint8_t/uint16_t
+ * 的操作数抬成 int——`(uint8_t)a * (uint8_t)b` 两个 255 相乘在 int 里是
+ * 65025（没事），但 uint16_t 的 65535*65535 就溢出 int，成了 UB。所以在
+ * 一个"装得下任意两个本宽度数之和/积"的无符号类型里算：宽度 ≤32 用
+ * uint32_t（(2^16-1)^2 < 2^32），≤64 用 uint64_t，128 用 unsigned __int128。 */
+static void wtype_of_bits(Buf *b, int bits) {
+    if (bits <= 32)      buf_puts(b, "uint32_t");
+    else if (bits <= 64) buf_puts(b, "uint64_t");
+    else                 buf_puts(b, "unsigned __int128");
+}
+
 static bool num_bin_c(Buf *b, Type *ty, int op, const char *lhs, const char *rhs) {
-    if (!ty || ty->kind != TY_INT) return false;
-    int bits = ty->bits;
-    bool sgn = ty->is_signed;
+    if (!ty) return false;
+    /* 未定型整数字面量（comptime_int）在 C 里就是 int64_t：同样要按 64 位
+     * 掩码/回绕，否则 `1 << 32` 直接落进 C 的 UB（右操作数 ≥ 宽度），
+     * 打印出来是垃圾值。 */
+    bool comptime = (ty->kind == TY_COMPTIME_INT);
+    if (ty->kind != TY_INT && !comptime) return false;
+    int bits = comptime ? 64 : ty->bits;
+    bool sgn = comptime ? true : ty->is_signed;
     int mask = bits - 1;
 
     if (op == TOK_SLASH || op == TOK_PERCENT) {
-        int widx = bits <= 8 ? 0 : bits <= 16 ? 1 : bits <= 32 ? 2 : bits <= 64 ? 3 : 4;
         g_need_div = true;
-        (void)widx;
         buf_printf(b, "zx_%s_%s%d(%s, %s)",
                    op == TOK_SLASH ? "div" : "mod", sgn ? "i" : "u", bits, lhs, rhs);
         return true;
     }
     if (op == TOK_PLUS || op == TOK_MINUS || op == TOK_STAR) {
-        if (!sgn) return false;      /* 无符号本来就回绕，C 保证 */
-        Buf ut; buf_init(&ut); utype_of_bits(&ut, bits);
+        /* 有符号靠"无符号算 + 回转"避开 C 的有符号溢出 UB；无符号同样要回转，
+         * 否则 u8/u16 的结果会被整数提升带出位宽（spec R10 明确禁止）。 */
         Buf ct; buf_init(&ct); ctype(&ct, ty);
+        Buf wt; buf_init(&wt); wtype_of_bits(&wt, bits);
         buf_printf(b, "((%s)((%s)(%s) %s (%s)(%s)))",
-                   ct.data, ut.data, lhs, cop(op), ut.data, rhs);
+                   ct.data, wt.data, lhs, cop(op), wt.data, rhs);
         return true;
     }
     if (op == TOK_SHL) {
-        if (sgn) {
-            Buf ut; buf_init(&ut); utype_of_bits(&ut, bits);
-            Buf ct; buf_init(&ct); ctype(&ct, ty);
-            buf_printf(b, "((%s)((%s)(%s) << ((%s) & %d)))",
-                       ct.data, ut.data, lhs, rhs, mask);
-        } else {
-            buf_printf(b, "((%s) << ((%s) & %d))", lhs, rhs, mask);
-        }
+        /* 左移在 C 里是最容易踩 UB 的一个：负值、或结果溢出符号位都算 UB。
+         * 统一在无符号加宽类型里移、再截回目标位宽；移位量按 bits-1 掩码。 */
+        Buf ct; buf_init(&ct); ctype(&ct, ty);
+        Buf wt; buf_init(&wt); wtype_of_bits(&wt, bits);
+        buf_printf(b, "((%s)((%s)(%s) << ((%s) & %d)))",
+                   ct.data, wt.data, lhs, rhs, mask);
         return true;
     }
     if (op == TOK_SHR) {
-        buf_printf(b, "((%s) >> ((%s) & %d))", lhs, rhs, mask);
+        /* 算术右移：有符号数在 C 里是"实现定义"，但 GCC/Clang/MSVC 一致；
+         * 为了不依赖它，有符号仍走带符号加宽类型（符号位照抄）。 */
+        Buf ct; buf_init(&ct); ctype(&ct, ty);
+        Buf wt; buf_init(&wt);
+        if (sgn) {
+            if (bits <= 32)      buf_puts(&wt, "int32_t");
+            else if (bits <= 64) buf_puts(&wt, "int64_t");
+            else                 buf_puts(&wt, "__int128");
+        } else {
+            wtype_of_bits(&wt, bits);
+        }
+        buf_printf(b, "((%s)((%s)(%s) >> ((%s) & %d)))",
+                   ct.data, wt.data, lhs, rhs, mask);
         return true;
     }
     return false;
@@ -3901,6 +4041,39 @@ static void where_lit(Buf *b, int line) {
     cstr(b, pos, (int)strlen(pos));
 }
 
+
+static void emit_bounds_runtime(void) {
+    bline(&g_bproto, "static size_t zx_bound(size_t i, size_t n, const char *loc);");
+    bline(&g_bproto, "static size_t zx_slice_len(size_t len, size_t total, const char *loc);");
+    buf_puts(g_out,
+        "static size_t zx_bound(size_t i, size_t n, const char *loc) {\n"
+        "#ifdef ZX_RELEASE\n"
+        "    (void)n; (void)loc; return i;\n"
+        "#else\n"
+        "    if (i >= n) {\n"
+        "        fflush(stdout);\n"
+        "        fprintf(stderr, \"zx: index %llu is out of bounds (len %llu) at %s\\n\",\n"
+        "                (unsigned long long)i, (unsigned long long)n, loc);\n"
+        "        abort();\n"
+        "    }\n"
+        "    return i;\n"
+        "#endif\n"
+        "}\n\n"
+        "static size_t zx_slice_len(size_t len, size_t total, const char *loc) {\n"
+        "#ifdef ZX_RELEASE\n"
+        "    (void)total; (void)loc; return len;\n"
+        "#else\n"
+        "    /* hi < lo 时无符号减法下溢成巨大值，这一条就把两种越界都收了 */\n"
+        "    if (len > total) {\n"
+        "        fflush(stdout);\n"
+        "        fprintf(stderr, \"zx: slice is out of bounds (len %llu > total %llu) at %s\\n\",\n"
+        "                (unsigned long long)len, (unsigned long long)total, loc);\n"
+        "        abort();\n"
+        "    }\n"
+        "    return len;\n"
+        "#endif\n"
+        "}\n\n");
+}
 
 static void emit_div_runtime(void) {
     bline(&g_bproto, "static void zx_div0(void);");
@@ -3980,7 +4153,13 @@ static bool ex_ct_scalar(Buf *b, Node *n) {
     if (!v || !n->ty) return false;
     switch (v->kind) {
     case V_BOOL:  buf_puts(b, v->bval ? "true" : "false"); return true;
-    case V_FLOAT: buf_printf(b, "%.17g", v->fval); return true;
+    case V_FLOAT:
+        /* f32 的编译期值必须**以 float 身份**落进 C：裸 `%.17g` 是 double
+         * 字面量，跟 float 比较/参与运算时会被提升成 double，值和运行时
+         * 差 1 ULP（`(f32)(0.1+0.2) == (f32)0.3` 编译期 false）。 */
+        if (n->ty && n->ty->kind == TY_FLOAT && n->ty->bits == 32) buf_puts(b, "(float)");
+        buf_printf(b, "%.17g", v->fval);
+        return true;
     case V_INT:
         if (v->big) {
             if (!n->ty || n->ty->kind != TY_INT || n->ty->bits != 128) return false;
@@ -4065,7 +4244,12 @@ static void ex(Buf *b, Node *n) {
             else         buf_printf(b, "%llu", (unsigned long long)cv->ival);
             return;
         }
-        if (cv && cv->kind == V_FLOAT) { buf_printf(b, "%.17g", cv->fval); return; }
+        if (cv && cv->kind == V_FLOAT) {
+            /* 同 ex_ct_scalar：f32 常量要带上 float 身份 */
+            if (n->ty && n->ty->kind == TY_FLOAT && n->ty->bits == 32) buf_puts(b, "(float)");
+            buf_printf(b, "%.17g", cv->fval);
+            return;
+        }
         if (cv && cv->kind == V_BOOL)  { buf_puts(b, cv->bval ? "true" : "false"); return; }
         need_by_cname(sym_cname(n));
         emit_sym_name(b, n);
@@ -4191,7 +4375,7 @@ static void ex(Buf *b, Node *n) {
         ex(b, n->a);
         if (bt && bt->kind == TY_SLICE) buf_puts(b, ".ptr");
         buf_putc(b, '[');
-        ex(b, n->b);
+        emit_index_checked(b, n, bt);
         buf_putc(b, ']');
         return;
     }
@@ -4201,24 +4385,41 @@ static void ex(Buf *b, Node *n) {
         Type *rt = n->ty;
         ensure_type(rt);
         Buf nm; buf_init(&nm); tn(&nm, rt);
-        if (bt->kind == TY_SLICE) {
+        /* 长度检查要总长度：切片取 .len，*[N]T 用类型里的 N，裸指针没有 */
+        Buf tot; buf_init(&tot);
+        bool is_slice_base = bt && bt->kind == TY_SLICE;
+        const char *total_c = NULL;
+        if (is_slice_base) {
+            Buf tb; buf_init(&tb);
+            ex(&tb, n->a);
+            buf_printf(&tot, "(%s).len", tb.data);
+            total_c = tot.data;
+        } else if (bt && bt->kind == TY_PTR && bt->has_len) {
+            buf_printf(&tot, "%llu", (unsigned long long)bt->len);
+            total_c = tot.data;
+        }
+        bool can_chk = total_c && simple_bound_expr(n->b) && simple_bound_expr(n->c);
+
+        Buf len; buf_init(&len);
+        if (n->c) {
+            Buf hb; buf_init(&hb); ex(&hb, n->c);
+            Buf lb; buf_init(&lb); if (n->b) ex(&lb, n->b); else buf_puts(&lb, "0");
+            buf_printf(&len, "%s - (%s)", hb.data, lb.data);
+        } else {
+            Buf lb; buf_init(&lb); if (n->b) ex(&lb, n->b); else buf_puts(&lb, "0");
+            if (is_slice_base) buf_printf(&len, "%s - (%s)", tot.data, lb.data);
+            else buf_printf(&len, "%lld - (%s)",
+                            (long long)(bt && bt->has_len ? (int64_t)bt->len : 0), lb.data);
+        }
+
+        if (is_slice_base) {
             buf_printf(b, "((%s){ (", nm.data);
             ex(b, n->a);
             buf_printf(b, ").ptr + ");
             if (n->b) ex(b, n->b); else buf_puts(b, "0");
             buf_puts(b, ", ");
-            if (n->c) {
-                ex(b, n->c);
-                buf_puts(b, " - (");
-                if (n->b) ex(b, n->b); else buf_puts(b, "0");
-                buf_puts(b, ")");
-            } else {
-                buf_puts(b, "(");
-                ex(b, n->a);
-                buf_puts(b, ").len - (");
-                if (n->b) ex(b, n->b); else buf_puts(b, "0");
-                buf_puts(b, ")");
-            }
+            if (can_chk) wrap_slice_len(b, &len, n, total_c);
+            else         buf_puts(b, len.data);
             buf_puts(b, " })");
             return;
         }
@@ -4227,17 +4428,8 @@ static void ex(Buf *b, Node *n) {
         buf_printf(b, ") + ");
         if (n->b) ex(b, n->b); else buf_puts(b, "0");
         buf_puts(b, ", ");
-        if (n->c) {
-            ex(b, n->c);
-            buf_puts(b, " - (");
-            if (n->b) ex(b, n->b); else buf_puts(b, "0");
-            buf_puts(b, ")");
-        } else {
-            int64_t L = bt->has_len ? (int64_t)bt->len : 0;
-            buf_printf(b, "%lld - (", (long long)L);
-            if (n->b) ex(b, n->b); else buf_puts(b, "0");
-            buf_puts(b, ")");
-        }
+        if (can_chk) wrap_slice_len(b, &len, n, total_c);
+        else         buf_puts(b, len.data);
         buf_puts(b, " })");
         return;
     }
@@ -4403,7 +4595,7 @@ static void ex(Buf *b, Node *n) {
             return;
         }
         /* M19 数值语义：整数算术/移位/除法的确定性行为（回绕、trap、掩码） */
-        if (n->ty && n->ty->kind == TY_INT &&
+        if (n->ty && (n->ty->kind == TY_INT || n->ty->kind == TY_COMPTIME_INT) &&
             (n->op == TOK_PLUS || n->op == TOK_MINUS || n->op == TOK_STAR ||
              n->op == TOK_SLASH || n->op == TOK_PERCENT ||
              n->op == TOK_SHL || n->op == TOK_SHR)) {
@@ -4424,6 +4616,24 @@ static void ex(Buf *b, Node *n) {
 
     case NK_CAST: {
         Type *to = n->ty;
+        /* 显式转换在 C 里也要显式：`(f32)(0.1 + 0.2)` 的两个操作数在 C 里
+         * 是 double 字面量，省掉这层 cast 就整段按 double 算——`== (f32)0.3`
+         * 于是给出 false（运行时是 true）。数值目标一律套一层转换。 */
+        bool num_to = to && (ty_is_num(to) || to->kind == TY_COMPTIME_FLOAT ||
+                             to->kind == TY_COMPTIME_INT || to->kind == TY_ENUM ||
+                             to->kind == TY_BOOL || to->kind == TY_ERROR);
+        Type *ft = n->b ? n->b->ty : NULL;
+        bool num_from = ft && (ty_is_num(ft) || ft->kind == TY_COMPTIME_FLOAT ||
+                               ft->kind == TY_COMPTIME_INT || ft->kind == TY_ENUM ||
+                               ft->kind == TY_BOOL || ft->kind == TY_ERROR);
+        if (num_to && num_from) {
+            buf_puts(b, "((");
+            ctype(b, to);
+            buf_puts(b, ")(");
+            ex(b, n->b);
+            buf_puts(b, "))");
+            return;
+        }
         coerce(b, n->b, to);
         return;
     }
@@ -4916,10 +5126,27 @@ static void gen_stmt(Node *n) {
                     line("%s = (%s)((%s*)%s %s %s);", l.data, dc.data, ec.data, l.data, op,
                          cxs(n->b, ty_usize()));
                 } else {
-                    /* M19：复合赋值走同一套数值语义（回绕 / 除零 trap / 移位掩码） */
+                    /* M19：复合赋值走同一套数值语义（回绕 / 除零 trap / 移位掩码）。
+                     * 必须先把 `+=`/`<<=` 这类**归一成基础运算符**——num_bin_c
+                     * 只认 TOK_PLUS/TOK_SHL，不归一的话移位掩码与回绕全会漏掉
+                     * （`a <<= 127` 在 i8 上就是 C 的 UB）。 */
+                    int bop = n->op;
+                    switch (n->op) {
+                    case TOK_PLUSEQ: bop = TOK_PLUS; break;
+                    case TOK_MINUSEQ: bop = TOK_MINUS; break;
+                    case TOK_STAREQ: bop = TOK_STAR; break;
+                    case TOK_SLASHEQ: bop = TOK_SLASH; break;
+                    case TOK_PERCEQ: bop = TOK_PERCENT; break;
+                    case TOK_AMPEQ: bop = TOK_AMP; break;
+                    case TOK_PIPEEQ: bop = TOK_PIPE; break;
+                    case TOK_CARETEQ: bop = TOK_CARET; break;
+                    case TOK_SHLEQ: bop = TOK_SHL; break;
+                    case TOK_SHREQ: bop = TOK_SHR; break;
+                    default: break;
+                    }
                     Buf r; buf_init(&r);
                     const char *rs = cxs(n->b, n->a->ty);
-                    if (!num_bin_c(&r, lt, n->op, l.data, rs))
+                    if (!num_bin_c(&r, lt, bop, l.data, rs))
                         buf_printf(&r, "%s %s %s", l.data, op, rs);
                     line("%s = %s;", l.data, r.data);
                 }
@@ -6141,6 +6368,33 @@ int backend_emit_split(Node *root, Buf *header, Buf *rt, BUnit *units, int maxun
             "    return out;\n"
             "}\n\n");
     }
+    if (g_need_f64str || g_need_fmt || g_need_allocfmt || g_need_page || g_need_any) {
+        /* 浮点按"最短往返"打印：15 位起步，回读相等即停，至多 17 位。
+         * %g 默认只给 6 位有效数字，0.30000000000000004 会被截成 0.3，
+         * 且 NaN 在各家 CRT 上文案不一（"-nan(ind)" / "nan"）。 */
+        bline(&g_bproto, "static const char *zx_f64_str(char *out, size_t cap, double v);");
+        buf_puts(g_out,
+            "static const char *zx_f64_str(char *out, size_t cap, double v) {\n"
+            "    if (!cap) return out;\n"
+            "    if (v != v) { snprintf(out, cap, \"nan\"); return out; }\n"
+            "    if (isinf(v)) { snprintf(out, cap, \"%s\", v < 0 ? \"-inf\" : \"inf\"); return out; }\n"
+            "    /* 能精确表示成 float 的值按 float 的最短形式打：f32 的\n"
+            "     * 3.4028234663852886e+38 不该膨胀成一长串。判据只看值——\n"
+            "     * 运行时路径的 ZxFmtArg 只剩 double，看不到原类型，\n"
+            "     * 两条路必须靠同一个判据才不分叉。 */\n"
+            "    if ((double)(float)v == v) {\n"
+            "        for (int prec = 6; prec <= 9; prec++) {\n"
+            "            snprintf(out, cap, \"%.*g\", prec, v);\n"
+            "            if ((double)strtof(out, NULL) == v) return out;\n"
+            "        }\n"
+            "    }\n"
+            "    for (int prec = 15; prec <= 17; prec++) {\n"
+            "        snprintf(out, cap, \"%.*g\", prec, v);\n"
+            "        if (strtod(out, NULL) == v) return out;\n"
+            "    }\n"
+            "    return out;\n"
+            "}\n\n");
+    }
     if (g_need_bin) {
         bline(&g_bproto, "static void zx_print_bin(uint64_t v);");
         buf_puts(g_out,
@@ -6165,6 +6419,7 @@ int backend_emit_split(Node *root, Buf *header, Buf *rt, BUnit *units, int maxun
     if (g_need_sync) emit_sync_runtime();
     if (g_need_heapalloc) emit_heapalloc_runtime();
     if (g_need_div) emit_div_runtime();
+    if (g_need_bounds) emit_bounds_runtime();
     if (g_nuw) emit_unwrap_runtime();
     /* 128 位转十进制：编译期 printf 路径（g_need_i128）与 zx_fmt 的
      * kind 9/10 分支（fmt 运行时一存在就可能碰到）都要有。 */
