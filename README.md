@@ -175,6 +175,21 @@ git tag 会被解析成不可变 commit 写进锁。上游 tag 被改写、内�
 
 编辑器支持（Zed 扩展 + 通用 LSP 客户端，`bin/zxls.exe`）见 `editor/README.md`。
 
+## 文档
+
+| 想做什么 | 打开 |
+| --- | --- |
+| 记不清命令 / 刚从旧版升级 | `docs/zxc-usage.md`（含 `add` -> `include` 改名对照） |
+| 查语言规则、标准库、命令行 | `docs/manual.md` |
+| 从零学 Zx | `docs/guide.md` |
+| 查诊断码 `E0xxx` | `docs/errors.md` 或 `zxc explain E0304` |
+| 断网 / 全文检索 | 双击 `docs/site/index.html` |
+
+`docs/site/index.html` 是全部文档合订的**单文件离线站**：零外部依赖、双击即开，
+左侧切文档、跨文档即时搜索（`Ctrl/Cmd+K`）、深浅色可切。源文档改动后跑
+`python tools/mksite.py` 重新生成；`test.sh` 会守着它，不让它悄悄过期。
+
+
 ## 目录
 
 | 目录 | 内容 |
@@ -182,7 +197,7 @@ git tag 会被解析成不可变 commit 写进锁。上游 tag 被改写、内�
 | `src/` | 编译器 C 实现：`parse.c`（前端）、`sema.c`（类型/语义）、`backend.c`（C 发射）等 |
 | `bootstrap/` | 自举前端（Zx 代码）：`parse.zx` / `lex.zx`，编译成 `bin/zxfe.exe`，zxc 默认走它 |
 | `std/` | 标准库：`str/map/fs/json/time/pool/task.zx` + 聚合 `std.zx` |
-| `docs/` | `manual.md` 语言手册、`guide.md` 教程、`errors.md` 错误码参考 |
+| `docs/` | `zxc-usage.md` 命令说明、`manual.md` 语言手册、`guide.md` 教程、`errors.md` 错误码参考、`site/index.html` 离线文档站 |
 | `spec/` | `zx-spec.md` 规格、`zx.ebnf` 文法、`decisions.md` 设计裁定记录 |
 | `tests/` | `good/`（正例）+ `bad/`（反例）+ `multi/`（多文件） |
 | `demo/` | `ffi/`：Windows API + OpenGL 例子（`extern "C"` 绑定的真实用户） |

@@ -2437,6 +2437,89 @@ static void setup_search_paths(const Proj *pj) {
     sema_set_search_paths(g_search);
 }
 
+/* ------------------------------------------------- 单文件模式的搜索路径
+ * 单文件分派（`zxc <file> --check` / `zxc <file> -o ...`）也要认识工程级
+ * 模块搜索路径。build/run 走 do_build -> setup_search_paths，`zxc check`
+ * 子命令也调它，唯独这条分派以前没调：编译器只试了「导入文件所在目录 +
+ * 模块名」就放弃，vendor/ 里的绑定明明存在。LSP 的诊断正是 spawn
+ * `zxc <影子文件> --check`，影子文件落在 src/ 下，于是出现「能编过、
+ * 编辑器却报 cannot open module」的假报错。
+ *
+ * KEEP: 这条调用别删。删了 LSP 会重新误报，而 zxc build/run 仍然全绿，
+ * 光跑全量回归发现不了——守门在 test.sh 2.54d。
+ *
+ * 只往 sema 注入路径，不落盘、不联网：诊断是高频只读操作，绝不在这里跑
+ * vendor_autoscan / fetch_check_local。cwd 未必是工程根（Zed 多根工作区、
+ * 命令行从别处给绝对路径），所以 cwd 无 zx.json 时从源文件目录逐级向上
+ * 找工程根，把 vendor/ 与 deps 拼成绝对路径再注入；找不到就维持原状，
+ * 孤立 .zx 文件的行为不变。
+ */
+static bool path_is_abs_c(const char *p) {
+    if (!p || !p[0]) return false;
+    if (p[0] == '/' || p[0] == '\\') return true;
+    return p[1] == ':' && ((p[0] >= 'A' && p[0] <= 'Z') ||
+                           (p[0] >= 'a' && p[0] <= 'z'));
+}
+
+static char g_search_abs[48][1024];   /* 绝对路径缓冲，进程内常驻、零泄漏 */
+
+static void setup_search_paths_for_file(const char *file) {
+    Proj pj;
+    if (proj_load(&pj)) { setup_search_paths(&pj); return; }
+
+    char dir[1024];
+    path_abs(file, dir, sizeof dir);
+    for (char *q = dir; *q; q++) if (*q == '\\') *q = '/';
+    char *last = strrchr(dir, '/');
+    if (!last) return;
+    *last = 0;
+
+    char root[1024];
+    root[0] = 0;
+    for (int up = 0; up < 32 && dir[0]; up++) {
+        char zx[1060];
+        snprintf(zx, sizeof zx, "%s/zx.json", dir);
+        if (fexists(zx)) { snprintf(root, sizeof root, "%s", dir); break; }
+        char *cut = strrchr(dir, '/');
+        if (!cut || cut == dir) break;
+        if (cut - dir == 2 && dir[1] == ':') break;   /* E:/ 已到盘符根 */
+        *cut = 0;
+    }
+    if (!root[0]) return;
+
+    int n = 0;
+    char zx[1060];
+    snprintf(zx, sizeof zx, "%s/vendor", root);
+    if (fexists(zx) && n < 47) {
+        snprintf(g_search_abs[n], sizeof g_search_abs[n], "%s", zx);
+        g_search[n] = g_search_abs[n];
+        n++;
+    }
+    snprintf(zx, sizeof zx, "%s/zx.json", root);
+    FILE *f = fopen(zx, "rb");
+    if (f) {
+        char text[8192];
+        size_t len = fread(text, 1, sizeof text - 1, f);
+        fclose(f);
+        text[len] = 0;
+        char *deps[16];
+        int nd = json_get_str_array(text, "deps", deps, 16);
+        for (int i = 0; i < nd && n < 47; i++) {
+            char d[1024];
+            if (path_is_abs_c(deps[i])) snprintf(d, sizeof d, "%s", deps[i]);
+            else snprintf(d, sizeof d, "%s/%s", root, deps[i]);
+            if (fexists(d)) {
+                snprintf(g_search_abs[n], sizeof g_search_abs[n], "%s", d);
+                g_search[n] = g_search_abs[n];
+                n++;
+            }
+            free(deps[i]);
+        }
+    }
+    g_search[n] = NULL;
+    sema_set_search_paths(g_search);
+}
+
 /* 构建 + 产物路径写回 outpath。返回 0 成功。 */
 static int do_build(Proj *pj, bool release, OutKind kind, char *outpath, size_t cap) {
     if (!fexists(pj->main)) {
@@ -2963,6 +3046,9 @@ int main(int argc, char **argv) {
     g_cflags = release ? CC_REL : CC_DEV;
 
     g_srcpath = file;
+    /* KEEP: LSP 诊断走这条单文件分派；没有工程搜索路径就会假报
+     * `cannot open module '.../src/<name>'`（vendor/ 里的模块明明在）。 */
+    setup_search_paths_for_file(file);
 
     if (dump_tokens) {
         /* 词法单元 dump 仍走 C 词法器：这是调试视图，且阶段 1 已对拍过

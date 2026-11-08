@@ -446,6 +446,57 @@ else
     printf "  FAIL add/fetch 用例的 fixture 准备\n"; cat "$TPFX.cli.finit" 2>/dev/null; fail=1
 fi
 
+# 2.54d LSP 诊断的模块搜索路径：单文件分派 `zxc <file> --check` 必须认识
+# vendor/ 与 deps。以前只有 build/run（do_build）和 `zxc check` 子命令设了
+# 搜索路径，LSP 偏偏 spawn 的是单文件分派，于是「能编过、编辑器却假报
+# cannot open module '.../src/<name>'」。守的是 src/main.c 里
+# setup_search_paths_for_file() 那次调用（KEEP 标记）——只跑 build / check
+# 子命令都发现不了，必须显式打这条链。
+printf "\n== 单文件 --check 的模块搜索路径（LSP 诊断假报错守门）\n"
+MDIR="$pdir/lspmod"
+if mkdir -p "$MDIR/src" "$MDIR/vendor" "$MDIR/shared" \
+   && printf '{"name":"lspmod","main":"src/main.zx","deps":["shared"]}\n' > "$MDIR/zx.json" \
+   && printf 'pub const V: i32 = 7;\n' > "$MDIR/vendor/vlib.zx" \
+   && printf 'pub const S: i32 = 5;\n' > "$MDIR/shared/slib.zx" \
+   && printf 'const std = module("std");\nconst v = module("vlib");\nconst s = module("slib");\nconst main = fn () i32 { std.println("{}", v.V + s.S); return 0; };\n' > "$MDIR/src/main.zx"; then
+    # ① cwd = 工程根、相对路径：LSP 的典型形态
+    if ( cd "$MDIR" && "$ZXCW" src/main.zx --check > "$TPFX.md1" 2>&1 ) \
+       && ! grep -q "cannot open module" "$TPFX.md1"; then
+        printf "  ok   工程根相对路径：vendor/ 与 deps 都解析得到\n"
+    else
+        printf "  FAIL 单文件 --check 找不到 vendor/deps 模块\n"; cat "$TPFX.md1"; fail=1
+    fi
+    # ② 影子文件：LSP 实际写的是 src/.zxls-<hash>.zx
+    cp "$MDIR/src/main.zx" "$MDIR/src/.zxls-deadbeef.zx"
+    if ( cd "$MDIR" && "$ZXCW" src/.zxls-deadbeef.zx --check > "$TPFX.md2" 2>&1 ) \
+       && ! grep -q "cannot open module" "$TPFX.md2"; then
+        printf "  ok   LSP 影子文件形态同样解析得到\n"
+    else
+        printf "  FAIL LSP 影子文件仍假报模块找不到\n"; cat "$TPFX.md2"; fail=1
+    fi
+    # ③ cwd 不在工程根 + 绝对路径：按源文件向上找 zx.json 后拼绝对路径
+    if ( cd "$pdir" && "$ZXCW" "$MDIR/src/main.zx" --check > "$TPFX.md3" 2>&1 ) \
+       && ! grep -q "cannot open module" "$TPFX.md3"; then
+        printf "  ok   cwd 不在工程根时按源文件向上找工程根\n"
+    else
+        printf "  FAIL 异目录 cwd 下仍假报模块找不到\n"; cat "$TPFX.md3"; fail=1
+    fi
+    # ④ 负例：真的写错模块名仍要报错，不许把诊断吞掉。
+    # 注意顶层 const 是惰性求值的：q 不被使用时 module(...) 压根不加载，
+    # 所以必须真的引用 q.X 才会走进模块解析链。
+    printf 'const q = module("nope_missing");\nconst main = fn () i32 { return q.X; };\n' > "$MDIR/src/bad.zx"
+    # 注意：报错时 zxc 返回非零，这里不能拿退出码做 && 的前提，
+    # 否则"正确报了错"反而会被判成失败——只认诊断文本。
+    ( cd "$MDIR" && "$ZXCW" src/bad.zx --check > "$TPFX.md4" 2>&1 ) || true
+    if grep -q "cannot open module" "$TPFX.md4"; then
+        printf "  ok   真缺模块仍照常报错（没把诊断吞掉）\n"
+    else
+        printf "  FAIL 真缺模块竟不报错\n"; cat "$TPFX.md4"; fail=1
+    fi
+else
+    printf "  FAIL 单文件搜索路径用例的 fixture 准备\n"; fail=1
+fi
+
 rm -rf "$pdir" 2>/dev/null || true
 
 # 2.55 错误码目录：诊断里出现的每个码都必须查得到。
@@ -536,6 +587,15 @@ fi
 # 两侧各写一份解析链，缺一个目录就是一个点了没反应的句点。
 # zxls 编进临时目录并把 zxc.exe 拷到它旁边——zxls 按兄弟目录找 zxc，
 # 这样格式化冒烟才能打到真 fmt，而不是空响应假通过。
+# 2.55b 离线文档站：源 md 改了必须重跑 tools/mksite.py，否则用户查到的是
+# 旧内容。产物里内嵌各源的 sha256 清单，--check 只比对摘要、不重新渲染。
+printf "\n== 离线文档站（docs/site/index.html 与源文档一致）\n"
+if python tools/mksite.py --check > "$TPFX.site" 2>&1; then
+    printf "  ok   %s\n" "$(cat "$TPFX.site")"
+else
+    printf "  FAIL 离线文档站过期或缺失\n"; cat "$TPFX.site"; fail=1
+fi
+
 printf "\n== LSP 冒烟（tools/lsptest.py：补全/跳转 + vendor/ 与 deps）\n"
 if [ -x "$ZYG" ] && command -v python >/dev/null 2>&1; then
     mkdir -p "$TPFX.lspbin"

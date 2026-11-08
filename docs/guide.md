@@ -1103,5 +1103,10 @@ const eql = fn (T: type, x: T, y: T) bool {
 6. **`spec/bootstrap.md` + `bootstrap/`**——编译器正在用 Zx 重写自己的现场，  
    `bootstrap/lex.zx` 是第一块：与 C 版词法器逐字节对拍的 Zx 实现。
 
+命令与工程化（C 库接入、`vendor/`、离线构建、编辑器配置）见  
+`docs/zxc-usage.md`；完整语言与命令行参考见 `docs/manual.md`；  
+诊断里每个 `E0xxx` 的修法见 `docs/errors.md`。断网或想全文检索时，  
+直接双击 `docs/site/index.html`：全部文档合成一个可离线搜索的单页。  
+
 编译器本身的编译模型（每个模块一份 C、增量编译、交叉验证开关）见  
 `spec/zx-spec.md` §16 与 `README.md` 的里程碑日志。

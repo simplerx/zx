@@ -10,6 +10,8 @@
 
 | 文档 | 回答什么 | 什么时候读 |
 | --- | --- | --- |
+| `docs/zxc-usage.md` | 我要做 X，该敲哪条命令（含命令改名对照、C 库三条路） | 命令记不清 / 刚从旧版升级 |
+| `docs/site/index.html` | 全部文档合成一个可离线搜索的单页 | 断网、想全文检索、随手查 |
 | `docs/guide.md` | 从 hello 到泛型的完整教程，讲"为什么" | 第一次接触 Zx |
 | `docs/manual.md`（本文） | 命令、语法点、标准库、坑与限制 | 写代码时随手查 |
 | `spec/zx-spec.md` | 规则的精确定义（编译期语义、布局、诊断） | 要判断"这到底算不算合法" |
@@ -122,6 +124,11 @@ zxc <file.zx> -o <prog>           单文件：生成 C 并编成可执行文件
 | `test [过滤]` | 跑 `src/test/` 用例 | 零参 `pub` 函数即用例，每例一个进程 |
 | `check [file...]` | 静态检查 | 缺省当前目录，回落 `src/`、`src/test/` |
 | `fmt [file...] [--check]` | 格式化 | `--check` 只报告不写回 |
+| `errors` | 按类别列出全部错误码 | 配合 `explain <CODE>` 看含义与修法 |
+| `explain <CODE>` | 解释一个错误码 | 例：`zxc explain E0301` |
+
+> 命令改名后（`include` / `add` / `fetch` 的语义拆分）记不清谁是谁，
+> 直接看 `docs/zxc-usage.md` §1 的对照表和 §4 的决策树。
 
 ### 2.2 单文件选项
 
@@ -470,7 +477,8 @@ extern fn GetTickCount64() u64;                   // Win32（大小写敏感）
 
 - `extern fn` 只声明、无函数体；符号名就是声明名（不做名字修饰）。
 - 参数/返回值只用 C ABI 兼容类型；`*u8` ↔ `char*`，`[]const u8` 不保证 NUL 结尾。
-- **没有 `extern "C" { … }` 块**，逐条声明。
+- 逐条 `extern fn` 是最直接的写法；一库一组声明可以用 §3.16 的
+  `extern "C" { … }` 块糖（`zxc include` 生成的绑定就走它），两者语义等价。
 - **C 回调**：Zx 函数可以直接当函数指针传给 extern（如 `qsort` 的比较器）。
   调用点经 `(void*)` 显式中转，规避 Zx 签名与 C 原型（`const void*`）的
   文本差异；C 侧按 Zx 生成签名调用，指针宽度一致即 ABI 兼容。
@@ -565,6 +573,18 @@ extern "C" {
   打印驱动字符串）也在这里。
 
 ### 3.17 zxc include —— 一条命令接入 C 库
+
+> **先看这张表**：C 库接入一共三条路，别一上来就找命令。完整操作、
+> 命令改名对照与故障排查见 `docs/zxc-usage.md`。
+
+| 库在哪 | 怎么做 | 命令 |
+| --- | --- | --- |
+| 能放进 `vendor/` | 拷进去，`run` 自动接管（§3.20） | **不用敲**，直接 `zxc run` |
+| 磁盘别处、不想搬 | 指过去，生成绑定 + 清单（§3.17 / §3.19） | `zxc include <路径>` |
+| 网站上 / 要复现 | 拉下来写声明与锁（§3.21） | `zxc add <url>`；换机器 `zxc fetch` |
+
+三条路最后都汇到「普通 Zx 绑定 → 自动编译 C 源码 → 自动链接」，`zxc run`
+是共同终点。`run` / `build` / `test` **永不联网**，缺库只提示去跑 `zxc fetch`。
 
 手写 FFI 里最费心的不是 `extern fn`，而是抄函数签名、逐字段镜像 C 结构体布局。
 `zxc include` 把 C 头交给项目内 vendored 的 clang 解析，产出一份**普通、可读可改的
@@ -810,6 +830,80 @@ nfiles = 2
 归档（自动下钻唯一顶层目录，`--subdir` 可指定）、git 仓库（`--git` 强制或 URL 以
 `.git` 结尾 / 带 `--ref`）。换版本用 `zxc add <url> --force`；本地已有的库用
 `zxc include <path>`，`add` 只接 URL。
+
+### 3.22 实战：glfw + OpenGL 贪吃蛇
+
+一个能跑的完整工程比十页说明更能验证 FFI 链路。目标是 glfw 开窗口、
+OpenGL 1.1 画格子、方向键控制蛇；完整代码见 `docs/zxc-usage.md` §9 末尾
+给出的示例工程路径，这里只记关键决策。
+
+#### 绑定怎么来
+
+```sh
+zxc include E:/code/vs/zuk/include/GLFW/glfw3.h --lib vendor/libglfw3.a --force
+```
+
+`include` 从真实 `glfw3.h` 生成 460+ 行普通 Zx 源码（`vendor/glfw3.zx`）：
+函数、按键常量、结构体都在，clang 翻不了的 24 条回调类声明列在文件末尾。
+本例用 `glfwGetKey` 轮询代替回调，正好绕开函数指针类型，一条都不用补。
+
+OpenGL **不生成**绑定：内置配方 `zxc include opengl32` 会去解析整个
+`windows.h`，产出又大又吵。这里手写 `src/gl.zx`，只声明用到的 GL 1.1 入口：
+
+```zx
+@link("opengl32");
+extern "C" {
+    pub fn glClearColor(r: f32, g: f32, b: f32, a: f32) void;
+    pub fn glClear(mask: u32) void;
+    pub fn glOrtho(l: f64, r: f64, b: f64, t: f64, n: f64, f: f64) void;
+    pub fn glBegin(mode: u32) void;
+    pub fn glEnd() void;
+    pub fn glColor3f(r: f32, g: f32, b: f32) void;
+    pub fn glVertex2f(x: f32, y: f32) void;
+}
+```
+
+GL 1.1 的入口由 `opengl32.dll` 直接导出，不需要 GLEW / glad，也就不用
+`wglGetProcAddress` —— Zx 还没开「`void*` 转函数指针」这扇门。
+
+#### 三个 Zx 侧的写法
+
+```zx
+let title = "Zx Snake";
+let win = g.glfwCreateWindow(720, 720, &title[0],
+                             (*g.GLFWmonitor)(0), (*g.GLFWwindow)(0));
+```
+
+- C 的 `NULL` 写 `(*T)(0)`，不是 `null`（`null` 只属于 `?*T`）。
+- 字符串字面量是 `[]const u8`，传给 `const char*` 要 `&title[0]`。
+- 没有 `break`：靠 `glfwSetWindowShouldClose(win, 1)` 让
+  `while (glfwWindowShouldClose(win) == 0)` 自然收口。
+
+#### 链接：ABI 必须一致
+
+本机预编译的 `glfw3.lib` 是 **MSVC** 版，每个 `.obj` 都带
+`/DEFAULTLIB:"uuid.lib" /"MSVCRT" /"OLDNAMES"`。zig cc(mingw) 后端会去找
+`libuuid.a` / `libMSVCRT.a`（不存在），随后还会缺 `__security_cookie`、
+`_fltused` 等 MSVC CRT 符号。换成 **mingw/COFF 版 `libglfw3.a`** 后一次链过。
+
+结论：**C 库要和生成它的工具链同 ABI，别混 MSVC `.lib` 与 mingw `.a`。**
+另外补两条系统库，`gdi32` 是 glfw 的 WGL/GDI 路径必需的：
+
+```zx
+@link("gdi32");      // ChoosePixelFormat / CreateDCW / SwapBuffers
+@link("opengl32");
+```
+
+#### 生成器因此修掉的四个问题
+
+| 现象 | 原因 | 修复 |
+| --- | --- | --- |
+| `E0101` 词法错误 | Windows 路径 `E://code//...` 写进 `.zx`，`\c` 被当非法转义 | 写进文本的路径统一转正斜杠 |
+| 69 个 `E0401 unknown type` | `typedef struct X X;` 不完整句柄被跳过，签名仍引用 | 自动补 `struct { _opaque: u8 }` 占位 |
+| `E0300 void has no C-compatible layout` | C 函数指针字段被翻成 `fn (...) void` | 字段改用 `*u8`（同为指针宽度） |
+| `E0302` 字面量溢出 | `0x80000000` 落到 `i32` | 超 `i32` 范围的宏改用 `u32` |
+
+这四条对任何带不透明句柄的 C 库都成立，不是 glfw 专用补丁。
 
 ---
 
