@@ -751,7 +751,7 @@ fn resolvePathStmt(files: []const []const u8, doc: *const Document, text: []cons
     }
     if (n < 2) return null;
     // 第一段是模块绑定 → 先限定在模块文件里找
-    if (moduleOfBinding(text, segs[0])) |mod| {
+    if (moduleRefOf(doc, text, segs[0])) |mod| {
         if (n > 3) return null;
         const p = resolveModuleFile(doc, mod) orelse return null;
         const t = readFileSmall(p) orelse return null;
@@ -1488,6 +1488,17 @@ fn resolveModuleFile(doc: *const Document, m_raw: []const u8) ?[]const u8 {
     return null;
 }
 
+/// 绑定名或裸模块名 → 模块名。KEEP：裸名 = 没写
+/// `module("…")` 绑定，但 `<搜索目录>/<名>.zx` 存在就当模块（与编译器
+/// 的 module_probe 同一句解析）。用户 2026-11-08 反馈：直接输模块名，
+/// `glfw3.` 点不出成员。
+fn moduleRefOf(doc: *const Document, text: []const u8, word: []const u8) ?[]const u8 {
+    if (moduleOfBinding(text, word)) |m| return m;
+    if (std.mem.eql(u8, word, "std")) return "std";
+    if (resolveModuleFile(doc, word)) |_| return word;
+    return null;
+}
+
 fn definitionAt(doc: *const Document, line: u32, character: u32) ?[]const u8 {
     const text = doc.text;
     const off = posToOffset(text, line, character);
@@ -1515,8 +1526,7 @@ fn definitionAt(doc: *const Document, line: u32, character: u32) ?[]const u8 {
         while (bs > 0 and (isIdentChar(text[bs - 1]) or text[bs - 1] == '.')) bs -= 1;
         const base = text[bs .. ws - 1];
         if (base.len > 0) {
-            var mm: ?[]const u8 = moduleOfBinding(text, base);
-            if (mm == null and std.mem.eql(u8, base, "std")) mm = "std";
+            const mm: ?[]const u8 = moduleRefOf(doc, text, base);
             if (mm) |mod_name| {
                 if (resolveModuleFile(doc, mod_name)) |p| {
                     if (readFileSmall(p)) |t| {
@@ -1529,8 +1539,7 @@ fn definitionAt(doc: *const Document, line: u32, character: u32) ?[]const u8 {
     }
 
     // 2) 模块绑定名 / std → 模块文件
-    var m = moduleOfBinding(text, word);
-    if (m == null and std.mem.eql(u8, word, "std")) m = "std";
+    const m = moduleRefOf(doc, text, word);
     if (m) |mm| {
         if (resolveModuleFile(doc, mm)) |p| return makeLocation(pathToUri(p), 0, 0, 0);
     }
@@ -2192,7 +2201,7 @@ fn inferExprType(text: []const u8, doc: *const Document, expr: []const u8, depth
             const member = e[dot + 1 ..];
             if (base.len == 0 or member.len == 0) return null;
             // base 是模块绑定（std.Buffer / task.Obj）→ 类型路径原样
-            if (std.mem.eql(u8, base, "std") or moduleOfBinding(text, base) != null) return e;
+            if (moduleRefOf(doc, text, base) != null) return e;
             var sf = scanFiles(doc, text);
             defer sf.deinit(gpa);
             // 实例成员 → 容器体里的字段类型 / 方法返回类型
@@ -2249,8 +2258,7 @@ fn resolveCalleeRet(text: []const u8, doc: *const Document, callee: []const u8) 
         const bind = callee[0..dot];
         const member = callee[dot + 1 ..];
         if (member.len == 0) return null;
-        var mm: ?[]const u8 = moduleOfBinding(text, bind);
-        if (mm == null and std.mem.eql(u8, bind, "std")) mm = "std";
+        const mm: ?[]const u8 = moduleRefOf(doc, text, bind);
         const mod = mm orelse {
             // 容器限定（std.Task.group）或实例方法（g.spawn）：扫描集里解析
             var sf = scanFiles(doc, text);
@@ -2392,8 +2400,7 @@ fn hoverAt(doc: *const Document, line: u32, character: u32) ?[]const u8 {
     if (path.len == 0) return null;
 
     // 模块绑定名本身
-    var mb: ?[]const u8 = moduleOfBinding(text, path);
-    if (mb == null and std.mem.eql(u8, path, "std")) mb = "std";
+    const mb: ?[]const u8 = moduleRefOf(doc, text, path);
     if (mb) |mm| {
         var b: std.ArrayList(u8) = .empty;
         b.print(gpa, "```zx\nmodule `{s}`\n```", .{mm}) catch return null;
@@ -2405,8 +2412,7 @@ fn hoverAt(doc: *const Document, line: u32, character: u32) ?[]const u8 {
         const bind = path[0..dot];
         const member = path[dot + 1 ..];
         if (member.len > 0) {
-            var mm: ?[]const u8 = moduleOfBinding(text, bind);
-            if (mm == null and std.mem.eql(u8, bind, "std")) mm = "std";
+            const mm: ?[]const u8 = moduleRefOf(doc, text, bind);
             if (mm) |mod| {
                 if (resolveModuleFile(doc, mod)) |p| {
                     if (readFileSmall(p)) |t| {
@@ -2623,8 +2629,7 @@ fn calleeParamNames(text: []const u8, doc: *const Document, callee: []const u8) 
         const bind = callee[0..dot];
         const member = callee[dot + 1 ..];
         if (member.len == 0) return null;
-        var mm: ?[]const u8 = moduleOfBinding(text, bind);
-        if (mm == null and std.mem.eql(u8, bind, "std")) mm = "std";
+        const mm: ?[]const u8 = moduleRefOf(doc, text, bind);
         if (mm) |mod| {
             if (resolveModuleFile(doc, mod)) |p| {
                 if (readFileSmall(p)) |t| stmt = findDeclStmt(t, member);
@@ -3009,8 +3014,7 @@ fn signatureHelpAt(doc: *const Document, line: u32, character: u32) ?[]const u8 
     if (std.mem.lastIndexOfScalar(u8, callee, '.')) |dot| {
         const bind = callee[0..dot];
         const member = callee[dot + 1 ..];
-        var mm: ?[]const u8 = moduleOfBinding(text, bind);
-        if (mm == null and std.mem.eql(u8, bind, "std")) mm = "std";
+        const mm: ?[]const u8 = moduleRefOf(doc, text, bind);
         if (mm) |mod| {
             if (resolveModuleFile(doc, mod)) |p| {
                 if (readFileSmall(p)) |t| {
@@ -3153,6 +3157,29 @@ fn isKeywordWord(w: []const u8) bool {
         if (std.mem.eql(u8, kw, w)) return true;
     }
     return false;
+}
+
+/// 模块名补全：搜索目录里每个 .zx 的文件名主干 + std。tier 1——
+/// 输入 `glfw` 时 `glfw3`（模块）要排在 vendor 成员噪音（tier 3）前面；
+/// 编译器已支持裸模块名（module_probe），选中后 `glfw3.` 直接点成员。
+fn addModuleNames(list: *Json, seen: *std.StringHashMapUnmanaged(void), doc_dir: []const u8, prefix: []const u8) void {
+    if (std.mem.startsWith(u8, "std", prefix))
+        addItem(list, seen, "std", 9, "模块（编译器内建）", 1);
+    var dirs: std.ArrayList([]const u8) = .empty;
+    defer dirs.deinit(gpa);
+    modDirsInto(doc_dir, &dirs);
+    for (dirs.items) |d| {
+        var dir = Io.Dir.cwd().openDir(g_io, d, .{ .iterate = true }) catch continue;
+        defer dir.close(g_io);
+        var it = dir.iterate();
+        while (it.next(g_io) catch null) |entry| {
+            if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".zx")) continue;
+            const stem = entry.name[0 .. entry.name.len - 3];
+            if (std.mem.eql(u8, stem, "std")) continue;
+            if (!std.mem.startsWith(u8, stem, prefix)) continue;
+            addItem(list, seen, stem, 9, "模块", 1);
+        }
+    }
 }
 
 fn addIdents(list: *Json, seen: *std.StringHashMapUnmanaged(void), doc_text: []const u8, doc_dir: []const u8, prefix: []const u8) void {
@@ -3304,7 +3331,7 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
             }
 
             // module 绑定？const <path> = module("…")（等号两侧可有对齐空格）
-            const mod: ?[]const u8 = moduleOfBinding(text, path);
+            const mod: ?[]const u8 = moduleRefOf(doc, text, path);
             var decls: std.ArrayList(Decl) = .empty;
             defer decls.deinit(gpa);
 
@@ -3424,6 +3451,8 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
             if (prefix.len > 0 and std.mem.startsWith(u8, sn.label, prefix))
                 addSnippet(&list, &seen, sn);
         }
+        // 模块名排在工作区噪音前：裸模块名是合法引用，`glfw3.` 能点成员。
+        addModuleNames(&list, &seen, doc_dir, prefix);
         // 当前文件标识符 + 关键字 + 工作区标识符（分层排序）
         addIdents(&list, &seen, text, doc_dir, prefix);
         for (keywords) |kw| {

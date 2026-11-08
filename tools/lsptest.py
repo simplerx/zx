@@ -798,6 +798,86 @@ pnames = {h["label"] for h in bh if h.get("kind") == 2}
 check("inlayHint.externParams",
       {"r: ", "x: ", "mode: "} <= pnames, str(sorted(pnames))[:240])
 
+# 3s 裸模块名（用户 2026-11-08："使用 zx 导入的模块名反而点不出来"）。
+#     编译器已支持裸模块名（sema.c module_probe）：不写 module("…") 绑定，
+#     `glue.glClearColor(...)` 直接可用。语言服务器侧统一走 moduleRefOf，
+#     与编译器同一条解析。NOBIND 文档里 glue 故意不带绑定。
+NOBIND = '''const gl = module("gl.zx");
+
+const main = fn () i32 {
+    glue.glClearColor(0.0, 0.0, 0.0, 1.0);
+    const _alias = glue;
+    return 0;
+};
+'''
+open(os.path.join(SRC_DIR, "modref.zx"), "w", encoding="utf-8").write(NOBIND)
+moduri = "file:///" + os.path.join(SRC_DIR, "modref.zx").replace("\\", "/")
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": moduri, "languageId": "zx", "version": 1, "text": NOBIND}}})
+
+def mod_items(off, rid):
+    send({"jsonrpc": "2.0", "id": rid, "method": "textDocument/completion", "params": {
+        "textDocument": {"uri": moduri}, "position": pos(NOBIND, off)}})
+    r, _ = recv_id("completion.modref", rid)
+    items = r["result"]["items"] if r and r.get("result") else []
+    return {i["label"]: i for i in items}
+
+# 裸名点成员：glue. → extern 成员全套（这条文档里没有 glue 绑定）
+off = NOBIND.index("glue.") + len("glue.")
+d0 = mod_items(off, 95)
+check("completion.bareModule.dot",
+      {"glClearColor", "glClear", "glViewport", "GL_COLOR_BUFFER_BIT"} <= set(d0),
+      str(sorted(d0))[:240])
+check("completion.bareModule.fnKind", d0.get("glClear", {}).get("kind") == 3,
+      str(d0.get("glClear"))[:160])
+
+# 非 dot：输入 glu → glue（模块，kind=9）排前；vendor 成员噪音（tier 3）在后
+off = NOBIND.index("glue.glClearColor") + len("glu")
+d1 = mod_items(off, 96)
+mitem = d1.get("glue", {})
+check("completion.bareModule.name",
+      mitem.get("kind") == 9 and mitem.get("insertTextFormat") is None
+      and (mitem.get("sortText") or "~") < (d1.get("glClearColor", {}).get("sortText") or "~"),
+      str(mitem)[:200])
+
+# 悬浮裸模块名（独立引用，不在点路径里）→ module `glue`
+off = NOBIND.index("_alias = glue;") + len("_alias = glue") - 1
+send({"jsonrpc": "2.0", "id": 97, "method": "textDocument/hover", "params": {
+    "textDocument": {"uri": moduri}, "position": pos(NOBIND, off)}})
+r, _ = recv_id("hover.modref", 97)
+hv = r["result"]["contents"]["value"] if r and r.get("result") else ""
+check("hover.bareModule", hv == "```zx\nmodule `glue`\n```", repr(hv[:120]))
+
+# 签名帮助 / 定义跳转 / 参数名 inlay：与绑定同一条解析
+off = NOBIND.index("glue.glClearColor(") + len("glue.glClearColor(")
+send({"jsonrpc": "2.0", "id": 98, "method": "textDocument/signatureHelp", "params": {
+    "textDocument": {"uri": moduri}, "position": pos(NOBIND, off)}})
+r, _ = recv_id("signature.modref", 98)
+sigs = r["result"]["signatures"] if r and r.get("result") else []
+check("signature.bareModule",
+      bool(sigs) and sigs[0]["label"].startswith("glClearColor(r: f32"),
+      str(sigs[:1])[:200])
+
+off = NOBIND.index("glue.glClearColor") + len("glue") - 1
+send({"jsonrpc": "2.0", "id": 99, "method": "textDocument/definition", "params": {
+    "textDocument": {"uri": moduri}, "position": pos(NOBIND, off)}})
+r, _ = recv_id("definition.modref", 99)
+loc = r["result"] if r else None
+target = loc.get("uri", "") if isinstance(loc, dict) else (
+    loc[0].get("uri", "") if isinstance(loc, list) and loc else "")
+check("definition.bareModule", "vendor/glue.zx" in target, str(loc)[:200])
+
+off = NOBIND.index("glue.glClearColor(") + len("glue.glClearColor(")
+send({"jsonrpc": "2.0", "id": 100, "method": "textDocument/inlayHint", "params": {
+    "textDocument": {"uri": moduri},
+    "range": {"start": {"line": 0, "character": 0},
+              "end": {"line": NOBIND.count("\n") + 1, "character": 0}}}})
+r, _ = recv_id("inlayHint.modref", 100)
+mh = r["result"] if r and r.get("result") is not None else []
+mnames = {h["label"] for h in mh if h.get("kind") == 2}
+check("inlayHint.bareModuleParams",
+      {"r: ", "g: ", "b: ", "a: "} <= mnames, str(sorted(mnames))[:240])
+
 # 9 shutdown/exit
 send({"jsonrpc": "2.0", "id": 8, "method": "shutdown", "params": None})
 recv_id("shutdown", 8)

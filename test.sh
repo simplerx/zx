@@ -642,6 +642,40 @@ else
     printf "  FAIL 离线文档站过期或缺失\n"; cat "$TPFX.site"; fail=1
 fi
 
+# 2.56 裸模块名：不写 module("…") 绑定，模块名直接当命名空间用。
+# 用户 2026-11-08 反馈 "使用 zx 导入的模块名反而点不出来"。守的是 src/sema.c
+# 的 module_probe + NK_IDENT 兜底（KEEP 标记）：① 值位置调用/结构/别名/裸 std；
+# ② 局部名遮蔽同名模块（lookup 永远优先）；③ 未知名仍报 unknown identifier，
+# probe 绝不自己打 "cannot open module" 干扰诊断。
+printf "\n== 裸模块名（模块名即命名空间，不需绑定）\n"
+BP="$TPFX.modprobe"
+if mkdir -p "$BP/src" \
+   && printf '{"name":"modprobe","version":"0.1.0","main":"src/main.zx","out":"modprobe"}\n' > "$BP/zx.json" \
+   && printf 'pub const add = fn (a: i32, b: i32) i32 { return a + b; };\n\npub const Point = struct { x: i32, y: i32 };\n' > "$BP/src/util.zx" \
+   && printf 'pub const main = fn () !i32 {\n    const s = util.add(1, 2);\n    const p = util.Point{ .x = s, .y = 0 };\n    const g2 = util;\n    std.println("{} {}", p.x + g2.add(0, 1), p.y);\n    return 0;\n};\n' > "$BP/src/main.zx" \
+   && ( cd "$BP" && "$ZXCW" run > "$TPFX.modrun" 2>&1 ) \
+   && grep -q "^4 0$" "$TPFX.modrun"; then
+    printf "  ok   裸模块名调用/结构/别名/裸 std 跑通\n"
+else
+    printf "  FAIL 裸模块名编译/运行\n"; cat "$TPFX.modrun" 2>/dev/null; fail=1
+fi
+# 遮蔽：名字能解析到绑定就永远走绑定（probe 只在 lookup 失败时才接手）
+if printf 'pub const main = fn () !i32 {\n    const util = 5;\n    return util + 1;\n};\n' > "$BP/src/main.zx" \
+   && ( cd "$BP" && "$ZXCW" run > "$TPFX.modshadow" 2>&1 ); then
+    printf "  ok   局部绑定遮蔽同名模块\n"
+else
+    printf "  FAIL 同名遮蔽被模块查找劫胡\n"; cat "$TPFX.modshadow" 2>/dev/null; fail=1
+fi
+# 负例：未知名仍报 unknown identifier，且 probe 不能探到什么都往上报
+printf 'pub const main = fn () !i32 {\n    return nosuchmod_9x7.foo;\n};\n' > "$BP/src/main.zx"
+( cd "$BP" && "$ZXCW" src/main.zx --check > "$TPFX.modbad" 2>&1 ) || true
+if grep -q "unknown identifier 'nosuchmod_9x7'" "$TPFX.modbad" \
+   && ! grep -q "cannot open module" "$TPFX.modbad"; then
+    printf "  ok   未知名仍报 unknown identifier（probe 保持静默）\n"
+else
+    printf "  FAIL 负例诊断被 probe 劫胡或改变\n"; cat "$TPFX.modbad"; fail=1
+fi
+
 printf "\n== LSP 冒烟（tools/lsptest.py：补全/跳转 + vendor/ 与 deps）\n"
 if [ -x "$ZYG" ] && command -v python >/dev/null 2>&1; then
     mkdir -p "$TPFX.lspbin"
