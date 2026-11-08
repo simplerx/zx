@@ -65,6 +65,26 @@ const lit2 = fn () i32 {
     std.println("{} {}", o2.count, o2.name);
     return 0;
 };
+
+// 匿名类型线（3v/3w/3x/3y/3z 守门）：匿名绑定、嵌套匿名、匿名参数第二位、嵌套实参
+const nest = fn () i32 {
+    let anon = .{ .x = 1, .y = "s" };
+    let nv = .{ .pos = .{ .x = 1, .y = 2 }, .tag = "t" };
+    let tp = .{ 1, 2.5 };
+    conf("n", .{ .depth = 2, .kind = "k" });
+    deep(.{ .opts = .{ .width = 1, .height = 2 }, .flag = true });
+    std.println("{} {} {}", anon.x, nv.pos.x, tp.0);
+    let sn1 = an;
+    return 0;
+};
+
+const conf = fn (name: []const u8, opts: struct{ depth: i32, kind: []const u8 }) void {
+    std.println("{} {} {}", name, opts.depth, opts.kind);
+};
+
+const deep = fn (cfg: struct{ opts: struct{ width: i32, height: i32 }, flag: bool }) void {
+    std.println("{} {}", cfg.opts.width, cfg.flag);
+};
 """
 
 uri = "file:///" + TESTDIR.replace("\\", "/") + "/main.zx"
@@ -241,6 +261,77 @@ check("completion.anon.fields", {"a", "msg"} <= labels, str(sorted(labels)))
 details = {i["label"]: i.get("detail") for i in r["result"]["items"]} if r and r.get("result") else {}
 check("completion.anon.fieldType", details.get("a") == "i32"
       and details.get("msg") == "[]const u8", str(details))
+
+# 3v 匿名 struct 绑定：`anon.` → 字段来自 .{ … } 推出的匿名类型
+#     （GUARD：匿名类型线的核心——hover 有类型、点补全也必须有候选）
+off = MAIN.index("anon.x") + len("anon.")
+send({"jsonrpc": "2.0", "id": 30, "method": "textDocument/completion", "params": {
+    "textDocument": {"uri": uri}, "position": pos(MAIN, off)}})
+r, _ = recv_id("completion.anonBind", 30)
+labels = {i["label"] for i in r["result"]["items"]} if r and r.get("result") else set()
+check("completion.anonBind.fields", {"x", "y"} <= labels, str(sorted(labels)))
+details = {i["label"]: i.get("detail") for i in r["result"]["items"]} if r and r.get("result") else {}
+check("completion.anonBind.fieldType", details.get("x") == "i32"
+      and details.get("y") == "str", str(details))
+
+# 3w 嵌套匿名类型：`nv.pos.` → 内层匿名 struct 的字段
+off = MAIN.index("nv.pos.x") + len("nv.pos.")
+send({"jsonrpc": "2.0", "id": 31, "method": "textDocument/completion", "params": {
+    "textDocument": {"uri": uri}, "position": pos(MAIN, off)}})
+r, _ = recv_id("completion.anonNest", 31)
+labels = {i["label"] for i in r["result"]["items"]} if r and r.get("result") else set()
+details = {i["label"]: i.get("detail") for i in r["result"]["items"]} if r and r.get("result") else {}
+check("completion.anonNest.fields", {"x", "y"} <= labels, str(sorted(labels)))
+check("completion.anonNest.fieldType", details.get("x") == "i32", str(details))
+
+# 3w2 嵌套匿名的行内类型提示 + 匿名元组形状（.{1, 2.5} 是 {i32,f64}）
+send({"jsonrpc": "2.0", "id": 32, "method": "textDocument/inlayHint", "params": {
+    "textDocument": {"uri": uri},
+    "range": {"start": {"line": 0, "character": 0},
+              "end": {"line": MAIN.count("\n"), "character": 0}}}})
+r, _ = recv_id("inlayHint.anonNest", 32)
+atypes = [h["label"] for h in (r["result"] or []) if h.get("kind") == 1] if r else []
+check("inlayHint.type.anonNest",
+      ": struct{pos:struct{x:i32,y:i32},tag:str}" in atypes, str(atypes))
+check("inlayHint.type.anonTuple", ": {i32,f64}" in atypes, str(atypes))
+
+# 3x 匿名参数第二位：conf("n", .{ … 补第二个 struct 形参的字段
+#     （GUARD：旧实现只认第一个 struct 形参，这里钉死按实参位置对齐）
+off = MAIN.index('conf("n", .{ .depth') + len('conf("n", .{ .')
+send({"jsonrpc": "2.0", "id": 33, "method": "textDocument/completion", "params": {
+    "textDocument": {"uri": uri}, "position": pos(MAIN, off)}})
+r, _ = recv_id("completion.anonArg2", 33)
+labels = {i["label"] for i in r["result"]["items"]} if r and r.get("result") else set()
+details = {i["label"]: i.get("detail") for i in r["result"]["items"]} if r and r.get("result") else {}
+check("completion.anonArg2.fields", {"depth", "kind"} <= labels, str(sorted(labels)))
+check("completion.anonArg2.fieldType", details.get("depth") == "i32"
+      and details.get("kind") == "[]const u8", str(details))
+
+# 3y 嵌套实参字段链：deep(.{ .opts = .{ . → 内层 struct 形参的字段
+off = MAIN.index("deep(.{ .opts = .{ .width") + len("deep(.{ .opts = .{ .")
+send({"jsonrpc": "2.0", "id": 34, "method": "textDocument/completion", "params": {
+    "textDocument": {"uri": uri}, "position": pos(MAIN, off)}})
+r, _ = recv_id("completion.anonDeep", 34)
+labels = {i["label"] for i in r["result"]["items"]} if r and r.get("result") else set()
+check("completion.anonDeep.fields", {"width", "height"} <= labels, str(sorted(labels)))
+
+# 3z 嵌套成员 hover：nv.pos.x → x: i32
+off = MAIN.index("nv.pos.x") + len("nv.pos.")
+send({"jsonrpc": "2.0", "id": 35, "method": "textDocument/hover", "params": {
+    "textDocument": {"uri": uri}, "position": pos(MAIN, off)}})
+r, _ = recv_id("hover.anonNest", 35)
+hv = r["result"]["contents"]["value"] if r and r.get("result") else ""
+check("hover.anonNest", "x: i32" in hv, hv[:120])
+
+# 3za snippet：匿名 struct 字面量模板（输入 an → anon）
+off = MAIN.index("let sn1 = an;") + len("let sn1 = an")
+send({"jsonrpc": "2.0", "id": 36, "method": "textDocument/completion", "params": {
+    "textDocument": {"uri": uri}, "position": pos(MAIN, off)}})
+r, _ = recv_id("completion.anonSnippet", 36)
+smap = {i["label"]: i for i in r["result"]["items"]} if r and r.get("result") else {}
+check("completion.snippet.anon", smap.get("anon", {}).get("insertTextFormat") == 2
+      and smap.get("anon", {}).get("insertText") == ".{ .${1:field} = ${2:0} }$0",
+      str(smap.get("anon"))[:200])
 
 # 3q LSP snippet 补全：写 `if` / `fn` + Tab 展开骨架
 #     GUARD: 这几条把模板内容钉死——4 空格缩进、块尾 `;`、tabstop，
