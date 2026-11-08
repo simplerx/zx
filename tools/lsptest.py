@@ -890,6 +890,106 @@ items = ip_items(IALIAS, off, 93)
 check("completion.importModule.aliasBoundHidden",
       not imports(items, "glue"), str(imports(items, "glue"))[:240])
 
+# 3u 自定义类型实例 / 函数调用骨架（用户 2026-11-08：
+#     "自定义类型实例和函数调用 添加snippet 提示"）。当前文件声明的容器
+#     补 `Name{ .f = … }` 实例骨架，函数补带形参占位的调用骨架；
+#     方法（首参 self）不列顶层调用骨架，点补全负责。
+SNIP3 = '''const Obj = struct {
+    count: i32,
+    name: []const u8,
+};
+
+const Shape = union {
+    circle: f64,
+};
+
+pub const make = fn () Obj {
+    return Obj{ .count = 0, .name = "x" };
+};
+
+pub const greet = fn (name: []const u8, n: i32) void {
+    std.println("{}", name);
+};
+
+const bump = fn (self: *Obj, d: i32) i32 {
+    return self.count + d;
+};
+
+pub const main = fn () i32 {
+    mak
+    gre
+    bum
+    Obj
+    Sh
+    return 0;
+};
+'''
+spath = os.path.join(SRC_DIR, "snipprobe.zx")
+open(spath, "w", encoding="utf-8").write(SNIP3)
+spuri = "file:///" + spath.replace("\\", "/")
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": spuri, "languageId": "zx", "version": 1, "text": SNIP3}}})
+
+def sp_items(text, off, rid):
+    send({"jsonrpc": "2.0", "id": rid, "method": "textDocument/completion", "params": {
+        "textDocument": {"uri": spuri}, "position": pos(text, off)}})
+    r, _ = recv_id("completion", rid)
+    return r["result"]["items"] if r and r.get("result") else []
+
+def sp_snips(items):
+    return [i for i in items if i.get("kind") == 15]
+
+# 函数调用骨架：零参 fn()、带参 fn(a, b)
+off = SNIP3.index("    mak\n") + len("    mak")
+items = sp_items(SNIP3, off, 95)
+mk = [i for i in sp_snips(items) if i["label"] == "make(...)"]
+check("completion.exprSnippet.call", len(mk) == 1, str(items)[:240])
+check("completion.exprSnippet.callBody",
+      bool(mk) and mk[0].get("insertText") == "make()$0", str(mk)[:240])
+check("completion.exprSnippet.callFmt",
+      bool(mk) and mk[0].get("insertTextFormat") == 2, str(mk)[:240])
+off = SNIP3.index("    gre\n") + len("    gre")
+items = sp_items(SNIP3, off, 96)
+gr = [i for i in sp_snips(items) if i["label"] == "greet(...)"]
+check("completion.exprSnippet.callArgs",
+      bool(gr) and gr[0].get("insertText") == "greet(${1:name}, ${2:n})$0", str(gr)[:240])
+# 方法（首参 self）不列调用骨架：`o.bump()` 由点补全负责
+off = SNIP3.index("    bum\n") + len("    bum")
+items = sp_items(SNIP3, off, 97)
+check("completion.exprSnippet.noMethod",
+      "bump(...)" not in {i["label"] for i in items},
+      str([i["label"] for i in items])[:240])
+# 自定义类型实例骨架：struct 多字段、union 字段字面量同样成立
+off = SNIP3.index("    Obj\n") + len("    Obj")
+items = sp_items(SNIP3, off, 98)
+ob = [i for i in sp_snips(items) if i["label"] == "Obj{...}"]
+check("completion.exprSnippet.ctor",
+      len(ob) == 1, str(items)[:240])
+check("completion.exprSnippet.ctorBody",
+      bool(ob) and ob[0].get("insertText") ==
+      "Obj{ .count = ${1:0}, .name = ${2:0} }$0", str(ob)[:240])
+off = SNIP3.index("    Sh\n") + len("    Sh")
+items = sp_items(SNIP3, off, 99)
+sh = [i for i in sp_snips(items) if i["label"] == "Shape{...}"]
+check("completion.exprSnippet.ctorUnion",
+      bool(sh) and sh[0].get("insertText") == "Shape{ .circle = ${1:0} }$0", str(sh)[:240])
+# 点上下文（字段/成员补全）不出骨架项
+SPDOT = '''const Obj = struct {
+    count: i32,
+};
+pub const main = fn () i32 {
+    Obj{.
+    return 0;
+};
+'''
+send({"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {
+    "textDocument": {"uri": spuri, "version": 2},
+    "contentChanges": [{"text": SPDOT}]}})
+off = SPDOT.index("Obj{.") + len("Obj{.")
+items = sp_items(SPDOT, off, 100)
+check("completion.exprSnippet.noDotCtx",
+      len(sp_snips(items)) == 0, str([i["label"] for i in items])[:240])
+
 # 9 shutdown/exit
 send({"jsonrpc": "2.0", "id": 8, "method": "shutdown", "params": None})
 recv_id("shutdown", 8)

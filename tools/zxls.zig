@@ -3094,6 +3094,126 @@ fn addSnippet(list: *Json, seen: *std.StringHashMapUnmanaged(void), s: Snip) voi
     list.raw("}}", .{});
 }
 
+/// KEEP - 表达式位置的自定义类型实例 / 函数调用骨架。用户 2026-11-08：
+/// "自定义类型实例和函数调用 添加snippet 提示"。当前文件声明的容器
+/// （const Name = struct/union {…}）补一条 `Name{ .f = … }` 实例骨架，
+/// 声明的函数补一条带形参占位的 `name(a, b)` 调用骨架。只收当前文件——
+/// 跨文件裸名不可用（名字只能来自显式绑定，那类工作区噪音已按用户要求
+/// 删除）；模块成员走 `绑定名.` 点补全。首参 self 是实例方法，不列调用
+/// 骨架（`o.bump()` 由点补全负责）；enum 只出变体，不造字面量骨架。
+/// label 带 `()` / `{...}` 后缀，与普通标识符项并存不互斥；静态模板表
+/// （if/fn/new…）先入 seen，与本函数同名也不会撞。展开形态由
+/// lsptest.py completion.exprSnippet.* 钉住。
+fn addSnippetRaw(list: *Json, seen: *std.StringHashMapUnmanaged(void),
+                 label: []const u8, insert: []const u8, detail: []const u8) void {
+    if (seen.contains(label)) return;
+    seen.put(gpa, dupe(label), {}) catch {};
+    if (seen.count() > 1) list.raw(",", .{});
+    list.raw("{{\"label\":", .{});
+    list.str(label);
+    list.raw(",\"kind\":15,\"detail\":", .{});
+    list.str(detail);
+    var st: std.ArrayList(u8) = .empty;
+    defer st.deinit(gpa);
+    st.append(gpa, 'b') catch {};
+    st.appendSlice(gpa, label) catch {};
+    list.raw(",\"sortText\":", .{});
+    list.str(st.items);
+    list.raw(",\"insertText\":", .{});
+    list.str(insert);
+    list.raw(",\"insertTextFormat\":2", .{});
+    list.raw("}}", .{});
+}
+
+fn addCallSnippet(list: *Json, seen: *std.StringHashMapUnmanaged(void),
+                  text: []const u8, name: []const u8) void {
+    const stmt = findDeclStmt(text, name) orelse return;
+    const sig = sigOfStmt(stmt);
+    if (!sig.is_fn) return;
+    var ins: std.ArrayList(u8) = .empty;
+    defer ins.deinit(gpa);
+    ins.appendSlice(gpa, name) catch return;
+    ins.append(gpa, '(') catch return;
+    var first = true;
+    var tab: usize = 1;
+    for (sig.params) |p0| {
+        var nm = trimSl(p0);
+        if (std.mem.indexOfScalar(u8, nm, ':')) |c| nm = trimSl(nm[0..c]);
+        if (nm.len == 0) continue;
+        // 首参 self 是实例方法：`o.bump()` 走点补全，顶层不列调用骨架
+        if (tab == 1 and std.mem.eql(u8, nm, "self")) return;
+        if (tab > 6) break;
+        if (!first) ins.appendSlice(gpa, ", ") catch return;
+        first = false;
+        ins.print(gpa, "${{{d}:{s}}}", .{ tab, nm }) catch return;
+        tab += 1;
+    }
+    ins.appendSlice(gpa, ")$0") catch return;
+    var lab: std.ArrayList(u8) = .empty;
+    defer lab.deinit(gpa);
+    lab.print(gpa, "{s}(...)", .{name}) catch return;
+    addSnippetRaw(list, seen, lab.items, ins.items, "调用骨架");
+}
+
+fn addCtorSnippet(list: *Json, seen: *std.StringHashMapUnmanaged(void),
+                  files: []const []const u8, name: []const u8) void {
+    var fields: std.ArrayList(Decl) = .empty;
+    defer fields.deinit(gpa);
+    if (!containerMembers(files, name, &fields)) return;
+    var ins: std.ArrayList(u8) = .empty;
+    defer ins.deinit(gpa);
+    ins.appendSlice(gpa, name) catch return;
+    ins.appendSlice(gpa, "{ ") catch return;
+    var used: usize = 0;
+    var tab: usize = 1;
+    for (fields.items) |dcl| {
+        if (dcl.is_fn or dcl.kind != .field or dcl.name.len == 0) continue;
+        if (tab > 3) break;
+        if (used > 0) ins.appendSlice(gpa, ", ") catch return;
+        ins.print(gpa, ".{s} = ${{{d}:0}}", .{ dcl.name, tab }) catch return;
+        used += 1;
+        tab += 1;
+    }
+    if (used == 0) return;
+    ins.appendSlice(gpa, " }$0") catch return;
+    var lab: std.ArrayList(u8) = .empty;
+    defer lab.deinit(gpa);
+    lab.print(gpa, "{s}{{...}}", .{name}) catch return;
+    addSnippetRaw(list, seen, lab.items, ins.items, "构造实例");
+}
+
+fn addExprSnippets(list: *Json, seen: *std.StringHashMapUnmanaged(void),
+                   doc: *const Document, text: []const u8, prefix: []const u8) void {
+    if (prefix.len == 0) return;
+    var decls: std.ArrayList(Decl) = .empty;
+    defer decls.deinit(gpa);
+    topLevelDecls(text, &decls, false);
+    var any_container = false;
+    for (decls.items) |d| {
+        if (!std.mem.startsWith(u8, d.name, prefix)) continue;
+        // 函数性由声明本身判定：`const make = fn () …` 在 topLevelDecls 里
+        // 是 .value（is_fn 只标裸 fn NAME(），那条给 extern 绑定用）。
+        var is_fn_decl = false;
+        if (findDeclStmt(text, d.name)) |st| {
+            if (sigOfStmt(st).is_fn) {
+                addCallSnippet(list, seen, text, d.name);
+                is_fn_decl = true;
+            }
+        }
+        if (!is_fn_decl) any_container = true;
+    }
+    if (!any_container) return;
+    var sf = scanFiles(doc, text);
+    defer sf.deinit(gpa);
+    for (decls.items) |d| {
+        if (!std.mem.startsWith(u8, d.name, prefix)) continue;
+        if (findDeclStmt(text, d.name)) |st| {
+            if (sigOfStmt(st).is_fn) continue;
+        }
+        if (isContainerIn(sf.items, d.name)) addCtorSnippet(list, seen, sf.items, d.name);
+    }
+}
+
 fn isKeywordWord(w: []const u8) bool {
     for (keywords) |kw| {
         if (std.mem.eql(u8, kw, w)) return true;
@@ -3439,6 +3559,8 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
         // 模块导入项（不创造隐式名字，只插入绑定语句）
         addImportModules(&list, &seen, text, off, doc_dir, prefix);
         addIdents(&list, &seen, text, prefix);
+        // KEEP - 自定义类型实例 / 函数调用骨架（当前文件声明）
+        addExprSnippets(&list, &seen, doc, text, prefix);
         for (keywords) |kw| {
             if (prefix.len == 0 or std.mem.startsWith(u8, kw, prefix)) {
                 // 关键字里有骨架的走 snippet（写 `if` + Tab 展开），
