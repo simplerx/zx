@@ -335,42 +335,63 @@ else
     printf "  FAIL zxc init（自动接管用例）\n"; cat "$TPFX.cli.ainit" 2>/dev/null; fail=1
 fi
 
-# 2.54c zxc add / fetch：两层声明与锁 + run 绝不联网。
-# 守的是：① add 写进 zx.json 的 vendor 声明必须仍是合法 JSON、不动别的字段；
-# ② zx.lock 记 tree hash 与 git commit；③ 单头 / 归档 / git 三种源都能落地
-# 并被自动接管；④ fetch 幂等、篡改检测、缺库恢复、声明锁冲突拒绝；
-# ⑤ 源站下线后 run 仍成功（构建路径一行网络代码都没有）；
-# ⑥ 原 add 的能力完整保留在 include 名下。
-printf "\n== zxc add/fetch（zx.json 声明 + zx.lock 锁定，run 不联网）\n"
+# 2.54c zxc add / fetch：清单极简（URL 数组）+ 锁承担全部安全锚点。
+# 守的是：① zx.json 只允许 name/version/main/out/deps/vendor，vendor 必须是
+# 字符串数组，不许再冒出 ref/sha256/subdir 之类的参数；② 旧 CLI 参数一律删除，
+# 旧写法直接报错；③ 单头 / 归档 / git 三种源零参数落地并被自动接管；
+# ④ fetch 幂等、篡改检测、缺库恢复、URL 变更拒绝、锁内 sha256/commit 复现；
+# ⑤ 源站下线 run 仍成功；⑥ include 的能力完整保留。
+printf "\n== zxc add/fetch（zx.json 只记 URL + zx.lock 全锚点，run 不联网）\n"
 FDIR="$pdir/fetch"
 FSRV="$FDIR/srv"
 FDEMO="$FDIR/demo"
-if mkdir -p "$FSRV/flib-1.0/include" "$FSRV/flib-1.0/src" "$FSRV/fgit/include" "$FSRV/fgit/src" \
+if mkdir -p "$FSRV/flib-1.0/include" "$FSRV/flib-1.0/src" "$FSRV/fgit.git/include" "$FSRV/fgit.git/src" \
    && printf '#define FMINI_K 42\n' > "$FSRV/fmini.h" \
    && printf '#define FLIB_V 8\nint flib_add(int a, int b);\n' > "$FSRV/flib-1.0/include/flib.h" \
    && printf '#include "flib.h"\nint flib_add(int a, int b) { return a + b; }\n' > "$FSRV/flib-1.0/src/add.c" \
    && ( cd "$FSRV" && tar -czf flib.tar.gz flib-1.0 ) \
-   && printf '#define FGIT_K 5\nint fgit_mul(int a, int b);\n' > "$FSRV/fgit/include/fgit.h" \
-   && printf '#include "fgit.h"\nint fgit_mul(int a, int b) { return a * b; }\n' > "$FSRV/fgit/src/mul.c" \
-   && ( cd "$FSRV/fgit" && git init -q && git config core.autocrlf false && git config user.email t@t.t && git config user.name t \
-        && git add . && git commit -q -m init && git tag v1 ) \
+   && printf '#define FGIT_K 5\nint fgit_mul(int a, int b);\n' > "$FSRV/fgit.git/include/fgit.h" \
+   && printf '#include "fgit.h"\nint fgit_mul(int a, int b) { return a * b; }\n' > "$FSRV/fgit.git/src/mul.c" \
+   && ( cd "$FSRV/fgit.git" && git init -q && git config core.autocrlf false && git config user.email t@t.t && git config user.name t \
+        && git add . && git commit -q -m init ) \
    && ( cd "$FDIR" && "$ZXCW" init demo > "$TPFX.cli.finit" 2>&1 ); then
-    FSHA=$(sha256sum "$FSRV/fmini.h" | cut -d' ' -f1)
-    # 三种源：单头（带预置 sha256）、tar.gz 归档、git tag
-    if ( cd "$FDEMO" && ZX_ALLOW_LOCAL_FETCH=1 "$ZXCW" add "file:///$FSRV/fmini.h" --name fmini --sha256 "$FSHA" > "$TPFX.cli.fa1" 2>&1 ) \
+    # 三种源，全部零参数：单头 / tar.gz（自动下钻顶层目录）/ .git 结尾的仓库
+    if ( cd "$FDEMO" && ZX_ALLOW_LOCAL_FETCH=1 "$ZXCW" add "file:///$FSRV/fmini.h" > "$TPFX.cli.fa1" 2>&1 ) \
        && ( cd "$FDEMO" && ZX_ALLOW_LOCAL_FETCH=1 "$ZXCW" add "file:///$FSRV/flib.tar.gz" > "$TPFX.cli.fa2" 2>&1 ) \
-       && ( cd "$FDEMO" && ZX_ALLOW_LOCAL_FETCH=1 "$ZXCW" add "file:///$FSRV/fgit" --git --ref v1 --name fgit > "$TPFX.cli.fa3" 2>&1 ) \
+       && ( cd "$FDEMO" && ZX_ALLOW_LOCAL_FETCH=1 "$ZXCW" add "file:///$FSRV/fgit.git" > "$TPFX.cli.fa3" 2>&1 ) \
        && [ -f "$FDEMO/vendor/fmini.h" ] && [ -f "$FDEMO/vendor/fmini.zx" ] \
        && [ -f "$FDEMO/vendor/flib.clib" ] && [ -f "$FDEMO/vendor/fgit.zx" ] \
-       && python -c "import json,sys; d=json.load(open(sys.argv[1])); assert sorted(d['vendor'])==['fgit','flib','fmini']; assert d['name']=='demo'" "$FDEMO/zx.json" \
+       && python -c "import json,sys; d=json.load(open(sys.argv[1])); \
+assert set(d) <= set(['name','version','main','out','deps','vendor']), d; \
+assert isinstance(d['vendor'], list) and len(d['vendor'])==3, d['vendor']; \
+assert all(isinstance(x,str) for x in d['vendor']), d['vendor']; \
+assert d['name']=='demo'" "$FDEMO/zx.json" \
        && grep -q "resolved = [0-9a-f]\{40\}" "$FDEMO/zx.lock" \
-       && grep -q "tree = [0-9a-f]\{64\}" "$FDEMO/zx.lock"; then
-        printf "  ok   add 三种源：声明 / 锁 / 绑定齐备，zx.json 仍合法\n"
+       && grep -q "tree = [0-9a-f]\{64\}" "$FDEMO/zx.lock" \
+       && grep -q "sha256 = [0-9a-f]\{64\}" "$FDEMO/zx.lock"; then
+        printf "  ok   零参数 add 三种源：清单只有 URL 数组，锚点自动进 lock\n"
     else
-        printf "  FAIL zxc add 三层产物\n"
+        printf "  FAIL zxc add 三层产物 / 清单格式\n"
         for f in "$TPFX.cli.fa1" "$TPFX.cli.fa2" "$TPFX.cli.fa3"; do cat "$f" 2>/dev/null; done
-        fail=1
+        cat "$FDEMO/zx.json" 2>/dev/null; fail=1
     fi
+    # 旧参数不再存在：给了就明确报错，防止有人把参数悄悄加回来
+    if ( cd "$FDEMO" && "$ZXCW" add "file:///$FSRV/fmini.h" --name foo > "$TPFX.cli.fold" 2>&1 ) \
+       || ! grep -q "unknown option" "$TPFX.cli.fold"; then
+        printf "  FAIL 已删除的 --name 竟被接受\n"; cat "$TPFX.cli.fold" 2>/dev/null; fail=1
+    else
+        printf "  ok   旧参数（--name/--ref/--sha256/--subdir/--git）已彻底移除\n"
+    fi
+    # 旧版「每库一个对象」的 vendor 写法按新规矩拒绝，不做兼容
+    cp "$FDEMO/zx.json" "$TPFX.cli.fjson.bak"
+    printf '{\n  "vendor": { "x": { "url": "https://example.com/x.h" } }\n}\n' > "$FDEMO/zx.json"
+    if ( cd "$FDEMO" && "$ZXCW" fetch > "$TPFX.cli.flegacy" 2>&1 ) \
+       || ! grep -q "must be a URL list" "$TPFX.cli.flegacy"; then
+        printf "  FAIL 旧版 vendor 对象写法未被拒绝\n"; cat "$TPFX.cli.flegacy" 2>/dev/null; fail=1
+    else
+        printf "  ok   旧版 vendor 对象写法按新规矩报错（无兼容层）\n"
+    fi
+    cp "$TPFX.cli.fjson.bak" "$FDEMO/zx.json"
     printf 'const std = module("std");\nconst a = module("flib");\nconst b = module("fgit");\nconst c = module("fmini");\nconst main = fn () i32 {\n    std.println("add={} mul={} k={} mini={}", a.flib_add(3, 4), b.fgit_mul(2, 6), b.FGIT_K, c.FMINI_K);\n    return 0;\n};\n' > "$FDEMO/src/main.zx"
     if ( cd "$FDEMO" && "$ZXCW" run > "$TPFX.cli.frun" 2>&1 ) \
        && grep -q "add=7 mul=12 k=5 mini=42" "$TPFX.cli.frun"; then
@@ -395,6 +416,13 @@ if mkdir -p "$FSRV/flib-1.0/include" "$FSRV/flib-1.0/src" "$FSRV/fgit/include" "
     else
         printf "  FAIL fetch 幂等\n"; cat "$TPFX.cli.ff1" 2>/dev/null; fail=1
     fi
+    # fetch 的单条过滤：name 和 URL 都认（用户不必记「name 到底是什么」）
+    if ( cd "$FDEMO" && "$ZXCW" fetch "file:///$FSRV/fmini.h" > "$TPFX.cli.ffurl" 2>&1 ) \
+       && grep -q "1 ok, 0 problem" "$TPFX.cli.ffurl"; then
+        printf "  ok   fetch 既认库名也认 URL\n"
+    else
+        printf "  FAIL fetch 按 URL 定位\n"; cat "$TPFX.cli.ffurl" 2>/dev/null; fail=1
+    fi
     printf '// tampered\n' >> "$FDEMO/vendor/fmini.h"
     if ( cd "$FDEMO" && "$ZXCW" fetch fmini > "$TPFX.cli.ftamp" 2>&1 ) \
        || ! grep -q "content differs" "$TPFX.cli.ftamp"; then
@@ -410,23 +438,41 @@ if mkdir -p "$FSRV/flib-1.0/include" "$FSRV/flib-1.0/src" "$FSRV/fgit/include" "
     else
         printf "  FAIL 缺库恢复\n"; cat "$TPFX.cli.fres" 2>/dev/null; fail=1
     fi
-    # 上游 tag 改写：锁里的 commit 必须拒绝，且本地库一个字节都不动
+    # 锁里的 sha256 被改：重拉必须复现锁，不一致就拒绝（安全锚点在锁里）
+    sed -i "s/^sha256 = [0-9a-f]\{64\}/sha256 = 0000000000000000000000000000000000000000000000000000000000000000/" "$FDEMO/zx.lock"
+    if ( cd "$FDEMO" && ZX_ALLOW_LOCAL_FETCH=1 "$ZXCW" fetch fmini --force > "$TPFX.cli.fsha" 2>&1 ) \
+       || ! grep -qE "sha256 mismatch|sha256 differs" "$TPFX.cli.fsha"; then
+        printf "  FAIL 锁内 sha256 未被复现校验\n"; cat "$TPFX.cli.fsha" 2>/dev/null; fail=1
+    else
+        printf "  ok   锁内 sha256 复现校验（参数沉到 lock 仍安全）\n"
+    fi
+    # 上游 HEAD 前进：锁里的 commit 必须拒绝，且本地库一个字节都不动
     FBEFORE=$(sha256sum "$FDEMO/vendor/fgit/src/mul.c" | cut -d' ' -f1)
-    ( cd "$FSRV/fgit" && git commit -q --allow-empty -m evil && git tag -f v1 >/dev/null 2>&1 )
+    ( cd "$FSRV/fgit.git" && git commit -q --allow-empty -m evil )
     if ( cd "$FDEMO" && ZX_ALLOW_LOCAL_FETCH=1 "$ZXCW" fetch fgit --force > "$TPFX.cli.fevil" 2>&1 ) \
        || ! grep -q "lock mismatch: git commit" "$TPFX.cli.fevil" \
        || [ "$FBEFORE" != "$(sha256sum "$FDEMO/vendor/fgit/src/mul.c" | cut -d' ' -f1)" ]; then
-        printf "  FAIL 上游 tag 改写未被锁挡住\n"; cat "$TPFX.cli.fevil" 2>/dev/null; fail=1
+        printf "  FAIL 上游 HEAD 前进未被锁挡住\n"; cat "$TPFX.cli.fevil" 2>/dev/null; fail=1
     else
-        printf "  ok   上游 tag 改写被 zx.lock 的 commit 拒绝\n"
+        printf "  ok   上游 HEAD 前进被 zx.lock 的 commit 拒绝\n"
+    fi
+    # 声明里的 URL 被改：换源必须显式重新锁定
+    sed -i "s#file:///.*/fmini.h#https://example.com/fmini.h#" "$FDEMO/zx.json"
+    if ( cd "$FDEMO" && "$ZXCW" fetch fmini > "$TPFX.cli.fswap" 2>&1 ) \
+       || ! grep -q "URL in zx.json changed" "$TPFX.cli.fswap"; then
+        printf "  FAIL 换源未被拒绝\n"; cat "$TPFX.cli.fswap" 2>/dev/null; fail=1
+    else
+        printf "  ok   声明 URL 变更被拒绝（要求 --force 重新锁定）\n"
+    fi
+    # 声明里凭空多一个新源：fetch 只复现锁，绝不替人下载并写锁
+    python -c "import json,sys; p=sys.argv[1]; d=json.load(open(p)); d['vendor'].append('https://example.com/newlib.h'); open(p,'w').write(json.dumps(d,indent=2))" "$FDEMO/zx.json"
+    if ( cd "$FDEMO" && "$ZXCW" fetch newlib > "$TPFX.cli.fnew" 2>&1 ) \
+       || ! grep -q "not in zx.lock" "$TPFX.cli.fnew"; then
+        printf "  FAIL fetch 竟引入未锁定的新源\n"; cat "$TPFX.cli.fnew" 2>/dev/null; fail=1
+    else
+        printf "  ok   fetch 从不引入新源（新源必须显式 zxc add）\n"
     fi
     # 安全边界 + 命令改名回归
-    if ( cd "$FDEMO" && ZX_ALLOW_LOCAL_FETCH=1 "$ZXCW" add "file:///$FSRV/fmini.h" --name bad --sha256 0000000000000000000000000000000000000000000000000000000000000000 > "$TPFX.cli.fbad" 2>&1 ) \
-       || ! grep -q "sha256 mismatch" "$TPFX.cli.fbad"; then
-        printf "  FAIL sha256 不符未拒绝\n"; cat "$TPFX.cli.fbad" 2>/dev/null; fail=1
-    else
-        printf "  ok   预置 sha256 不符立即拒绝\n"
-    fi
     if ( cd "$FDEMO" && "$ZXCW" add http://example.com/x.h > "$TPFX.cli.fsch" 2>&1 ) \
        || ! grep -q "only https" "$TPFX.cli.fsch"; then
         printf "  FAIL 非 https 源未拒绝\n"; cat "$TPFX.cli.fsch" 2>/dev/null; fail=1

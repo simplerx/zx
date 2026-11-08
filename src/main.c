@@ -19,7 +19,7 @@
  *   zxc test [过滤]     运行 src/test/ 测试模块（零参 pub 函数即用例）
  *   zxc sync            扫 vendor/ 补生成缺失的 C 绑定（build/run 自动做）
  *   zxc include         接入本地/工程外的 C 库（原 add 的全部能力）
- *   zxc add <url>       从网站拉 C 库进 vendor/，写 zx.json 声明 + zx.lock
+ *   zxc add <url>       从网站拉 C 库进 vendor/；zx.json 只记 URL，锚点全进 zx.lock
  *   zxc fetch           按 zx.lock 校验/补齐 vendor/（唯一可能联网的补齐入口）
  *   zxc check / fmt     检查 / 格式化
  *
@@ -830,8 +830,8 @@ static void usage(FILE *f) {
         "  init [name]                      create a project: src/ sources, vendor/ module root, zx.json\n"
         "  include <name|header.h|dir>  include a local C library: binding into vendor/\n"
         "  include ./third_party/foo     point at a library tree; no files are copied\n"
-        "  add <url>                      fetch a C library into vendor/ (network, pinned)\n"
-        "  fetch [name]                   verify/restore vendor/ from zx.lock\n"
+        "  add <url> [--force]            fetch a C library into vendor/ (network, pinned)\n"
+        "  fetch [name|url] [--force]     verify/restore vendor/ from zx.lock\n"
         "  sync                            scan vendor/, generate missing C bindings now\n"
         "  cbuild [group]                 compile vendor/*.c into lib<group>.a (auto on include/build)\n"
         "  build [options]                  build per zx.json into out/ (intermediates in .zxc-cache/)\n"
@@ -870,45 +870,56 @@ static void print_version(FILE *f) {
 static int help_sub(FILE *f, const char *cmd) {
     if (!strcmp(cmd, "add")) {
         fprintf(f,
-            "zxc add <url> [options] -- fetch a C library into vendor/ (network)\n"
+            "zxc add <url> [--force] -- fetch a C library into vendor/ (network)\n"
             "\n"
             "  zxc add https://raw.githubusercontent.com/nothings/stb/master/stb_image.h\n"
-            "  zxc add https://gitcode.com/some/foo.git --ref v1.2.3 --name foo\n"
-            "  zxc add https://example.com/foo.tar.gz --subdir foo-1.2/include\n"
-            "  zxc add <url> --sha256 <64hex>     pin the expected bytes before downloading\n"
+            "  zxc add https://example.com/foo.tar.gz\n"
+            "  zxc add https://gitcode.com/some/foo.git\n"
             "\n"
-            "Two layers, both committed:\n"
-            "  zx.json  \"vendor\"   what a human asked for (url / ref / sha256 / subdir)\n"
-            "  zx.lock              what was actually fetched (git commit + tree hash + path)\n"
+            "Two files, both committed:\n"
+            "  zx.json   \"vendor\": [ \"<url>\", ... ]   just the URLs (like \"deps\")\n"
+            "  zx.lock   written by zxc: sha256, git commit, tree hash, path, nfiles\n"
             "\n"
-            "add downloads, verifies, writes both files, then lands the library in vendor/\n"
-            "so the normal auto-scan picks it up. `zxc run` NEVER uses the network;\n"
-            "it only warns when a locked library is missing. On another machine run\n"
-            "`zxc fetch` to restore vendor/ from zx.lock.\n"
+            "The manifest has NO options -- no ref / sha256 / subdir to remember.\n"
+            "zxc computes every integrity pin on the first add and stores it in\n"
+            "zx.lock; `zxc fetch` reproduces those pins on another machine.\n"
+            "Safety comes from the lock, not from extra fields in zx.json.\n"
             "\n"
-            "Sources: a single file (e.g. a header-only lib), a .tar/.tgz/.zip archive,\n"
-            "or a git repo (--ref pins a tag/branch; zx.lock pins the exact commit).\n"
+            "The library name is derived from the URL's last segment (extension\n"
+            "stripped): .../stb_image.h -> stb_image. It is the landing name under\n"
+            "vendor/, the [name] in zx.lock, and the argument of `zxc fetch <name>`.\n"
+            "It is NOT an address.\n"
+            "\n"
+            "Sources: a single file, a .tar/.tgz/.zip archive, or a git repo (URL\n"
+            "ending in .git). Archives auto-descend into a single top-level dir.\n"
             "Only https:// is accepted. loopback http:// is allowed for local mirrors;\n"
-            "file:// needs ZX_ALLOW_LOCAL_FETCH=1. No build scripts are executed, no\n"
-            "dependency resolution, no registry. Uses curl / git / tar from PATH.\n"
+            "file:// needs ZX_ALLOW_LOCAL_FETCH=1. No build scripts, no registry, no\n"
+            "dependency resolution. Uses curl / git / tar from PATH.\n"
             "\n"
-            "options: --name NAME --ref TAG --sha256 HEX --subdir PATH --git --force\n"
+            "To change the source or re-pin, run the same add with --force.\n"
             "For a library already on disk use `zxc include <path>` instead.\n");
         return 0;
     }
     if (!strcmp(cmd, "fetch")) {
         fprintf(f,
-            "zxc fetch [name] [--force] -- verify / restore vendor/ from zx.lock\n"
+            "zxc fetch [name|url] [--force] -- verify / restore vendor/ from zx.lock\n"
             "\n"
-            "  zxc fetch                check every declared library\n"
-            "  zxc fetch foo            check only 'foo'\n"
-            "  zxc fetch --force        re-download even if vendor/ looks intact\n"
+            "  zxc fetch                  check every library (the usual case)\n"
+            "  zxc fetch stb_image        check one by library name\n"
+            "  zxc fetch \"https://...\"    check one by its URL\n"
+            "  zxc fetch --force          re-download / restore even if modified\n"
             "\n"
-            "A library that is present and matches zx.lock is left untouched (no network).\n"
-            "A missing one is downloaded and MUST reproduce the locked tree hash; a\n"
-            "locally modified one is reported instead of silently overwritten -- pass\n"
-            "--force to restore it (the old copy is moved to .zxc-cache/fetch-backup/).\n"
-            "If zx.json and zx.lock disagree, fetch refuses: re-pin with `zxc add --force`.\n"
+            "name is NOT an address. It is the landing name under vendor/, derived\n"
+            "from the URL's last segment (.../stb_image.h -> stb_image), and is the\n"
+            "[name] key in zx.lock. If unsure, just run `zxc fetch` with no argument.\n"
+            "\n"
+            "A library present and matching zx.lock is left untouched (no network).\n"
+            "A missing one is downloaded and MUST reproduce the locked sha256 / commit\n"
+            "/ tree hash. A locally modified one is reported instead of silently\n"
+            "overwritten -- --force restores it (old copy: .zxc-cache/fetch-backup/).\n"
+            "A changed URL in zx.json is refused: re-pin with `zxc add <url> --force`.\n"
+            "A URL with no lock entry is refused too: fetch never adds a new source;\n"
+            "use `zxc add <url>` explicitly to introduce one.\n"
             "This is the only command that may download during a normal workflow.\n");
         return 0;
     }
@@ -982,7 +993,7 @@ static int help_sub(FILE *f, const char *cmd) {
             "\n"
             "generated:\n"
             "  src/main.zx       entry (example: module(\"std\") + greet/main)\n"
-            "  zx.json           project manifest: name / version / main / out / deps\n"
+            "  zx.json           project manifest: name / version / main / out / deps / vendor\n"
             "  vendor/           external module root (see below)\n"
             "  README.md .gitignore\n"
             "\n"
@@ -1371,13 +1382,14 @@ static const char *INIT_VENDOR_README =
     "库在远端时用 `zxc add <url>` 拉进来，同样落在这里：\n"
     "\n"
     "```sh\n"
-    "zxc add https://example.com/foo.h                 # 单头库\n"
-    "zxc add https://example.com/foo.git --ref v1.2.3  # git 仓库\n"
-    "zxc fetch                                        # 换机器后按 zx.lock 补齐\n"
+    "zxc add https://example.com/foo.h        # 单头库\n"
+    "zxc add https://example.com/foo.git      # git 仓库\n"
+    "zxc fetch                               # 换机器后按 zx.lock 补齐\n"
     "```\n"
     "\n"
-    "`zx.json` 的 `\"vendor\"` 段写意图，`zx.lock` 锁定实际内容（commit / 文件树\n"
-    "hash），两个都要提交。`zxc run` / `build` / `test` 永远不联网，缺库时跑 `zxc fetch`。\n"
+    "`zx.json` 的 `\"vendor\"` 就是一串 URL（和 `deps` 一样，没有别的参数），\n"
+    "`zx.lock` 由 zxc 写、把下载字节 / commit / 文件树 hash 全部钉死。两个都要提交。\n"
+    "`zxc run` / `build` / `test` 永远不联网，缺库时跑 `zxc fetch`。\n"
     "\n"
     "vendor/ 里的是源码依赖，应该提交进版本控制。\n";
 
@@ -2054,7 +2066,7 @@ static int cmd_include(int argc, char **argv, int argi) {
 }
 
 /* ---- add / fetch：从网站拉 C 库，两层声明与锁 -------------------------
- * `zxc add <url>`  写 zx.json 的声明、把实际结果锁进 zx.lock、落地 vendor/。
+ * `zxc add <url>`  往 zx.json 加一行 URL、把实际结果锁进 zx.lock、落地 vendor/。
  * `zxc fetch`      只按这两份文件校验 / 补齐，不改写声明。
  * run / build / test 一行联网代码都没有，只在缺库时提示去跑 fetch。
  */
@@ -2074,37 +2086,16 @@ static int fetch_lock_upsert(const FetchLock *item, char *err, size_t cap) {
     return rc;
 }
 
-static int fetch_name_ok(const char *s) {
-    if (!s || !*s || strlen(s) > 100) return 0;
-    for (const char *p = s; *p; p++)
-        if (!(isalnum((unsigned char)*p) || *p == '_' || *p == '-')) return 0;
-    return 1;
-}
-
-static const char *opt_value(int argc, char **argv, int *i) {
-    if (*i + 1 >= argc) {
-        fprintf(stderr, "zxc: %s needs a value\n", argv[*i]);
-        return NULL;
-    }
-    return argv[++(*i)];
-}
-
+/* `zxc add <url>` 重新构造后只剩一个参数：URL（外加 --force 重新锁定）。
+ * 库名、源类型、sha256、commit、tree hash 全由工具推导并写进 zx.lock，
+ * 人不用记第二个名字，也不用填任何可选字段。 */
 static int cmd_add(int argc, char **argv, int argi) {
-    const char *url = NULL, *uname = NULL, *uref = NULL, *usha = NULL, *usub = NULL;
-    int force = 0, force_git = 0;
+    const char *url = NULL;
+    int force = 0;
     for (int i = argi; i < argc; i++) {
         const char *a = argv[i];
-        if      (!strcmp(a, "--force")) force = 1;
-        else if (!strcmp(a, "--git"))   force_git = 1;
-        else if (!strcmp(a, "--name") || !strcmp(a, "--ref") ||
-                 !strcmp(a, "--sha256") || !strcmp(a, "--subdir")) {
-            const char *v = opt_value(argc, argv, &i);
-            if (!v) return 2;
-            if      (!strcmp(a, "--name"))   uname = v;
-            else if (!strcmp(a, "--ref"))    uref = v;
-            else if (!strcmp(a, "--sha256")) usha = v;
-            else                             usub = v;
-        } else if (a[0] == '-') {
+        if (!strcmp(a, "--force")) force = 1;
+        else if (a[0] == '-') {
             fprintf(stderr, "zxc add: unknown option '%s'\n", a);
             return 2;
         } else if (!url) url = a;
@@ -2114,8 +2105,7 @@ static int cmd_add(int argc, char **argv, int argi) {
         }
     }
     if (!url) {
-        fprintf(stderr, "usage: zxc add <url> [--name N] [--ref TAG] [--sha256 HEX]"
-                        " [--subdir P] [--git] [--force]\n");
+        fprintf(stderr, "usage: zxc add <url> [--force]\n");
         return 2;
     }
     if (!strstr(url, "://")) {
@@ -2135,16 +2125,8 @@ static int cmd_add(int argc, char **argv, int argi) {
     FetchDecl d;
     memset(&d, 0, sizeof d);
     fetch_name_of(url, d.name, sizeof d.name);
-    if (uname) snprintf(d.name, sizeof d.name, "%s", uname);
-    if (!fetch_name_ok(d.name)) {
-        fprintf(stderr, "zxc add: invalid --name '%s' (letters, digits, _ and - only)\n", d.name);
-        return 2;
-    }
     snprintf(d.url, sizeof d.url, "%s", url);
-    if (uref) snprintf(d.ref, sizeof d.ref, "%s", uref);
-    if (usha) snprintf(d.sha256, sizeof d.sha256, "%s", usha);
-    if (usub) snprintf(d.subdir, sizeof d.subdir, "%s", usub);
-    fetch_kind_of(d.url, d.ref, force_git, &d.kind, err, sizeof err);
+    fetch_kind_of(d.url, NULL, 0, &d.kind, err, sizeof err);
 
     FetchLock *locks = NULL;
     int nl = fetch_lock_load(&locks, err, sizeof err);
@@ -2153,28 +2135,29 @@ static int cmd_add(int argc, char **argv, int argi) {
         if (!strcmp(locks[i].d.name, d.name)) hit = &locks[i];
     if (hit && !force) {
         fprintf(stderr, "zxc add: '%s' is already pinned in zx.lock;"
-                        " use `zxc fetch` or --force to change it\n", d.name);
+                        " use `zxc fetch` or --force to re-pin\n", d.name);
         fetch_lock_free(locks, nl);
         return 1;
     }
     FetchLock res;
-    if (fetch_materialize(&d, force ? NULL : hit, force, &res, err, sizeof err) != 0) {
+    if (fetch_materialize(&d, NULL, force, &res, err, sizeof err) != 0) {
         fprintf(stderr, "zxc add: %s\n", err);
         fetch_lock_free(locks, nl);
         return 1;
     }
     fetch_lock_free(locks, nl);
-    if (fetch_decl_save(&res.d, err, sizeof err) != 0 ||
+    if (fetch_decl_save(url, err, sizeof err) != 0 ||
         fetch_lock_upsert(&res, err, sizeof err) != 0) {
         fprintf(stderr, "zxc add: %s\n", err);
         return 1;
     }
     vendor_autoscan();
-    printf("zxc add: %s -> %s (%d file(s))\n", d.url, res.path, res.nfiles);
-    printf("  zx.json: declaration written; zx.lock: tree %.12s\n", res.tree);
+    printf("zxc add: %s -> %s (%d file(s))\n", d.name, res.path, res.nfiles);
+    printf("  zx.json: one URL added; zx.lock: tree %.12s\n", res.tree);
     if (d.kind == FK_GIT) printf("  resolved commit %s\n", res.resolved);
     else printf("  download sha256 %s\n", res.d.sha256);
-    printf("  `zxc run` works offline from here; `zxc fetch` restores vendor/ elsewhere\n");
+    printf("  `zxc run` works offline from here; `zxc fetch %s` restores it elsewhere\n",
+           d.name);
     return 0;
 }
 
@@ -2196,26 +2179,30 @@ static int cmd_fetch(int argc, char **argv, int argi) {
     FetchDecl *ds = NULL;
     FetchLock *ls = NULL;
     int nd = fetch_decls_load(&ds, err, sizeof err);
+    if (nd < 0) {
+        fprintf(stderr, "zxc fetch: %s\n", err);
+        return 1;
+    }
     int nl = fetch_lock_load(&ls, err, sizeof err);
-    if (nd <= 0) {
-        printf("zxc fetch: no \"vendor\" declarations in zx.json\n");
-        fetch_decls_free(ds, nd); fetch_lock_free(ls, nl);
+    if (nd == 0) {
+        printf("zxc fetch: no \"vendor\" URLs in zx.json\n");
+        fetch_lock_free(ls, nl);
         return 0;
     }
     int ok = 0, bad = 0, seen = 0;
     for (int i = 0; i < nd; i++) {
         FetchDecl *d = &ds[i];
-        if (only && strcmp(only, d->name) != 0) continue;
+        /* name 或 URL 都收，省得为「这个 name 是什么」查文档。 */
+        if (only && strcmp(only, d->name) != 0 && strcmp(only, d->url) != 0) continue;
         seen++;
         FetchLock *lk = NULL;
         for (int k = 0; k < nl; k++)
             if (!strcmp(ls[k].d.name, d->name)) lk = &ls[k];
         if (lk) {
-            /* 声明被改而锁没变，是供应链风险最高的情形：不猜，要求显式重新锁定 */
-            if (strcmp(d->url, lk->d.url) != 0 ||
-                strcmp(d->ref, lk->d.ref) != 0 ||
-                (d->sha256[0] && strcmp(d->sha256, lk->d.sha256) != 0)) {
-                fprintf(stderr, "zxc fetch: %s: zx.json and zx.lock disagree;"
+            /* 声明里只有 URL：URL 变了就是换源，绝不猜。其余安全参数
+             * （sha256 / ref / commit / subdir / tree）全在锁里，以锁为准。 */
+            if (strcmp(d->url, lk->d.url) != 0) {
+                fprintf(stderr, "zxc fetch: %s: URL in zx.json changed;"
                                 " re-pin with `zxc add <url> --force`\n", d->name);
                 bad++; continue;
             }
@@ -2238,29 +2225,17 @@ static int cmd_fetch(int argc, char **argv, int argi) {
             printf("zxc fetch: restored %s -> %s\n", d->name, res.path);
             ok++;
         } else {
-            FetchDecl dd = *d;
-            FetchLock res;
-            if (fetch_materialize(&dd, NULL, force, &res, err, sizeof err) != 0) {
-                fprintf(stderr, "zxc fetch: %s: %s\n", d->name, err);
-                bad++; continue;
-            }
-            /* 手工写进 zx.json 的声明可能没带 sha256：补写回去，下次才有锚点 */
-            if (!dd.sha256[0] && res.d.sha256[0]) {
-                if (fetch_decl_save(&res.d, err, sizeof err) != 0) {
-                    fprintf(stderr, "zxc fetch: %s: %s\n", d->name, err);
-                    bad++; continue;
-                }
-            }
-            if (fetch_lock_upsert(&res, err, sizeof err) != 0) {
-                fprintf(stderr, "zxc fetch: %s: %s\n", d->name, err);
-                bad++; continue;
-            }
-            printf("zxc fetch: fetched %s -> %s\n", d->name, res.path);
-            ok++;
+            /* 锁里没有的源一律不在这里下载：fetch 只负责复现锁，引入新源
+             * 必须显式 `zxc add <url>`。否则有人改一行 zx.json 就能让 fetch
+             * 从任意地址拉代码进来编译，供应链口子太大。 */
+            fprintf(stderr, "zxc fetch: %s: not in " ZX_LOCK_PATH
+                            "; run `zxc add <url>` to pin a new source\n", d->name);
+            bad++; continue;
         }
     }
     if (only && !seen) {
-        fprintf(stderr, "zxc fetch: no vendor declaration named '%s'\n", only);
+        fprintf(stderr, "zxc fetch: no vendor library named '%s' (name = URL tail;"
+                        " run `zxc fetch` to check all)\n", only);
         bad++;
     }
     if (ok) vendor_autoscan();

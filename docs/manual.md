@@ -114,8 +114,8 @@ zxc <file.zx> -o <prog>           单文件：生成 C 并编成可执行文件
 | 子命令 | 作用 | 关键细节 |
 | --- | --- | --- |
 | `include <name\|header.h\|dir>` | 接入本地 / 工程外的 C 库 | 指目录即可，不复制库文件；见 §3.17 / §3.19 |
-| `add <url>` | 从网站拉 C 库进 `vendor/` | 写 `zx.json` 声明 + `zx.lock`；见 §3.21 |
-| `fetch [名]` | 按 `zx.lock` 校验 / 补齐 `vendor/` | 唯一可能联网的补齐入口；见 §3.21 |
+| `add <url> [--force]` | 从网站拉 C 库进 `vendor/` | 只接 URL；写一行声明 + `zx.lock`；见 §3.21 |
+| `fetch [名\|URL]` | 按 `zx.lock` 校验 / 补齐 `vendor/` | name 是库名不是地址；见 §3.21 |
 | `sync` | 扫 `vendor/` 补生成 C 绑定 | 免接入命令流程的显式入口；见 §3.20 |
 | `cbuild [group]` | 编译 C 源码 | `vendor/*.c` → `vendor/lib<组>.a`；见 §3.18 |
 | `init [name]` | 创建工程 | 生成 `src/`、`vendor/`、`zx.json`、`.gitignore`；建完自检 `main.zx` |
@@ -754,16 +754,21 @@ zxc run                               # 直接跑；源码里 module("foo") 已�
 第一次写码前先跑 `zxc sync`（只扫 `vendor/`、不编译），补全、hover、行内类型提示
 就都有了。`zxc sync` 与 `run` 共用同一套逻辑，重复跑是幂等的。
 
-### 3.21 从网站拉库 —— `zxc add` / `zxc fetch`（两层声明与锁）
+### 3.21 从网站拉库 —— `zxc add` / `zxc fetch`（清单 + 锁）
 
 §3.17–§3.20 处理的都是「库已经在磁盘上」。库在远端时用 `zxc add`：
 
 ```sh
 zxc add https://raw.githubusercontent.com/nothings/stb/master/stb_image.h
-zxc add https://gitcode.com/some/foo.git --ref v1.2.3 --name foo
-zxc add https://example.com/foo.tar.gz --subdir foo-1.2/include
+zxc add https://example.com/foo.tar.gz
+zxc add https://gitcode.com/some/foo.git
 zxc run                               # 拉完之后，构建完全离线
 ```
+
+**命令只有一个参数：URL**（外加 `--force` 重新锁定）。没有 `--name` / `--ref` /
+`--sha256` / `--subdir` / `--git`。源类型由 URL 自己说明：`.git` 结尾按 git 仓库
+处理，`.tar` / `.tar.gz` / `.tgz` / `.tar.xz` / `.zip` 按归档处理（自动下钻唯一
+顶层目录），其余按单文件处理。
 
 `add` 只负责把远端字节搬进 `vendor/`，落盘后立刻走 §3.20 的自动接管，生成绑定与
 清单，编译链接复用 §3.18 / §3.19 的增量路径。**没有版本求解、没有 registry、没有
@@ -771,65 +776,82 @@ zxc run                               # 拉完之后，构建完全离线
 
 #### 为什么是两层
 
-| 层 | 谁写 | 内容 | 为什么分开 |
-| --- | --- | --- | --- |
-| `zx.json` 的 `"vendor"` 段 | 人 | `url` / `git` + `ref`、期望 `sha256`、`subdir` | 可 review、可 diff，一眼看出这次想换哪个版本 |
-| `zx.lock` | `zxc` | 实际 git commit、落地文件树 hash、落地路径、文件数 | 机器解析的不可变结果；人写的 tag 会变，commit 不会 |
+| 层 | 谁写 | 内容 |
+| --- | --- | --- |
+| `zx.json` 的 `"vendor"` | 人 / `zxc add` | **只有 URL 字符串数组**，和 `deps` 同构 |
+| `zx.lock` | `zxc` | 全部安全锚点：下载字节 sha256、git 实际 commit、文件树 hash、路径、文件数 |
 
-只写一个 URL 有三个硬伤：不可复现（同一个 tag 明天可能指向别的代码）、无完整性
-校验（拉下来的代码是要编译执行的）、CI 每次构建都要联网。两层把「意图」和
-「结果」分开，diff 里能直接看出这次到底换了什么。
+只写 URL 有三个硬伤：不可复现（同一个 tag 明天可能指向别的代码）、无完整性
+校验（拉下来的代码是要编译执行的）、CI 每次构建都要联网。但补法不是让人填
+一堆参数，而是**让工具把结果锁起来**：`zxc add` 首次拉取时自动算好每个校验值
+写进 `zx.lock`，`zxc fetch` 在另一台机器上逐项复现。清单保持可读、可 diff，
+安全一点没少。
 
 ```json
-"vendor": {
-  "stb":  { "url": "https://.../stb_image.h", "sha256": "2a18e93b..." },
-  "foo":  { "git": "https://gitcode.com/.../foo.git", "ref": "v1.2.3" }
+{
+  "name": "snake",
+  "version": "0.1.0",
+  "main": "src/main.zx",
+  "out": "snake",
+  "deps": [],
+  "vendor": [
+    "https://example.com/stb_image.h",
+    "https://gitcode.com/some/foo.git"
+  ]
 }
 ```
+
+允许的顶层字段就这六个：`name` / `version` / `main` / `out` / `deps` / `vendor`。
+旧版「每库一个对象」的 `vendor` 写法已废弃，遇到会明确报错要求改写成数组。
 
 `zx.lock` 由工具生成、必须提交，格式是可读的 `[名]` + `key = value`：
 
 ```text
 [foo]
 kind = git
-url = https://gitcode.com/.../foo.git
-ref = v1.2.3
+url = https://gitcode.com/some/foo.git
+sha256 = 2a18e93b...
 resolved = 98d4395265372d8cc71f062c6900bb4403ad434c
 tree = 300a0368725440116e186cd14ed654f38663b4b4f07873d88c6e49d1ce901c1c
 path = vendor/foo
 nfiles = 2
 ```
 
+#### `zxc fetch <name>` 里的 name
+
+**是库名，不是地址**。它由 URL 尾段唯一推导（去扩展名）：
+`.../stb_image.h` → `stb_image`，`.../foo.git` → `foo`；同时是 `vendor/` 下的
+落地名和 `zx.lock` 里的 `[名]`。地址只存在 `zx.json` 与 `zx.lock` 里。不带参数的
+`zxc fetch` 检查全部（主路径），单条时库名和 URL 都接受，不用去记。
+
 #### 命令与联网边界
 
 | 命令 | 联网 | 行为 |
 | --- | --- | --- |
-| `zxc add <url>` | 是 | 下载 → 校验 → 落地 `vendor/` → 写 `zx.json` 声明与 `zx.lock` |
-| `zxc fetch [名]` | 仅缺库时 | 完好的库只做本地校验；缺失则重拉且必须复现锁里的 tree hash |
+| `zxc add <url> [--force]` | 是 | 下载 → 校验 → 落地 `vendor/` → 往 `zx.json` 加一行 URL、写 `zx.lock` |
+| `zxc fetch [名\|URL]` | 仅缺库时 | 完好的库只做本地校验；缺失则重拉且必须复现锁里的全部锚点 |
 | `zxc run` / `build` / `test` | **否** | 只查 `zx.lock` 登记的落地路径在不在，缺了提示去跑 `zxc fetch` |
 | `zxc sync` | 否 | 只补生成绑定，不联网、不编译 |
 
+`zxc fetch` 只复现已锁定的源：声明里出现 `zx.lock` 没有的 URL 时一律拒绝并提示
+`zxc add <url>`，绝不替人下载新源——引入源的入口只有 `add` 一个。
+
 `zxc fetch` 默认**不覆盖**本地内容：文件被改过会明确报 `content differs from zx.lock`，
-`--force` 才恢复，且旧目录先移到 `.zxc-cache/fetch-backup/`。`zx.json` 与 `zx.lock`
-对不上（有人偷偷改了源地址）时直接拒绝，必须 `zxc add <url> --force` 显式重新锁定。
+`--force` 才恢复，且旧目录先移到 `.zxc-cache/fetch-backup/`。`zx.json` 里的 URL
+被改过（有人偷偷换源）时直接拒绝，必须 `zxc add <url> --force` 显式重新锁定。
 
 #### 安全边界
 
 - 只接受 `https://`；loopback `http://127.0.0.1` 供本地镜像，`file://` 需显式
   `ZX_ALLOW_LOCAL_FETCH=1`。URL 里的 userinfo、控制字符、路径穿越字符一律拒绝。
-- 下载字节算 SHA-256（编译器自带实现，不依赖 PATH 里的 `sha256sum`）；声明里带
-  `--sha256` 时不匹配立即失败，没带则首次 `add` 自动写回声明与锁。
-- git 源：`--ref` 钉 tag / branch，`zx.lock` 钉实际 commit；重拉时两者必须一致，
-  上游 force-push 改了 tag 会被拒绝。clone 固定 `core.autocrlf=false`，保证不同
-  平台落地的字节一致，tree hash 不会跨平台误报。
+- 下载字节算 SHA-256（编译器自带实现，不依赖 PATH 里的 `sha256sum`），首次
+  `add` 自动写进锁；重拉时不一致立即失败。
+- git 源：`zx.lock` 钉实际 commit；重拉时 HEAD 对不上就拒绝，上游 force-push /
+  新提交都挡得住。clone 固定 `core.autocrlf=false`，保证不同平台落地的字节一致，
+  tree hash 不会跨平台误报。
 - 落地前在临时目录完成全部校验；归档 / 仓库里的 `..` 路径、绝对路径、符号链接被
   拒绝，文件数与总体积有上限。不执行库里的构建脚本，不解析它的构建配置。
 - 下载复用系统 `curl` / `git` / `tar`，参数用 argv 数组传递，不经过 shell。
-
-支持的源：单个文件（单头库）、`.tar` / `.tar.gz` / `.tgz` / `.tar.xz` / `.zip`
-归档（自动下钻唯一顶层目录，`--subdir` 可指定）、git 仓库（`--git` 强制或 URL 以
-`.git` 结尾 / 带 `--ref`）。换版本用 `zxc add <url> --force`；本地已有的库用
-`zxc include <path>`，`add` 只接 URL。
 
 ### 3.22 实战：glfw + OpenGL 贪吃蛇
 

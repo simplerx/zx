@@ -1,10 +1,14 @@
 /* fetch.h — C 库远端获取：声明（zx.json）+ 锁定（zx.lock）+ 落地 vendor/。
  *
- * 两层分工：
- *   zx.json 的 "vendor" 段  人写的意图：url / git ref / 期望 sha256 / 子目录。
- *                           可 review、可 diff、可手工改。
- *   zx.lock                 机器解析的结果：git 实际 commit、落地文件树 hash、
- *                           落地路径。由 zxc add / fetch 生成，必须提交。
+ * 两层分工（清单保持最简，参数全在锁里）：
+ *   zx.json 的 "vendor" 段  URL 字符串数组，和 "deps" 同构。人只写「从哪拿」，
+ *                           没有 ref / sha256 / subdir 之类的可选参数。
+ *   zx.lock                 机器写的安全锚点：下载字节 sha256、git ref 与实际
+ *                           commit、subdir、落地文件树 hash 与路径、文件数。
+ *                           由 zxc add / fetch 生成，必须提交。
+ *
+ * 库名由 URL 尾段唯一推导（去扩展名），同时是 vendor/ 落地名、zx.lock 的
+ * [名]、以及 `zxc fetch <name>` 里的 name——不是地址，地址只在声明与锁里。
  *
  * 没有版本求解、没有 registry、没有传递依赖。zxc 只负责把远端字节安全地
  * 搬进 vendor/，之后交给既有的 vendor_autoscan + clib/csrc 增量编译链路。
@@ -38,10 +42,12 @@ typedef struct {
     int  nfiles;
 } FetchLock;
 
-/* 声明：读 zx.json 的 "vendor" 段。返回条目数；-1 = zx.json 读不了。 */
+/* 声明：读 zx.json 的 "vendor" URL 数组。返回条目数；0 = 没有声明，
+ * -1 = 还是旧版「每库一个对象」写法，err 里给出改写提示。 */
 int  fetch_decls_load(FetchDecl **out, char *err, size_t cap);
-/* 文本级 upsert：只替换/插入 "vendor" 段，其余字段原样保留（含手写格式）。 */
-int  fetch_decl_save(const FetchDecl *d, char *err, size_t cap);
+/* 文本级 upsert：只往数组里加一条 URL，其余字段原样保留（含手写格式）。
+ * 安全参数不写进 zx.json；遇到旧版对象写法直接报错，不猜、不兼容。 */
+int  fetch_decl_save(const char *url, char *err, size_t cap);
 void fetch_decls_free(FetchDecl *v, int n);
 
 /* 锁：返回条目数；-1 = 格式错。 */

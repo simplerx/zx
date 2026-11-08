@@ -6,8 +6,8 @@
  *  - 只允许 https://（外加 loopback http:// 和显式开关的 file:// 供离线
  *    镜像/测试）。拒绝 userinfo、控制字符、反斜杠等。
  *  - 下载先落在 .zxc-cache/fetch/<name>/stage，全部校验通过后才搬进 vendor/。
- *    声明里的 sha256 锚住"下载到的字节"，锁里的 tree hash 锚住"落地的文件树"，
- *    git 源的 resolved commit 锚住"tag 背后真正的那次提交"。
+ *    锁里的 sha256 锚住"下载到的字节"、tree hash 锚住"落地的文件树"、
+ *    resolved commit 锚住"tag 背后真正的那次提交"；zx.json 只留 URL。
  *  - 解压/克隆可能带恶意路径：落地时只按规范化过的相对路径逐个复制普通
  *    文件，遇到 ".."、绝对路径、符号链接一律拒绝；文件数与体积有上限。
  *  - 不执行库里的任何构建脚本，不解析它的配置，不联网解析依赖。
@@ -450,8 +450,19 @@ int fetch_name_of(const char *url, char *out, size_t cap) {
 
 /* ---------------- zx.json 声明层 ---------------- */
 
-/* 从 from 处的 '{' 找配对 '}'，返回 [from, *end) */
-static int obj_span(const char *t, size_t from, size_t *end) {
+/* zx.json 的 "vendor" 只放 URL 字符串数组，和 "deps" 同构：
+ *
+ *   "vendor": [ "https://.../stb_image.h", "https://.../foo.git" ]
+ *
+ * 没有兼容层：旧版「每库一个对象」的写法直接报错、要求按新格式改写。
+ * 人只写「从哪拿」；sha256 / git commit / tree hash / 落地路径全部由 zxc
+ * 在首次 add 时算好写进 zx.lock，fetch 复现这些锚点即可，安全不打折。
+ * 库名由 fetch_name_of(url) 唯一推导（URL 尾段去扩展名），同时是 vendor/
+ * 落地名、zx.lock 的 [名]、以及 `zxc fetch <name>` 里的 name——不是地址。
+ */
+
+/* 从 from 处的 '[' 找配对 ']'，返回 [from, *end)。 */
+static int arr_span(const char *t, size_t from, size_t *end) {
     int depth = 0, instr = 0, esc = 0;
     for (size_t i = from; t[i]; i++) {
         char c = t[i];
@@ -462,89 +473,66 @@ static int obj_span(const char *t, size_t from, size_t *end) {
             continue;
         }
         if (c == '"') { instr = 1; continue; }
-        if (c == '{') depth++;
-        else if (c == '}') {
-            if (--depth == 0) { *end = i + 1; return 0; }
-        }
+        if (c == '[') depth++;
+        else if (c == ']' && --depth == 0) { *end = i + 1; return 0; }
     }
     return -1;
 }
 
-static int jstr(const char *t, const char *key, char *out, size_t cap) {
-    char pat[80];
-    snprintf(pat, sizeof pat, "\"%s\"", key);
-    const char *p = strstr(t, pat);
-    if (!p) return 0;
-    p = strchr(p + strlen(pat), ':');
-    if (!p) return 0;
-    p++;
-    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
-    if (*p != '"') return 0;
-    p++;
+/* 读一个 JSON 字符串字面量，返回右引号之后的位置。 */
+static size_t json_string(const char *t, size_t at, char *out, size_t cap) {
+    if (t[at] != '"') { out[0] = 0; return at; }
+    at++;
     size_t i = 0;
-    while (*p && *p != '"' && i + 1 < cap) {
-        if (*p == '\\' && p[1]) p++;
-        out[i++] = *p++;
+    while (t[at] && t[at] != '"') {
+        if (t[at] == '\\' && t[at + 1]) at++;
+        if (i + 1 < cap) out[i++] = t[at];
+        at++;
     }
     out[i] = 0;
-    return i > 0;
+    return t[at] ? at + 1 : at;
 }
 
-static void vendor_span(char *t, size_t *vs, size_t *ve) {
+/* "vendor" 值的位置。只认数组；返回 1 = 还是旧版对象写法。 */
+static int vendor_span(char *t, size_t *vs, size_t *ve) {
     *vs = *ve = 0;
     char *p = strstr(t, "\"vendor\"");
-    if (!p) return;
-    char *br = strchr(p + 8, '{');
-    if (!br) return;
+    if (!p) return 0;
+    char *c = strchr(p + 8, ':');
+    if (!c) return 0;
+    p = c + 1;
+    while (*p && isspace((unsigned char)*p)) p++;
+    if (*p == '{') return 1;
+    if (*p != '[') return 0;
     size_t end;
-    if (obj_span(t, (size_t)(br - t), &end) != 0) return;
-    /* 返回对象的范围（从 '{' 起）：parse_decls 直接吃这个块，
-     * fetch_decl_save 也只替换对象本身，前面的 `"vendor": ` 原样保留。 */
-    *vs = (size_t)(br - t); *ve = end;
+    if (arr_span(t, (size_t)(p - t), &end) != 0) return 0;
+    *vs = (size_t)(p - t); *ve = end;
+    return 0;
+}
+
+static const char *LEGACY_MSG =
+    "zx.json: \"vendor\" must be a URL list -- "
+    "rewrite it as \"vendor\": [\"https://...\", ...]";
+
+static void decl_from_url(FetchDecl *d, const char *url) {
+    memset(d, 0, sizeof *d);
+    snprintf(d->url, sizeof d->url, "%s", url);
+    fetch_name_of(url, d->name, sizeof d->name);
+    fetch_kind_of(url, NULL, 0, &d->kind, NULL, 0);
 }
 
 static int parse_decls(const char *block, FetchDecl **out, int *nout) {
     FetchDecl *v = NULL;
     int n = 0, cap = 0;
-    size_t len = strlen(block), i = 0;
-    while (i < len) {
+    size_t len = strlen(block);
+    for (size_t i = 0; i < len; ) {
         if (block[i] != '"') { i++; continue; }
-        size_t ks = i + 1, ke = ks;
-        while (ke < len && block[ke] != '"') {
-            if (block[ke] == '\\' && ke + 1 < len) ke++;
-            ke++;
-        }
-        if (ke >= len) break;
-        char key[256];
-        size_t kl = ke - ks;
-        if (kl >= sizeof key) kl = sizeof key - 1;
-        memcpy(key, block + ks, kl); key[kl] = 0;
-        size_t j = ke + 1;
-        while (j < len && isspace((unsigned char)block[j])) j++;
-        if (j >= len || block[j] != ':') { i = ke + 1; continue; }
-        j++;
-        while (j < len && isspace((unsigned char)block[j])) j++;
-        if (j >= len || block[j] != '{') { i = ke + 1; continue; }
-        size_t oe;
-        if (obj_span(block, j, &oe) != 0) break;
-        char *obj = malloc(oe - j + 1);
-        memcpy(obj, block + j, oe - j); obj[oe - j] = 0;
-
-        if (n == cap) { cap = cap ? cap*2 : 8; v = realloc(v, (size_t)cap * sizeof *v); }
-        FetchDecl *d = &v[n];
-        memset(d, 0, sizeof *d);
-        snprintf(d->name, sizeof d->name, "%s", key);
-        if (!jstr(obj, "git", d->url, sizeof d->url)) {
-            jstr(obj, "url", d->url, sizeof d->url);
-        }
-        jstr(obj, "ref", d->ref, sizeof d->ref);
-        jstr(obj, "sha256", d->sha256, sizeof d->sha256);
-        jstr(obj, "subdir", d->subdir, sizeof d->subdir);
-        int isgit = strstr(obj, "\"git\"") != NULL;
-        fetch_kind_of(d->url, d->ref, isgit, &d->kind, NULL, 0);
-        free(obj);
+        char url[1024];
+        i = json_string(block, i, url, sizeof url);
+        if (!url[0]) continue;
+        if (n == cap) { cap = cap ? cap * 2 : 8; v = realloc(v, (size_t)cap * sizeof *v); }
+        decl_from_url(&v[n], url);
         n++;
-        i = oe;
     }
     *out = v; *nout = n;
     return n;
@@ -557,7 +545,12 @@ int fetch_decls_load(FetchDecl **out, char *err, size_t cap) {
     char *t = slurp("zx.json", &len);
     if (!t) return 0;                       /* 没有工程清单 = 没有声明 */
     size_t vs, ve;
-    vendor_span(t, &vs, &ve);
+    int legacy = vendor_span(t, &vs, &ve);
+    if (legacy) {
+        if (err && cap) snprintf(err, cap, "%s", LEGACY_MSG);
+        free(t);
+        return -1;
+    }
     int n = 0;
     if (ve > vs) {
         char *block = malloc(ve - vs + 1);
@@ -581,54 +574,50 @@ static void json_escape(const char *s, char *out, size_t cap) {
     out[i] = 0;
 }
 
-int fetch_decl_save(const FetchDecl *d, char *err, size_t cap) {
+/* 只往 zx.json 里写 URL；安全参数全在 zx.lock，声明层不留任何可选字段。 */
+int fetch_decl_save(const char *url, char *err, size_t cap) {
     size_t len = 0;
     char *t = slurp("zx.json", &len);
     if (!t) {
         snprintf(err, cap, "zx.json not found (run `zxc init` first)");
         return -1;
     }
-    /* 合并已有声明，按 name upsert —— vendor 段由工具管理，其余字段原样保留 */
+    size_t vs, ve;
+    if (vendor_span(t, &vs, &ve)) {
+        snprintf(err, cap, "%s", LEGACY_MSG);
+        free(t);
+        return -1;
+    }
     int n = 0;
     FetchDecl *old = NULL;
-    char *block = NULL;
-    size_t vs, ve;
-    vendor_span(t, &vs, &ve);
     if (ve > vs) {
-        block = malloc(ve - vs + 1);
+        char *block = malloc(ve - vs + 1);
         memcpy(block, t + vs, ve - vs);
         block[ve - vs] = 0;
         parse_decls(block, &old, &n);
         free(block);
     }
-    FetchDecl *all = malloc((size_t)(n + 1) * sizeof *all);
-    int m = 0;
-    for (int i = 0; i < n; i++)
-        if (strcmp(old[i].name, d->name) != 0) all[m++] = old[i];
-    all[m++] = *d;
-    free(old);
 
     Buf nb; buf_init(&nb);
-    buf_puts(&nb, "{\n");
-    for (int i = 0; i < m; i++) {
-        char u[1100], r[300], h[100], sd[600];
-        json_escape(all[i].url, u, sizeof u);
-        json_escape(all[i].ref, r, sizeof r);
-        json_escape(all[i].sha256, h, sizeof h);
-        json_escape(all[i].subdir, sd, sizeof sd);
-        buf_printf(&nb, "    \"%s\": { \"%s\": \"%s\"", all[i].name,
-                   all[i].kind == FK_GIT ? "git" : "url", u);
-        if (all[i].kind == FK_GIT && r[0]) buf_printf(&nb, ", \"ref\": \"%s\"", r);
-        if (all[i].kind != FK_GIT && h[0]) buf_printf(&nb, ", \"sha256\": \"%s\"", h);
-        if (sd[0]) buf_printf(&nb, ", \"subdir\": \"%s\"", sd);
-        buf_printf(&nb, " }%s\n", i + 1 < m ? "," : "");
+    buf_puts(&nb, "[");
+    int m = 0;
+    for (int i = 0; i < n; i++) {
+        if (!strcmp(old[i].url, url)) continue;
+        char u[1100];
+        json_escape(old[i].url, u, sizeof u);
+        buf_printf(&nb, "%s\n    \"%s\"", m++ ? "," : "", u);
     }
-    buf_puts(&nb, "  }");
+    char u[1100];
+    json_escape(url, u, sizeof u);
+    buf_printf(&nb, "%s\n    \"%s\"", m++ ? "," : "", u);
+    if (m) buf_puts(&nb, "\n  ");
+    buf_puts(&nb, "]");
+    fetch_decls_free(old, n);
 
     Buf out; buf_init(&out);
     if (ve > vs) {
         buf_putn(&out, t, vs);
-        buf_puts(&out, nb.data ? nb.data : "{}");
+        buf_puts(&out, nb.data ? nb.data : "[]");
         buf_puts(&out, t + ve);
     } else {
         /* 没有 vendor 段：插在最后一个 '}' 前，视前面有无逗号决定前缀 */
@@ -636,7 +625,7 @@ int fetch_decl_save(const FetchDecl *d, char *err, size_t cap) {
         while (last > 0 && isspace((unsigned char)t[last-1])) last--;
         if (last == 0 || t[last-1] != '}') {
             snprintf(err, cap, "zx.json is not a JSON object");
-            buf_free(&nb); buf_free(&out); free(t); free(all);
+            buf_free(&nb); buf_free(&out); free(t);
             return -1;
         }
         size_t at = last - 1;
@@ -648,17 +637,16 @@ int fetch_decl_save(const FetchDecl *d, char *err, size_t cap) {
         int empty = 1;
         for (size_t q = open + 1; q < at; q++)
             if (!isspace((unsigned char)t[q]) && t[q] != ',') { empty = 0; break; }
-        /* 写到 at 之前最后一个非空白字符处：逗号贴着上一个字段，不留孤行 */
         buf_putn(&out, t, k);
         if (!has_comma && !empty) buf_puts(&out, ",");
         buf_puts(&out, "\n  \"vendor\": ");
-        buf_puts(&out, nb.data ? nb.data : "{}");
+        buf_puts(&out, nb.data ? nb.data : "[]");
         buf_puts(&out, "\n");
         buf_puts(&out, t + at);
     }
     int rc = put_text("zx.json", out.data ? out.data : "");
     if (rc != 0) snprintf(err, cap, "cannot write zx.json");
-    buf_free(&nb); buf_free(&out); free(t); free(all);
+    buf_free(&nb); buf_free(&out); free(t);
     return rc;
 }
 

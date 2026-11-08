@@ -18,8 +18,8 @@
 | `zxc fmt [文件...]` | 否 | 格式化（纯空白改动） |
 | `zxc sync` | 否 | 立刻扫 `vendor/`，补生成缺失的 C 绑定 |
 | `zxc include <路径/配方>` | 否 | 接入**本机磁盘上**的 C 库 |
-| `zxc add <url>` | **是** | 从网站拉 C 库进 `vendor/`，写声明与锁 |
-| `zxc fetch [名]` | 仅缺库时 | 按 `zx.lock` 校验 / 补齐 `vendor/` |
+| `zxc add <url> [--force]` | **是** | 从网站拉 C 库进 `vendor/`，写一行 URL + 锁 |
+| `zxc fetch [名\|URL]` | 仅缺库时 | 按 `zx.lock` 校验 / 补齐 `vendor/` |
 | `zxc cbuild [组]` | 否 | 手动重编 `vendor/` 里的 C 源码（一般不用） |
 | `zxc errors` / `zxc explain <码>` | 否 | 错误码列表 / 单个错误码的解释 |
 
@@ -37,7 +37,7 @@
 | `zxc add ./vendor/foo.h` | `zxc include ./vendor/foo.h` | 接入本地 C 库，能力**完全不变** |
 | `zxc add ../third_party/foo` | `zxc include ../third_party/foo` | 目录模式、`--list`、`--name`、`--lib`、`--no-build`、`--force` 全保留 |
 | `zxc add m`（内置配方） | `zxc include m` | 同上 |
-| —— | `zxc add <url>` | **新命令**：从网站拉库 |
+| —— | `zxc add <url>` | **新命令**：从网站拉库；只接 URL，无可选参数 |
 | —— | `zxc fetch` | **新命令**：换机器后按锁补齐 |
 | `zxc sync` | 不变 | 扫 `vendor/` 补绑定 |
 | `zxc cbuild` | 不变 | 显式重编 C 源码 |
@@ -263,52 +263,61 @@ clang 翻不了的声明会列在文件末尾的注释里，按需手写补上�
 ## 7. 路径三：`zxc add` / `zxc fetch`（库在网站上）
 
 ```sh
-zxc add https://example.com/stb_image.h
-zxc add https://gitcode.com/some/foo.git --ref v1.2.3 --name foo
-zxc add https://example.com/foo.tar.gz --subdir foo-1.2/include
-zxc add <url> --sha256 <64hex>          # 下载前就钉死期望字节
+zxc add https://example.com/stb_image.h     # 单头库
+zxc add https://example.com/foo.tar.gz      # 归档
+zxc add https://gitcode.com/some/foo.git    # git 仓库
+zxc run                                    # 之后完全离线
 ```
 
-支持三种源：**单个文件**（单头库最常见）、**归档**（`.tar` / `.tar.gz` / `.tgz` /
-`.tar.xz` / `.zip`，自动下钻唯一顶层目录）、**git 仓库**（`--git` 强制，或 URL 以
-`.git` 结尾 / 带 `--ref`）。
-
-| 选项 | 作用 |
-| --- | --- |
-| `--name NAME` | 库名 / 模块名 |
-| `--ref TAG` | 钉 tag 或 branch |
-| `--sha256 HEX` | 期望的下载字节哈希，不符立即失败 |
-| `--subdir PATH` | 只取归档 / 仓库里的某一层 |
-| `--git` | 强制按 git 仓库处理 |
-| `--force` | 显式重新锁定（换源 / 升级时用） |
+**没有可选参数**。`--name` / `--ref` / `--sha256` / `--subdir` / `--git` 这一组
+已全部删掉，唯一还能带的是 `--force`（重新锁定同一个源）。源类型由 URL 自己
+说明：`.git` 结尾是 git 仓库，`.tar` / `.tar.gz` / `.tgz` / `.tar.xz` / `.zip`
+是归档（自动下钻唯一顶层目录），其余按单文件处理。
 
 ### 两层文件都要提交
 
 | 文件 | 谁写 | 内容 |
 | --- | --- | --- |
-| `zx.json` 的 `"vendor"` 段 | **人** | 意图：URL / git ref / 期望 sha256 / 子目录 |
-| `zx.lock` | `zxc` | 结果：实际 git commit、落地文件树 hash、落地路径、文件数 |
+| `zx.json` 的 `"vendor"` | 人 / `zxc add` | 一行一个 URL 的字符串数组，和 `deps` 同构 |
+| `zx.lock` | `zxc` | 全部安全锚点：下载字节 sha256、git commit、文件树 hash、落地路径、文件数 |
 
 ```json
-"vendor": {
-  "stb": { "url": "https://.../stb_image.h", "sha256": "2a18e93b..." },
-  "foo": { "git": "https://gitcode.com/.../foo.git", "ref": "v1.2.3" }
+{
+  "name": "snake",
+  "version": "0.1.0",
+  "main": "src/main.zx",
+  "out": "snake",
+  "deps": [],
+  "vendor": [
+    "https://example.com/stb_image.h",
+    "https://gitcode.com/some/foo.git"
+  ]
 }
 ```
 
-tag 会移动、URL 指向的字节会变，所以只写 URL 不可复现，也没法发现上游偷偷重推了
-版本。两层分开后，diff 里一眼能看出是"意图变了"还是"结果变了"。
+清单允许的顶层字段就这六个，`vendor` 里没有 `ref` / `sha256` / `subdir`。原因是
+tag 会移动、URL 指向的字节会变，所以**安全不能靠人填参数**：`zxc add` 首次拉取
+时把每个校验值自动算出来钉进 `zx.lock`，`zxc fetch` 在另一台机器上逐项复现。
+diff 里一眼能看出「想换哪个源」，锁里一眼能看出「实际锁了什么」。
 
 ```sh
-zxc fetch              # 检查全部；完好的库只做本地校验，不联网
-zxc fetch foo          # 只查一个
-zxc fetch --force      # 强制重拉；本地被改过的旧目录先备份到 .zxc-cache/fetch-backup/
+zxc fetch                 # 检查全部（主路径，通常就敲这一条）
+zxc fetch stb_image       # 只查一个：这里的 stb_image 是库名
+zxc fetch "https://..."   # 也可以直接给 URL
+zxc fetch --force         # 强制重拉 / 恢复被改过的本地副本
 ```
 
+> **`zxc fetch <name>` 里的 name 是什么？** 是**库名，不是地址**。它由 URL 尾段
+> 推出来（`.../stb_image.h` → `stb_image`、`.../foo.git` → `foo`），同时是
+> `vendor/` 下的落地名和 `zx.lock` 里的 `[stb_image]`。地址只写在 `zx.json` 与
+> `zx.lock` 里。拿不准就敲不带参数的 `zxc fetch`，或者直接把 URL 贴进去。
+
 安全边界：只接受 `https://`（本地镜像可用 loopback `http://`，`file://` 需
-`ZX_ALLOW_LOCAL_FETCH=1`）；下载字节算 SHA-256，git tag 解析成不可变 commit 写进锁；
-重拉必须复现锁，声明与锁冲突直接拒绝（要 `zxc add <url> --force` 重新锁定）；
-不执行库里的构建脚本，不做版本求解 / registry / 传递依赖。
+`ZX_ALLOW_LOCAL_FETCH=1`）；重拉必须复现锁里的 sha256 / commit / tree hash；
+`zx.json` 里的 URL 被改过就拒绝换源（要 `zxc add <url> --force` 重新锁定）；
+`zxc fetch` 只复现 `zx.lock`：声明里出现未锁定的新 URL 一律拒绝并指路
+`zxc add <url>`，不会替你下载。不执行库里的构建脚本，不做版本求解 /
+registry / 传递依赖。
 
 > **换机器流程**：`git clone` → `zxc fetch` → `zxc run`。`run` 从头到尾不联网。
 
@@ -339,7 +348,9 @@ zxc fetch --force      # 强制重拉；本地被改过的旧目录先备份到 
 | `B2002 could not open 'libuuid.a' / 'libMSVCRT.a'` | 用了 **MSVC 工具链编的 `.lib`**，配 zig cc(mingw) 的 `/DEFAULTLIB` 对不上 | 换同 ABI 的 `lib<名>.a`；别混用 MSVC 与 mingw 静态库 |
 | `B2001 undefined symbol: ... CreateDCW / ChoosePixelFormat` | C 库还依赖系统库 | 在源码里补 `@link("gdi32")` / `@link("user32")` / `@link("opengl32")` 等 |
 | 链接期缺 `__security_cookie` / `_fltused` | 同上，MSVC CRT 专有符号 | 换 mingw/COFF 版库，不要试图补 stub |
-| `zxc fetch: zx.json and zx.lock disagree` | 有人改了源地址但没重新锁定 | `zxc add <url> --force` 显式重新锁定 |
+| `zxc fetch: ... URL in zx.json changed` | 有人改了源地址但没重新锁定 | `zxc add <url> --force` 显式重新锁定 |
+| `zx.json: "vendor" must be a URL list` | 还在用旧版「每库一个对象」的写法 | 改成 `"vendor": ["https://..."]` 数组 |
+| `zxc fetch: ... not in zx.lock` | 清单里写了没锁过的新 URL | 先 `zxc add <url>` 显式钉住 |
 | `zxc fetch: content differs from zx.lock` | 本地库被改过 | 确认后 `zxc fetch --force`（旧目录会备份） |
 | `vendor/` 里某个库一直没被接管 | 存在同名 `.zx` / `.clib`（可能是占位 opt-out） | 检查同名文件，删掉或按需编辑 |
 | `zxc add ./vendor/foo.h` 报"预期 https URL" | `add` 只接 URL | 本地路径用 `zxc include ./vendor/foo.h` |

@@ -139,36 +139,52 @@ ray.InitWindow(800, 600, "hello");
 全部照常生效；要微调直接编辑，`--force` 可重新生成。整套本地流程不联网、不下载源码。
 ### 从网站拉库：`zxc add` / `zxc fetch`
 
-库在远端时用 `zxc add`。拉完直接落到 `vendor/`，后续仍走上面那套自动接管：
+`zxc add` 只接一个 URL，没有 `ref` / `sha256` / `subdir` 之类的参数：
 
 ```sh
 zxc add https://raw.githubusercontent.com/nothings/stb/master/stb_image.h
-zxc add https://gitcode.com/some/foo.git --ref v1.2.3 --name foo
+zxc add https://example.com/foo.tar.gz
+zxc add https://gitcode.com/some/foo.git
 zxc run                               # 之后完全离线
 ```
 
-支持三种源：单个文件（单头库最常见）、`.tar.gz` / `.tgz` / `.zip` 归档、git 仓库。
-`--subdir` 只取归档或仓库里的某一层，`--sha256` 可以在下载前就钉死期望的字节。
+`zx.json` 只多出一个和 `deps` 同构的 URL 数组：
 
-**两层文件都要提交**：
+```json
+{
+  "name": "snake", "version": "0.1.0",
+  "main": "src/main.zx", "out": "snake",
+  "deps": [],
+  "vendor": [
+    "https://example.com/stb_image.h",
+    "https://gitcode.com/some/foo.git"
+  ]
+}
+```
 
-| 文件 | 谁写 | 内容 |
-| --- | --- | --- |
-| `zx.json` 的 `"vendor"` 段 | 人 | 意图：URL / git ref / 期望 sha256 / 子目录 |
-| `zx.lock` | `zxc` | 结果：git 实际 commit、落地文件树 hash、落地路径、文件数 |
+安全靠 `zx.lock`：`zxc` 在首次 `add` 时自动算好下载字节 SHA-256、git 实际
+commit、落地文件树 hash、路径与文件数，全部写进锁；`zxc fetch` 换机器时
+逐项复现，对不上就拒绝。**两份文件都要提交**，平时只用 `zxc run`。
 
 | 命令 | 联网 | 作用 |
 | --- | --- | --- |
-| `zxc add <url>` | 是 | 拉取 → 校验 → 落地 `vendor/` → 写声明与锁 |
-| `zxc fetch [名]` | 仅缺库时 | 按锁校验 `vendor/`；缺失就重拉，内容对不上就报错 |
+| `zxc add <url> [--force]` | 是 | 拉取 → 校验 → 落地 `vendor/` → 写一行 URL + 锁 |
+| `zxc fetch [名\|URL]` | 仅缺库时 | 按锁校验 `vendor/`；缺失就重拉且必须复现锁 |
 | `zxc run` / `build` / `test` | **否** | 只给本地缺库提示，绝不下载 |
 
-安全边界：只接受 `https://`（本地镜像可用 loopback `http://`）；下载字节算 SHA-256，
-git tag 会被解析成不可变 commit 写进锁。上游 tag 被改写、内容漂移、或 `zx.json`
-与 `zx.lock` 不一致，一律拒绝而不是悄悄更新。不执行库里的任何构建脚本，不做依赖
-求解、不做 registry；下载复用系统 `curl` / `git` / `tar`，不自己实现协议栈。
+> `zxc fetch foo` 里的 `foo` 是**库名，不是地址**：URL 尾段去掉扩展名
+> （`.../stb_image.h` → `stb_image`），也是 `vendor/` 下的落地名和 `zx.lock`
+> 里的 `[foo]`。记不住就别带参数 —— `zxc fetch` 默认检查全部；也可以直接贴 URL。
 
-换源或升级用 `zxc add <url> --force` 显式重新锁定；本地已有的库用
+支持三种源：单个文件（单头库最常见）、`.tar.gz` / `.tgz` / `.zip` 归档（自动
+下钻唯一顶层目录）、URL 以 `.git` 结尾的 git 仓库。只接受 `https://`（本地镜像
+可用 loopback `http://`）。不执行库里的任何构建脚本、不做依赖求解、不做
+registry；下载复用系统 `curl` / `git` / `tar`，不自己实现协议栈。
+
+`zxc fetch` 只复现已锁定的源：清单里凭空多出一条未锁定的 URL 不会替你下载，
+必须显式 `zxc add <url>` 先钉住，避免改一行清单就拉进任意代码。
+
+换源或升级用 `zxc add <url> --force` 重新锁定；本地已有的库用
 `zxc include <path>`，`add` 只接 URL。
 
 细节与边界见 `docs/manual.md` §3.17 / §3.19 / §3.20 / §3.21。
