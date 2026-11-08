@@ -284,6 +284,55 @@ check("completion.snippet.semicolon",
           if i["label"] in ("if", "ifelse", "fn", "struct", "switch", "while", "for")),
       str([i["label"] for i in all_snips])[:200])
 
+# 3q2 自定义类型骨架：`type` / `uniontag` / `enumtag` / `new`
+#     用户 2026-11-08 追加：写自定义类型也要能 Tab 展开完整声明。
+#     展开后是能直接编译的 `const Name = struct { … };` 整条声明；
+#     实例构造走 `new`。
+SNIP2 = """const std = module("std");
+const t = type;
+const u = union;
+const e = enum;
+const n = new;
+"""
+send({"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {
+    "textDocument": {"uri": uri, "version": 13},
+    "contentChanges": [{"text": SNIP2}]}})
+
+def snip2(word, rid):
+    off = SNIP2.index("= " + word) + 2 + len(word)
+    send({"jsonrpc": "2.0", "id": rid, "method": "textDocument/completion", "params": {
+        "textDocument": {"uri": uri}, "position": pos(SNIP2, off)}})
+    r, _ = recv_id("completion.snippet2", rid)
+    items = r["result"]["items"] if r and r.get("result") else []
+    return {i["label"]: i for i in items}
+
+s2t = snip2("type", 91)
+check("completion.snippet.type",
+      s2t.get("type", {}).get("insertText")
+      == "const ${1:Name} = struct {\n    ${2:field}: ${3:i32},\n};", str(s2t.get("type"))[:200])
+s2u = snip2("union", 92)
+check("completion.snippet.uniontag",
+      s2u.get("uniontag", {}).get("insertText")
+      == "const ${1:Name} = union(enum) {\n    ${2:a}: ${3:i32},\n};", str(s2u.get("uniontag"))[:200])
+check("completion.snippet.unionOrder",
+      s2u.get("union", {}).get("sortText", "") < s2u.get("uniontag", {}).get("sortText", "~"),
+      str({k: v.get("sortText") for k, v in s2u.items()})[:200])
+s2e = snip2("enum", 93)
+check("completion.snippet.enumtag",
+      s2e.get("enumtag", {}).get("insertText")
+      == "const ${1:Name} = enum(u8) { ${2:a}, ${3:b} };", str(s2e.get("enumtag"))[:200])
+s2n = snip2("new", 94)
+check("completion.snippet.new",
+      s2n.get("new", {}).get("insertText") == "const ${1:v} = ${2:Name}{ .${3:field} = $0 };",
+      str(s2n.get("new"))[:200])
+check("completion.snippet.typeShape",
+      all(d.get(c, {}).get("kind") == 15 and d.get(c, {}).get("insertTextFormat") == 2
+          for d, c in ((s2t, "type"), (s2u, "uniontag"), (s2e, "enumtag"), (s2n, "new"))),
+      str([s2t.get("type"), s2u.get("uniontag"), s2e.get("enumtag"), s2n.get("new")])[:260])
+send({"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {
+    "textDocument": {"uri": uri, "version": 14},
+    "contentChanges": [{"text": MAIN}]}})
+
 # 3e std.Task 静态成员：std.Task. → 全方法集（group 在列；方法签名里的
 # 参数名 f/ctx/h/v 不得混入——extractBraceMembers 的圆括号深度守卫）
 off = MAIN.index("std.Task.") + len("std.Task.")
@@ -626,6 +675,128 @@ check("inlayHint.type.namedStruct", ": Person" in types, pdetail)
 send({"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {
     "textDocument": {"uri": uri, "version": 12},
     "contentChanges": [{"text": MAIN}]}})
+
+# 3r extern "C" 绑定线（用户 2026-11-08 反馈：vendor 里生成的绑定、手写
+#     extern "C" 模块都没有补全/提示）。根因是 zxls 只索引 pub const/var/type，
+#     `pub fn NAME(...) void;` 整条漏掉，补全 / hover / 签名 / 跳转一起哑。
+#     这份 fixture 同时覆盖 cbind 生成物（vendor/glue.zx）与手写模块（src/gl.zx）。
+GLUE = '''@link("glue");
+
+extern "C" {
+    // cbind 生成的函数声明长这样：缩进 + pub fn + 分号
+    pub fn glClearColor(r: f32, g: f32, b: f32, a: f32) void;
+    pub fn glClear(mask: u32) void;
+    pub fn glViewport(x: i32, y: i32, w: i32, h: i32) void;
+    pub fn glSetTitle(title: *const u8) void;
+}
+
+pub extern var glState: u32;
+
+pub const GL_COLOR_BUFFER_BIT: u32 = 0x4000;
+'''
+GLLOCAL = '''@link("opengl32");
+
+extern "C" {
+    pub fn glBegin(mode: u32) void;
+    pub fn glEnd() void;
+    pub fn glVertex2f(x: f32, y: f32) void;
+}
+
+pub const GL_QUADS: u32 = 0x0007;
+'''
+BIND = '''const g  = module("glue");
+const gl = module("gl.zx");
+
+const main = fn () i32 {
+    g.
+    gl.
+    g.glClearColor(0.0, 0.0, 0.0, 1.0);
+    gl.glBegin(gl.GL_QUADS);
+    gl.glVertex2f(1.0, 2.0);
+    gl.glEnd();
+    g.glViewport(0, 0, 720, 720);
+    g.glSetTitle("hello");
+    return 0;
+};
+'''
+open(os.path.join(TESTDIR, "vendor", "glue.zx"), "w", encoding="utf-8").write(GLUE)
+open(os.path.join(SRC_DIR, "gl.zx"), "w", encoding="utf-8").write(GLLOCAL)
+open(os.path.join(SRC_DIR, "binduser.zx"), "w", encoding="utf-8").write(BIND)
+binduri = "file:///" + os.path.join(SRC_DIR, "binduser.zx").replace("\\", "/")
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": binduri, "languageId": "zx", "version": 1, "text": BIND}}})
+
+def bind_items(text, off, rid):
+    send({"jsonrpc": "2.0", "id": rid, "method": "textDocument/completion", "params": {
+        "textDocument": {"uri": binduri}, "position": pos(text, off)}})
+    r, _ = recv_id("completion", rid)
+    return r["result"]["items"] if r and r.get("result") else []
+
+off = BIND.index("    g.\n") + len("    g.")
+items = bind_items(BIND, off, 80)
+labels = {i["label"] for i in items}
+kinds = {i["label"]: i.get("kind") for i in items}
+check("completion.externVendor.functions",
+      {"glClearColor", "glClear", "glViewport"} <= labels, str(sorted(labels))[:240])
+check("completion.externVendor.constVar",
+      {"GL_COLOR_BUFFER_BIT", "glState"} <= labels, str(sorted(labels))[:240])
+check("completion.externVendor.fnKind", kinds.get("glClear") == 3, str(kinds)[:240])
+
+off = BIND.index("    gl.\n") + len("    gl.")
+labels = {i["label"] for i in bind_items(BIND, off, 81)}
+check("completion.externLocal",
+      {"glBegin", "glEnd", "glVertex2f", "GL_QUADS"} <= labels, str(sorted(labels))[:240])
+
+off = BIND.index("g.glViewport(") + len("g.glV")
+labels = {i["label"] for i in bind_items(BIND, off, 82)}
+check("completion.externPrefix", "glViewport" in labels, str(sorted(labels))[:240])
+
+def bind_hover(anchor, rid):
+    off = BIND.index(anchor) + len(anchor) - 1
+    send({"jsonrpc": "2.0", "id": rid, "method": "textDocument/hover", "params": {
+        "textDocument": {"uri": binduri}, "position": pos(BIND, off)}})
+    r, _ = recv_id("hover", rid)
+    return r["result"]["contents"]["value"] if r and r.get("result") else ""
+
+hv = bind_hover("g.glClearColor", 83)
+check("hover.externVendor.fn",
+      "glClearColor(r: f32, g: f32, b: f32, a: f32) void" in hv, repr(hv[:160]))
+hv = bind_hover("gl.glVertex2f", 84)
+check("hover.externLocal.fn", "glVertex2f(x: f32, y: f32) void" in hv, repr(hv[:160]))
+# 守卫：形参里的 `*const u8` 不能把函数头骗成 `u8(...)`
+hv = bind_hover("g.glSetTitle", 88)
+check("hover.externFn.constPtrParam",
+      "glSetTitle(title: *const u8) void" in hv, repr(hv[:160]))
+
+off = BIND.index("g.glClearColor(") + len("g.glClearColor(")
+send({"jsonrpc": "2.0", "id": 85, "method": "textDocument/signatureHelp", "params": {
+    "textDocument": {"uri": binduri}, "position": pos(BIND, off)}})
+r, _ = recv_id("signatureHelp", 85)
+sigs = r["result"]["signatures"] if r and r.get("result") else []
+check("signatureHelp.externVendor",
+      bool(sigs) and "r: f32" in sigs[0].get("label", ""), str(sigs)[:240])
+
+off = BIND.index("g.glViewport(") + len("g.glViewport") - 1
+send({"jsonrpc": "2.0", "id": 86, "method": "textDocument/definition", "params": {
+    "textDocument": {"uri": binduri}, "position": pos(BIND, off)}})
+r, _ = recv_id("definition", 86)
+loc = r.get("result") if r else None
+target = ""
+if isinstance(loc, dict):
+    target = loc.get("uri", "")
+elif isinstance(loc, list) and loc:
+    target = loc[0].get("uri", "")
+check("definition.externVendor", "vendor/glue.zx" in target, str(loc)[:240])
+
+send({"jsonrpc": "2.0", "id": 87, "method": "textDocument/inlayHint", "params": {
+    "textDocument": {"uri": binduri},
+    "range": {"start": {"line": 0, "character": 0},
+              "end": {"line": BIND.count("\n") + 1, "character": 0}}}})
+r, _ = recv_id("inlayHint.params", 87)
+bh = r["result"] if r and r.get("result") is not None else []
+pnames = {h["label"] for h in bh if h.get("kind") == 2}
+check("inlayHint.externParams",
+      {"r: ", "x: ", "mode: "} <= pnames, str(sorted(pnames))[:240])
 
 # 9 shutdown/exit
 send({"jsonrpc": "2.0", "id": 8, "method": "shutdown", "params": None})

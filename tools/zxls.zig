@@ -157,6 +157,10 @@ const snippets = [_]Snip{
     .{ .label = "struct", .body = "struct {\n    ${1:name}: ${2:i32},\n};", .detail = "代码片段 struct" },
     .{ .label = "union", .body = "union {\n    ${1:name}: ${2:i32},\n};", .detail = "代码片段 union" },
     .{ .label = "enum", .body = "enum { ${1:a}, ${2:b} };", .detail = "代码片段 enum" },
+    .{ .label = "type", .body = "const ${1:Name} = struct {\n    ${2:field}: ${3:i32},\n};", .detail = "自定义类型 struct" },
+    .{ .label = "uniontag", .body = "const ${1:Name} = union(enum) {\n    ${2:a}: ${3:i32},\n};", .detail = "自定义类型 union(enum)" },
+    .{ .label = "enumtag", .body = "const ${1:Name} = enum(u8) { ${2:a}, ${3:b} };", .detail = "自定义类型 enum(u8)" },
+    .{ .label = "new", .body = "const ${1:v} = ${2:Name}{ .${3:field} = $0 };", .detail = "按类型构造实例" },
     .{ .label = "error", .body = "error { ${1:open}, ${2:read} };", .detail = "代码片段 error" },
     .{ .label = "const", .body = "const ${1:name} = $0;", .detail = "代码片段 const" },
     .{ .label = "let", .body = "let ${1:name} = $0;", .detail = "代码片段 let" },
@@ -357,7 +361,12 @@ const DeclKind = enum { value, field, variant };
 //（用户 2026-11-08 02:15 拍板：字段类型不做行内 inlay，太吵；写的时候给提示）。
 // 配套四处：Decl.ty、extractBraceMembers / anonFieldOne 填类型、readFieldTy、
 // completeAt 的 addItem。lsptest.py 的 completion.*.fieldType 4 条是守门断言。
-const Decl = struct { name: []const u8, kind: DeclKind, ty: []const u8 = "" };
+const Decl = struct {
+    name: []const u8,
+    kind: DeclKind,
+    ty: []const u8 = "",
+    is_fn: bool = false,   // KEEP: extern "C" { pub fn ... } 的模块成员
+};
 
 /// 从 ':' 之后读字段类型，直到顶层分隔符（, } ; 换行）。
 /// 括号/方括号/花括号内部的分隔符不算——`rect: {f64, f64}`、`[]const u8`、
@@ -397,18 +406,33 @@ fn readFieldTy(src: []const u8, from: usize) []const u8 {
     return trimSl(src[s..i]);
 }
 
-/// 顶层声明：`[pub] (const|var|type) NAME =`
+/// 顶层声明：`[pub] (const|var|type) NAME =` 与 `[pub] [extern] fn NAME(`。
+/// KEEP: 第二条是 C 绑定的入口——`extern "C" { pub fn glClear(...); }` 里的
+/// 声明带缩进、被花括号包着，但语义上仍是模块的 pub 成员。以前只认 const/
+/// var/type，于是 `zxc include` 生成的 vendor 绑定和手写的 gl 模块都补不出
+/// 成员、hover 也没签名。块本身 `extern "C" {` 剩 `"C" {` 不命中任何前缀；
+/// 文件根的 `pub extern var X: T;`（cbind 生成器写法）也一起收下。
 fn topLevelDecls(text: []const u8, out: *std.ArrayList(Decl), pub_only: bool) void {
     var it = std.mem.splitScalar(u8, text, '\n');
     while (it.next()) |line_raw| {
-        const line = std.mem.trim(u8, line_raw, " \t\r");
-        var rest = line;
+        var rest = std.mem.trim(u8, line_raw, " \t\r");
+        if (rest.len == 0 or rest[0] == '/' or rest[0] == '@' or rest[0] == '}') continue;
         var is_pub = false;
         if (std.mem.startsWith(u8, rest, "pub ")) {
             is_pub = true;
             rest = std.mem.trimStart(u8, rest[4..], " \t");
         }
         if (pub_only and !is_pub) continue;
+        if (std.mem.startsWith(u8, rest, "extern "))
+            rest = std.mem.trimStart(u8, rest[7..], " \t");
+        if (std.mem.startsWith(u8, rest, "fn ")) {
+            const tail = rest[3..];
+            var n: usize = 0;
+            while (n < tail.len and isIdentChar(tail[n])) n += 1;
+            if (n > 0 and n < tail.len and tail[n] == '(')
+                out.append(gpa, .{ .name = tail[0..n], .kind = .value, .is_fn = true }) catch {};
+            continue;
+        }
         const prefixes = [_][]const u8{ "const ", "var ", "type " };
         for (prefixes) |p| {
             if (std.mem.startsWith(u8, rest, p)) {
@@ -420,6 +444,16 @@ fn topLevelDecls(text: []const u8, out: *std.ArrayList(Decl), pub_only: bool) vo
             }
         }
     }
+}
+
+/// pos 是否落在 `//` 行注释里（找声明时别把注释里的同名 fn 当真声明）。
+fn inLineComment(text: []const u8, pos: usize) bool {
+    var p = pos;
+    while (p > 0 and text[p - 1] != '\n') {
+        p -= 1;
+        if (p + 1 < text.len and text[p] == '/' and text[p + 1] == '/') return true;
+    }
+    return false;
 }
 
 fn collectIdents(text: []const u8, set: *std.StringHashMapUnmanaged(void)) void {
@@ -1354,7 +1388,7 @@ fn makeLocation(uri: []const u8, l1: u32, c1: u32, c2: u32) []const u8 {
     return j.buf.items;
 }
 
-/// 行内找 `[pub ](const|let|var|type) word` 声明；返回 0-based 行/列
+/// 行内找 `[pub ][extern ](const|let|var|type|fn) word` 声明；返回 0-based 行/列
 fn findDeclLine(text: []const u8, word: []const u8) ?struct { line: u32, col: u32 } {
     var ln: u32 = 0;
     var it = std.mem.splitScalar(u8, text, '\n');
@@ -1363,8 +1397,10 @@ fn findDeclLine(text: []const u8, word: []const u8) ?struct { line: u32, col: u3
         while (ci < line_raw.len and (line_raw[ci] == ' ' or line_raw[ci] == '\t')) ci += 1;
         if (line_raw.len - ci >= 4 and std.mem.eql(u8, line_raw[ci .. ci + 4], "pub ")) ci += 4;
         while (ci < line_raw.len and (line_raw[ci] == ' ' or line_raw[ci] == '\t')) ci += 1;
+        if (line_raw.len - ci >= 7 and std.mem.eql(u8, line_raw[ci .. ci + 7], "extern ")) ci += 7;
+        while (ci < line_raw.len and (line_raw[ci] == ' ' or line_raw[ci] == '\t')) ci += 1;
         const rest = line_raw[ci..];
-        const kws = [_][]const u8{ "const", "let", "var", "type" };
+        const kws = [_][]const u8{ "const", "let", "var", "type", "fn" };
         for (kws) |kw| {
             if (!(rest.len > kw.len and std.mem.startsWith(u8, rest, kw))) continue;
             if (rest[kw.len] != ' ' and rest[kw.len] != '\t') continue;
@@ -1380,17 +1416,36 @@ fn findDeclLine(text: []const u8, word: []const u8) ?struct { line: u32, col: u3
     return null;
 }
 
-/// `const word = module("X")` → X
+/// `const word = module("X")` → X。KEEP: 等号两侧的空白是任意的——
+/// 真实工程里为了对齐常写 `const g    = module("glfw3");`，旧版按单空格
+/// 拼字符串硬匹配，于是 `g.` 落回工作区标识符兜底：补全一堆噪音、hover
+/// 和签名全空。用户 2026-11-08 反馈的 vendor / 手写 extern 模块没提示，
+/// 除了 extern fn 没进索引，这一处是第二个根因。
 fn moduleOfBinding(text: []const u8, word: []const u8) ?[]const u8 {
-    var pat: std.ArrayList(u8) = .empty;
-    defer pat.deinit(gpa);
-    pat.appendSlice(gpa, "const ") catch return null;
-    pat.appendSlice(gpa, word) catch return null;
-    pat.appendSlice(gpa, " = module(\"") catch return null;
-    const hit = std.mem.indexOf(u8, text, pat.items) orelse return null;
-    const rest = text[hit + pat.items.len ..];
-    const e = std.mem.indexOfScalar(u8, rest, '"') orelse return null;
-    return rest[0..e];
+    if (word.len == 0) return null;
+    var from: usize = 0;
+    while (std.mem.indexOfPos(u8, text, from, "const ")) |c| {
+        from = c + 6;
+        if (c > 0 and isIdentChar(text[c - 1])) continue;
+        if (inLineComment(text, c)) continue;
+        var j = c + 6;
+        while (j < text.len and (text[j] == ' ' or text[j] == '\t')) j += 1;
+        if (!std.mem.startsWith(u8, text[j..], word)) continue;
+        var e = j + word.len;
+        if (e < text.len and isIdentChar(text[e])) continue;
+        while (e < text.len and (text[e] == ' ' or text[e] == '\t' or
+            text[e] == '\r' or text[e] == '\n')) e += 1;
+        if (e >= text.len or text[e] != '=') continue;
+        e += 1;
+        while (e < text.len and (text[e] == ' ' or text[e] == '\t' or
+            text[e] == '\r' or text[e] == '\n')) e += 1;
+        if (!std.mem.startsWith(u8, text[e..], "module(\"")) continue;
+        const s = e + 8; // 跳过 `module("` —— 8 个字符
+        const q = std.mem.indexOfScalarPos(u8, text, s, '"') orelse continue;
+        if (q == s) continue;
+        return text[s..q];
+    }
+    return null;
 }
 
 /// off 在同行 module("…" 字符串内（含停在内容上）→ 完整模块名
@@ -1747,29 +1802,46 @@ fn trimSl(s: []const u8) []const u8 {
     return s[a..b];
 }
 
-/// 找 `<name> = …` 声明语句，返回从关键字到顶层 ';' 的整段。
-/// const / let / var 都认（实例类型推断要找 `let v = Obj.init(...)`）；
-/// pub 前缀只对 const 有意义，也一并处理。
+/// 找声明语句，返回从关键字到顶层 ';' 的整段。
+/// const / let / var 的 `<name> = …`、extern var 的 `<name>: T;` 都认；
+/// KEEP: `pub fn NAME(...)` 形式也认——extern "C" 块里没有 `=`，以前这里
+/// 一律返回 null，模块成员的 hover / 签名帮助 / 参数名 inlay 全跟着哑掉。
 fn findDeclStmt(text: []const u8, name: []const u8) ?[]const u8 {
-    const kws = [_][]const u8{ "const ", "let ", "var " };
+    const kws = [_][]const u8{ "const ", "let ", "var ", "fn " };
     for (kws) |kw| {
         var from: usize = 0;
         while (std.mem.indexOfPos(u8, text, from, kw)) |c| {
             from = c + 1;
             if (c > 0 and isIdentChar(text[c - 1])) continue; // obsolete 之类
+            if (inLineComment(text, c)) continue;
             var j = c + kw.len;
-            while (j < text.len and text[j] == ' ') j += 1;
+            while (j < text.len and (text[j] == ' ' or text[j] == '\t')) j += 1;
             const ns = j;
             while (j < text.len and isIdentChar(text[j])) j += 1;
             if (j == ns or !std.mem.eql(u8, text[ns..j], name)) continue;
-            while (j < text.len and text[j] == ' ') j += 1;
-            if (j >= text.len or text[j] != '=') continue;
+            while (j < text.len and (text[j] == ' ' or text[j] == '\t')) j += 1;
+            if (j >= text.len) continue;
+            if (std.mem.eql(u8, kw, "fn ")) {
+                if (text[j] != '(') continue;
+            } else if (text[j] != '=' and text[j] != ':') continue;
+            // 往前吞掉 `pub ` / `extern ` 修饰，返回片段从声明开头起
             var start = c;
-            if (kw[0] == 'c' and start >= 4 and std.mem.eql(u8, text[start - 4 .. start], "pub ")) start -= 4;
+            var guard: usize = 0;
+            while (guard < 3) : (guard += 1) {
+                if (start >= 4 and std.mem.eql(u8, text[start - 4 .. start], "pub ")) {
+                    start -= 4;
+                    continue;
+                }
+                if (start >= 7 and std.mem.eql(u8, text[start - 7 .. start], "extern ")) {
+                    start -= 7;
+                    continue;
+                }
+                break;
+            }
             // 到顶层 ';'（跳过字符串、跟踪嵌套深度）
             var depth: usize = 0;
             var in_str = false;
-            var k = j + 1;
+            var k = j;
             while (k < text.len) : (k += 1) {
                 const ch = text[k];
                 if (in_str) {
@@ -1809,13 +1881,21 @@ const FnSig = struct {
 
 fn sigOfStmt(stmt: []const u8) FnSig {
     var r = FnSig{ .name = "", .params = &.{}, .ret = "", .is_fn = false };
-    // name
-    if (std.mem.indexOf(u8, stmt, "const ")) |c| {
-        var j = c + 6;
-        while (j < stmt.len and stmt[j] == ' ') j += 1;
+    // name：`const NAME = fn(...)` 或 extern 块的 `pub fn NAME(...)`。
+    // KEEP: 只在**声明头部**找，不能全文搜 "const "——C 绑定里到处是
+    // `*const u8` 形参，旧版会把这类函数 hover 成 `u8(title: *const u8)`。
+    var head = std.mem.trimStart(u8, stmt, " \t\r\n");
+    if (std.mem.startsWith(u8, head, "pub ")) head = std.mem.trimStart(u8, head[4..], " \t");
+    if (std.mem.startsWith(u8, head, "extern ")) head = std.mem.trimStart(u8, head[7..], " \t");
+    const npre: usize = if (std.mem.startsWith(u8, head, "const ")) 6
+        else if (std.mem.startsWith(u8, head, "fn ")) 3
+        else 0;
+    if (npre > 0) {
+        var j = npre;
+        while (j < head.len and (head[j] == ' ' or head[j] == '\t')) j += 1;
         const ns = j;
-        while (j < stmt.len and isIdentChar(stmt[j])) j += 1;
-        r.name = stmt[ns..j];
+        while (j < head.len and isIdentChar(head[j])) j += 1;
+        r.name = head[ns..j];
     }
     // fn?
     const fp = std.mem.indexOf(u8, stmt, "fn ") orelse std.mem.indexOf(u8, stmt, "fn(");
@@ -3223,20 +3303,8 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                 for (std_seeded) |m| addItem(&list, &seen, m, 3, "std 编译器内建", 0);
             }
 
-            // module 绑定？const <path> = module("…")
-            var mod: ?[]const u8 = null;
-            {
-                var pat: std.ArrayList(u8) = .empty;
-                defer pat.deinit(gpa);
-                pat.appendSlice(gpa, "const ") catch {};
-                pat.appendSlice(gpa, path) catch {};
-                pat.appendSlice(gpa, " = module(\"") catch {};
-                if (std.mem.indexOf(u8, text, pat.items)) |hit| {
-                    const rest = text[hit + pat.items.len ..];
-                    const e = std.mem.indexOfScalar(u8, rest, '"') orelse rest.len;
-                    if (e > 0) mod = rest[0..e];
-                }
-            }
+            // module 绑定？const <path> = module("…")（等号两侧可有对齐空格）
+            const mod: ?[]const u8 = moduleOfBinding(text, path);
             var decls: std.ArrayList(Decl) = .empty;
             defer decls.deinit(gpa);
 
@@ -3322,7 +3390,7 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                 for (decls.items) |dcl| {
                     // 字面量初始化只能写字段/变体，方法（name = fn …）不出
                     if (lit_ctx and dcl.kind == .value) continue;
-                    const k: u32 = switch (dcl.kind) {
+                    const k: u32 = if (dcl.is_fn) 3 else switch (dcl.kind) {
                         .field => 5,
                         .variant => 20,
                         .value => 6,
