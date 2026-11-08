@@ -1,4 +1,4 @@
-/* cbind.h — C 头文件 → Zx 绑定源码生成器（`zxc add` 的后端）。
+/* cbind.h — C 头文件 → Zx 绑定源码生成器（`zxc include` 的后端）。
  *
  * 只有一份：把 C 头喂给 vendored clang 的文本 AST，抽出函数 / 变量 /
  * struct / union / 枚举常量 / 数字宏，翻成普通的 Zx `extern "C"` 模块。
@@ -17,7 +17,7 @@
  *   extra_incs 目录树模式额外拼好的 `-I"..." -D...` 串，可为 NULL
  *   macro_headers / nmacro 需要扫 #define 的头（目录树模式下是全部公开头）；
  *                  nmacro = 0 时只扫 header 自己
- *   regen_arg 用户真正敲给 `zxc add` 的参数，写进生成物注释里的重生成命令；
+ *   regen_arg 用户真正敲给 `zxc include` 的参数，写进生成物注释里的重生成命令；
  *             传 NULL 时退回用 header 名
  *   err      失败原因（ASCII）
  *   nskip    解析不了、被跳过的声明条数（可为 NULL）

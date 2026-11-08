@@ -34,7 +34,7 @@ mkdir -p bin .zc-cache/local .zc-cache/global
 
 "$ZIG" cc -std=c11 -Wall -Wextra -O1 -o bin/zxc.exe \
     src/zxc.c src/ty.c src/val.c src/lex.c src/parse.c src/sema.c src/backend.c src/main.c \
-    src/fe.c src/astload.c src/errors.c src/cbind.c src/csrc.c src/clib.c
+    src/fe.c src/astload.c src/errors.c src/cbind.c src/csrc.c src/clib.c src/fetch.c
 rm -f bin/zxc.pdb
 echo "built bin/zxc.exe"
 

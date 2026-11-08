@@ -134,10 +134,10 @@ else
     printf "  FAIL zxc init\n"; cat "$TPFX.cli.init"; fail=1
 fi
 
-# 2.52 `zxc add`：C 头 -> Zx 绑定。守的是整条链路（clang AST 解析、
+# 2.52 `zxc include`：C 头 -> Zx 绑定。守的是整条链路（clang AST 解析、
 # 类型映射、extern var 文件作用域、生成物能被 Zx 自己检查），
 # 不是只测命令有没有打印成功。
-printf "\n== zxc add（C 头自动生成绑定）\n"
+printf "\n== zxc include（C 头自动生成绑定）\n"
 cat > "$pdir/demo/vendor/cliadd.h" <<'CHDR'
 #define CLI_MAGIC 7
 typedef struct Pt { int x; int y; } Pt;
@@ -146,22 +146,22 @@ extern int cli_g;
 int cli_sum(int a, int b);
 void cli_move(Pt *p, int dx);
 CHDR
-if ( cd "$pdir/demo" && "$ZXCW" add cliadd > "$TPFX.cli.add" 2>&1 ) \
+if ( cd "$pdir/demo" && "$ZXCW" include cliadd > "$TPFX.cli.add" 2>&1 ) \
    && grep -q "pub fn cli_sum(a: i32, b: i32) i32;" "$pdir/demo/vendor/cliadd.zx" \
    && grep -q "pub const CLI_MAGIC: i32 = 7;" "$pdir/demo/vendor/cliadd.zx" \
    && grep -q "pub extern var cli_g: i32;" "$pdir/demo/vendor/cliadd.zx" \
    && ( cd "$pdir/demo" && "$ZXCW" check vendor/cliadd.zx > "$TPFX.cli.addcheck" 2>&1 ); then
-    printf "  ok   zxc add 生成可检查的 C 绑定\n"
+    printf "  ok   zxc include 生成可检查的 C 绑定\n"
 else
-    printf "  FAIL zxc add\n"
+    printf "  FAIL zxc include\n"
     cat "$TPFX.cli.add" "$TPFX.cli.addcheck" 2>/dev/null
     cat "$pdir/demo/vendor/cliadd.zx" 2>/dev/null
     fail=1
 fi
-# 2.53 zxc 自己编 C 库：add 自动编译 vendor/*.c，改 .c 后 build 自动
+# 2.53 zxc 自己编 C 库：include 自动编译 vendor/*.c，改 .c 后 build 自动
 # 增量重编并重链。挡的是两件事：① 手工编库时 sanitizer 档位对不上；
 # ② "无改动重建"跳过链接，导致改了 C 源码却还在跑旧二进制。
-printf "\n== zxc 编译 C 库（add / build / cbuild）\n"
+printf "\n== zxc 编译 C 库（include / build / cbuild）\n"
 cat > "$pdir/demo/vendor/cliadd.c" <<'CSRC'
 #include "cliadd.h"
 int cli_g = 4;
@@ -176,14 +176,14 @@ const main = fn () i32 {
     return 0;
 };
 ZSRC
-if ( cd "$pdir/demo" && "$ZXCW" add cliadd --force > "$TPFX.cli.cadd" 2>&1 ) \
+if ( cd "$pdir/demo" && "$ZXCW" include cliadd --force > "$TPFX.cli.cadd" 2>&1 ) \
    && [ -f "$pdir/demo/vendor/libcliadd.a" ] \
    && grep -q '@link("vendor/libcliadd.a")' "$pdir/demo/vendor/cliadd.zx" \
    && ( cd "$pdir/demo" && "$ZXCW" run > "$TPFX.cli.crun" 2>&1 ) \
    && grep -q "sum=5 g=4" "$TPFX.cli.crun"; then
-    printf "  ok   add 自动编译 C 源码并链接运行\n"
+    printf "  ok   include 自动编译 C 源码并链接运行\n"
 else
-    printf "  FAIL add 自动编译 C 库\n"
+    printf "  FAIL include 自动编译 C 库\n"
     cat "$TPFX.cli.cadd" "$TPFX.cli.crun" 2>/dev/null
     fail=1
 fi
@@ -206,7 +206,7 @@ fi
 # 2.54 目录树模式：库原本就是 include/ + src/ 多层结构、还在工程外。
 # 守的是「不用复制任何文件」以及自动发现、自动排除测试目录、深层 .c 改动
 # 能触发重编重链。库文件一旦被要求摊平到 vendor/ 一层，这个用例就废了。
-printf "\n== zxc add <库目录>（多层路径，不复制文件）\n"
+printf "\n== zxc include <库目录>（多层路径，不复制文件）\n"
 TLIB="$pdir/treelib"
 mkdir -p "$TLIB/include/treelib" "$TLIB/src/core" "$TLIB/src/util" "$TLIB/tests"
 cat > "$TLIB/include/treelib.h" <<'THDR'
@@ -244,7 +244,7 @@ const main = fn () i32 {
     return 0;
 };
 ZSRC
-if ( cd "$pdir/demo" && "$ZXCW" add ../treelib > "$TPFX.cli.tree" 2>&1 ) \
+if ( cd "$pdir/demo" && "$ZXCW" include ../treelib > "$TPFX.cli.tree" 2>&1 ) \
    && [ -f "$pdir/demo/vendor/treelib.clib" ] \
    && [ -f "$pdir/demo/vendor/libtreelib.a" ] \
    && [ "$(grep -c '^source = ' "$pdir/demo/vendor/treelib.clib")" = "2" ] \
@@ -255,7 +255,7 @@ if ( cd "$pdir/demo" && "$ZXCW" add ../treelib > "$TPFX.cli.tree" 2>&1 ) \
    && grep -q "add=5 hash=6 g=2 ver=4" "$TPFX.cli.trun"; then
     printf "  ok   目录树自动发现 / 不复制 / 排除 tests / 端到端可调用\n"
 else
-    printf "  FAIL zxc add <库目录>\n"
+    printf "  FAIL zxc include <库目录>\n"
     cat "$TPFX.cli.tree" "$TPFX.cli.trun" 2>/dev/null
     cat "$pdir/demo/vendor/treelib.clib" 2>/dev/null
     fail=1
@@ -269,11 +269,11 @@ else
     printf "  FAIL 深层 .c 改动没有重编\n"; cat "$TPFX.cli.trun2" 2>/dev/null; fail=1
 fi
 
-# 2.54b vendor/ 自动接管：库直接丢进 vendor，不跑 add，一条 zxc run 就能跑。
+# 2.54b vendor/ 自动接管：库直接丢进 vendor，不跑 include，一条 zxc run 就能跑。
 # 守的是：① 绑定必须在解析入口源码之前生成（否则第一次 run 就报找不到模块）；
 # ② 目录树和顶层散头两种放法；③ 幂等且绝不覆盖手工改过的 .zx；
 # ④ 纯 zx 模块目录不误判、同名占位可 opt-out、zxc sync 幂等。
-printf "\n== vendor/ 自动接管（免 zxc add，直接 run）\n"
+printf "\n== vendor/ 自动接管（免 zxc include，直接 run）\n"
 AP="$pdir/auto/autodemo"
 mkdir -p "$pdir/auto"
 if ( cd "$pdir/auto" && "$ZXCW" init autodemo > "$TPFX.cli.ainit" 2>&1 ); then
@@ -293,7 +293,7 @@ if ( cd "$pdir/auto" && "$ZXCW" init autodemo > "$TPFX.cli.ainit" 2>&1 ); then
        && [ -f "$AP/vendor/geolib.clib" ] \
        && [ -f "$AP/vendor/geolib.zx" ] \
        && [ -f "$AP/vendor/libgeolib.a" ]; then
-        printf "  ok   丢库进 vendor 后直接 run，自动 add + 编译 + 链接\n"
+        printf "  ok   丢库进 vendor 后直接 run，自动接管 + 编译 + 链接\n"
     else
         printf "  FAIL vendor 自动接管\n"; cat "$TPFX.cli.arun" 2>/dev/null; fail=1
     fi
@@ -306,7 +306,7 @@ if ( cd "$pdir/auto" && "$ZXCW" init autodemo > "$TPFX.cli.ainit" 2>&1 ); then
     else
         printf "  FAIL 重复生成或覆盖了手改\n"; cat "$TPFX.cli.arun2" 2>/dev/null; fail=1
     fi
-    # 顶层散头 + 散 .c：更简单的放法同样免 add
+    # 顶层散头 + 散 .c：更简单的放法同样免 include
     printf '#define SMALL_K 9\nint small_mul(int a, int b);\n' > "$AP/vendor/small.h"
     printf '#include "small.h"\nint small_mul(int a, int b) { return a * b; }\n' > "$AP/vendor/small.c"
     printf 'const std = module("std");\nconst s = module("small");\nconst main = fn () i32 {\n    std.println("mul={} k={}", s.small_mul(4, 5), s.SMALL_K);\n    return 0;\n};\n' \
@@ -314,7 +314,7 @@ if ( cd "$pdir/auto" && "$ZXCW" init autodemo > "$TPFX.cli.ainit" 2>&1 ); then
     if ( cd "$AP" && "$ZXCW" run > "$TPFX.cli.arun3" 2>&1 ) \
        && grep -q "auto-added C header vendor/small.h" "$TPFX.cli.arun3" \
        && grep -q "mul=20 k=9" "$TPFX.cli.arun3"; then
-        printf "  ok   顶层散头 + 散 .c 也能免 add 直接跑\n"
+        printf "  ok   顶层散头 + 散 .c 也能免 include 直接跑\n"
     else
         printf "  FAIL 散头自动接管\n"; cat "$TPFX.cli.arun3" 2>/dev/null; fail=1
     fi
@@ -333,6 +333,117 @@ if ( cd "$pdir/auto" && "$ZXCW" init autodemo > "$TPFX.cli.ainit" 2>&1 ); then
     fi
 else
     printf "  FAIL zxc init（自动接管用例）\n"; cat "$TPFX.cli.ainit" 2>/dev/null; fail=1
+fi
+
+# 2.54c zxc add / fetch：两层声明与锁 + run 绝不联网。
+# 守的是：① add 写进 zx.json 的 vendor 声明必须仍是合法 JSON、不动别的字段；
+# ② zx.lock 记 tree hash 与 git commit；③ 单头 / 归档 / git 三种源都能落地
+# 并被自动接管；④ fetch 幂等、篡改检测、缺库恢复、声明锁冲突拒绝；
+# ⑤ 源站下线后 run 仍成功（构建路径一行网络代码都没有）；
+# ⑥ 原 add 的能力完整保留在 include 名下。
+printf "\n== zxc add/fetch（zx.json 声明 + zx.lock 锁定，run 不联网）\n"
+FDIR="$pdir/fetch"
+FSRV="$FDIR/srv"
+FDEMO="$FDIR/demo"
+if mkdir -p "$FSRV/flib-1.0/include" "$FSRV/flib-1.0/src" "$FSRV/fgit/include" "$FSRV/fgit/src" \
+   && printf '#define FMINI_K 42\n' > "$FSRV/fmini.h" \
+   && printf '#define FLIB_V 8\nint flib_add(int a, int b);\n' > "$FSRV/flib-1.0/include/flib.h" \
+   && printf '#include "flib.h"\nint flib_add(int a, int b) { return a + b; }\n' > "$FSRV/flib-1.0/src/add.c" \
+   && ( cd "$FSRV" && tar -czf flib.tar.gz flib-1.0 ) \
+   && printf '#define FGIT_K 5\nint fgit_mul(int a, int b);\n' > "$FSRV/fgit/include/fgit.h" \
+   && printf '#include "fgit.h"\nint fgit_mul(int a, int b) { return a * b; }\n' > "$FSRV/fgit/src/mul.c" \
+   && ( cd "$FSRV/fgit" && git init -q && git config core.autocrlf false && git config user.email t@t.t && git config user.name t \
+        && git add . && git commit -q -m init && git tag v1 ) \
+   && ( cd "$FDIR" && "$ZXCW" init demo > "$TPFX.cli.finit" 2>&1 ); then
+    FSHA=$(sha256sum "$FSRV/fmini.h" | cut -d' ' -f1)
+    # 三种源：单头（带预置 sha256）、tar.gz 归档、git tag
+    if ( cd "$FDEMO" && ZX_ALLOW_LOCAL_FETCH=1 "$ZXCW" add "file:///$FSRV/fmini.h" --name fmini --sha256 "$FSHA" > "$TPFX.cli.fa1" 2>&1 ) \
+       && ( cd "$FDEMO" && ZX_ALLOW_LOCAL_FETCH=1 "$ZXCW" add "file:///$FSRV/flib.tar.gz" > "$TPFX.cli.fa2" 2>&1 ) \
+       && ( cd "$FDEMO" && ZX_ALLOW_LOCAL_FETCH=1 "$ZXCW" add "file:///$FSRV/fgit" --git --ref v1 --name fgit > "$TPFX.cli.fa3" 2>&1 ) \
+       && [ -f "$FDEMO/vendor/fmini.h" ] && [ -f "$FDEMO/vendor/fmini.zx" ] \
+       && [ -f "$FDEMO/vendor/flib.clib" ] && [ -f "$FDEMO/vendor/fgit.zx" ] \
+       && python -c "import json,sys; d=json.load(open(sys.argv[1])); assert sorted(d['vendor'])==['fgit','flib','fmini']; assert d['name']=='demo'" "$FDEMO/zx.json" \
+       && grep -q "resolved = [0-9a-f]\{40\}" "$FDEMO/zx.lock" \
+       && grep -q "tree = [0-9a-f]\{64\}" "$FDEMO/zx.lock"; then
+        printf "  ok   add 三种源：声明 / 锁 / 绑定齐备，zx.json 仍合法\n"
+    else
+        printf "  FAIL zxc add 三层产物\n"
+        for f in "$TPFX.cli.fa1" "$TPFX.cli.fa2" "$TPFX.cli.fa3"; do cat "$f" 2>/dev/null; done
+        fail=1
+    fi
+    printf 'const std = module("std");\nconst a = module("flib");\nconst b = module("fgit");\nconst c = module("fmini");\nconst main = fn () i32 {\n    std.println("add={} mul={} k={} mini={}", a.flib_add(3, 4), b.fgit_mul(2, 6), b.FGIT_K, c.FMINI_K);\n    return 0;\n};\n' > "$FDEMO/src/main.zx"
+    if ( cd "$FDEMO" && "$ZXCW" run > "$TPFX.cli.frun" 2>&1 ) \
+       && grep -q "add=7 mul=12 k=5 mini=42" "$TPFX.cli.frun"; then
+        printf "  ok   拉下来的三种库都能编译链接跑\n"
+    else
+        printf "  FAIL add 后的 zxc run\n"; cat "$TPFX.cli.frun" 2>/dev/null; fail=1
+    fi
+    # 源站整个下线：run 必须照常成功，且输出不带任何下载字样
+    mv "$FSRV" "$FSRV.off"
+    if ( cd "$FDEMO" && "$ZXCW" run > "$TPFX.cli.frun2" 2>&1 ) \
+       && grep -q "add=7 mul=12" "$TPFX.cli.frun2" \
+       && ! grep -qi "download\|curl\|clone" "$TPFX.cli.frun2"; then
+        printf "  ok   源站下线后 run 仍成功（构建不联网）\n"
+    else
+        printf "  FAIL run 竟然依赖源站\n"; cat "$TPFX.cli.frun2" 2>/dev/null; fail=1
+    fi
+    mv "$FSRV.off" "$FSRV"
+    # fetch 纯本地：不开本地源开关也能全绿，说明没碰 URL
+    if ( cd "$FDEMO" && "$ZXCW" fetch > "$TPFX.cli.ff1" 2>&1 ) \
+       && grep -q "3 ok, 0 problem" "$TPFX.cli.ff1"; then
+        printf "  ok   fetch 幂等，纯本地校验不碰 URL\n"
+    else
+        printf "  FAIL fetch 幂等\n"; cat "$TPFX.cli.ff1" 2>/dev/null; fail=1
+    fi
+    printf '// tampered\n' >> "$FDEMO/vendor/fmini.h"
+    if ( cd "$FDEMO" && "$ZXCW" fetch fmini > "$TPFX.cli.ftamp" 2>&1 ) \
+       || ! grep -q "content differs" "$TPFX.cli.ftamp"; then
+        printf "  FAIL 篡改未被检出\n"; cat "$TPFX.cli.ftamp" 2>/dev/null; fail=1
+    else
+        printf "  ok   本地篡改被 tree hash 检出且不静默覆盖\n"
+    fi
+    rm -rf "$FDEMO/vendor/flib"
+    if ( cd "$FDEMO" && ZX_ALLOW_LOCAL_FETCH=1 "$ZXCW" fetch flib > "$TPFX.cli.fres" 2>&1 ) \
+       && [ -f "$FDEMO/vendor/flib/src/add.c" ] \
+       && grep -q "restored flib" "$TPFX.cli.fres"; then
+        printf "  ok   缺库按锁恢复\n"
+    else
+        printf "  FAIL 缺库恢复\n"; cat "$TPFX.cli.fres" 2>/dev/null; fail=1
+    fi
+    # 上游 tag 改写：锁里的 commit 必须拒绝，且本地库一个字节都不动
+    FBEFORE=$(sha256sum "$FDEMO/vendor/fgit/src/mul.c" | cut -d' ' -f1)
+    ( cd "$FSRV/fgit" && git commit -q --allow-empty -m evil && git tag -f v1 >/dev/null 2>&1 )
+    if ( cd "$FDEMO" && ZX_ALLOW_LOCAL_FETCH=1 "$ZXCW" fetch fgit --force > "$TPFX.cli.fevil" 2>&1 ) \
+       || ! grep -q "lock mismatch: git commit" "$TPFX.cli.fevil" \
+       || [ "$FBEFORE" != "$(sha256sum "$FDEMO/vendor/fgit/src/mul.c" | cut -d' ' -f1)" ]; then
+        printf "  FAIL 上游 tag 改写未被锁挡住\n"; cat "$TPFX.cli.fevil" 2>/dev/null; fail=1
+    else
+        printf "  ok   上游 tag 改写被 zx.lock 的 commit 拒绝\n"
+    fi
+    # 安全边界 + 命令改名回归
+    if ( cd "$FDEMO" && ZX_ALLOW_LOCAL_FETCH=1 "$ZXCW" add "file:///$FSRV/fmini.h" --name bad --sha256 0000000000000000000000000000000000000000000000000000000000000000 > "$TPFX.cli.fbad" 2>&1 ) \
+       || ! grep -q "sha256 mismatch" "$TPFX.cli.fbad"; then
+        printf "  FAIL sha256 不符未拒绝\n"; cat "$TPFX.cli.fbad" 2>/dev/null; fail=1
+    else
+        printf "  ok   预置 sha256 不符立即拒绝\n"
+    fi
+    if ( cd "$FDEMO" && "$ZXCW" add http://example.com/x.h > "$TPFX.cli.fsch" 2>&1 ) \
+       || ! grep -q "only https" "$TPFX.cli.fsch"; then
+        printf "  FAIL 非 https 源未拒绝\n"; cat "$TPFX.cli.fsch" 2>/dev/null; fail=1
+    else
+        printf "  ok   非 https 源被拒绝\n"
+    fi
+    if ( cd "$FDEMO" && "$ZXCW" include --list > "$TPFX.cli.finc" 2>&1 ) \
+       && grep -q "built-in C library recipes" "$TPFX.cli.finc" \
+       && ! ( cd "$FDEMO" && "$ZXCW" add ./vendor/fmini.h > "$TPFX.cli.flocal" 2>&1 ) \
+       && grep -q "zxc include" "$TPFX.cli.flocal"; then
+        printf "  ok   include 保留原能力 / add 对本地路径指路 include\n"
+    else
+        printf "  FAIL include 回归或本地路径提示\n"
+        cat "$TPFX.cli.finc" "$TPFX.cli.flocal" 2>/dev/null; fail=1
+    fi
+else
+    printf "  FAIL add/fetch 用例的 fixture 准备\n"; cat "$TPFX.cli.finit" 2>/dev/null; fail=1
 fi
 
 rm -rf "$pdir" 2>/dev/null || true

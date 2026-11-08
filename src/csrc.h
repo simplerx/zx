@@ -1,4 +1,4 @@
-/* csrc.h — vendor/ 下 C 源码的自动编译（`zxc add` / `zxc build` / `zxc cbuild` 共用）。
+/* csrc.h — vendor/ 下 C 源码的自动编译（`zxc include` / `zxc build` / `zxc cbuild` 共用）。
  *
  * 存在的理由：C 静态库必须和 zxc 生成的 C 用**同一套 cc + flags**编译。
  * 手工用别的命令编（哪怕只差 -fno-sanitize=undefined），链接时就会缺
@@ -13,7 +13,7 @@
  *
  *   cc / cflags   与 zx 生成 C 完全相同的编译器与参数（调用方传 g_cc / g_cflags）
  *   cache         中间文件目录（工程里是 .zxc-cache），.o / .flags / .log 都落这里
- *   only_group    非 NULL 时只处理这一组（zxc add 只编当前头文件对应的库）
+ *   only_group    非 NULL 时只处理这一组（zxc include 只编当前头文件对应的库）
  *   force         忽略时间戳全量重编
  *   outlibs       成功时返回 malloc 的路径数组（每个元素也要 free），无 C 源码时为 NULL
  *   err           失败原因（ASCII）

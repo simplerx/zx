@@ -2,7 +2,7 @@
  *
  * 背景：真实 C 库几乎都是 include/ 放头、src/ 放下多层源码，甚至还带
  * tests/ examples/ 之类的干扰目录。要求用户把这些文件摊平复制到 vendor/
- * 一层既费心又容易漏，和 `zxc add` 的初衷相悖。
+ * 一层既费心又容易漏，和 `zxc include` 的初衷相悖。
  *
  * 做法：递归扫一遍库**原本的**目录树，把发现结果写成一张可读可改的
  * vendor/<name>.clib 清单（root/include/source/define 行）。库文件一个都不动，

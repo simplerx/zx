@@ -18,6 +18,9 @@
  *   zxc run [args]      build 后直接运行 out/<产物>.exe（-- 之后的参数传给程序）
  *   zxc test [过滤]     运行 src/test/ 测试模块（零参 pub 函数即用例）
  *   zxc sync            扫 vendor/ 补生成缺失的 C 绑定（build/run 自动做）
+ *   zxc include         接入本地/工程外的 C 库（原 add 的全部能力）
+ *   zxc add <url>       从网站拉 C 库进 vendor/，写 zx.json 声明 + zx.lock
+ *   zxc fetch           按 zx.lock 校验/补齐 vendor/（唯一可能联网的补齐入口）
  *   zxc check / fmt     检查 / 格式化
  *
  * zx.json：工程清单（init 生成）。name/version/main/out 之外，
@@ -35,6 +38,8 @@
 #include "cbind.h"
 #include "csrc.h"
 #include "clib.h"
+#include "fetch.h"
+#include <ctype.h>
 #include <stdarg.h>
 #include <time.h>
 #include <sys/stat.h>
@@ -63,6 +68,8 @@ void  sema_set_search_paths(const char *const *dirs);   /* deps 模块搜索路�
 const char *sema_module_path(int i);                    /* 模块 i 的源文件路径 */
 static char *read_source(const char *path, size_t *out_len);
 static int  vendor_autoscan(void);   /* vendor/ 自动接管：build/run/test 解析源码前调 */
+static int  cmd_add(int argc, char **argv, int argi);
+static int  cmd_fetch(int argc, char **argv, int argi);
 
 static const char *g_cc;
 static const char *g_cflags;
@@ -821,10 +828,12 @@ static void usage(FILE *f) {
         "\n"
         "project subcommands:\n"
         "  init [name]                      create a project: src/ sources, vendor/ module root, zx.json\n"
-        "  add <name|header.h|dir>       add a C library: generate a Zx binding into vendor/\n"
-        "  add ./third_party/foo          point at a library tree; no files are copied\n"
+        "  include <name|header.h|dir>  include a local C library: binding into vendor/\n"
+        "  include ./third_party/foo     point at a library tree; no files are copied\n"
+        "  add <url>                      fetch a C library into vendor/ (network, pinned)\n"
+        "  fetch [name]                   verify/restore vendor/ from zx.lock\n"
         "  sync                            scan vendor/, generate missing C bindings now\n"
-        "  cbuild [group]                 compile vendor/*.c into lib<group>.a (auto on add/build)\n"
+        "  cbuild [group]                 compile vendor/*.c into lib<group>.a (auto on include/build)\n"
         "  build [options]                  build per zx.json into out/ (intermediates in .zxc-cache/)\n"
         "  run [options] [-- prog args...]  build, then run\n"
         "  test [name filter]               run src/test/ cases (zero-arg pub functions)\n"
@@ -859,6 +868,50 @@ static void print_version(FILE *f) {
 
 /* 子命令级帮助。返回 0 = 认得的子命令，-1 = 没有这个子命令。 */
 static int help_sub(FILE *f, const char *cmd) {
+    if (!strcmp(cmd, "add")) {
+        fprintf(f,
+            "zxc add <url> [options] -- fetch a C library into vendor/ (network)\n"
+            "\n"
+            "  zxc add https://raw.githubusercontent.com/nothings/stb/master/stb_image.h\n"
+            "  zxc add https://gitcode.com/some/foo.git --ref v1.2.3 --name foo\n"
+            "  zxc add https://example.com/foo.tar.gz --subdir foo-1.2/include\n"
+            "  zxc add <url> --sha256 <64hex>     pin the expected bytes before downloading\n"
+            "\n"
+            "Two layers, both committed:\n"
+            "  zx.json  \"vendor\"   what a human asked for (url / ref / sha256 / subdir)\n"
+            "  zx.lock              what was actually fetched (git commit + tree hash + path)\n"
+            "\n"
+            "add downloads, verifies, writes both files, then lands the library in vendor/\n"
+            "so the normal auto-scan picks it up. `zxc run` NEVER uses the network;\n"
+            "it only warns when a locked library is missing. On another machine run\n"
+            "`zxc fetch` to restore vendor/ from zx.lock.\n"
+            "\n"
+            "Sources: a single file (e.g. a header-only lib), a .tar/.tgz/.zip archive,\n"
+            "or a git repo (--ref pins a tag/branch; zx.lock pins the exact commit).\n"
+            "Only https:// is accepted. loopback http:// is allowed for local mirrors;\n"
+            "file:// needs ZX_ALLOW_LOCAL_FETCH=1. No build scripts are executed, no\n"
+            "dependency resolution, no registry. Uses curl / git / tar from PATH.\n"
+            "\n"
+            "options: --name NAME --ref TAG --sha256 HEX --subdir PATH --git --force\n"
+            "For a library already on disk use `zxc include <path>` instead.\n");
+        return 0;
+    }
+    if (!strcmp(cmd, "fetch")) {
+        fprintf(f,
+            "zxc fetch [name] [--force] -- verify / restore vendor/ from zx.lock\n"
+            "\n"
+            "  zxc fetch                check every declared library\n"
+            "  zxc fetch foo            check only 'foo'\n"
+            "  zxc fetch --force        re-download even if vendor/ looks intact\n"
+            "\n"
+            "A library that is present and matches zx.lock is left untouched (no network).\n"
+            "A missing one is downloaded and MUST reproduce the locked tree hash; a\n"
+            "locally modified one is reported instead of silently overwritten -- pass\n"
+            "--force to restore it (the old copy is moved to .zxc-cache/fetch-backup/).\n"
+            "If zx.json and zx.lock disagree, fetch refuses: re-pin with `zxc add --force`.\n"
+            "This is the only command that may download during a normal workflow.\n");
+        return 0;
+    }
     if (!strcmp(cmd, "sync")) {
         fprintf(f,
             "zxc sync -- scan vendor/ and generate missing C bindings now\n"
@@ -881,24 +934,24 @@ static int help_sub(FILE *f, const char *cmd) {
             "  zxc cbuild --force      ignore timestamps, rebuild all\n"
             "  zxc cbuild --release    use the -O2 profile\n"
             "\n"
-            "Normally you do not need this: `zxc add` compiles sibling .c files\n"
+            "Normally you do not need this: `zxc include` compiles sibling .c files\n"
             "and `zxc build` recompiles them incrementally when a .c/.h changes.\n"
             "C sources use the exact same cc + flags as the C that zxc generates,\n"
             "so there is no sanitizer / ABI mismatch at link time.\n"
             "Grouping: <stem>.c with <stem>.h -> lib<stem>.a; mini_extra.c also\n"
             "joins libmini.a; a .c without a matching header gets its own group.\n"
-            "A vendor/<name>.clib manifest (made by `zxc add <dir>`) builds all its\n"
+            "A vendor/<name>.clib manifest (made by `zxc include <dir>`) builds all its\n"
             "listed sources into one lib<name>.a, whatever their directory depth.\n");
         return 0;
     }
-    if (!strcmp(cmd, "add")) {
+    if (!strcmp(cmd, "include")) {
         fprintf(f,
-            "zxc add <name|header.h|dir> [options] -- add a C library, no manual bindings\n"
+            "zxc include <name|header.h|dir> [options] -- include a local C library\n"
             "\n"
-            "  zxc add ../third_party/foo    point at a LIBRARY DIRECTORY (recommended)\n"
-            "  zxc add ./vendor/raylib.h     parse one local header -> vendor/raylib.zx\n"
-            "  zxc add sqlite3               built-in recipe: locate header + set @link\n"
-            "  zxc add --list                show built-in recipes\n"
+            "  zxc include ../third_party/foo    point at a LIBRARY DIRECTORY (recommended)\n"
+            "  zxc include ./vendor/raylib.h     parse one local header -> vendor/raylib.zx\n"
+            "  zxc include sqlite3               built-in recipe: locate header + set @link\n"
+            "  zxc include --list                show built-in recipes\n"
             "\n"
             "Directory mode: zxc walks the library's own tree (include/, src/, any\n"
             "number of nested dirs), writes vendor/<name>.clib listing what it found,\n"
@@ -1303,7 +1356,7 @@ static const char *INIT_VENDOR_README =
     "搜索顺序：相对导入所在的目录 → 工程根的 `vendor/` → `zx.json` 的\n"
     "`\"deps\"` 数组。`vendor/` 存在即自动参与搜索，不用写进 deps。\n"
     "\n"
-    "C 库也直接放这里，不用跑 `zxc add`：\n"
+    "C 库也直接放这里，不用敲任何接入命令：\n"
     "\n"
     "```sh\n"
     "cp -r ../third_party/foo vendor/foo   # include/ + 多层 src/ 原样搬入\n"
@@ -1314,6 +1367,17 @@ static const char *INIT_VENDOR_README =
     "第一次会生成 `vendor/foo.zx`（普通 Zx 源码）和 `vendor/foo.clib`（编译清单），\n"
     "两个都是可编辑的工程文件，建议提交。已有同名文件就不会再动；想让编辑器在写码\n"
     "前先有补全，跑一次 `zxc sync`。\n"
+    "\n"
+    "库在远端时用 `zxc add <url>` 拉进来，同样落在这里：\n"
+    "\n"
+    "```sh\n"
+    "zxc add https://example.com/foo.h                 # 单头库\n"
+    "zxc add https://example.com/foo.git --ref v1.2.3  # git 仓库\n"
+    "zxc fetch                                        # 换机器后按 zx.lock 补齐\n"
+    "```\n"
+    "\n"
+    "`zx.json` 的 `\"vendor\"` 段写意图，`zx.lock` 锁定实际内容（commit / 文件树\n"
+    "hash），两个都要提交。`zxc run` / `build` / `test` 永远不联网，缺库时跑 `zxc fetch`。\n"
     "\n"
     "vendor/ 里的是源码依赖，应该提交进版本控制。\n";
 
@@ -1442,7 +1506,7 @@ static int cmd_init(int argc, char **argv, int argi) {
  * 生成物是普通源码，所以 LSP 的补全 / hover / inlayHint 全部照常生效。
  */
 typedef struct {
-    const char *alias;      /* zxc add <alias> */
+    const char *alias;      /* zxc include <alias> */
     const char *header;     /* 头文件名 */
     const char *lib;        /* @link 名，"" = 不用额外链接 */
 } CRecipe;
@@ -1597,7 +1661,7 @@ static int vendor_has_c_for(const VEntry *ents, int n, const char *stem) {
     return 0;
 }
 
-/* 已有清单是否已经指向这个目录：`zxc add vendor/foo --name bar` 会留下一张
+/* 已有清单是否已经指向这个目录：`zxc include vendor/foo --name bar` 会留下一张
  * vendor/bar.clib，此时不能再自动补一份 vendor/foo.zx。 */
 static int vendor_root_claimed(const char *root) {
     int nm = 0, claimed = 0;
@@ -1723,21 +1787,21 @@ static int cmd_sync(int argc, char **argv, int argi) {
     return 0;
 }
 
-/* ---- 目录树模式：zxc add <库目录> --------------------------------------
+/* ---- 目录树模式：zxc include <库目录> --------------------------------------
  * 库文件保持原位：include/ 与 src/ 分离、任意深度子目录、甚至工程外的路径。
  * 只写一张 vendor/<name>.clib 清单（编译输入，可直接注释行裁剪），
  * 再把清单里所有 .c 合成一个 lib<name>.a。一个文件都不复制。
  */
-static int cmd_add_tree(const char *root, const char *uname,
+static int cmd_include_tree(const char *root, const char *uname,
                         const char *ulib, int force, int no_build) {
     char err[1024];
     ClibManifest m;
     if (clib_discover(root, uname, &m, err, sizeof err) != 0) {
-        fprintf(stderr, "zxc add: %s\n", err);
+        fprintf(stderr, "zxc include: %s\n", err);
         return 1;
     }
     if (mkdir_one("vendor") != 0) {
-        fprintf(stderr, "zxc add: cannot create vendor/\n");
+        fprintf(stderr, "zxc include: cannot create vendor/\n");
         clib_free(&m); return 1;
     }
     char modname[256];
@@ -1750,15 +1814,15 @@ static int cmd_add_tree(const char *root, const char *uname,
     snprintf(zxpath, sizeof zxpath, "vendor/%s.zx", modname);
     snprintf(libpath, sizeof libpath, "vendor/lib%s.a", modname);
     if (!force && (fexists(mf) || fexists(zxpath))) {
-        fprintf(stderr, "zxc add: '%s' already exists (use --force to overwrite)\n",
+        fprintf(stderr, "zxc include: '%s' already exists (use --force to overwrite)\n",
                 fexists(mf) ? mf : zxpath);
         clib_free(&m); return 1;
     }
     if (clib_write_manifest(mf, &m, root, regen, err, sizeof err) != 0) {
-        fprintf(stderr, "zxc add: %s\n", err);
+        fprintf(stderr, "zxc include: %s\n", err);
         clib_free(&m); return 1;
     }
-    printf("zxc add: %s\n", root);
+    printf("zxc include: %s\n", root);
     printf("  found %d header(s), %d include dir(s), %d C source(s)\n",
            m.nhdr, m.ninc, m.nsrc);
     printf("  wrote %s -- nothing copied; comment out lines to trim\n", mf);
@@ -1785,12 +1849,12 @@ static int cmd_add_tree(const char *root, const char *uname,
     char header[1024];
     if (clib_umbrella(&m, ZX_CACHE_DIR, header, sizeof header,
                       err, sizeof err) != 0) {
-        fprintf(stderr, "zxc add: %s\n", err);
+        fprintf(stderr, "zxc include: %s\n", err);
         clib_free(&m); return 1;
     }
     char *incs = clib_inc_flags(&m);
     if (!incs) {
-        fprintf(stderr, "zxc add: out of memory\n");
+        fprintf(stderr, "zxc include: out of memory\n");
         clib_free(&m); return 1;
     }
 
@@ -1799,10 +1863,10 @@ static int cmd_add_tree(const char *root, const char *uname,
         int ncomp = 0;
         if (clib_build(g_cc, g_cflags ? g_cflags : CC_DEV, mf, ZX_CACHE_DIR, 0,
                        libpath, sizeof libpath, err, sizeof err, &ncomp) < 0) {
-            fprintf(stderr, "zxc add: %s\n", err);
+            fprintf(stderr, "zxc include: %s\n", err);
             free(incs); clib_free(&m); return 1;
         }
-        printf("zxc add: compiled %d C unit(s) -> %s\n", ncomp, libpath);
+        printf("zxc include: compiled %d C unit(s) -> %s\n", ncomp, libpath);
     }
     /* 纯头库不写 @link；其它情况即使 --no-build 也先把路径写进绑定，
      * 之后 zxc build 会自动把库编出来。 */
@@ -1814,11 +1878,11 @@ static int cmd_add_tree(const char *root, const char *uname,
                                 err, sizeof err, &nskip);
     free(incs);
     clib_free(&m);
-    if (!text) { fprintf(stderr, "zxc add: %s\n", err); return 1; }
+    if (!text) { fprintf(stderr, "zxc include: %s\n", err); return 1; }
     int rc = write_text_file(zxpath, text);
     free(text);
     if (rc != 0) return 1;
-    printf("zxc add: wrote %s (%d declaration(s) skipped)\n", zxpath, nskip);
+    printf("zxc include: wrote %s (%d declaration(s) skipped)\n", zxpath, nskip);
     printf("  use:  const %s = module(\"%s\");\n", modname, modname);
     if (lib && lib[0])
         printf("  link: @link(\"%s\") is already in the binding\n", lib);
@@ -1828,7 +1892,7 @@ static int cmd_add_tree(const char *root, const char *uname,
     return 0;
 }
 
-static int cmd_add(int argc, char **argv, int argi) {
+static int cmd_include(int argc, char **argv, int argi) {
     const char *name = NULL, *ulib = NULL, *uname = NULL;
     int force = 0, list = 0, no_build = 0;
     for (int i = argi; i < argc; i++) {
@@ -1837,44 +1901,44 @@ static int cmd_add(int argc, char **argv, int argi) {
         else if (!strcmp(argv[i], "--no-build")) no_build = 1;
         else if (!strcmp(argv[i], "--name")) {
             if (i + 1 >= argc) {
-                fprintf(stderr, "zxc add: --name needs a module name\n");
+                fprintf(stderr, "zxc include: --name needs a module name\n");
                 return 2;
             }
             uname = argv[++i];
         } else if (!strcmp(argv[i], "--lib")) {
             if (i + 1 >= argc) {
-                fprintf(stderr, "zxc add: --lib needs a library name\n");
+                fprintf(stderr, "zxc include: --lib needs a library name\n");
                 return 2;
             }
             ulib = argv[++i];
         } else if (argv[i][0] == '-') {
-            fprintf(stderr, "zxc add: unknown option '%s'\n", argv[i]);
+            fprintf(stderr, "zxc include: unknown option '%s'\n", argv[i]);
             return 2;
         } else if (!name) name = argv[i];
         else {
-            fprintf(stderr, "zxc add: unexpected argument '%s'\n", argv[i]);
+            fprintf(stderr, "zxc include: unexpected argument '%s'\n", argv[i]);
             return 2;
         }
     }
     if (list) {
-        printf("zxc add -- built-in C library recipes\n\n");
+        printf("zxc include -- built-in C library recipes\n\n");
         printf("  name        header        link\n");
         for (int i = 0; g_crecipes[i].alias; i++)
             printf("  %-11s %-13s %s\n", g_crecipes[i].alias,
                    g_crecipes[i].header,
                    g_crecipes[i].lib[0] ? g_crecipes[i].lib : "(none)");
-        printf("\nA plain .h path works too:  zxc add ./vendor/foo.h\n");
+        printf("\nA plain .h path works too:  zxc include ./vendor/foo.h\n");
         printf("Use --lib NAME / --force to override the link name / overwrite.\n");
         return 0;
     }
     if (!name) {
-        fprintf(stderr, "usage: zxc add <name|header.h|dir> [--name NAME] [--lib NAME] [--no-build] [--force]\n"
-                        "       zxc add --list\n");
+        fprintf(stderr, "usage: zxc include <name|header.h|dir> [--name NAME] [--lib NAME] [--no-build] [--force]\n"
+                        "       zxc include --list\n");
         return 2;
     }
 
     /* 目录参数 = 库原本的目录树：不复制文件，走清单模式。 */
-    if (path_is_dir(name)) return cmd_add_tree(name, uname, ulib, force, no_build);
+    if (path_is_dir(name)) return cmd_include_tree(name, uname, ulib, force, no_build);
 
     const CRecipe *r = crecipe_of(name);
     char header[1024] = "";
@@ -1907,15 +1971,15 @@ static int cmd_add(int argc, char **argv, int argi) {
         const char *inc = want_h;
         if (!inc) { snprintf(incbuf, sizeof incbuf, "%s.h", name); inc = incbuf; }
         if (mkdir_one(".zxc-cache") != 0) {
-            fprintf(stderr, "zxc add: cannot create .zxc-cache/\n");
+            fprintf(stderr, "zxc include: cannot create .zxc-cache/\n");
             return 1;
         }
         char wrap[1024];
         snprintf(wrap, sizeof wrap, "#include <%s>\n", inc);
-        if (write_text_file(".zxc-cache/zxc-add-wrap.h", wrap) != 0) return 1;
-        snprintf(header, sizeof header, ".zxc-cache/zxc-add-wrap.h");
+        if (write_text_file(".zxc-cache/zxc-include-wrap.h", wrap) != 0) return 1;
+        snprintf(header, sizeof header, ".zxc-cache/zxc-include-wrap.h");
         allow_system = 1;
-        printf("zxc add: <%s> not found locally, using toolchain headers\n", inc);
+        printf("zxc include: <%s> not found locally, using toolchain headers\n", inc);
     }
 
     char stem[256];
@@ -1933,13 +1997,13 @@ static int cmd_add(int argc, char **argv, int argi) {
                               hdir, ZX_CACHE_DIR, stem, 0,
                               &libs, cerr, sizeof cerr, &ncomp);
         if (nlib < 0) {
-            fprintf(stderr, "zxc add: %s\n", cerr);
+            fprintf(stderr, "zxc include: %s\n", cerr);
             return 1;
         }
         if (nlib > 0) {
             snprintf(builtlib, sizeof builtlib, "%s", libs[0]);
-            if (ncomp > 0) printf("zxc add: compiled %d C unit(s) -> %s\n", ncomp, builtlib);
-            else printf("zxc add: %s is up to date\n", builtlib);
+            if (ncomp > 0) printf("zxc include: compiled %d C unit(s) -> %s\n", ncomp, builtlib);
+            else printf("zxc include: %s is up to date\n", builtlib);
         }
         for (int i = 0; i < nlib; i++) free(libs[i]);
         free(libs);
@@ -1954,18 +2018,18 @@ static int cmd_add(int argc, char **argv, int argi) {
         if (cadd_probe_lib(stem, probe, sizeof probe)) {
             snprintf(libbuf, sizeof libbuf, "%s", probe);
             lib = libbuf;
-            printf("zxc add: found local library %s, linking it\n", probe);
+            printf("zxc include: found local library %s, linking it\n", probe);
         }
     }
 
     if (mkdir_one("vendor") != 0) {
-        fprintf(stderr, "zxc add: cannot create vendor/\n");
+        fprintf(stderr, "zxc include: cannot create vendor/\n");
         return 1;
     }
     char outpath[1024];
     snprintf(outpath, sizeof outpath, "vendor/%s.zx", stem);
     if (!force && fexists(outpath)) {
-        fprintf(stderr, "zxc add: '%s' already exists (use --force to overwrite)\n", outpath);
+        fprintf(stderr, "zxc include: '%s' already exists (use --force to overwrite)\n", outpath);
         return 1;
     }
 
@@ -1973,12 +2037,12 @@ static int cmd_add(int argc, char **argv, int argi) {
     int nskip = 0;
     char *text = cbind_generate(header, g_cc, lib, allow_system, NULL, NULL, 0, name,
                                 err, sizeof err, &nskip);
-    if (!text) { fprintf(stderr, "zxc add: %s\n", err); return 1; }
+    if (!text) { fprintf(stderr, "zxc include: %s\n", err); return 1; }
     int rc = write_text_file(outpath, text);
     free(text);
     if (rc != 0) return 1;
 
-    printf("zxc add: wrote %s (%d declaration(s) skipped)\n", outpath, nskip);
+    printf("zxc include: wrote %s (%d declaration(s) skipped)\n", outpath, nskip);
     printf("  use:  const %s = module(\"%s\");\n", stem, stem);
     if (lib && lib[0])
         printf("  link: @link(\"%s\") is already in the binding\n", lib);
@@ -1987,6 +2051,223 @@ static int cmd_add(int argc, char **argv, int argi) {
     if (!fexists("zx.json"))
         printf("  note: no zx.json here; run this inside a project (or use vendor/ directly)\n");
     return 0;
+}
+
+/* ---- add / fetch：从网站拉 C 库，两层声明与锁 -------------------------
+ * `zxc add <url>`  写 zx.json 的声明、把实际结果锁进 zx.lock、落地 vendor/。
+ * `zxc fetch`      只按这两份文件校验 / 补齐，不改写声明。
+ * run / build / test 一行联网代码都没有，只在缺库时提示去跑 fetch。
+ */
+static int fetch_lock_upsert(const FetchLock *item, char *err, size_t cap) {
+    FetchLock *v = NULL;
+    int n = fetch_lock_load(&v, err, cap);
+    if (n < 0) return -1;
+    FetchLock *all = malloc((size_t)(n + 1) * sizeof *all);
+    if (!all) { fetch_lock_free(v, n); return -1; }
+    int m = 0;
+    for (int i = 0; i < n; i++)
+        if (strcmp(v[i].d.name, item->d.name) != 0) all[m++] = v[i];
+    all[m++] = *item;
+    int rc = fetch_lock_save(all, m, err, cap);
+    free(all);
+    fetch_lock_free(v, n);
+    return rc;
+}
+
+static int fetch_name_ok(const char *s) {
+    if (!s || !*s || strlen(s) > 100) return 0;
+    for (const char *p = s; *p; p++)
+        if (!(isalnum((unsigned char)*p) || *p == '_' || *p == '-')) return 0;
+    return 1;
+}
+
+static const char *opt_value(int argc, char **argv, int *i) {
+    if (*i + 1 >= argc) {
+        fprintf(stderr, "zxc: %s needs a value\n", argv[*i]);
+        return NULL;
+    }
+    return argv[++(*i)];
+}
+
+static int cmd_add(int argc, char **argv, int argi) {
+    const char *url = NULL, *uname = NULL, *uref = NULL, *usha = NULL, *usub = NULL;
+    int force = 0, force_git = 0;
+    for (int i = argi; i < argc; i++) {
+        const char *a = argv[i];
+        if      (!strcmp(a, "--force")) force = 1;
+        else if (!strcmp(a, "--git"))   force_git = 1;
+        else if (!strcmp(a, "--name") || !strcmp(a, "--ref") ||
+                 !strcmp(a, "--sha256") || !strcmp(a, "--subdir")) {
+            const char *v = opt_value(argc, argv, &i);
+            if (!v) return 2;
+            if      (!strcmp(a, "--name"))   uname = v;
+            else if (!strcmp(a, "--ref"))    uref = v;
+            else if (!strcmp(a, "--sha256")) usha = v;
+            else                             usub = v;
+        } else if (a[0] == '-') {
+            fprintf(stderr, "zxc add: unknown option '%s'\n", a);
+            return 2;
+        } else if (!url) url = a;
+        else {
+            fprintf(stderr, "zxc add: unexpected argument '%s'\n", a);
+            return 2;
+        }
+    }
+    if (!url) {
+        fprintf(stderr, "usage: zxc add <url> [--name N] [--ref TAG] [--sha256 HEX]"
+                        " [--subdir P] [--git] [--force]\n");
+        return 2;
+    }
+    if (!strstr(url, "://")) {
+        fprintf(stderr, "zxc add: expected an https:// URL; a library already on disk"
+                        " is handled by `zxc include <path>`\n");
+        return 2;
+    }
+    if (!fexists("zx.json")) {
+        fprintf(stderr, "zxc add: no zx.json here (run `zxc init` first)\n");
+        return 1;
+    }
+    char err[1024];
+    if (fetch_url_check(url, err, sizeof err) != 0) {
+        fprintf(stderr, "zxc add: %s\n", err);
+        return 2;
+    }
+    FetchDecl d;
+    memset(&d, 0, sizeof d);
+    fetch_name_of(url, d.name, sizeof d.name);
+    if (uname) snprintf(d.name, sizeof d.name, "%s", uname);
+    if (!fetch_name_ok(d.name)) {
+        fprintf(stderr, "zxc add: invalid --name '%s' (letters, digits, _ and - only)\n", d.name);
+        return 2;
+    }
+    snprintf(d.url, sizeof d.url, "%s", url);
+    if (uref) snprintf(d.ref, sizeof d.ref, "%s", uref);
+    if (usha) snprintf(d.sha256, sizeof d.sha256, "%s", usha);
+    if (usub) snprintf(d.subdir, sizeof d.subdir, "%s", usub);
+    fetch_kind_of(d.url, d.ref, force_git, &d.kind, err, sizeof err);
+
+    FetchLock *locks = NULL;
+    int nl = fetch_lock_load(&locks, err, sizeof err);
+    FetchLock *hit = NULL;
+    for (int i = 0; i < nl; i++)
+        if (!strcmp(locks[i].d.name, d.name)) hit = &locks[i];
+    if (hit && !force) {
+        fprintf(stderr, "zxc add: '%s' is already pinned in zx.lock;"
+                        " use `zxc fetch` or --force to change it\n", d.name);
+        fetch_lock_free(locks, nl);
+        return 1;
+    }
+    FetchLock res;
+    if (fetch_materialize(&d, force ? NULL : hit, force, &res, err, sizeof err) != 0) {
+        fprintf(stderr, "zxc add: %s\n", err);
+        fetch_lock_free(locks, nl);
+        return 1;
+    }
+    fetch_lock_free(locks, nl);
+    if (fetch_decl_save(&res.d, err, sizeof err) != 0 ||
+        fetch_lock_upsert(&res, err, sizeof err) != 0) {
+        fprintf(stderr, "zxc add: %s\n", err);
+        return 1;
+    }
+    vendor_autoscan();
+    printf("zxc add: %s -> %s (%d file(s))\n", d.url, res.path, res.nfiles);
+    printf("  zx.json: declaration written; zx.lock: tree %.12s\n", res.tree);
+    if (d.kind == FK_GIT) printf("  resolved commit %s\n", res.resolved);
+    else printf("  download sha256 %s\n", res.d.sha256);
+    printf("  `zxc run` works offline from here; `zxc fetch` restores vendor/ elsewhere\n");
+    return 0;
+}
+
+static int cmd_fetch(int argc, char **argv, int argi) {
+    const char *only = NULL;
+    int force = 0;
+    for (int i = argi; i < argc; i++) {
+        if (!strcmp(argv[i], "--force")) force = 1;
+        else if (argv[i][0] == '-') {
+            fprintf(stderr, "zxc fetch: unknown option '%s'\n", argv[i]);
+            return 2;
+        } else if (!only) only = argv[i];
+        else {
+            fprintf(stderr, "zxc fetch: unexpected argument '%s'\n", argv[i]);
+            return 2;
+        }
+    }
+    char err[1024];
+    FetchDecl *ds = NULL;
+    FetchLock *ls = NULL;
+    int nd = fetch_decls_load(&ds, err, sizeof err);
+    int nl = fetch_lock_load(&ls, err, sizeof err);
+    if (nd <= 0) {
+        printf("zxc fetch: no \"vendor\" declarations in zx.json\n");
+        fetch_decls_free(ds, nd); fetch_lock_free(ls, nl);
+        return 0;
+    }
+    int ok = 0, bad = 0, seen = 0;
+    for (int i = 0; i < nd; i++) {
+        FetchDecl *d = &ds[i];
+        if (only && strcmp(only, d->name) != 0) continue;
+        seen++;
+        FetchLock *lk = NULL;
+        for (int k = 0; k < nl; k++)
+            if (!strcmp(ls[k].d.name, d->name)) lk = &ls[k];
+        if (lk) {
+            /* 声明被改而锁没变，是供应链风险最高的情形：不猜，要求显式重新锁定 */
+            if (strcmp(d->url, lk->d.url) != 0 ||
+                strcmp(d->ref, lk->d.ref) != 0 ||
+                (d->sha256[0] && strcmp(d->sha256, lk->d.sha256) != 0)) {
+                fprintf(stderr, "zxc fetch: %s: zx.json and zx.lock disagree;"
+                                " re-pin with `zxc add <url> --force`\n", d->name);
+                bad++; continue;
+            }
+            char msg[512];
+            int st = fetch_verify_entry(lk, msg, sizeof msg);
+            if (st == 0 && !force) {
+                printf("zxc fetch: %s up to date (%s)\n", d->name, lk->path);
+                ok++; continue;
+            }
+            if (st == 2 && !force) {
+                fprintf(stderr, "zxc fetch: %s: %s (use --force to restore)\n", d->name, msg);
+                bad++; continue;
+            }
+            FetchDecl dd = lk->d;
+            FetchLock res;
+            if (fetch_materialize(&dd, lk, 1, &res, err, sizeof err) != 0) {
+                fprintf(stderr, "zxc fetch: %s: %s\n", d->name, err);
+                bad++; continue;
+            }
+            printf("zxc fetch: restored %s -> %s\n", d->name, res.path);
+            ok++;
+        } else {
+            FetchDecl dd = *d;
+            FetchLock res;
+            if (fetch_materialize(&dd, NULL, force, &res, err, sizeof err) != 0) {
+                fprintf(stderr, "zxc fetch: %s: %s\n", d->name, err);
+                bad++; continue;
+            }
+            /* 手工写进 zx.json 的声明可能没带 sha256：补写回去，下次才有锚点 */
+            if (!dd.sha256[0] && res.d.sha256[0]) {
+                if (fetch_decl_save(&res.d, err, sizeof err) != 0) {
+                    fprintf(stderr, "zxc fetch: %s: %s\n", d->name, err);
+                    bad++; continue;
+                }
+            }
+            if (fetch_lock_upsert(&res, err, sizeof err) != 0) {
+                fprintf(stderr, "zxc fetch: %s: %s\n", d->name, err);
+                bad++; continue;
+            }
+            printf("zxc fetch: fetched %s -> %s\n", d->name, res.path);
+            ok++;
+        }
+    }
+    if (only && !seen) {
+        fprintf(stderr, "zxc fetch: no vendor declaration named '%s'\n", only);
+        bad++;
+    }
+    if (ok) vendor_autoscan();
+    printf("zxc fetch: %d ok, %d problem(s)\n", ok, bad);
+    fetch_decls_free(ds, nd);
+    fetch_lock_free(ls, nl);
+    return bad ? 1 : 0;
 }
 
 /* ---- cbuild：显式重编 vendor/ 下的 C 源码 ----------------------------
@@ -2162,6 +2443,9 @@ static int do_build(Proj *pj, bool release, OutKind kind, char *outpath, size_t 
         fprintf(stderr, "zxc: entry source '%s' not found\n", pj->main);
         return 1;
     }
+    /* 只读、绝不联网：zx.lock 里登记的库若被删了，先给一条可操作的提示。
+     * 构建本身永远不会去下载，缺库时交给用户显式跑 `zxc fetch`。 */
+    fetch_check_local(0, stderr);
     /* 必须在 fe_parse_file 之前：入口源码里 module("foo") 要能找到刚
      * 生成的 vendor/foo.zx，否则第一次 `zxc run` 就报模块找不到。 */
     vendor_autoscan();
@@ -2443,6 +2727,7 @@ static int test_run1(const char *file, const char *filter, bool release) {
 }
 
 static int cmd_test(int argc, char **argv, int argi) {
+    fetch_check_local(0, stderr);          /* 只读：缺库给提示，不联网 */
     vendor_autoscan();                     /* 测试模块可能引用 vendor 里的 C 库 */
     const char *filter = NULL;             /* 名字子串过滤 */
     bool release = false;
@@ -2623,8 +2908,10 @@ int main(int argc, char **argv) {
             return errors_print_one(stdout, argv[2]);
         }
         if (!strcmp(sub, "init"))  return cmd_init(argc, argv, 2);
-        if (!strcmp(sub, "add"))   return cmd_add(argc, argv, 2);
-        if (!strcmp(sub, "sync"))  return cmd_sync(argc, argv, 2);
+        if (!strcmp(sub, "include")) return cmd_include(argc, argv, 2);
+        if (!strcmp(sub, "add"))     return cmd_add(argc, argv, 2);
+        if (!strcmp(sub, "fetch"))   return cmd_fetch(argc, argv, 2);
+        if (!strcmp(sub, "sync"))    return cmd_sync(argc, argv, 2);
         if (!strcmp(sub, "cbuild")) return cmd_cbuild(argc, argv, 2);
         if (!strcmp(sub, "check")) return cmd_check(argc, argv, 2);
         if (!strcmp(sub, "fmt"))   return cmd_fmt(argc, argv, 2, false);

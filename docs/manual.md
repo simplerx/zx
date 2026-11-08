@@ -111,8 +111,10 @@ zxc <file.zx> -o <prog>           单文件：生成 C 并编成可执行文件
 
 | 子命令 | 作用 | 关键细节 |
 | --- | --- | --- |
-| `add <name\|header.h\|dir>` | 显式接入 C 库 | 指目录即可，不复制库文件；见 §3.17 / §3.19 |
-| `sync` | 扫 `vendor/` 补生成 C 绑定 | 免 `add` 流程的显式入口；见 §3.20 |
+| `include <name\|header.h\|dir>` | 接入本地 / 工程外的 C 库 | 指目录即可，不复制库文件；见 §3.17 / §3.19 |
+| `add <url>` | 从网站拉 C 库进 `vendor/` | 写 `zx.json` 声明 + `zx.lock`；见 §3.21 |
+| `fetch [名]` | 按 `zx.lock` 校验 / 补齐 `vendor/` | 唯一可能联网的补齐入口；见 §3.21 |
+| `sync` | 扫 `vendor/` 补生成 C 绑定 | 免接入命令流程的显式入口；见 §3.20 |
 | `cbuild [group]` | 编译 C 源码 | `vendor/*.c` → `vendor/lib<组>.a`；见 §3.18 |
 | `init [name]` | 创建工程 | 生成 `src/`、`vendor/`、`zx.json`、`.gitignore`；建完自检 `main.zx` |
 | `build` | 按 `zx.json` 构建到 `out/` | 中间文件在 `.zxc-cache/`，见 §5 |
@@ -562,18 +564,18 @@ extern "C" {
   应用代码只见 Zx。OpenGL 全链路演示（窗口 → 像素格式 → GL 上下文 →
   打印驱动字符串）也在这里。
 
-### 3.17 zxc add —— 一条命令接入 C 库
+### 3.17 zxc include —— 一条命令接入 C 库
 
 手写 FFI 里最费心的不是 `extern fn`，而是抄函数签名、逐字段镜像 C 结构体布局。
-`zxc add` 把 C 头交给项目内 vendored 的 clang 解析，产出一份**普通、可读可改的
+`zxc include` 把 C 头交给项目内 vendored 的 clang 解析，产出一份**普通、可读可改的
 Zx 源码**放进 `vendor/`。三种参数形式，**指向库目录是首选**（见 §3.19）：
 
 ```sh
-zxc add ../third_party/foo    # 库目录：递归发现，库文件原地不动（见 §3.19）
-zxc add ./vendor/raylib.h     # 本地头文件：完整绑定
-zxc add sqlite3               # 内置配方：自动定位头文件 + 配好 @link
-zxc add --list                # 列出内置配方
-zxc add ./vendor/foo.h --lib foo --force
+zxc include ../third_party/foo    # 库目录：递归发现，库文件原地不动（见 §3.19）
+zxc include ./vendor/raylib.h     # 本地头文件：完整绑定
+zxc include sqlite3               # 内置配方：自动定位头文件 + 配好 @link
+zxc include --list                # 列出内置配方
+zxc include ./vendor/foo.h --lib foo --force
 ```
 
 生成物形如：
@@ -602,14 +604,14 @@ pub const FOO_MAGIC: i32 = 7;
   枚举常量、纯数字 `#define`。`void*` 用 `*u8` 占位（ABI 上都是一个机器字）。
 - **翻不了的会跳过**，并在文件末尾以注释列出原因（变参函数、多级指针、位域、
   函数指针之外的复杂声明、Zx 同名的关键字符号）。宁可留白也不猜一个错布局。
-- **链接**：头文件旁边若有 `.c` 源码，`zxc add` 会直接编译并自动写 `@link`
+- **链接**：头文件旁边若有 `.c` 源码，`zxc include` 会直接编译并自动写 `@link`
   （见 §3.18，这一步也顺带消掉了 sanitizer 标志对不上的老问题）；否则找现成的
   `vendor/<名>.lib` / `vendor/lib<名>.a` / `vendor/<名>.a`，或配方自带的库名；
   都不满足时用 `--lib NAME` 指定。
 - **系统头配方**（`m` / `c` / `ws2_32` / `user32` …）走工具链自带头文件，
   只导出基础类型的函数签名：SDK 内部结构互相引用、带位域和匿名 union，
   硬生成只会得到编译不过的绑定。要结构体和常量，把库的头文件放进工程，
-  用路径方式 `zxc add`（Win32/OpenGL 的手写范例见 `demo/ffi/`）。
+  用路径方式 `zxc include`（Win32/OpenGL 的手写范例见 `demo/ffi/`）。
 - 重新生成用 `--force`（会覆盖手改）。命令不联网、不下载源码，不是包管理器。
 
 ### 3.18 zxc 编译 C 源码 —— 从源码到能调用，一条命令
@@ -623,7 +625,7 @@ pub const FOO_MAGIC: i32 = 7;
 vendor/foo.h          # 声明
 vendor/foo.c          # 实现（还可以有 foo_extra.c）
 
-zxc add foo           # 解析头文件 + 编译 .c -> vendor/libfoo.a + 写 @link
+zxc include foo           # 解析头文件 + 编译 .c -> vendor/libfoo.a + 写 @link
 zxc build             # 之后改了 .c/.h，自动增量重编并重链
 zxc cbuild --force    # 只想重编 C 库时用
 ```
@@ -643,23 +645,23 @@ zxc cbuild --force    # 只想重编 C 库时用
 - **不用记额外命令**：`zxc build` / `run` / `test` 会在链接前自动重编并注入
   `vendor/lib*.a`，即使绑定里没写 `@link` 也能链上。`zxc cbuild [group]`
   只是显式入口，用于只想编库或排查 C 编译错误；`--force` 强制全量、
-  `--release` 用 -O2 档。`zxc add --no-build` 可以只生成绑定不编译
+  `--release` 用 -O2 档。`zxc include --no-build` 可以只生成绑定不编译
   （已有预编译库、或用 `--lib NAME` 指定系统库时）。
 - C 编译错误会取编译器首行诊断报出来，完整日志留在
   `.zxc-cache/csrc/<组>_<文件>.log`。归档前会删掉旧 `.a`，避免 `ar rcs`
   残留已移除源文件留下的旧成员。
 
-### 3.19 zxc add <库目录> —— 头源分离、多层路径，不用复制文件
+### 3.19 zxc include <库目录> —— 头源分离、多层路径，不用复制文件
 
 上一节的「`vendor/` 一层、头源同目录同名」只适合一两个文件的小库。真实 C 库
 几乎都是 `include/` 放公开头、`src/` 下再分 `core/`、`util/` 等子目录，还常带
 `tests/`、`examples/`，整个库甚至放在工程外。要求把这些文件摊平复制进 `vendor/`
-既费事，又容易漏文件、或者把测试代码编进来。`zxc add` 的**首选参数是库目录**：
+既费事，又容易漏文件、或者把测试代码编进来。`zxc include` 的**首选参数是库目录**：
 
 ```sh
-zxc add ../third_party/foo       # 工程外的库，路径原样记录，不复制
-zxc add ./deps/foo --name foo    # 指定模块名（默认取目录名）
-zxc add ./deps/foo --force       # 库里加了新 .c 时刷新清单
+zxc include ../third_party/foo       # 工程外的库，路径原样记录，不复制
+zxc include ./deps/foo --name foo    # 指定模块名（默认取目录名）
+zxc include ./deps/foo --force       # 库里加了新 .c 时刷新清单
 ```
 
 一条命令做四件事：
@@ -683,7 +685,7 @@ zxc add ./deps/foo --force       # 库里加了新 .c 时刷新清单
 
 **实际会遇到的点**
 
-- 清单是**静态快照**：库里新增/删除文件后跑 `zxc add <目录> --force` 刷新，
+- 清单是**静态快照**：库里新增/删除文件后跑 `zxc include <目录> --force` 刷新，
   或手工加/删 `source =` 行。`--force` 会覆盖你对清单和绑定的手改。
 - 同一个库用不同 `--name` 再 `add` 一次会留下两份清单，命令会提醒你删掉旧的，
   否则 `build` 会编两遍、注入两个内容相同的 `.a`。
@@ -693,11 +695,11 @@ zxc add ./deps/foo --force       # 库里加了新 .c 时刷新清单
 - 翻译不了的声明仍按 §3.17 的规则跳过并在绑定末尾注释说明。系统头配方
   （`m` / `c` / `ws2_32` …）仍只给基础类型的函数签名，不走目录模式。
 
-### 3.20 免 add —— 把库放进 vendor/，直接 zxc run
+### 3.20 免接入命令 —— 把库放进 vendor/，直接 zxc run
 
 §3.17–§3.19 解决的是「怎么接一个 C 库」。这一节解决的是「干脆别记这条命令」。
 `zxc run` / `build` / `test` 在解析入口源码**之前**会扫一遍 `vendor/`，把还没接管的
-C 库自动补成 `add` 过的状态：
+C 库自动补成「已接入」的状态：
 
 ```sh
 cp -r ../third_party/foo vendor/foo   # include/ + 多层 src/ 原样搬进来
@@ -731,6 +733,83 @@ zxc run                               # 直接跑；源码里 module("foo") 已�
 **编辑器里的先后问题**：绑定文件要存在，LSP 才会在补全里列出 `module("foo")`。
 第一次写码前先跑 `zxc sync`（只扫 `vendor/`、不编译），补全、hover、行内类型提示
 就都有了。`zxc sync` 与 `run` 共用同一套逻辑，重复跑是幂等的。
+
+### 3.21 从网站拉库 —— `zxc add` / `zxc fetch`（两层声明与锁）
+
+§3.17–§3.20 处理的都是「库已经在磁盘上」。库在远端时用 `zxc add`：
+
+```sh
+zxc add https://raw.githubusercontent.com/nothings/stb/master/stb_image.h
+zxc add https://gitcode.com/some/foo.git --ref v1.2.3 --name foo
+zxc add https://example.com/foo.tar.gz --subdir foo-1.2/include
+zxc run                               # 拉完之后，构建完全离线
+```
+
+`add` 只负责把远端字节搬进 `vendor/`，落盘后立刻走 §3.20 的自动接管，生成绑定与
+清单，编译链接复用 §3.18 / §3.19 的增量路径。**没有版本求解、没有 registry、没有
+传递依赖**——这不是包管理器。
+
+#### 为什么是两层
+
+| 层 | 谁写 | 内容 | 为什么分开 |
+| --- | --- | --- | --- |
+| `zx.json` 的 `"vendor"` 段 | 人 | `url` / `git` + `ref`、期望 `sha256`、`subdir` | 可 review、可 diff，一眼看出这次想换哪个版本 |
+| `zx.lock` | `zxc` | 实际 git commit、落地文件树 hash、落地路径、文件数 | 机器解析的不可变结果；人写的 tag 会变，commit 不会 |
+
+只写一个 URL 有三个硬伤：不可复现（同一个 tag 明天可能指向别的代码）、无完整性
+校验（拉下来的代码是要编译执行的）、CI 每次构建都要联网。两层把「意图」和
+「结果」分开，diff 里能直接看出这次到底换了什么。
+
+```json
+"vendor": {
+  "stb":  { "url": "https://.../stb_image.h", "sha256": "2a18e93b..." },
+  "foo":  { "git": "https://gitcode.com/.../foo.git", "ref": "v1.2.3" }
+}
+```
+
+`zx.lock` 由工具生成、必须提交，格式是可读的 `[名]` + `key = value`：
+
+```text
+[foo]
+kind = git
+url = https://gitcode.com/.../foo.git
+ref = v1.2.3
+resolved = 98d4395265372d8cc71f062c6900bb4403ad434c
+tree = 300a0368725440116e186cd14ed654f38663b4b4f07873d88c6e49d1ce901c1c
+path = vendor/foo
+nfiles = 2
+```
+
+#### 命令与联网边界
+
+| 命令 | 联网 | 行为 |
+| --- | --- | --- |
+| `zxc add <url>` | 是 | 下载 → 校验 → 落地 `vendor/` → 写 `zx.json` 声明与 `zx.lock` |
+| `zxc fetch [名]` | 仅缺库时 | 完好的库只做本地校验；缺失则重拉且必须复现锁里的 tree hash |
+| `zxc run` / `build` / `test` | **否** | 只查 `zx.lock` 登记的落地路径在不在，缺了提示去跑 `zxc fetch` |
+| `zxc sync` | 否 | 只补生成绑定，不联网、不编译 |
+
+`zxc fetch` 默认**不覆盖**本地内容：文件被改过会明确报 `content differs from zx.lock`，
+`--force` 才恢复，且旧目录先移到 `.zxc-cache/fetch-backup/`。`zx.json` 与 `zx.lock`
+对不上（有人偷偷改了源地址）时直接拒绝，必须 `zxc add <url> --force` 显式重新锁定。
+
+#### 安全边界
+
+- 只接受 `https://`；loopback `http://127.0.0.1` 供本地镜像，`file://` 需显式
+  `ZX_ALLOW_LOCAL_FETCH=1`。URL 里的 userinfo、控制字符、路径穿越字符一律拒绝。
+- 下载字节算 SHA-256（编译器自带实现，不依赖 PATH 里的 `sha256sum`）；声明里带
+  `--sha256` 时不匹配立即失败，没带则首次 `add` 自动写回声明与锁。
+- git 源：`--ref` 钉 tag / branch，`zx.lock` 钉实际 commit；重拉时两者必须一致，
+  上游 force-push 改了 tag 会被拒绝。clone 固定 `core.autocrlf=false`，保证不同
+  平台落地的字节一致，tree hash 不会跨平台误报。
+- 落地前在临时目录完成全部校验；归档 / 仓库里的 `..` 路径、绝对路径、符号链接被
+  拒绝，文件数与总体积有上限。不执行库里的构建脚本，不解析它的构建配置。
+- 下载复用系统 `curl` / `git` / `tar`，参数用 argv 数组传递，不经过 shell。
+
+支持的源：单个文件（单头库）、`.tar` / `.tar.gz` / `.tgz` / `.tar.xz` / `.zip`
+归档（自动下钻唯一顶层目录，`--subdir` 可指定）、git 仓库（`--git` 强制或 URL 以
+`.git` 结尾 / 带 `--ref`）。换版本用 `zxc add <url> --force`；本地已有的库用
+`zxc include <path>`，`add` 只接 URL。
 
 ---
 
