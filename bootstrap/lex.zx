@@ -614,6 +614,14 @@ pub const Lexer = struct {
                 val = nv;
             }
             if (!any) { self.emit(Kind.int, start); return; }  // 错误已报，按空值收尾
+            // 扫描停在数字上：这个底数里没有它（0b12 的 2）。不指出来，
+            // 后缀扫描会把 12 当成后缀，报"unknown suffix"——差得太远。
+            if (is_digit(self.peek())) {
+                self.fail("E0102", "invalid digit in binary/octal/hex literal");
+                // 一口气吃掉剩下的标识字符：不然后缀扫描又把 12 当后缀，
+                // 多报一条"unknown suffix"——第一条已经说清了。
+                while (is_ident_char(self.peek())) { self.adv(); }
+            }
         } else {
             while (is_digit(self.peek()) || self.peek() == '_') {
                 let c = self.adv();
@@ -682,6 +690,10 @@ pub const Lexer = struct {
         let suf = self.src[suf_start..self.p];
         if (is_float) {
             if (!is_float_suffix(suf)) { self.fail("E0102", "unknown float type suffix; use f16 / f32 / f64 / f128"); }
+        } else if (suf.len == 1 && (suf[0] == 'e' || suf[0] == 'E')) {
+            // `1e` —— 指数后面没有数字，回滚后 e 被当成整数后缀；
+            // 报"unknown suffix"不如直接说该写什么。
+            self.fail("E0102", "float exponent needs digits: write `1e7` or `1.0e7`");
         } else {
             if (!is_int_suffix(suf)) { self.fail("E0102", "unknown integer type suffix; use u8..u128 / i8..i128 / usize / isize"); }
         }

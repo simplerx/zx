@@ -985,6 +985,7 @@ static void cstr(Buf *b, const char *s, int n) {
  * 只对**简单基址**（标识符 / 字段链）插下标检查：取 `.len` 需要把基址再发
  * 一遍，如果基址是调用结果，两次求值就是语义变化——那比越界更糟。 */
 static bool g_need_bounds;
+static bool g_need_f2i;
 
 static bool simple_index_base(Node *n) {
     if (!n) return false;
@@ -1029,9 +1030,17 @@ static void emit_index_checked(Buf *b, Node *n, Type *bt) {
         return;
     }
     g_need_bounds = true;
+    Type *it = n->b ? n->b->ty : NULL;
+    if (it && it->kind == TY_INT && it->is_signed) {
+        /* 有符号下标报原始值：-1 不能打成 18446744073709551615 */
+        buf_puts(b, "zx_bound_s((long long)(");
+        ex(b, n->b);
+        buf_puts(b, "), (size_t)(");
+    } else {
     buf_puts(b, "zx_bound((size_t)(");
     ex(b, n->b);
     buf_puts(b, "), (size_t)(");
+    }
     if (is_slice) {
         ex(b, n->a);
         buf_puts(b, ").len");
@@ -1047,8 +1056,9 @@ static void emit_index_checked(Buf *b, Node *n, Type *bt) {
 static void wrap_slice_len(Buf *b, Buf *len, Node *n, const char *total_c) {
     if (!total_c) { buf_puts(b, len->data); return; }
     g_need_bounds = true;
-    buf_puts(b, "zx_slice_len(");
+    buf_puts(b, "zx_slice_len((long long)(");
     buf_puts(b, len->data);
+    buf_puts(b, ")");
     buf_printf(b, ", (size_t)(%s), ", total_c);
     bounds_loc(b, n);
     buf_putc(b, ')');
@@ -4044,7 +4054,11 @@ static void where_lit(Buf *b, int line) {
 
 static void emit_bounds_runtime(void) {
     bline(&g_bproto, "static size_t zx_bound(size_t i, size_t n, const char *loc);");
-    bline(&g_bproto, "static size_t zx_slice_len(size_t len, size_t total, const char *loc);");
+    bline(&g_bproto, "static size_t zx_bound_s(long long i, size_t n, const char *loc);");
+    bline(&g_bproto, "static size_t zx_slice_len(long long len, size_t total, const char *loc);");
+    bline(&g_bproto, "static int64_t zx_f2i64(double v, int bits);");
+    bline(&g_bproto, "static uint64_t zx_f2u64(double v, int bits);");
+    bline(&g_bproto, "static unsigned __int128 zx_f2i128(double v, int bits, int sign);");
     buf_puts(g_out,
         "static size_t zx_bound(size_t i, size_t n, const char *loc) {\n"
         "#ifdef ZX_RELEASE\n"
@@ -4059,19 +4073,85 @@ static void emit_bounds_runtime(void) {
         "    return i;\n"
         "#endif\n"
         "}\n\n"
-        "static size_t zx_slice_len(size_t len, size_t total, const char *loc) {\n"
+        "static size_t zx_bound_s(long long i, size_t n, const char *loc) {\n"
+        "#ifdef ZX_RELEASE\n"
+        "    (void)n; (void)loc; return (size_t)i;\n"
+        "#else\n"
+        "    if (i < 0 || (unsigned long long)i >= n) {\n"
+        "        fflush(stdout);\n"
+        "        fprintf(stderr, \"zx: index %lld is out of bounds (len %llu) at %s\\n\",\n"
+        "                i, (unsigned long long)n, loc);\n"
+        "        abort();\n"
+        "    }\n"
+        "    return (size_t)i;\n"
+        "#endif\n"
+        "}\n\n"
+        "static size_t zx_slice_len(long long len, size_t total, const char *loc) {\n"
         "#ifdef ZX_RELEASE\n"
         "    (void)total; (void)loc; return len;\n"
         "#else\n"
-        "    /* hi < lo 时无符号减法下溢成巨大值，这一条就把两种越界都收了 */\n"
-        "    if (len > total) {\n"
+        "    /* hi < lo 时长度是负的；参数收 long long，报出来的就是负数，\n"
+        "     * 不再是 2^64-2 这种重解释出来的巨大值 */\n"
+        "    if (len < 0 || (unsigned long long)len > total) {\n"
         "        fflush(stdout);\n"
-        "        fprintf(stderr, \"zx: slice is out of bounds (len %llu > total %llu) at %s\\n\",\n"
-        "                (unsigned long long)len, (unsigned long long)total, loc);\n"
+        "        fprintf(stderr, \"zx: slice is out of bounds (len %lld > total %llu) at %s\\n\",\n"
+        "                len, (unsigned long long)total, loc);\n"
         "        abort();\n"
         "    }\n"
         "    return len;\n"
         "#endif\n"
+        "}\n\n");
+}
+
+/* 浮点 → 整数 cast 的运行时检查。边界与 sema.c 的 f64_fits_int 一致，
+ * 编译期与运行时同一答案（R10）。 */
+static void emit_f2i_runtime(void) {
+    buf_puts(g_out,
+        "static int64_t zx_f2i64(double v, int bits) {\n"
+        "    double hi = 1.0;\n"
+        "    for (int i = 0; i < bits; i++) hi *= 2.0;\n"
+        "    double lo = -(hi / 2.0); hi = hi / 2.0;\n"
+        "#ifdef ZX_RELEASE\n"
+        "    (void)lo; (void)hi;\n"
+        "#else\n"
+        "    if (!(v >= lo && v < hi)) {\n"
+        "        fflush(stdout);\n"
+        "        fprintf(stderr, \"zx: float-to-int cast is out of range (%g)\\n\", v);\n"
+        "        abort();\n"
+        "    }\n"
+        "#endif\n"
+        "    return (int64_t)v;\n"
+        "}\n\n"
+        "static uint64_t zx_f2u64(double v, int bits) {\n"
+        "    double hi = 1.0;\n"
+        "    for (int i = 0; i < bits; i++) hi *= 2.0;\n"
+        "#ifdef ZX_RELEASE\n"
+        "    (void)hi;\n"
+        "#else\n"
+        "    if (!(v >= 0.0 && v < hi)) {\n"
+        "        fflush(stdout);\n"
+        "        fprintf(stderr, \"zx: float-to-int cast is out of range (%g)\\n\", v);\n"
+        "        abort();\n"
+        "    }\n"
+        "#endif\n"
+        "    return (uint64_t)v;\n"
+        "}\n\n"
+        "static unsigned __int128 zx_f2i128(double v, int bits, int sign) {\n"
+        "    double hi = 1.0;\n"
+        "    for (int i = 0; i < bits; i++) hi *= 2.0;\n"
+        "    double lo = 0.0;\n"
+        "    if (sign) { lo = -(hi / 2.0); hi = hi / 2.0; }\n"
+        "#ifdef ZX_RELEASE\n"
+        "    (void)lo; (void)hi; (void)sign;\n"
+        "#else\n"
+        "    if (!(v >= lo && v < hi)) {\n"
+        "        fflush(stdout);\n"
+        "        fprintf(stderr, \"zx: float-to-int cast is out of range (%g)\\n\", v);\n"
+        "        abort();\n"
+        "    }\n"
+        "#endif\n"
+        "    if (sign) return (unsigned __int128)(__int128)v;\n"
+        "    return (unsigned __int128)v;\n"
         "}\n\n");
 }
 
@@ -4627,6 +4707,24 @@ static void ex(Buf *b, Node *n) {
                                ft->kind == TY_COMPTIME_INT || ft->kind == TY_ENUM ||
                                ft->kind == TY_BOOL || ft->kind == TY_ERROR);
         if (num_to && num_from) {
+            /* 浮点 → 整数：C 的越界转换是 UB（x86 上 1e300 → INT_MIN，
+             * 静默出错值）。包一层运行时检查，越界 trap——与除零同一处置；
+             * RELEASE 档照 bounds 惯例擦除。边界与 sema 的 f64_fits_int 一致。 */
+            if (ty_is_float(ft) && to->kind == TY_INT && to->bits >= 8) {
+                g_need_f2i = true;
+                buf_puts(b, "((");
+                ctype(b, to);
+                if (to->bits <= 64) {
+                    buf_puts(b, to->is_signed ? ")zx_f2i64((double)(" : ")zx_f2u64((double)(");
+                    ex(b, n->b);
+                    buf_printf(b, "), %d))", (int)to->bits);
+                } else {
+                    buf_puts(b, ")zx_f2i128((double)(");
+                    ex(b, n->b);
+                    buf_printf(b, "), %d, %d))", (int)to->bits, to->is_signed ? 1 : 0);
+                }
+                return;
+            }
             buf_puts(b, "((");
             ctype(b, to);
             buf_puts(b, ")(");
@@ -6420,6 +6518,7 @@ int backend_emit_split(Node *root, Buf *header, Buf *rt, BUnit *units, int maxun
     if (g_need_heapalloc) emit_heapalloc_runtime();
     if (g_need_div) emit_div_runtime();
     if (g_need_bounds) emit_bounds_runtime();
+    if (g_need_f2i) emit_f2i_runtime();
     if (g_nuw) emit_unwrap_runtime();
     /* 128 位转十进制：编译期 printf 路径（g_need_i128）与 zx_fmt 的
      * kind 9/10 分支（fmt 运行时一存在就可能碰到）都要有。 */

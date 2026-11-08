@@ -1,0 +1,7 @@
+// expect: does not fit in `i32`
+// expect-code: E0302
+// 浮点 → 整数的编译期越界：以前折叠阶段走 C 的 UB 转换，静默出垃圾值
+//（(i32)(1.0e300) 实测 -344682216），现在与"字面量装不进目标类型"同处置。
+const x: i32 = (i32)(1.0e300);
+
+const main = fn () void {};

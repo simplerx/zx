@@ -1,0 +1,6 @@
+// expect: slice lower bound 3 is greater than upper bound 1
+// 编译期已知的上下界：顺序错了直接报，不用等运行时 trap。
+const main = fn () void {
+    var arr = &.{ 1, 2, 3, 4 };
+    let s = arr[3..1];
+};

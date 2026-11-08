@@ -2081,16 +2081,27 @@ fn findDeclStmt(text: []const u8, name: []const u8) ?[]const u8 {
             from = c + 1;
             if (c > 0 and isIdentChar(text[c - 1])) continue; // obsolete 之类
             if (inLineComment(text, c)) continue;
+            if (declStmtAt(text, c, kw, name)) |st| return st;
+        }
+    }
+    return null;
+}
+
+/// c 指向声明关键字（kw）的起点。校验名字、声明形态（`=` / `:` / `(`），
+/// 往前吞 `pub ` / `extern `，往后到顶层 `;`，返回声明语句切片。
+/// findDeclStmt 与 DeclIndex 共用这一段，保证两种查找方式结果一致。
+fn declStmtAt(text: []const u8, c: usize, kw: []const u8, name: []const u8) ?[]const u8 {
+    {
             var j = c + kw.len;
             while (j < text.len and (text[j] == ' ' or text[j] == '\t')) j += 1;
             const ns = j;
             while (j < text.len and isIdentChar(text[j])) j += 1;
-            if (j == ns or !std.mem.eql(u8, text[ns..j], name)) continue;
+            if (j == ns or !std.mem.eql(u8, text[ns..j], name)) return null;
             while (j < text.len and (text[j] == ' ' or text[j] == '\t')) j += 1;
-            if (j >= text.len) continue;
+            if (j >= text.len) return null;
             if (std.mem.eql(u8, kw, "fn ")) {
-                if (text[j] != '(') continue;
-            } else if (text[j] != '=' and text[j] != ':') continue;
+                if (text[j] != '(') return null;
+            } else if (text[j] != '=' and text[j] != ':') return null;
             // 往前吞掉 `pub ` / `extern ` 修饰，返回片段从声明开头起
             var start = c;
             var guard: usize = 0;
@@ -2132,10 +2143,44 @@ fn findDeclStmt(text: []const u8, name: []const u8) ?[]const u8 {
                 }
             }
             return text[start..];
-        }
     }
     return null;
 }
+
+/// 本文件声明索引：单趟扫描，把每个「语句开头的 const/let/var/fn + 名字」
+/// 记成 name → 关键字偏移。此前无点号的被调方每查一个名字就 findDeclStmt
+/// 全文扫 4 遍（4 个关键字 × indexOfPos 到文件尾），名字数 × 文件长度是
+/// 平方——12000 个不同名函数实测 11.5s。建一次索引后每个名字只验证它自己
+/// 的候选位置。索引只活在一次 inlay 请求里（InlayCtx），键指向 text。
+const DeclIndex = struct {
+    map: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(usize)) = .empty,
+
+    fn build(text: []const u8) DeclIndex {
+        var self = DeclIndex{};
+        var i: usize = 0;
+        while (i < text.len) : (i += 1) {
+            // 关键字首字符过滤：绝大多数位置这里一步跳过
+            const kw: []const u8 = switch (text[i]) {
+                'c' => if (std.mem.startsWith(u8, text[i..], "const ")) "const " else continue,
+                'l' => if (std.mem.startsWith(u8, text[i..], "let ")) "let " else continue,
+                'v' => if (std.mem.startsWith(u8, text[i..], "var ")) "var " else continue,
+                'f' => if (std.mem.startsWith(u8, text[i..], "fn ")) "fn " else continue,
+                else => continue,
+            };
+            if (i > 0 and isIdentChar(text[i - 1])) continue; // obsolete 之类
+            if (inLineComment(text, i)) continue;
+            var j = i + kw.len;
+            while (j < text.len and (text[j] == ' ' or text[j] == '\t')) j += 1;
+            const ns = j;
+            while (j < text.len and isIdentChar(text[j])) j += 1;
+            if (j == ns) continue;
+            const gop = self.map.getOrPut(gpa, text[ns..j]) catch continue;
+            if (!gop.found_existing) gop.value_ptr.* = .empty;
+            gop.value_ptr.append(gpa, i) catch {};
+        }
+        return self;
+    }
+};
 
 /// fn 签名解析：`pub const Add = fn(a:i32,b:i32) i32{…};` →
 /// name="Add"、params=["a:i32","b:i32"]、ret="i32"（切片都指向 stmt）
@@ -2995,15 +3040,17 @@ fn paramStructTy(p: []const u8) ?[]const u8 {
 /// 目录扫描（fileList）、按路径读文件（readCached）、被调方签名（calleeStmtCached）。
 /// 缓存的切片指向 text 或只为本次请求分配的缓冲，请求结束即作废（进程不回收，
 /// 与文件里其余路径一致：gpa 是 smp_allocator，LSP 常驻进程按需增长）。
+///
+/// paths/callees 用 hash map 而不是数组：缓存查询在主循环里每个调用点一次，
+/// 数组线性查是 O(U²)——12000 个不同名函数实测 11.7s（4 倍数据 15 倍时间），
+/// 换 hash map 后回到 O(U)。
 const InlayCtx = struct {
     doc: *const Document,
     text: []const u8,
     files: ?std.ArrayList([]const u8) = null,
-    paths: std.ArrayList(PathText) = .empty,
-    callees: std.ArrayList(CalleeEntry) = .empty,
-
-    const PathText = struct { path: []const u8, text: []const u8 };
-    const CalleeEntry = struct { name: []const u8, stmt: ?[]const u8 };
+    paths: std.StringHashMapUnmanaged([]const u8) = .empty,
+    callees: std.StringHashMapUnmanaged(?[]const u8) = .empty,
+    decls: ?DeclIndex = null,
 
     fn fileList(self: *InlayCtx) []const []const u8 {
         if (self.files == null) self.files = scanFiles(self.doc, self.text);
@@ -3011,19 +3058,20 @@ const InlayCtx = struct {
     }
 
     fn readCached(self: *InlayCtx, path: []const u8) ?[]const u8 {
-        for (self.paths.items) |e| if (std.mem.eql(u8, e.path, path)) return e.text;
+        if (self.paths.get(path)) |t| return t;
         const t = readFileSmall(path) orelse return null;
         const key = gpa.dupe(u8, path) catch path;
-        self.paths.append(gpa, .{ .path = key, .text = t }) catch {};
+        self.paths.put(gpa, key, t) catch {};
         return t;
     }
 
     /// 名字相同就是同一个声明：`callee` 是 text 里的切片，命中率很高。
+    /// 查不到（null）也要缓存——同一个没被解析出来的名字会出现很多次。
     fn stmtCached(self: *InlayCtx, callee: []const u8) ?[]const u8 {
-        for (self.callees.items) |e| if (std.mem.eql(u8, e.name, callee)) return e.stmt;
+        if (self.callees.get(callee)) |st| return st;
         const st = calleeStmt(self, callee);
         const key = gpa.dupe(u8, callee) catch callee;
-        self.callees.append(gpa, .{ .name = key, .stmt = st }) catch {};
+        self.callees.put(gpa, key, st) catch {};
         return st;
     }
 };
@@ -3053,7 +3101,15 @@ fn calleeStmt(ctx: *InlayCtx, callee: []const u8) ?[]const u8 {
         }
         return resolvePathStmt(fl, ctx.doc, text, callee);
     }
-    return findDeclStmt(text, callee);
+    // 无点号：走本文件声明索引，避免每个名字都全文扫 4 遍
+    if (ctx.decls == null) ctx.decls = DeclIndex.build(text);
+    const offs = ctx.decls.?.map.get(callee) orelse return null;
+    for (offs.items) |c| {
+        for ([_][]const u8{ "const ", "let ", "var ", "fn " }) |kw| {
+            if (declStmtAt(text, c, kw, callee)) |st| return st;
+        }
+    }
+    return null;
 }
 
 /// KEEP — 匿名形参里的**嵌套匿名字面量**类型提示（用户 2026-11-08 第 2/5 条）：

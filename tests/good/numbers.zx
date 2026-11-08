@@ -11,6 +11,10 @@
 // shift mask: 2 0
 // f16/f32/f64: 1.5 3.4028235e+38 0.5
 // ieee: inf -inf
+// MIN/-1: -128 0
+// neg shift: -2147483648 -4
+// div trunc: -3 -1
+// f2i bounds: 3 -3 -128 2147483647 4294967295 -9223372036854775808
 
 const std = module("std");
 
@@ -59,4 +63,29 @@ const main = fn () void {
     var p: f64 = 1.0;
     var n: f64 = -1.0;
     std.println("ieee: {} {}", p / z, n / z);
+
+    // iN 的 MIN / -1 回绕成 MIN，不 trap（R10 表格里的特例）
+    var m8: i8 = -128;
+    std.println("MIN/-1: {} {}", m8 / -1, m8 % -1);
+
+    // 移位量是负数：先按位宽掩码（i32：-1 & 31 = 31 → 1<<31 回绕成 MIN）；
+    // 有符号右移按符号位填
+    var one32: i32 = 1;
+    var neg32: i32 = -1;
+    var neg8: i8 = -8;
+    std.println("neg shift: {} {}", one32 << neg32, neg8 >> 1);
+
+    // 除法向零截断（不是向下取整）
+    std.println("div trunc: {} {}", -7 / 2, -7 % 2);
+
+    // 浮点 → 整数：范围内向零截断；边界值都精确落位
+    // （编译期可见的越界在编译期报 E0302，运行时越界 trap——见 tests/bad/float-cast-fit）
+    var d2: f64 = 3.7;
+    var d3: f64 = -3.7;
+    var d4: f64 = -128.0;
+    var d5: f64 = 2147483647.0;
+    var d6: f64 = 4294967295.0;
+    var d7: f64 = -9223372036854775808.0;
+    std.println("f2i bounds: {} {} {} {} {} {}", (i32)d2, (i32)d3, (i8)d4,
+               (i32)d5, (u32)d6, (i64)d7);
 };

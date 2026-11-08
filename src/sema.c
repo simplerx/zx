@@ -2217,6 +2217,17 @@ static Type *check_assign(Node *n) {
  * 都放过去了，最后在生成 C 时被 C 编译器拒掉、报成 B1001「编译器 bug」
  * （假 bug，把用户引到错误的方向）。这里在类型检查阶段就拦下，并给出规范
  * 里本来就有的替代写法。 */
+/* 浮点值能否无损装进位宽 bits 的整数目标。边界是 2 的幂，在 double 里精确，
+ * 比较不含舍入误差；NaN 一律视为装不下。运行时（backend.c 的 zx_f2i*）
+ * 用同一套边界，保证编译期与运行时同一答案（R10）。 */
+static bool f64_fits_int(double v, int bits, bool sign) {
+    if (v != v) return false;                    /* NaN */
+    double hi = 1.0;
+    for (int i = 0; i < bits; i++) hi *= 2.0;    /* 2^bits，精确 */
+    double lo = 0.0;
+    if (sign) { lo = -hi; hi = hi / 2.0; }       /* 有符号：[-2^(b-1), 2^(b-1)) */
+    return v >= lo && v < hi;
+}
 static bool comparable_in_c(Type *t) {
     if (!t) return false;
     switch (t->kind) {
@@ -2810,7 +2821,18 @@ static Type *check_index(Node *n) {
     Type *bt = check_expr(n->a, NULL);
     Type *it = check_expr(n->b, ty_usize());
     if (!ty_is_int(it)) return BAD(n->b, "index must be an integer, found `%s`", ty_str(it));
-    if (bt->kind == TY_PTR && bt->has_len) return type_of(n, bt->elem);
+    if (bt->kind == TY_PTR && bt->has_len) {
+        /* 长度在类型里、下标又是编译期值：越界在这里报，不让它拖到运行时
+         * 才 trap（`arr[5]` 对 `*[3]i32` 编译期就能确定）。 */
+        Value *iv = n->b->ct ? n->b->ct : ct_eval_probe(n->b);
+        if (iv && iv->kind == V_INT) {
+            int64_t x = val_i64(iv);
+            if (x < 0 || (uint64_t)x >= bt->len)
+                return BAD(n->b, "index %lld is out of bounds (len %llu)",
+                           (long long)x, (unsigned long long)bt->len);
+        }
+        return type_of(n, bt->elem);
+    }
     if (bt->kind == TY_PTR) return type_of(n, bt->elem);
     if (bt->kind == TY_SLICE) return type_of(n, bt->elem);
     if (bt->kind == TY_TUPLE)
@@ -2841,6 +2863,23 @@ static Type *check_slice_expr(Node *n) {
     if (n->c) {
         Type *hi = check_expr(n->c, ty_usize());
         if (!ty_is_int(hi)) return BAD(n->c, "slice bound must be an integer");
+    }
+    /* 编译期已知的上下界：顺序与范围都能提前抓，不必等运行时 trap。 */
+    if (bt->kind == TY_PTR && bt->has_len) {
+        Value *lv = n->b ? (n->b->ct ? n->b->ct : ct_eval_probe(n->b)) : NULL;
+        Value *hv = n->c ? (n->c->ct ? n->c->ct : ct_eval_probe(n->c)) : NULL;
+        bool lok = !n->b || (lv && lv->kind == V_INT);
+        bool hik = !n->c || (hv && hv->kind == V_INT);
+        int64_t lov = lok ? (n->b ? val_i64(lv) : 0) : 0;
+        int64_t hiv = hik ? (n->c ? val_i64(hv) : (int64_t)bt->len) : 0;
+        if (lok && n->b && lov < 0)
+            return BAD(n->b, "slice lower bound %lld is negative", (long long)lov);
+        if (hik && n->c && hiv > (int64_t)bt->len)
+            return BAD(n->c, "slice upper bound %lld is out of bounds (len %llu)",
+                       (long long)hiv, (unsigned long long)bt->len);
+        if (lok && hik && n->b && n->c && lov > hiv)
+            return BAD(n, "slice lower bound %lld is greater than upper bound %lld",
+                       (long long)lov, (long long)hiv);
     }
     bool cst = (bt->kind == TY_PTR) ? bt->is_const : bt->is_const;
     return type_of(n, ty_slice(elem, cst));
@@ -6343,6 +6382,16 @@ static Value *ct_eval(Node *n) {
     case NK_CAST: {
         Value *a = ct_eval(n->b);
         if (!a) break;
+        /* 浮点 → 整数：C 的越界转换是 UB，折叠阶段会给出垃圾（
+         * (i32)(1.0e300) 实测 -344682216），而且与运行时的 INT_MIN 不一致。
+         * 编译期值就该在这里报——与"字面量装不进目标类型"（E0302）同一处置。 */
+        if (a->kind == V_FLOAT && n->ty && n->ty->kind == TY_INT &&
+            !f64_fits_int(a->fval, (int)n->ty->bits, n->ty->is_signed)) {
+            diag_code_at("E0302", n->line, n->col,
+                         "floating-point value %.17g does not fit in `%s`",
+                         a->fval, ty_str(n->ty));
+            return NULL;
+        }
         v = val_cast(n->ty, a);
         break;
     }

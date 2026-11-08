@@ -324,6 +324,15 @@ static void lex_number(Lex *l) {
             val = nv;
         }
         if (!any_digit) { emit(l, TOK_INT, start); return; }  /* error already reported */
+        /* 扫描停在数字上：这个底数里没有它（0b12 的 2）。不指出来，
+         * 后面的后缀扫描会把 12 当成后缀，报"unknown suffix"——差得太远。 */
+        if (is_digit(peek(l))) {
+            lex_error(l, start, "invalid digit '%c' in %s literal", peek(l),
+                      base == 2 ? "binary" : base == 8 ? "octal" : "hexadecimal");
+            /* 一口气吃掉剩下的标识字符：不然后缀扫描又把 12 当后缀，
+             * 多报一条"unknown suffix"——第一条已经说清了。 */
+            while (is_ident_char(peek(l))) adv(l);
+        }
     } else {
         while (is_digit(peek(l)) || peek(l) == '_') {
             char c = adv(l);
@@ -403,6 +412,10 @@ static void lex_number(Lex *l) {
         for (size_t i = 0; i < sizeof float_sufs / sizeof *float_sufs; i++)
             if (strcmp(suf, float_sufs[i]) == 0) return;
         lex_error(l, start, "invalid float suffix '%s'", suf);
+    } else if (strcmp(suf, "e") == 0 || strcmp(suf, "E") == 0) {
+        /* `1e` —— 指数后面没有数字，回滚后 e 被当成整数后缀；
+         * 报"invalid suffix"不如直接说该写什么。 */
+        lex_error(l, start, "float exponent needs digits: write `1e7` or `1.0e7`");
     } else {
         for (size_t i = 0; i < sizeof int_sufs / sizeof *int_sufs; i++)
             if (strcmp(suf, int_sufs[i]) == 0) return;
