@@ -86,7 +86,8 @@ if not os.path.exists(os.path.join(STD_COPY, "task.zx")):
 open(os.path.join(TESTDIR, "zx.json"), "w", encoding="utf-8").write(
     '{\n  "name": "lsptest",\n  "main": "src/extuser.zx",\n  "out": "lsptest",\n  "deps": ["libs"]\n}\n')
 open(os.path.join(TESTDIR, "vendor", "ext.zx"), "w", encoding="utf-8").write(
-    'pub const VERSION = "1.2.3";\n\npub const hello = fn (n: []const u8) void {\n    n;\n};\n')
+    'pub const VERSION = "1.2.3";\n\npub const hello = fn (n: []const u8) void {\n    n;\n};\n\n'
+    'pub const Cfg = struct {\n    w: i32,\n    h: i32,\n};\n')
 open(os.path.join(TESTDIR, "libs", "util.zx"), "w", encoding="utf-8").write(
     'pub const twice = fn (x: i32) i32 {\n    return x * 2;\n};\n')
 EXTUSE = """const ext = module("ext");
@@ -96,6 +97,9 @@ const main = fn () i32 {
     ext.hello("x");
     ext.
     util.twice(1);
+    var c = ext.Cfg{ .w = 1 };
+    c.
+    ext.Cfg{.
     return 0;
 };
 """
@@ -506,6 +510,15 @@ vk = {i["label"]: i.get("kind") for i in vitems}
 check("completion.vendorFnDetail",
       (vd.get("hello") or "").startswith("hello(n: []const u8)"), str(vd)[:240])
 check("completion.vendorFnKind", vk.get("hello") == 3, str(vk)[:160])
+
+# 10c vendor 容器（struct）的字段也要查得到——原生实例/字面量走
+# scanFiles，vendor 的容器体在模块文件里，必须按绑定解析（2026-11-08）。
+off = EXTUSE.index("    c.\n") + len("    c.")
+labels = complete_at(EXTUSE, off, 204)
+check("completion.vendorStruct.instance", {"w", "h"} <= labels, str(sorted(labels))[:200])
+off = EXTUSE.index("ext.Cfg{.") + len("ext.Cfg{.")
+labels = complete_at(EXTUSE, off, 205)
+check("completion.vendorStruct.literal", {"w", "h"} <= labels, str(sorted(labels))[:200])
 
 # 3b 错误集补全（M64）：`Err.` 出集合成员；`error.` 出全局码名。
 # 错误码名在编译器侧是全局 intern 的，文本层就把工程里见过的都端出来。
@@ -973,6 +986,10 @@ check("completion.exprSnippet.callBody",
       bool(mk) and mk[0].get("insertText") == "make()$0", str(mk)[:240])
 check("completion.exprSnippet.callFmt",
       bool(mk) and mk[0].get("insertTextFormat") == 2, str(mk)[:240])
+# 调用骨架发出后裸名也不再并存（用户 2026-11-08：函数的原型那条不要）
+check("completion.exprSnippet.callNoBareIdent",
+      not any(i["label"] == "make" for i in items),
+      str([i["label"] for i in items])[:240])
 off = SNIP3.index("    gre\n") + len("    gre")
 items = sp_items(SNIP3, off, 96)
 gr = [i for i in sp_snips(items) if i["label"] == "greet(...)"]

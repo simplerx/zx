@@ -1436,6 +1436,56 @@ fn moduleStringAt(text: []const u8, off: usize) ?[]const u8 {
     return text[ls + start .. e];
 }
 
+/// 声明初始化是不是容器字面量开头（struct/union/enum）。
+/// hoverMarkdownForDecl 的 is_container 判定同款。
+fn containerInitOf(stmt: []const u8) ?[]const u8 {
+    const init0 = trimSl(declInitOf(stmt) orelse return null);
+    if (std.mem.startsWith(u8, init0, "struct") or
+        std.mem.startsWith(u8, init0, "union") or
+        std.mem.startsWith(u8, init0, "enum")) return init0;
+    return null;
+}
+
+const ModContainer = struct { txt: []const u8, member: []const u8 };
+
+/// KEEP — vendor/deps 导入的容器 `vp.Cfg` / `std.Widget`：
+/// 本文件与 std 目录扫描（scanFiles）都够不到模块文件，容器体必须按
+/// 绑定解析。用户 2026-11-08：从 vendor 导入的 struct、fn 和原生不一样，
+/// 字段/成员也要查得到。限定名（恰好一段 `绑定.容器`）、绑定存在、
+/// 模块文件里该成员确实是容器，三条都成立才命中。
+fn modContainerOf(doc: *const Document, text: []const u8, qualified: []const u8) ?ModContainer {
+    const d = std.mem.lastIndexOfScalar(u8, qualified, '.') orelse return null;
+    if (d == 0 or d + 1 >= qualified.len) return null;
+    const bind = qualified[0..d];
+    const member = qualified[d + 1 ..];
+    if (std.mem.indexOfScalar(u8, member, '.') != null) return null;
+    var mm: ?[]const u8 = moduleOfBinding(text, bind);
+    if (mm == null and std.mem.eql(u8, bind, "std")) mm = "std";
+    const mod = mm orelse return null;
+    if (resolveModuleFile(doc, mod)) |mp| {
+        if (readFileSmall(mp)) |mt| {
+            if (findDeclStmt(mt, member)) |st| {
+                if (containerInitOf(st) != null) return .{ .txt = mt, .member = member };
+            }
+        }
+    }
+    return null;
+}
+
+/// `var c = vp.Cfg{…}`：vendor/deps 容器实例 → 把容器字段收进 out。
+/// 原生实例（`var o = Obj{…}`）走 inferContainer（本文件/std 扫得到），
+/// 模块容器这里补齐——inferContainer 对绑定名打头的结果一律 null。
+fn vendorInstanceFields(doc: *const Document, text: []const u8, name: []const u8,
+                        out: *std.ArrayList(Decl)) bool {
+    const s = findDeclStmt(text, name) orelse return false;
+    const init0 = trimSl(declInitOf(s) orelse return false);
+    var j2: usize = 0;
+    while (j2 < init0.len and (isIdentChar(init0[j2]) or init0[j2] == '.')) j2 += 1;
+    if (j2 == 0 or j2 >= init0.len or init0[j2] != '{') return false;
+    const mc = modContainerOf(doc, text, init0[0..j2]) orelse return false;
+    return containerMembers(&[_][]const u8{mc.txt}, mc.member, out);
+}
+
 /// 模块名 → 真实文件路径（<dir>/<m>.zx 或 <dir>/<m>/<m>.zx）
 fn resolveModuleFile(doc: *const Document, m_raw: []const u8) ?[]const u8 {
     const m = moduleBase(m_raw);
@@ -3126,8 +3176,8 @@ fn addSnippet(list: *Json, seen: *std.StringHashMapUnmanaged(void), s: Snip) voi
 /// 跨文件裸名不可用（名字只能来自显式绑定，那类工作区噪音已按用户要求
 /// 删除）；模块成员走 `绑定名.` 点补全。首参 self 是实例方法，不列调用
 /// 骨架（`o.bump()` 由点补全负责）；enum 只出变体，不造字面量骨架。
-/// 骨架 label 带 `()` / `{...}` 后缀；构造骨架发出时会把裸名占进 seen，
-/// 裸标识符项不再并存（addCtorSnippet 里做）。静态模板表
+/// 骨架 label 带 `()` / `{...}` 后缀；调用/构造骨架发出时都会把裸名占进
+/// seen，裸标识符项不再并存（addCallSnippet / addCtorSnippet 里做）。静态模板表
 /// （if/fn/new…）先入 seen，与本函数同名也不会撞。展开形态由
 /// lsptest.py completion.exprSnippet.* 钉住。
 fn addSnippetRaw(list: *Json, seen: *std.StringHashMapUnmanaged(void),
@@ -3179,6 +3229,11 @@ fn addCallSnippet(list: *Json, seen: *std.StringHashMapUnmanaged(void),
     defer lab.deinit(gpa);
     lab.print(gpa, "{s}(...)", .{name}) catch return;
     addSnippetRaw(list, seen, lab.items, ins.items, "调用骨架");
+    // KEEP: 与构造骨架同一条去重规则——骨架发出后把裸名占进 seen（本函数在
+    // addIdents 之前跑），`push 当前文件` 不再和 `push(...) 调用骨架` 并排
+    // 弹两条（用户 2026-11-08：函数的原型那条不要）。骨架没发成（首参 self
+    // 的实例方法、非 fn 声明）裸名照常保留。
+    seen.put(gpa, dupe(name), {}) catch {};
 }
 
 fn addCtorSnippet(list: *Json, seen: *std.StringHashMapUnmanaged(void),
@@ -3423,6 +3478,10 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                                 var sfv = scanFiles(doc, text);
                                 defer sfv.deinit(gpa);
                                 ok = isContainerIn(sfv.items, nm);
+                                // KEEP: vendor/deps 导入的容器 `vp.Cfg{`——
+                                // 本文件/std 目录扫不到，按模块绑定进模块
+                                // 文件确认（2026-11-08：vendor struct 也要查）。
+                                if (!ok) ok = modContainerOf(doc, text, name) != null;
                             }
                             if (ok) {
                                 lit_ctx = true;
@@ -3518,6 +3577,17 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
             }
             // 模块文件文本：fn 成员的 detail 要拼真实签名（见 emit 循环）
             var mod_txt: ?[]const u8 = null;
+            // KEEP: vendor/deps 容器 `vp.Cfg{.` / `vp.Cfg.`——点路径的 path
+            // 是带点的限定名，moduleOfBinding 对它不命中（绑定名本身不带点），
+            // 上面的模块分支进不去，必须单独按 modContainerOf 解析容器字段。
+            // lit_ctx 下 emit 循环把 .value 全过滤，字段就是全部；非字面量
+            // 上下文字段单独成组。
+            if (!handled) {
+                if (modContainerOf(doc, text, path)) |mc0| {
+                    if (containerMembers(&[_][]const u8{mc0.txt}, mc0.member, &decls))
+                        handled = true;
+                }
+            }
             if (mod) |m| {
                 moduleDecls(doc_dir, m, &decls);
                 handled = decls.items.len > 0;
@@ -3544,12 +3614,20 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                     // 不是模块/类型名——按实例变量处理：推断类型再补容器成员
                     //（let v = Obj.init(...) → v. 出 Obj 的字段与方法）
                     decls.clearRetainingCapacity();
-                    if (inferContainer(files.items, text, container, 0) orelse blk: {
-                        const s = findDeclStmt(text, container) orelse break :blk null;
-                        const init2 = declInitOf(s) orelse break :blk null;
-                        break :blk inferContainer(files.items, text, init2, 1);
-                    }) |ty| {
-                        if (containerMembers(files.items, ty, &decls)) handled = decls.items.len > 0;
+                    // KEEP: vendor/deps 容器实例（var c = vp.Cfg{…}）——
+                    // inferContainer 对绑定名打头的初始化一律 null，先走模块
+                    // 解析补齐（2026-11-08：vendor struct 也要查）。
+                    if (vendorInstanceFields(doc, text, container, &decls)) {
+                        handled = decls.items.len > 0;
+                    }
+                    if (!handled) {
+                        if (inferContainer(files.items, text, container, 0) orelse blk: {
+                            const s = findDeclStmt(text, container) orelse break :blk null;
+                            const init2 = declInitOf(s) orelse break :blk null;
+                            break :blk inferContainer(files.items, text, init2, 1);
+                        }) |ty| {
+                            if (containerMembers(files.items, ty, &decls)) handled = decls.items.len > 0;
+                        }
                     }
                 }
             }
