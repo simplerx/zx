@@ -29,3 +29,7 @@ err_probe.zx
 
 # zxls 影子文件（诊断用临时副本，异常退出时可能残留）
 .zxls-*.zx
+
+# Python 工具脚本缓存
+__pycache__/
+*.pyc

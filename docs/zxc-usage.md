@@ -210,6 +210,12 @@ zxc run                               # 完事
 **编辑器里的先后问题**：绑定文件要先存在，LSP 才会在补全里列出 `module("foo")`。
 写第一行代码前跑一次 `zxc sync`（只扫 `vendor/`、不编译、不联网），补全立刻可用。
 
+**模块必须显式绑定**：`glfw3.glfwInit()` 这种裸模块名不是合法引用，会报
+unknown identifier。在行首输入 `glfw` 会出「导入模块」补全项，Tab 展开成
+`const glfw3 = module("glfw3");`；光标停在绑定名上，直接输入 `g` 就是缩写
+`const g = module("glfw3");`，再导出则写 `pub const math = module("util");`。
+名字只由源码里的绑定产生，不会因模块文件变多而撞名。
+
 ---
 
 ## 6. 路径二：`zxc include`（库在磁盘别处）

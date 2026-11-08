@@ -456,13 +456,32 @@ fn inLineComment(text: []const u8, pos: usize) bool {
     return false;
 }
 
+/// 当前文件里"能单独写出来的名字"。以前是纯词法扫词，把 `g.glfwInit(...)`、
+/// 注释和字符串里的词都收进来，结果输入 glfw 弹一屏不可用的 C 函数名，
+/// 标着"当前文件"（用户 2026-11-08 反馈）。点成员名不是本作用域的绑定，
+/// 成员补全走 `绑定名.` 那条链；真有同名局部变量时声明处仍会收到。
 fn collectIdents(text: []const u8, set: *std.StringHashMapUnmanaged(void)) void {
     var i: usize = 0;
     while (i < text.len) {
-        if (isIdentChar(text[i]) and !(text[i] >= '0' and text[i] <= '9')) {
+        const c = text[i];
+        if (c == '/' and i + 1 < text.len and text[i + 1] == '/') {
+            while (i < text.len and text[i] != '\n') i += 1;
+            continue;
+        }
+        if (c == '"') {
+            i += 1;
+            while (i < text.len and text[i] != '"' and text[i] != '\n') i += 1;
+            if (i < text.len) i += 1;
+            continue;
+        }
+        if (isIdentChar(c) and !(c >= '0' and c <= '9')) {
             var j = i + 1;
             while (j < text.len and isIdentChar(text[j])) j += 1;
-            if (j - i >= 2 and j - i <= 64) set.put(gpa, text[i..j], {}) catch {};
+            var p = i;
+            while (p > 0 and (text[p - 1] == ' ' or text[p - 1] == '\t')) p -= 1;
+            const is_member = p > 0 and text[p - 1] == '.';
+            if (!is_member and j - i >= 2 and j - i <= 64)
+                set.put(gpa, text[i..j], {}) catch {};
             i = j;
         } else i += 1;
     }
@@ -751,7 +770,7 @@ fn resolvePathStmt(files: []const []const u8, doc: *const Document, text: []cons
     }
     if (n < 2) return null;
     // 第一段是模块绑定 → 先限定在模块文件里找
-    if (moduleRefOf(doc, text, segs[0])) |mod| {
+    if (moduleOfBinding(text, segs[0])) |mod| {
         if (n > 3) return null;
         const p = resolveModuleFile(doc, mod) orelse return null;
         const t = readFileSmall(p) orelse return null;
@@ -1283,80 +1302,10 @@ fn moduleDecls(doc_dir: []const u8, mod: []const u8, out: *std.ArrayList(Decl)) 
     }
 }
 
-// 工作区标识符 TTL 缓存：全量扫盘每次几毫秒到上百毫秒，连续敲键的补全会
-// 反复付这笔钱。按 doc_dir 缓存 3 秒——同一轮编辑基本全命中；磁盘上的
-// 外部改动（新文件/别的编辑器）最多延迟 3 秒可见，可接受。
-var g_ws_mu: Io.Mutex = .init;
-var g_ws_cache_dir: []const u8 = "";
-var g_ws_cache_set: std.StringHashMapUnmanaged(void) = .empty;
-var g_ws_cache_stamp: Io.Timestamp = Io.Timestamp.zero;
-const WS_CACHE_TTL_NS: i96 = 3000 * std.time.ns_per_ms;
-
-fn workspaceIdents(doc_dir: []const u8) *std.StringHashMapUnmanaged(void) {
-    const now_ts = Io.Clock.awake.now(g_io);
-    g_ws_mu.lockUncancelable(g_io);
-    defer g_ws_mu.unlock(g_io);
-    if (std.mem.eql(u8, g_ws_cache_dir, doc_dir) and
-        now_ts.nanoseconds - g_ws_cache_stamp.nanoseconds < WS_CACHE_TTL_NS)
-    {
-        return &g_ws_cache_set;
-    }
-    g_ws_cache_set.clearRetainingCapacity();
-    var searched: std.StringHashMapUnmanaged(void) = .empty;
-    defer searched.deinit(gpa);
-    var dirs: [2][]const u8 = undefined;
-    var nd: usize = 0;
-    dirs[nd] = doc_dir;
-    nd += 1;
-    if (root_path) |r| {
-        if (!std.mem.eql(u8, r, doc_dir)) {
-            dirs[nd] = r;
-            nd += 1;
-        }
-    }
-    for (dirs[0..nd]) |d| {
-        if (searched.contains(d)) continue;
-        searched.put(gpa, d, {}) catch {};
-        scanDirIdents(d, &g_ws_cache_set, 0);
-    }
-    if (g_ws_cache_dir.len > 0) gpa.free(g_ws_cache_dir);
-    g_ws_cache_dir = dupe(doc_dir);
-    g_ws_cache_stamp = now_ts;
-    return &g_ws_cache_set;
-}
-
-fn scanDirIdents(dir_path: []const u8, set: *std.StringHashMapUnmanaged(void), depth: usize) void {
-    if (depth > 2) return;
-    var dir = Io.Dir.cwd().openDir(g_io, dir_path, .{ .iterate = true }) catch return;
-    defer dir.close(g_io);
-    var it = dir.iterate();
-    while (it.next(g_io) catch null) |entry| {
-        switch (entry.kind) {
-            .directory => {
-                if (entry.name.len > 0 and (entry.name[0] == '.' or
-                    std.mem.eql(u8, entry.name, "zig-cache") or
-                    std.mem.eql(u8, entry.name, "bin") or
-                    std.mem.eql(u8, entry.name, ".tmp"))) continue;
-                var sub: std.ArrayList(u8) = .empty;
-                defer sub.deinit(gpa);
-                sub.appendSlice(gpa, dir_path) catch continue;
-                sub.append(gpa, '/') catch continue;
-                sub.appendSlice(gpa, entry.name) catch continue;
-                scanDirIdents(sub.items, set, depth + 1);
-            },
-            .file => {
-                if (!std.mem.endsWith(u8, entry.name, ".zx")) continue;
-                var fp: std.ArrayList(u8) = .empty;
-                defer fp.deinit(gpa);
-                fp.appendSlice(gpa, dir_path) catch continue;
-                fp.append(gpa, '/') catch continue;
-                fp.appendSlice(gpa, entry.name) catch continue;
-                if (readFileSmall(fp.items)) |txt| collectIdents(txt, set);
-            },
-            else => {},
-        }
-    }
-}
+// Zx 没有隐式跨文件名字：其它 .zx 里的标识符必须先 module("…") 绑定。
+// 早期把它们当裸补全列出来，输入 glfw 弹一堆不可用的 glfwInit，
+// 真正的模块名反而被淹没（用户 2026-11-08 反馈）。模块名改由
+// addImportModules 在声明位置给「插入绑定」项，成员走 `绑定名.` 补全。
 
 fn readFileSmall(path: []const u8) ?[]u8 {
     return Io.Dir.cwd().readFileAlloc(g_io, path, gpa, Io.Limit.limited(4 * 1024 * 1024)) catch null;
@@ -1488,17 +1437,6 @@ fn resolveModuleFile(doc: *const Document, m_raw: []const u8) ?[]const u8 {
     return null;
 }
 
-/// 绑定名或裸模块名 → 模块名。KEEP：裸名 = 没写
-/// `module("…")` 绑定，但 `<搜索目录>/<名>.zx` 存在就当模块（与编译器
-/// 的 module_probe 同一句解析）。用户 2026-11-08 反馈：直接输模块名，
-/// `glfw3.` 点不出成员。
-fn moduleRefOf(doc: *const Document, text: []const u8, word: []const u8) ?[]const u8 {
-    if (moduleOfBinding(text, word)) |m| return m;
-    if (std.mem.eql(u8, word, "std")) return "std";
-    if (resolveModuleFile(doc, word)) |_| return word;
-    return null;
-}
-
 fn definitionAt(doc: *const Document, line: u32, character: u32) ?[]const u8 {
     const text = doc.text;
     const off = posToOffset(text, line, character);
@@ -1526,7 +1464,8 @@ fn definitionAt(doc: *const Document, line: u32, character: u32) ?[]const u8 {
         while (bs > 0 and (isIdentChar(text[bs - 1]) or text[bs - 1] == '.')) bs -= 1;
         const base = text[bs .. ws - 1];
         if (base.len > 0) {
-            const mm: ?[]const u8 = moduleRefOf(doc, text, base);
+            var mm: ?[]const u8 = moduleOfBinding(text, base);
+            if (mm == null and std.mem.eql(u8, base, "std")) mm = "std";
             if (mm) |mod_name| {
                 if (resolveModuleFile(doc, mod_name)) |p| {
                     if (readFileSmall(p)) |t| {
@@ -1539,7 +1478,8 @@ fn definitionAt(doc: *const Document, line: u32, character: u32) ?[]const u8 {
     }
 
     // 2) 模块绑定名 / std → 模块文件
-    const m = moduleRefOf(doc, text, word);
+    var m = moduleOfBinding(text, word);
+    if (m == null and std.mem.eql(u8, word, "std")) m = "std";
     if (m) |mm| {
         if (resolveModuleFile(doc, mm)) |p| return makeLocation(pathToUri(p), 0, 0, 0);
     }
@@ -2201,7 +2141,7 @@ fn inferExprType(text: []const u8, doc: *const Document, expr: []const u8, depth
             const member = e[dot + 1 ..];
             if (base.len == 0 or member.len == 0) return null;
             // base 是模块绑定（std.Buffer / task.Obj）→ 类型路径原样
-            if (moduleRefOf(doc, text, base) != null) return e;
+            if (std.mem.eql(u8, base, "std") or moduleOfBinding(text, base) != null) return e;
             var sf = scanFiles(doc, text);
             defer sf.deinit(gpa);
             // 实例成员 → 容器体里的字段类型 / 方法返回类型
@@ -2258,7 +2198,8 @@ fn resolveCalleeRet(text: []const u8, doc: *const Document, callee: []const u8) 
         const bind = callee[0..dot];
         const member = callee[dot + 1 ..];
         if (member.len == 0) return null;
-        const mm: ?[]const u8 = moduleRefOf(doc, text, bind);
+        var mm: ?[]const u8 = moduleOfBinding(text, bind);
+        if (mm == null and std.mem.eql(u8, bind, "std")) mm = "std";
         const mod = mm orelse {
             // 容器限定（std.Task.group）或实例方法（g.spawn）：扫描集里解析
             var sf = scanFiles(doc, text);
@@ -2400,7 +2341,8 @@ fn hoverAt(doc: *const Document, line: u32, character: u32) ?[]const u8 {
     if (path.len == 0) return null;
 
     // 模块绑定名本身
-    const mb: ?[]const u8 = moduleRefOf(doc, text, path);
+    var mb: ?[]const u8 = moduleOfBinding(text, path);
+    if (mb == null and std.mem.eql(u8, path, "std")) mb = "std";
     if (mb) |mm| {
         var b: std.ArrayList(u8) = .empty;
         b.print(gpa, "```zx\nmodule `{s}`\n```", .{mm}) catch return null;
@@ -2412,7 +2354,8 @@ fn hoverAt(doc: *const Document, line: u32, character: u32) ?[]const u8 {
         const bind = path[0..dot];
         const member = path[dot + 1 ..];
         if (member.len > 0) {
-            const mm: ?[]const u8 = moduleRefOf(doc, text, bind);
+            var mm: ?[]const u8 = moduleOfBinding(text, bind);
+            if (mm == null and std.mem.eql(u8, bind, "std")) mm = "std";
             if (mm) |mod| {
                 if (resolveModuleFile(doc, mod)) |p| {
                     if (readFileSmall(p)) |t| {
@@ -2629,7 +2572,8 @@ fn calleeParamNames(text: []const u8, doc: *const Document, callee: []const u8) 
         const bind = callee[0..dot];
         const member = callee[dot + 1 ..];
         if (member.len == 0) return null;
-        const mm: ?[]const u8 = moduleRefOf(doc, text, bind);
+        var mm: ?[]const u8 = moduleOfBinding(text, bind);
+        if (mm == null and std.mem.eql(u8, bind, "std")) mm = "std";
         if (mm) |mod| {
             if (resolveModuleFile(doc, mod)) |p| {
                 if (readFileSmall(p)) |t| stmt = findDeclStmt(t, member);
@@ -3014,7 +2958,8 @@ fn signatureHelpAt(doc: *const Document, line: u32, character: u32) ?[]const u8 
     if (std.mem.lastIndexOfScalar(u8, callee, '.')) |dot| {
         const bind = callee[0..dot];
         const member = callee[dot + 1 ..];
-        const mm: ?[]const u8 = moduleRefOf(doc, text, bind);
+        var mm: ?[]const u8 = moduleOfBinding(text, bind);
+        if (mm == null and std.mem.eql(u8, bind, "std")) mm = "std";
         if (mm) |mod| {
             if (resolveModuleFile(doc, mod)) |p| {
                 if (readFileSmall(p)) |t| {
@@ -3149,9 +3094,6 @@ fn addSnippet(list: *Json, seen: *std.StringHashMapUnmanaged(void), s: Snip) voi
     list.raw("}}", .{});
 }
 
-/// 工作区补全上限：全仓库标识符再多也不能淹没列表/撑爆报文
-const MAX_WORKSPACE_COMPLETIONS = 250;
-
 fn isKeywordWord(w: []const u8) bool {
     for (keywords) |kw| {
         if (std.mem.eql(u8, kw, w)) return true;
@@ -3159,12 +3101,65 @@ fn isKeywordWord(w: []const u8) bool {
     return false;
 }
 
-/// 模块名补全：搜索目录里每个 .zx 的文件名主干 + std。tier 1——
-/// 输入 `glfw` 时 `glfw3`（模块）要排在 vendor 成员噪音（tier 3）前面；
-/// 编译器已支持裸模块名（module_probe），选中后 `glfw3.` 直接点成员。
-fn addModuleNames(list: *Json, seen: *std.StringHashMapUnmanaged(void), doc_dir: []const u8, prefix: []const u8) void {
-    if (std.mem.startsWith(u8, "std", prefix))
-        addItem(list, seen, "std", 9, "模块（编译器内建）", 1);
+/// KEEP - 模块导入补全。名字只能来自显式 `const <名> = module("…")` 绑定：
+/// 曾试过"模块名解析不到绑定就隐式当命名空间"，用户 2026-11-08 否掉——
+/// 隐式名一旦和别名/再导出撞名，就再没有语法能指回隐式命名空间
+/// （`pub const glfw3 = glfw3;` 右边会被自己的绑定吃掉），文件一多必乱。
+/// 所以这里不制造隐式名字：选中项插入的是**一条绑定语句**，$1 落在绑定名
+/// 上，直接输入即可改成缩写（const g = module("glfw3");）。再导出同理，
+/// 由人显式写 `pub const`，名字冲突完全可见、可控。
+fn addImportItem(list: *Json, seen: *std.StringHashMapUnmanaged(void), stem: []const u8) void {
+    if (seen.contains(stem)) return;
+    seen.put(gpa, dupe(stem), {}) catch {};
+    if (seen.count() > 1) list.raw(",", .{});
+    var body: [1024]u8 = undefined;
+    const ins = std.fmt.bufPrint(&body,
+        "const ${{1:{s}}} = module(\"{s}\");$0", .{ stem, stem }) catch return;
+    var st: [1024]u8 = undefined;
+    const sort = std.fmt.bufPrint(&st, "b{s}", .{stem}) catch return;
+    list.raw("{{\"label\":", .{});
+    list.str(stem);
+    list.raw(",\"kind\":9,\"detail\":\"导入模块（$1 可改别名）\"", .{});
+    list.raw(",\"sortText\":", .{});
+    list.str(sort);
+    list.raw(",\"insertText\":", .{});
+    list.str(ins);
+    list.raw(",\"insertTextFormat\":2}}", .{});
+}
+
+/// 只在"声明位置"（行首，允许缩进）列导入项：表达式中间插入 const 会
+/// 破坏语法。必须放在 addIdents 之前：未绑定的裸名（写错的 `glue.`）
+/// 也会被 collectIdents 当普通标识符塞进 seen，把导入项静默挡掉；
+/// 已导入过的模块（含别名绑定）由 moduleImported 按路径排除。
+/// 已经导入过这个模块就不再提示——按 module("…") 里的路径判，而不是按
+/// 绑定名：`const g = module("glfw3");` 用的是别名，绑定名 g 与模块名不同，
+/// 只看绑定名会反复提示"导入 glfw3"。注释里的字样不算数。
+fn moduleImported(text: []const u8, stem: []const u8) bool {
+    var b1: [1024]u8 = undefined;
+    const n1 = std.fmt.bufPrint(&b1, "module(\"{s}\")", .{stem}) catch return false;
+    var b2: [1024]u8 = undefined;
+    const n2 = std.fmt.bufPrint(&b2, "module(\"{s}.zx\")", .{stem}) catch return false;
+    for ([_][]const u8{ n1, n2 }) |needle| {
+        var from: usize = 0;
+        while (std.mem.indexOfPos(u8, text, from, needle)) |p| {
+            if (!inLineComment(text, p)) return true;
+            from = p + needle.len;
+        }
+    }
+    return false;
+}
+
+fn addImportModules(list: *Json, seen: *std.StringHashMapUnmanaged(void),
+                    text: []const u8, off: usize, doc_dir: []const u8,
+                    prefix: []const u8) void {
+    if (prefix.len == 0 or off < prefix.len) return;
+    var p = off - prefix.len;
+    while (p > 0 and (text[p - 1] == ' ' or text[p - 1] == '\t')) p -= 1;
+    if (p > 0 and text[p - 1] != '\n' and text[p - 1] != '\r') return;
+
+    if (std.mem.startsWith(u8, "std", prefix) and
+        !moduleImported(text, "std"))
+        addImportItem(list, seen, "std");
     var dirs: std.ArrayList([]const u8) = .empty;
     defer dirs.deinit(gpa);
     modDirsInto(doc_dir, &dirs);
@@ -3176,13 +3171,14 @@ fn addModuleNames(list: *Json, seen: *std.StringHashMapUnmanaged(void), doc_dir:
             if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".zx")) continue;
             const stem = entry.name[0 .. entry.name.len - 3];
             if (std.mem.eql(u8, stem, "std")) continue;
-            if (!std.mem.startsWith(u8, stem, prefix)) continue;
-            addItem(list, seen, stem, 9, "模块", 1);
+            if (std.mem.startsWith(u8, stem, prefix) and
+                !moduleImported(text, stem))
+                addImportItem(list, seen, stem);
         }
     }
 }
 
-fn addIdents(list: *Json, seen: *std.StringHashMapUnmanaged(void), doc_text: []const u8, doc_dir: []const u8, prefix: []const u8) void {
+fn addIdents(list: *Json, seen: *std.StringHashMapUnmanaged(void), doc_text: []const u8, prefix: []const u8) void {
     // 当前文件标识符（tier 1）；关键字不算标识符
     var local: std.StringHashMapUnmanaged(void) = .empty;
     defer local.deinit(gpa);
@@ -3192,18 +3188,6 @@ fn addIdents(list: *Json, seen: *std.StringHashMapUnmanaged(void), doc_text: []c
         if (isKeywordWord(k.*)) continue;
         if (prefix.len == 0 or std.mem.startsWith(u8, k.*, prefix))
             addItem(list, seen, k.*, 6, "当前文件", 1);
-    }
-    // 工作区（tier 3，带上限；缓存命中时零扫盘）
-    const ws = workspaceIdents(doc_dir);
-    var count: usize = 0;
-    var wit = ws.keyIterator();
-    while (wit.next()) |k| {
-        if (count >= MAX_WORKSPACE_COMPLETIONS) break;
-        if (isKeywordWord(k.*)) continue;
-        if (prefix.len == 0 or std.mem.startsWith(u8, k.*, prefix)) {
-            addItem(list, seen, k.*, 6, "", 3);
-            count += 1;
-        }
     }
 }
 
@@ -3331,7 +3315,7 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
             }
 
             // module 绑定？const <path> = module("…")（等号两侧可有对齐空格）
-            const mod: ?[]const u8 = moduleRefOf(doc, text, path);
+            const mod: ?[]const u8 = moduleOfBinding(text, path);
             var decls: std.ArrayList(Decl) = .empty;
             defer decls.deinit(gpa);
 
@@ -3451,10 +3435,10 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
             if (prefix.len > 0 and std.mem.startsWith(u8, sn.label, prefix))
                 addSnippet(&list, &seen, sn);
         }
-        // 模块名排在工作区噪音前：裸模块名是合法引用，`glfw3.` 能点成员。
-        addModuleNames(&list, &seen, doc_dir, prefix);
         // 当前文件标识符 + 关键字 + 工作区标识符（分层排序）
-        addIdents(&list, &seen, text, doc_dir, prefix);
+        // 模块导入项（不创造隐式名字，只插入绑定语句）
+        addImportModules(&list, &seen, text, off, doc_dir, prefix);
+        addIdents(&list, &seen, text, prefix);
         for (keywords) |kw| {
             if (prefix.len == 0 or std.mem.startsWith(u8, kw, prefix)) {
                 // 关键字里有骨架的走 snippet（写 `if` + Tab 展开），

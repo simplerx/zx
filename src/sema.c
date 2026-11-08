@@ -1089,7 +1089,6 @@ static void ensure(Symbol *s);
 static Module *module_load(const char *rel, int line, int col);
 static Module *module_load_full(const char *full, int line, int col);
 static Module *module_load_std(int line, int col);
-static Module *module_probe(const char *name);
 static void sym_copy(Symbol *dst, Symbol *src, const char *name);
 static Symbol *module_member(Module *m, const char *name);
 
@@ -3466,18 +3465,6 @@ static Type *check_expr_raw(Node *n, Type *expect) {
             if (!strcmp(n->name, "_")) return type_of(n, ty_void());
             Type *b = base_type(n->name);
             if (b) { n->type_val = b; return type_of(n, ty_type()); }
-            /* 裸模块名：名字解析不到绑定时，探它是否是搜索路径上的模块（与
-             * module("名") 同一句解析）。命中就当命名空间值用——
-             * `glfw3.init()` 不用先写 `const glfw3 = module("glfw3")`。
-             * KEEP：必须排在 suggest_ident 前；probe 失败完全静默，
-             * unknown identifier 的诊断仍由下面发。用户 2026-11-08
-             * 反馈：zx 导入的模块名反而点不出来。 */
-            Module *pm = module_probe(n->name);
-            if (pm) {
-                n->sym = pm->ns;
-                n->type_val = ty_void();
-                return type_of(n, ty_type());
-            }
             const char *sug = suggest_ident(n->name);
             if (sug) diag_help("did you mean `%s`?", sug);
             return BAD(n, "unknown identifier '%s'", n->name);
@@ -4089,11 +4076,7 @@ static void ensure_raw(Symbol *s) {
             s->type_val->name = d->name;
     }
 
-    if (d->b && (d->b->kind == NK_MODULE ||
-                 /* 模块别名：`const g2 = glfw3;`（裸模块名，同一个 ns） */
-                 (d->b->kind == NK_IDENT && d->b->sym &&
-                  d->b->sym->kind == SK_NS)) &&
-        s->ty && s->ty->kind == TY_TYPE) {
+    if (d->b && d->b->kind == NK_MODULE && s->ty && s->ty->kind == TY_TYPE) {
         s->kind = SK_NS;
         Symbol *ns = d->b->sym;
         if (ns && ns->mod) {          /* 文件模块：借用它的成员表（名字还是本地别名） */
@@ -4372,38 +4355,6 @@ static Module *module_load_full(const char *full_in, int line, int col) {
     g_scope = save_s;
     g_mod = save_m;
     m->loading = false;
-    return m;
-}
-
-/* 裸模块名探测：把 `glfw3` 静默解析成文件模块。只在 NK_IDENT
- * 的名字解析不到绑定时调，与 module_load 的差别：
- *   ① 不打任何诊断：找不到就返回 NULL，让调用点继续报 unknown identifier；
- *   ② 只收纯名字（不带路径分隔）：带路径的仍走 module("…")；
- *   ③ 当前文件自己的名不算（否则裸 `main` 会把正在编的
- *      文件再加载一遍）。
- * KEEP：和 NK_IDENT 分支是同一条线（模块名可直接用），删一半另一半就成死代码。 */
-static Module *module_probe(const char *name) {
-    if (!name || !*name) return NULL;
-    for (const char *p = name; *p; p++)
-        if (*p == '/' || *p == '\\') return NULL;
-    if (!strcmp(name, "std")) return module_load_std(0, 0);
-    char *dir  = path_dup_dir(g_mod ? g_mod->path : g_srcpath);
-    char *orig = path_join(dir, name);
-    free(dir);
-    char *full = find_module_file(orig, true);
-    for (int i = 0; !full && g_search_paths && g_search_paths[i]; i++) {
-        char *cand = path_join(g_search_paths[i], name);
-        full = find_module_file(cand, true);
-        free(cand);
-    }
-    if (!full) { free(orig); return NULL; }
-    free(orig);
-    char *norm = path_normalize(full);
-    free(full);
-    const char *self = g_mod ? g_mod->path : g_srcpath;
-    if (self && !strcmp(norm, self)) { free(norm); return NULL; }
-    Module *m = module_load_full(norm, 0, 0);
-    free(norm);
     return m;
 }
 

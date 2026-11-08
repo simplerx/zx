@@ -446,11 +446,14 @@ util.secret(1);                     // ✗ private to module 'util'
 - 模块顶层只能有声明，没有自由语句。
 - **没有 import 语法**：`const` 绑定就是别名，函数/类型/常量/命名空间一视同仁
   （`const println = std.println;`、`const HashMap = std.HashMap;`）。
-- **裸模块名**：名字解析不到绑定时，若 `<搜索路径>/<名>.zx` 存在，这个名字
-  直接就是模块命名空间——`util.add(1, 2)` 不用先写
-  `const util = module("util")`；`const util2 = util;` 是模块别名；`std`
-  同理（`std.println` 免绑定）。同名绑定永远优先（局部/顶层都算）；探不到
-  文件就照常报 unknown identifier（探测保持静默，不另打诊断）。
+- **模块名不是自动可用的标识符**：必须先写 `const g = module("glfw3");`，
+  `g.` 才点得出成员。名字只由源码里的显式绑定产生，所以缩写就是起短名
+  （`const g = module("glfw3")`），再导出就是 `pub const math = module("util");`
+  让别人写 `api.math.add(...)`；同名冲突一眼可见，不会随文件变多冒出隐式名字。
+  裸写 `glfw3.glfwInit()` 会报 unknown identifier。
+- 编辑器里在**行首**输入模块名（如 `glfw`）会出「导入模块」补全项，Tab 展开成
+  `const glfw3 = module("glfw3");`，光标停在绑定名上，直接输入即可改成缩写。
+  `std` 同理：输入 `st` 可一键插入 `const std = module("std");`。
 - `pub` 是唯一的可见性修饰；别名不改可见性。
 
 ### 3.11 内建（`@` 前缀）
@@ -1213,8 +1216,6 @@ sh editor/zed/install.sh    # 装 Zed 扩展（高亮 + 大纲 + LSP 接线）
 18. **defer 体里不能再 return / 收割 / continue**；`try` 也不能用在 defer 里。
 19. **switch 冒号后的裸名字一定读作捕获名**：`1: K;` 的值是匹配到的 `1`，不是常量 `K`。
     要常量就把名字括起来 `1: (K);`。（`if (c) x else y` 不受影响：bool 条件没载荷可捕。）
-20. **裸模块名是合法引用**：`util.add(...)` 不需要先 `module("util")` 绑定；
-    名字命中搜索路径上的 `<名>.zx` 即命名空间，绑定/局部名永远优先。
 
 ### 8.2 工程与工具链
 
