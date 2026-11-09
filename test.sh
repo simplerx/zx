@@ -560,10 +560,12 @@ fi
 rm -rf "$pdir" 2>/dev/null || true
 
 # 2.55 错误码目录：诊断里出现的每个码都必须查得到。
-# 两处码集要完全一致——src/zxc.c 的 g_rules（真源）与 src/errors.c 的文案
-# （`zxc errors` / `zxc explain` 都念它）。漏一处就是"用户拿着码搜不到东西"，
-# 而码一旦发布又不能改，只能靠这里挡。
-printf "\n== 错误码目录（zxc errors / explain 与编译器码集一致）\n"
+# 三处码集要完全一致——src/zxc.c 的 g_rules（真源）、src/errors.c 的文案
+# （`zxc errors` / `zxc explain` 都念它）、docs/errors.md（完整参考，诊断里的
+# `details:` 链接与编辑器的 codeDescription 都指向它）。漏一处就是"用户拿着
+# 码搜不到东西"，而码一旦发布又不能改，只能靠这里挡。
+# 手册与离线文档站已删（std 还没定型），只留错误码参考。
+printf "\n== 错误码目录（zxc errors / explain / docs/errors.md 三方一致）\n"
 # 真源 = 编译器里实际会发出的码；文案表必须与它**相等**（多一个少一个都算漂移）
 codes=$(grep -ohE '"E[0-9]{4}"' src/zxc.c src/sema.c src/parse.c src/lex.c src/backend.c | tr -d '"' | sort -u)
 codes_doc=$(grep -ohE '"E[0-9]{4}"' src/errors.c | tr -d '"' | sort -u)
@@ -599,6 +601,39 @@ if $ZXC explain E9999 > /dev/null 2>&1; then
     printf "  FAIL explain 对不存在的码返回了成功\n"; fail=1
 else
     printf "  ok   explain 对未知码返回非零\n"
+fi
+doc_miss=""
+anchor_miss=""
+for c in $codes; do
+    grep -q "$c" docs/errors.md || doc_miss="$doc_miss $c"
+    # 锚点：lsp 的 codeDescription 与 `zxc explain` 都靠 `#e0304` 直接跳转
+    lc=$(printf '%s' "$c" | tr 'A-Z' 'a-z')
+    grep -q "id=\"$lc\"" docs/errors.md || anchor_miss="$anchor_miss $c"
+done
+if [ -z "$doc_miss" ]; then
+    printf "  ok   docs/errors.md 覆盖全部 %s 个码\n" "$ncodes"
+else
+    printf "  FAIL docs/errors.md 缺:%s\n" "$doc_miss"; fail=1
+fi
+if [ -z "$anchor_miss" ]; then
+    printf "  ok   docs/errors.md 每个码都有锚点\n"
+else
+    printf "  FAIL docs/errors.md 缺锚点:%s\n" "$anchor_miss"; fail=1
+fi
+# 文档地址在 C（zxc explain 输出）和 Zig（lsp codeDescription）各存一份，
+# 只能靠这里挡住漂移：两处字面量必须一致，否则编辑器里的链接指向旧位置。
+url_c=$(grep -oE 'https://[^"]*docs/errors\.md' src/errors.c | head -1)
+url_zig=$(grep -oE 'https://[^"]*docs/errors\.md' tools/zxls.zig | head -1)
+if [ -n "$url_c" ] && [ "$url_c" = "$url_zig" ]; then
+    printf "  ok   errors.c 与 zxls.zig 的文档地址一致\n"
+else
+    printf "  FAIL 文档地址漂移\n        errors.c:%s\n        zxls.zig:%s\n" "$url_c" "$url_zig"; fail=1
+fi
+# `zxc explain` 要真的把链接打出来（details: 行）
+if $ZXC explain E0304 2>&1 | grep -q "#e0304"; then
+    printf "  ok   zxc explain 给出文档链接\n"
+else
+    printf "  FAIL zxc explain 没给文档链接\n"; fail=1
 fi
 # 兜底修法：诊断里没有具体建议时，help 行要换成该码的通用修法
 printf 'const main = fn () void {\n    let y: i32 = "abc";\n};\n' > "$TPFX.fix.zx"

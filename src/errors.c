@@ -129,6 +129,19 @@ static const ErrDoc g_errs[] = {
 
 #define NERRS ((int)(sizeof g_errs / sizeof g_errs[0]))
 
+/* 错误码说明文档的对外地址（`<base>#e0304` 直达一条）。每个 `### E0xxx`
+ * 标题前都有显式锚点 `<a id="e0304"></a>`，拼上小写码就能跳过去。
+ *
+ * 这份地址在 tools/zxls.zig 里还有一份（LSP 的 codeDescription 只能给
+ * URL，拿不到这里的 C 常量）。test.sh 会校验两处字面量一致——改地址
+ * 记得两边一起改，否则编辑器里的链接会指向一个旧位置。
+ *
+ * 注意：删掉的是**手册与离线文档站**（std 还没定型，写出来就是错的），
+ * 错误码参考（docs/errors.md）保留——诊断里的链接要能点开。 */
+#define ZX_DOCS_URL "https://gitcode.com/simplex/zx/blob/main/docs/errors.md"
+
+const char *errors_doc_url(void) { return ZX_DOCS_URL; }
+
 /* 码前两位 → 类别名。表里没出现的类别就归"其它"。 */
 static const char *category(const char *code) {
     if (!code || strlen(code) < 4) return "other";
@@ -175,6 +188,11 @@ int errors_print_one(FILE *out, const char *code) {
         fprintf(out, "%s -- %s\n\n", g_errs[i].code, g_errs[i].title);
         fprintf(out, "  fix: %s\n", g_errs[i].fix);
         fprintf(out, "  category: %s\n", category(g_errs[i].code));
+        /* 锚点用小写码，与 docs/errors.md 里的 `<a id="e0304">` 对齐 */
+        fprintf(out, "  details: %s#", ZX_DOCS_URL);
+        for (size_t k = 0; k < n; k++)
+            fputc((char)(want[k] >= 'A' && want[k] <= 'Z' ? want[k] - 'A' + 'a' : want[k]), out);
+        fputc('\n', out);
         return 0;
     }
     fprintf(out, "no such error code: %s\nuse `zxc errors` to list all %d.\n", code, NERRS);

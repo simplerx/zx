@@ -111,6 +111,13 @@ fn findStdDir() ?[]const u8 {
     return null;
 }
 
+/// 错误码说明文档的地址（`<base>#e0304` 直达一条）。与 src/errors.c 的
+/// ZX_DOCS_URL 是同一个字面量——C 常量传不到 Zig 这边，只能各存一份，
+/// test.sh 会校验两处一致，改地址记得两边一起改。
+///
+/// 只指向错误码参考；手册与离线文档站已删（std 还没定型）。
+const docs_base = "https://gitcode.com/simplex/zx/blob/main/docs/errors.md";
+
 /// 客户端有没有在 initialize 里声明 codeDescriptionSupport。
 /// 没有就别发 codeDescription（见 publishDiags 里的注释）。
 var cap_code_desc = false;
@@ -4884,33 +4891,45 @@ fn addSnippetRaw(list: *Json, seen: *std.StringHashMapUnmanaged(void),
 /// 成员签名的 detail：`name(params) ret`。首参 self 是隐含接收者，不摆给
 /// 用户看；返回类型里的 `Self` 换成容器真名（owner）。普通项与骨架项共用
 /// 这一份，弹窗里两条显示一致。
-fn appendMemberSig(sb: *std.ArrayList(u8), name: []const u8, sig: FnSig, owner: []const u8) void {
+/// 把文本里的 `Self` 换成接收者容器名（`*const Self` → `*const Task`）。
+fn appendSelfSub(sb: *std.ArrayList(u8), txt: []const u8, owner: []const u8) void {
+    if (owner.len == 0 or std.mem.indexOf(u8, txt, "Self") == null) {
+        sb.appendSlice(gpa, txt) catch return;
+        return;
+    }
+    var sp: usize = 0;
+    while (std.mem.indexOfPos(u8, txt, sp, "Self")) |hp| {
+        sb.appendSlice(gpa, txt[sp..hp]) catch return;
+        sb.appendSlice(gpa, owner) catch return;
+        sp = hp + "Self".len;
+    }
+    sb.appendSlice(gpa, txt[sp..]) catch return;
+}
+
+/// 成员补全的 detail 签名。`keep_self` 为真时保留首个 `self: *const Self`
+/// 形参——**实例**补全必须保留：不写出来，`spawn(f: …) ?usize` 这种串
+/// 看着和关联函数一模一样，用户 2026-11-10 截图两次把它当成污染。
+fn appendMemberSig(sb: *std.ArrayList(u8), name: []const u8, sig: FnSig,
+                   owner: []const u8, keep_self: bool) void {
     sb.appendSlice(gpa, name) catch return;
     sb.append(gpa, '(') catch return;
     var first = true;
     for (sig.params, 0..) |p0, pi| {
-        if (pi == 0 and std.mem.eql(u8, paramName(p0), "self")) continue;
+        const is_self = pi == 0 and std.mem.eql(u8, paramName(p0), "self");
+        if (is_self and !keep_self) continue;
         if (!first) sb.appendSlice(gpa, ", ") catch return;
         first = false;
-        sb.appendSlice(gpa, p0) catch return;
+        appendSelfSub(sb, p0, owner);
     }
     sb.append(gpa, ')') catch return;
     if (sig.ret.len == 0) return;
     sb.append(gpa, ' ') catch return;
-    const rt = trimSl(sig.ret);
-    if (owner.len > 0 and std.mem.indexOf(u8, rt, "Self") != null) {
-        var sp: usize = 0;
-        while (std.mem.indexOfPos(u8, rt, sp, "Self")) |hp| {
-            sb.appendSlice(gpa, rt[sp..hp]) catch return;
-            sb.appendSlice(gpa, owner) catch return;
-            sp = hp + "Self".len;
-        }
-        sb.appendSlice(gpa, rt[sp..]) catch return;
-    } else sb.appendSlice(gpa, rt) catch return;
+    appendSelfSub(sb, trimSl(sig.ret), owner);
 }
 
 fn memberCallSnippet(list: *Json, seen: *std.StringHashMapUnmanaged(void),
-                     stmt: []const u8, name: []const u8, owner: []const u8) bool {
+                     stmt: []const u8, name: []const u8, owner: []const u8,
+                     keep_self: bool) bool {
     const sig = sigOfStmt(stmt);
     if (!sig.is_fn) return false;
     const self_first = sig.params.len > 0 and
@@ -4936,7 +4955,7 @@ fn memberCallSnippet(list: *Json, seen: *std.StringHashMapUnmanaged(void),
     // 与返回类型（10b 当初的诉求），kind=15 只影响插入形态。
     var sb: std.ArrayList(u8) = .empty;
     defer sb.deinit(gpa);
-    appendMemberSig(&sb, name, sig, owner);
+    appendMemberSig(&sb, name, sig, owner, keep_self);
     // label 就是函数名本身：函数只出这一条（kind=15、带 snippet 占位），
     // 后面 addItem 的裸名项会被 seen 去重掉。用户 2026-11-09 第 13 条：
     // "只提示类型和提示 snippet 两条都要"是针对**类型**的（类型项 + `Name{...}`）；
@@ -5674,6 +5693,10 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                         handled = decls.items.len > 0;
                         if (handled) recv_kind = .ty;
                         mem_txt = mc0.txt;
+                        // 容器名要一起带上：方法签名里的 `Self`、返回类型里的
+                        // `?Self` 都靠它换成真名（以前漏了这条，`std.BufReader.`
+                        // 的 `open` 显示成 `open(…) ?Self`）。
+                        owner = mc0.member;
                         // KEEP — 类型路径成员（用户 2026-11-09：std.BufReader.
                         // 的方法全是 kind=6 detail=None 没骨架）：容器体在模块
                         // 文件里，extractBraceMembers 只能看到 `.value`，标回
@@ -5924,6 +5947,14 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                             },
                             .ty => {
                                 if (dcl.kind == .field) continue;       // Task.id
+                                // 方法（首参 self）只属于实例：类型上列出来
+                                // 就是"Task. 里也有一堆 await/send/recv"，
+                                // 用户 2026-11-10 截图第 2 张的污染。类型上
+                                // 只留关联函数（coro/single/pool/fromId/group）、
+                                // 嵌套类型与关联常量。未绑定调用
+                                //（`Task.spawn(&t, f, 0)`）虽然合法，但不是
+                                // 这里该推荐的东西——实例上写 `t.spawn` 更短。
+                                if (is_fn_decl and has_self) continue;
                             },
                             .module => {},
                         }
@@ -5944,10 +5975,12 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                         if (dcl.is_fn) {
                             // KEEP — 实例方法也要骨架（用户 2026-11-09 第 7 条：
                             // std.BufReader/BufWriter 实例的方法没有提示和
-                            // snippet）。成员补全的 `self` 是隐含接收者，插入
-                            // 形态是 `next()$0` / `write(${1:data})$0`，签名
-                            // detail 也不该把 self 摆给用户看。
-                            _ = memberCallSnippet(&list, &seen, stmt.?, dcl.name, owner);
+                            // snippet）。插入形态是 `next()$0` / `write(${1:data})$0`
+                            //（self 是隐含接收者，不进骨架），但**签名 detail 要
+                            // 带上 self**：实例上只该有方法，detail 里看不见
+                            // self 就会被当成关联函数（用户 2026-11-10 两次截图）。
+                            _ = memberCallSnippet(&list, &seen, stmt.?, dcl.name, owner,
+                                                  recv_kind == .instance);
                         } else if (cinit != null) {
                             memberCtorSnippet(&list, &seen, src, dcl.name);
                         }
@@ -5964,7 +5997,8 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                                 const sig = sigOfStmt(st);
                                 if (sig.is_fn) {
                                     var sb: std.ArrayList(u8) = .empty;
-                                    appendMemberSig(&sb, dcl.name, sig, owner);
+                                    appendMemberSig(&sb, dcl.name, sig, owner,
+                                                    recv_kind == .instance);
                                     break :blk sb.items;
                                 }
                             }
@@ -6368,8 +6402,16 @@ fn publishDiags(doc: *const Document, diags: []const Diag) void {
         // docs/errors.md 里对应的一条（锚点 = 小写码）。
         // 只在客户端声明支持时才发——不支持的老客户端看到未知字段会
         // 严格校验失败，整条 publishDiagnostics 就被丢弃，诊断全没了。
-        // codeDescription 暂时不发：手册/错误码文档已删、正在重写，没有可
-        // 指向的地址（客户端声明了能力也不影响它缺席）。
+        if (cap_code_desc and d.code.len == 5) {
+            j.buf.appendSlice(gpa, ",\"codeDescription\":{\"href\":\"") catch @panic("oom");
+            j.buf.appendSlice(gpa, docs_base) catch @panic("oom");
+            j.buf.append(gpa, '#') catch @panic("oom");
+            for (d.code) |ch| {
+                const lo: u8 = if (ch >= 'A' and ch <= 'Z') ch + 32 else ch;
+                j.buf.append(gpa, lo) catch @panic("oom");
+            }
+            j.buf.appendSlice(gpa, "\"}") catch @panic("oom");
+        }
         j.buf.appendSlice(gpa, ",\"source\":\"zxc\",\"message\":") catch @panic("oom");
         j.str(d.msg);
         j.buf.appendSlice(gpa, "}") catch @panic("oom");

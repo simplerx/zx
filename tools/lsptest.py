@@ -446,14 +446,17 @@ send({"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {
     "textDocument": {"uri": uri, "version": 14},
     "contentChanges": [{"text": MAIN}]}})
 
-# 3e std.task.Task 静态成员：std.task.Task. → 全方法集（group 在列；方法签名里的
-# 参数名 f/ctx/h/v 不得混入——extractBraceMembers 的圆括号深度守卫）
+# 3e std.task.Task 关联函数：std.task.Task. → 只有 coro/single/pool/fromId/group。
+# 方法（首参 self）**不进类型命名空间**——用户 2026-11-10 第 2 张截图：
+# "Task 空间上也是这些[方法]"，类型上列方法和实例重复，纯污染。签名里的
+# 参数名 f/ctx/h/v 也不得混进来（extractBraceMembers 的圆括号深度守卫）。
 off = MAIN.index("std.task.Task.") + len("std.task.Task.")
 send({"jsonrpc": "2.0", "id": 12, "method": "textDocument/completion", "params": {
     "textDocument": {"uri": uri}, "position": pos(MAIN, off)}})
 r, _ = recv_id("completion.stdTask", 12)
 labels = {i["label"] for i in r["result"]["items"]} if r and r.get("result") else set()
-check("completion.stdTask", {"group", "coro", "spawn"} <= labels
+check("completion.stdTask",
+      labels == {"coro", "single", "pool", "fromId", "group"}
       and not labels & {"ctx", "f", "h", "v"}, str(sorted(labels)))
 
 # 3f 实例类型穿透：let g = std.task.Task.group() → g. 出 Group 的成员
@@ -476,9 +479,9 @@ send({"jsonrpc": "2.0", "id": 991, "method": "textDocument/completion", "params"
 r, _ = recv_id("completion.instance.sameNameMember", 991)
 tmap = {i["label"]: i.get("detail") for i in r["result"]["items"]} if r and r.get("result") else {}
 check("completion.instance.sameNameMember",
-      tmap.get("spawn") == "spawn(f: fn (usize) !usize, ctx: usize) ?usize"
-      and tmap.get("awaitAll") == "awaitAll() !void"
-      and tmap.get("close") == "close() void"
+      tmap.get("spawn") == "spawn(self: *const Task, f: fn (usize) !usize, ctx: usize) ?usize"
+      and tmap.get("awaitAll") == "awaitAll(self: *const Task) !void"
+      and tmap.get("close") == "close(self: *const Task) void"
       # 关联函数（首参不是 self）一律不进实例补全
       and not ({"coro", "single", "pool", "fromId", "group"} & set(tmap)),
       str(tmap)[:300])
@@ -718,14 +721,15 @@ while _t2.time() < deadline:
 ok_help = any("did you mean" in m for m in diag_msgs)
 check("diagnostics.helpInMsg", ok_help, str(diag_msgs)[:300])
 
-# 10c 诊断要带稳定的码与来源名。codeDescription 暂时不发——手册/错误码文档
-#     已经删掉、正在重写，没有可指向的地址；等文档回来再在这里恢复
-#     `href` 的断言（否则就是给用户一个 404 链接）。
+# 10c 诊断要带稳定的码 + 来源名，并且能点开文档：codeDescription.href
+#     指向 docs/errors.md 的锚点（手册已删，错误码参考保留——用户 2026-11-10
+#     明确要求"打印提示"留着）。
 d304 = next((x for x in diags if x.get("code") == "E0304"), None)
-check("diagnostics.codeStable",
+href = ((d304 or {}).get("codeDescription") or {}).get("href", "")
+check("diagnostics.codeDescription",
       d304 is not None and d304.get("source") == "zxc"
-      and "codeDescription" not in d304,
-      str(diags)[:300])
+      and href.endswith("docs/errors.md#e0304"),
+      href or str(diags)[:300])
 
 # 10d 没有具体 fix-it 的诊断，消息里要带上该码的通用修法（errors.c 的文案）
 ok_fix = any(d.get("code") == "E0301" and "(T)expr" in d.get("message", "") for d in diags)
@@ -1507,7 +1511,7 @@ check("completion.stdInstance.staticSnippet",
       not ({"single", "coro", "pool", "fromId", "group"} & set(gk)) and "id" in gk,
       str(sorted(gk)))
 check("completion.stdInstance.methodSig",
-      (gd.get("await") or "") == "await(h: usize) !usize"
+      (gd.get("await") or "") == "await(self: *const Task, h: usize) !usize"
       and gk.get("await") == 15 and gt.get("await") == "await(${1:h})$0",
       "%r %r" % (gd.get("await"), gk.get("await")))
 
@@ -1516,7 +1520,7 @@ off = STDUSE.index("    l.push(1);") + len("    l.")
 lit_ = std_items(off, 404)
 lid = {i["label"]: i.get("detail") for i in lit_}
 check("completion.genericInstance.members",
-      lid.get("push", "") == "push(v: T) bool"
+      lid.get("push", "") == "push(self: *ArrayList, v: T) bool"
       and lid.get("buf") == "*T" and lid.get("len") == "usize", str(lid)[:240])
 
 # 3c 实例方法 hover（std 类型 + 泛型）
@@ -1604,12 +1608,13 @@ rid_b = 413
 brit = std_items(STDUSE.index("    std.BufReader.") + len("    std.BufReader."), rid_b)
 brd = {i["label"]: (i.get("kind"), i.get("detail"), i.get("insertText")) for i in brit}
 check("completion.typePath.methodSig",
-      (brd.get("next", (None, ""))[1] or "") == "next() ?[]const u8"
-      and brd.get("next", (None, None, None))[0] == 15
-      and brd["next"][2] == "next()$0"
+      # 类型命名空间只留关联函数（`open` 首参不是 self）；方法 `next` 只在
+      # 实例上出现——用户 2026-11-10："Task 空间上也是这些[方法]"。
+      "next" not in brd
       and brd.get("open", (None, None, None))[0] == 15
+      and brd.get("open", (None, ""))[1] == "open(alloc: Allocator, path: []const u8, cap: usize) ?BufReader"
       and brd["open"][2] == "open(${1:alloc}, ${2:path}, ${3:cap})$0",
-      str(brd.get("next")))
+      str(brd)[:300])
 #  6d 实例补全：HashMap 实例 / 模块函数返回类型实例（DateTime / ?Stat）
 mit = std_items(STDUSE.index("    _ = m.put") + len("    _ = m."), 414)
 mlab = {i["label"]: i.get("detail") for i in mit}
@@ -1644,9 +1649,9 @@ off = STDUSE.index("    r.?.\n") + len("    r.?.")
 rit = std_items(off, 417)
 rd = {i["label"]: (i.get("detail"), i.get("kind"), i.get("insertText")) for i in rit}
 check("completion.instance.bufReaderMethods",
-      rd.get("next", (None,))[0] == "next() ?[]const u8"
+      rd.get("next", (None,))[0] == "next(self: *BufReader) ?[]const u8"
       and rd.get("next", (None, None, None))[2] == "next()$0"
-      and rd.get("chunk", (None,))[0] == "chunk() ?[]const u8"
+      and rd.get("chunk", (None,))[0] == "chunk(self: *BufReader) ?[]const u8"
       # `open` 是静态工厂（首参不是 self）：`r.open()` 报 E0303，只在
       # `BufReader.` 上出现（用户 2026-11-10 命名空间分离）。
       and "open" not in rd,
@@ -1655,7 +1660,7 @@ off = STDUSE.index("    w.?.\n") + len("    w.?.")
 wit = std_items(off, 418)
 wd = {i["label"]: (i.get("detail"), i.get("insertText")) for i in wit}
 check("completion.instance.bufWriterMethods",
-      wd.get("write", (None,))[0] == "write(data: []const u8) bool"
+      wd.get("write", (None,))[0] == "write(self: *BufWriter, data: []const u8) bool"
       and wd.get("write", (None, None))[1] == "write(${1:data})$0"
       and wd.get("writeLine", (None, None))[1] == "writeLine(${1:s})$0"
       and wd.get("flush", (None, None))[1] == "flush()$0",
@@ -1665,7 +1670,7 @@ check("completion.instance.bufWriterMethods",
 off = STDUSE.index("    std.BufReader.") + len("    std.BufReader.")
 bpt = {i["label"] for i in std_items(off, 4167)}
 check("completion.typePath.noField",
-      {"open", "init", "next", "chunk"} <= bpt
+      {"open", "init"} <= bpt and not ({"next", "chunk", "readAll"} & bpt)
       and not ({"h", "buf", "cap", "start", "end", "eof", "owned", "alloc"} & bpt),
       str(sorted(bpt)))
 #  6f 类型变量绑定：`var V: type = std.ArrayList(i32)` → `V.init(…)` 的实例
@@ -1674,16 +1679,17 @@ off = STDUSE.index("    list.\n") + len("    list.")
 lit2 = std_items(off, 419)
 lld = {i["label"]: i.get("detail") for i in lit2}
 check("completion.typeVar.instance",
-      lld.get("push") == "push(v: T) bool" and lld.get("len") == "usize"
-      and lld.get("items") == "items() []T", str(lld)[:240])
+      lld.get("push") == "push(self: *ArrayList, v: T) bool" and lld.get("len") == "usize"
+      and lld.get("items") == "items(self: *ArrayList) []T", str(lld)[:240])
 #  6g 三段路径的泛型容器：`std.map.HashMap.` 一个成员都不出过
 off = STDUSE.index("    std.map.HashMap.") + len("    std.map.HashMap.")
 hit3 = std_items(off, 420)
 h3 = {i["label"]: (i.get("detail"), i.get("insertText")) for i in hit3}
 check("completion.typePath.genericMembers",
-      {"get", "put", "count", "contains"} <= set(h3)
-      and h3.get("get", (None,))[1] == "get(${1:key})$0"
-      and h3.get("put", (None,))[1] == "put(${1:key}, ${2:val})$0",
+      # 三段路径的泛型容器：类型上只该有静态函数（init 与 norm 都不带
+      # self），get/put/count 都是方法（首参 self），只在实例上出现。
+      set(h3) == {"init", "norm"}
+      and h3.get("init", (None, None))[1] == "init(${1:alloc})$0",
       str(sorted(h3))[:240])
 #  6h union(enum) 的三段路径：Value. 出变体（构造骨架走 std.json. 类型项）
 off = STDUSE.index("    std.json.Value.") + len("    std.json.Value.")
@@ -1691,15 +1697,15 @@ vit = std_items(off, 421)
 vlab = {i["label"] for i in vit}
 check("completion.typePath.unionVariants",
       {"nul", "int", "float", "str", "arr", "obj"} <= vlab, str(sorted(vlab)))
-#  6i 零字段容器三段路径：Pool. 方法带骨架（只有方法的类型）
+#  6i 三段路径的 Pool：类型上只有静态 init，实例方法（alloc/free/create/
+#     deinit）不进类型命名空间（用户 2026-11-10 命名空间分离）。
 off = STDUSE.index("    std.pool.Pool.") + len("    std.pool.Pool.")
 pit = std_items(off, 422)
 pd = {i["label"]: (i.get("detail"), i.get("insertText")) for i in pit}
 check("completion.typePath.poolMethods",
-      pd.get("alloc", (None,))[1] == "alloc(${1:size})$0"
-      and pd.get("free", (None,))[1] == "free(${1:p})$0"
-      and pd.get("deinit", (None,))[1] == "deinit()$0",
-      str(pd.get("alloc")))
+      set(pd) == {"init"}
+      and pd.get("init", (None, None))[1] == "init(${1:gpa})$0",
+      str(sorted(pd))[:200])
 
 # 4/1 复核：std. 顶层暴露 Allocator/stackAlloc/heapAlloc（带 snippet），
 # TypeKind/TypeInfo/FieldInfo 仍不出现（stduser 文档再点一次）
@@ -1885,14 +1891,13 @@ def chain_hover(anchor, within):
 ctyp = sorted(i["label"] for i in chain_items("std.map.HashMap(i32).in\n"))
 check("completion.chain.genericTyping", ctyp == ["init"], str(ctyp))
 
-# 泛型实例尾巴：字段 + 方法（方法带骨架，Self 换成真实容器名）
+# 泛型类型路径：只有静态函数（`HashMap(i32).init(…)`）；方法 put/get 与
+# 字段 keys/vals 都不该出现在类型上（用户 2026-11-10 命名空间分离）。
 cdot = {i["label"]: i for i in chain_items("std.map.HashMap(i32).\n")}
 check("completion.chain.genericDot",
-      cdot.get("put", {}).get("kind") == 15
-      and cdot["put"].get("insertText") == "put(${1:key}, ${2:val})$0"
-      and "put(...)" not in cdot
-      and cdot.get("init", {}).get("detail") == "init(alloc: Allocator) HashMap"
-      and "keys" not in cdot,
+      cdot.get("init", {}).get("detail") == "init(alloc: Allocator) HashMap"
+      and cdot["init"].get("insertText") == "init(${1:alloc})$0"
+      and not ({"put", "get", "keys", "vals", "cap", "n"} & set(cdot)),
       str(sorted(cdot))[:220])
 # 字段在实例上（`HS.keys`），类型上取字段是 E0300
 cinst = {i["label"] for i in chain_items("HS.\n")}
@@ -1907,7 +1912,7 @@ check("completion.chain.moduleFn", {"year", "month", "day"} <= cmod, str(sorted(
 cfac = {i["label"]: i for i in chain_items('std.BufReader.open(std.heap.page, "z", 64).?.\n')}
 check("completion.chain.factory",
       cfac.get("next", {}).get("insertText") == "next()$0"
-      and cfac.get("next", {}).get("detail") == "next() ?[]const u8",
+      and cfac.get("next", {}).get("detail") == "next(self: *BufReader) ?[]const u8",
       str(sorted(cfac))[:220])
 
 # 本地函数返回 struct（非 std 路径，证明是递归解析而不是特判）

@@ -65,11 +65,17 @@
 - 守门：tests/good/casts-one-way.zx（(T)v 全场景）、tests/bad/removed-*.zx（4 个 E0211）。
 
 ## 补全命名空间三分 + 可选值解包（2026-11-10 用户："Task 命名空间污染了"）
-- zxls 点补全按 **RecvKind{module, ty, instance}** 分开：
-  - `Task.` / `std.BufReader.` / `HashMap(i32).` → 只出静态成员（静态 fn、嵌套类型、
-    关联常量）+ 方法（未绑定调用合法）；**不出实例字段**（`Task.id` 是 E0300）。
-  - `t.` / `g.` / `v.` → 只出字段、实例方法（首参 self）、关联常量；**不出静态构造器**
-    （`t.coro()` 是 E0303）与嵌套类型（`t.Group` 是 E0304）。
+- zxls 点补全按 **RecvKind{module, ty, instance}** 分开（2026-11-10 用户二次确认后
+  改成**彻底分离**：类型与实例的列表不许有交集）：
+  - `Task.` / `std.BufReader.` / `HashMap(i32).` → 只出关联函数（首参不是 self）、
+    嵌套类型、关联常量、enum 变体；**不出方法**（`Task.spawn`/`await` 只在实例上）、
+    **不出实例字段**（`Task.id` 是 E0300）。代价：`Group.` 空列表、`HashMap.` 只剩
+    init/norm——用户明确接受（"Task 空间上也是这些"就是嫌重复）。
+  - `t.` / `g.` / `v.` → 只出字段、方法、关联常量；**不出静态构造器**（`t.coro()` 是
+    E0303）与嵌套类型（`t.Group` 是 E0304）。
+  - 实例 detail **必须保留首个 self 形参**（`spawn(self: *const Task, f: …, ctx: usize)`）：
+    摘掉以后和关联函数长得一模一样，用户两次截图当成污染。`Self` 统一换容器真名
+    （appendSelfSub，形参与返回类型共用）；骨架里仍不插 self。
   - 判据：`sigOfStmt` 首参是否 `self`；字面量上下文（`Person{.`）不过滤，那里只能写字段。
   - 链式接收者要再分：末位被调名本身是容器名（`HashMap(i32)`）才是类型，`f(…).` 是值。
 - **可选值 `?T`**：`arena.` 只提示 `?`（补成 `arena.?`），`arena.?.` 才出内层成员。
@@ -90,9 +96,11 @@
   findDeclStmt 会让同名成员串签名（Task.spawn / Group.spawn 等 8 组），
   `t.spawn` 曾显示成 Group 的 `… bool`，看着像"实例上冒出关联函数"。
   守门 lsptest `completion.instance.sameNameMember`。
-- **docs/ 已整体删除（用户 2026-11-10："丢弃现在这个手册, 文档也不要了;
-  以后再重新写"）**：manual/guide/errors/site/zxc-usage + tools/mksite.py
-  都没了，test.sh 里的文档检查、errors.c 的 ZX_DOCS_URL、zxls 的
-  codeDescription 一并撤掉。写文档是后续独立任务，别再引用 docs/ 路径；
-  lsptest 的 `diagnostics.codeStable` 目前守"不发 codeDescription"，文档
-  回来要改成 href 断言。
+- **文档范围（用户 2026-11-10 两次澄清后的最终裁定）**：删的是**手册与离线
+  文档站**——manual.md / guide.md / site/ / tools/mksite.py 与 test.sh 的离线站
+  检查，理由是 std 还没定型、写出来就是错的。**错误码参考 docs/errors.md 保留**，
+  `zxc explain` 的 `details:` 链接、zxls 的 codeDescription、test.sh 的
+  「errors.md 覆盖全部码 / 每码有锚点 / C-Zig 地址漂移」三段也都保留（用户：
+  "你那些打印提示的可以留着"）。lsptest 的 `diagnostics.codeDescription` 守
+  `href` 以 `docs/errors.md#e0304` 结尾。README 里写明"std/ 源码 + 补全就是文档"。
+  以后重写手册是独立任务，别把 errors.md 一起删。

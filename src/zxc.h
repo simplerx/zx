@@ -44,6 +44,8 @@ int         errors_count(void);
 const char *errors_code_at(int i);
 /* 没有具体 fix-it 时诊断渲染器的兜底：该码的通用修法（没有这个码返回 NULL） */
 const char *errors_fix(const char *code);
+/* 错误码说明文档的公开地址（不带锚点） */
+const char *errors_doc_url(void);
 /* fix-it：预挂一条 help 行，跟在下一条诊断后面（A2）。 */
 void diag_help(const char *fmt, ...);
 /* note（D2）：预挂一个"相关位置"（可跨模块：path 传声明所在文件的路径），

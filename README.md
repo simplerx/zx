@@ -60,7 +60,7 @@ pub const main = fn () !i32 {
 
 ```sh
 sh build.sh     # → bin/zxc.exe（编译器）· bin/zxfe.exe（自举前端）· bin/zxls.exe（语言服务器）
-sh test.sh      # 全量回归：语法 / 语义 / 反例 / 运行 / 多文件 / 增量 / CLI / LSP / 文档站
+sh test.sh      # 全量回归：语法 / 语义 / 反例 / 运行 / 多文件 / 增量 / CLI / LSP
 ```
 
 工具链是项目内自带的 zig（`.toolchain/zig.exe`，不进版本库，约 360 MB）。
@@ -150,5 +150,9 @@ zxc explain E0304        # 单个错误码的含义与修法
 ```
 
 错误码文案就在 `src/errors.c` 里，`zxc errors` / `zxc explain` 直接念它，
-不用翻文件。手册与教程正在重写，暂时没有成体系的文档；语言规格与设计裁定
-在 `spec/`（`zx-spec.md`、`decisions.md`）。
+不用翻文件；完整参考在 `docs/errors.md`（诊断里的 `details:` 链接、编辑器里
+点诊断上的码都跳到那里）。
+
+标准库还没有定型，所以**没有写手册**：`std/` 的源码顺序和注释就是文档，
+编辑器里的补全会给出签名。手册与离线文档站以后再补。语言规格与设计裁定在
+`spec/`（`zx-spec.md`、`decisions.md`）。
