@@ -747,7 +747,14 @@ int main(int argc, char **argv) {
 
         if (is_err) {
             bool ok = true;
-            if (r.code == 0) {
+            /* 崩溃不是"拒绝"：段错误/异常终止的返回码 >= 128（POSIX 的 128+sig，
+             * MSYS 下同样是 139）。以前只要非零就认，于是 switch-cap-else 里
+             * 解引用 NULL 的段错误被当成"预期报错"混过了整轮回归。 */
+            if (r.code < 0 || r.code >= 128) {
+                printf("  FAIL %s — compiler crashed (exit %d)\n", f, r.code);
+                print_indented(log.p, log.n);
+                ok = false;
+            } else if (r.code == 0) {
                 printf("  FAIL %s — should be rejected, but compiled\n", f);
                 fflush(stdout);
                 ok = false;

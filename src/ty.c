@@ -147,6 +147,10 @@ static int g_nerrcodes;
 
 uint16_t ty_err_code(const char *name) {
     if (!name || !*name) return 0;
+    /* `null` 是**保留码 65535**（§5.2）：`?T` 被 `try` 的时候抛的就是它。
+     * 不进码表、不参与顺序分配——它有固定值，写 `error.null` 就是这个码
+     *（用户 2026-11-09：null 本身是一种错误，`error.null` 要能写）。 */
+    if (!strcmp(name, "null")) return 65535;
     for (int i = 0; i < g_nerrcodes; i++)
         if (g_errnames[i] && !strcmp(g_errnames[i], name)) return (uint16_t)(i + 1);
     /* 找第一个空槽：显式占位（ty_err_code_at，枚举错误用）可能把中间的
@@ -172,6 +176,7 @@ void ty_err_code_at(const char *name, uint16_t code) {
 }
 
 const char *ty_err_name(uint16_t code) {
+    if (code == 65535) return "null";   /* 保留码：errName(error.null) → "null" */
     if (code == 0 || code > g_nerrcodes) return NULL;
     return g_errnames[code - 1];
 }

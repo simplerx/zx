@@ -65,6 +65,10 @@ static const DiagRule g_rules[] = {
     /* 控制流位置：continue/return/defer 放错地方，标签找不到 */
     { "outside a loop",                   "E0405" },
     { "outside a function",               "E0405" },
+    /* errdefer 放错函数：消息里带 "found `T`"，不先命中就会落到
+     * 下面那条笼统的 "found `"（E0301），help 变成"加显式转换"——完全
+     * 不对路的建议比没有建议更糟。 */
+    { "`errdefer`",                       "E0405" },
     { "inside `defer`",                   "E0405" },
     { "labeled",                          "E0405" },
     { "labelled",                         "E0405" },
@@ -96,6 +100,7 @@ static const DiagRule g_rules[] = {
 
     /* 名字、声明、可见性 */
     { "unused",                           "E0410" },
+    { "discarded",                        "E0411" },
     { "unknown identifier",               "E0401" },
     { "unknown type",                     "E0401" },
     { "not found",                        "E0401" },
@@ -237,6 +242,30 @@ static void render_snippet(const char *path, int line, int col) {
     SrcFile *sf = src_file(path);
     if (!sf || line > sf->n) return;
     const char *text = sf->lines[line - 1];
+    /* 超长行（压缩过的/生成的代码）只显示插入点周围的一窗：整行打出来会把
+     * 真正的诊断冲走，几千列的 `^` 更是没法看。窗口 160 列，两端用 ... 标。 */
+    char win[512];
+    int  shift = 0;                 /* 显示窗口前裁掉了几个字节 */
+    size_t tlen = strlen(text);
+    if (tlen > 160) {
+        size_t c = col > 0 ? (size_t)(col - 1) : 0;
+        if (c > tlen) c = tlen;
+        size_t a = c > 60 ? c - 60 : 0;
+        size_t b = a + 160;
+        if (b > tlen) { b = tlen; a = b > 160 ? b - 160 : 0; }
+        size_t o = 0;
+        if (a > 0) { win[o++] = '.'; win[o++] = '.'; win[o++] = '.'; }
+        size_t n = b - a;
+        if (n > sizeof win - o - 5) n = sizeof win - o - 5;
+        memcpy(win + o, text + a, n);
+        o += n;
+        if (b < tlen) { win[o++] = '.'; win[o++] = '.'; win[o++] = '.'; }
+        win[o] = 0;
+        shift = (int)a - (a > 0 ? 3 : 0);
+        text = win;
+        col -= shift;
+        if (col < 1) col = 1;
+    }
     int gw = 1;
     for (int t = line; t >= 10; t /= 10) gw++;
     Buf body;
@@ -298,6 +327,25 @@ void diag_note(const char *path, int line, int col, const char *fmt, ...) {
     g_note_pending = true;
 }
 
+/* 子单元（模块）解析失败时，父诊断里要能说出"第一条错在哪、错在什么码"。
+ * 只留一句 "module 'x' failed to parse"，用户就得自己钻进几千行的生成代码
+ * 里找——而那条错（比如 `0x` 少了数字）本来就该直接呈现在眼前。 */
+static char g_first_err_msg[256];
+static char g_first_err_code[16];
+static int  g_first_err_line, g_first_err_col, g_first_err_set;
+
+void diag_first_error_reset(void) { g_first_err_set = 0; }
+
+int diag_first_error(int *line, int *col, char *code, size_t ccap,
+                     char *msg, size_t mcap) {
+    if (!g_first_err_set) return 0;
+    if (line) *line = g_first_err_line;
+    if (col)  *col  = g_first_err_col;
+    if (code && ccap) snprintf(code, ccap, "%s", g_first_err_code);
+    if (msg && mcap)  snprintf(msg, mcap, "%s", g_first_err_msg);
+    return 1;
+}
+
 static void diag_remember(const char *code, int line, int col, const char *msg) {
     int i = g_recent_n % 8;
     g_recent[i].line = line;
@@ -314,6 +362,13 @@ static void diag_emit(const char *code, int line, int col, const char *msg) {
         return;
     }
     diag_remember(code, line, col, msg);
+    if (!g_first_err_set) {
+        g_first_err_set = 1;
+        g_first_err_line = line;
+        g_first_err_col = col;
+        snprintf(g_first_err_code, sizeof g_first_err_code, "%s", code);
+        snprintf(g_first_err_msg, sizeof g_first_err_msg, "%s", msg);
+    }
     g_error_count++;
     if (g_error_count > g_diag_max_print) {
         g_help_pending = false;

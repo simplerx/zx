@@ -41,7 +41,8 @@ static const ErrDoc g_errs[] = {
     { "E0300", "type error (uncategorized)",
       "compare the expression's type at the caret with the expected type" },
     { "E0301", "type mismatch, no implicit conversion",
-      "add an explicit cast `@intCast` / `@floatCast`, or change one side's type; both operands of arithmetic must match" },
+      "write the conversion explicitly: `(T)expr`, or `@intCast(T, v)` when the value "
+      "needs a range check; both sides of arithmetic and assignment must match" },
     { "E0302", "literal out of range for the target type",
       "use a wider type (`i32` -> `i64`), or double-check the literal itself" },
     { "E0303", "argument count or type mismatch",
@@ -56,19 +57,28 @@ static const ErrDoc g_errs[] = {
       "a union names exactly one variant (`U{ .circle = 1.0 }`, never `U{}`); "
       "no field may be initialized twice" },
 
+    { "E0308", "invalid return type",
+      "a bare `error` (or a bare `error{a, b}`) says nothing about whether the "
+      "function can fail: return `error.x` from a `!T` function, declare "
+      "`error{a, b}!void`, or use `!void`" },
+
     /* ---- 名字与可见性 ---- */
     { "E0401", "unknown identifier or type",
       "check spelling and scope; across modules use `mod.name` and the target must be `pub`" },
     { "E0402", "duplicate declaration",
       "only one declaration per name; the `note` line points at the previous one" },
     { "E0403", "not assignable / not addressable / read-only",
-      "`let`/`const` bindings cannot be reassigned; `&` only works on lvalues" },
+      "`let`/`const` bindings cannot be reassigned; `&` needs something that has "
+      "storage of its own (a temporary has none)" },
     { "E0404", "private member, or declaration not allowed here",
       "add `pub` in the declaring module; `extern` and friends live at file scope only" },
     { "E0405", "control-flow statement in the wrong place",
-      "`continue` belongs in a loop, `return` in a function, and no `return` inside `defer`" },
+      "`continue` belongs in a loop, `return` in a function, no `return` inside "
+      "`defer`, and `errdefer` only in a function that returns `!T`" },
     { "E0410", "unused local variable, parameter or binding",
       "rename unused ones to `_x` or `_`; otherwise delete them until needed" },
+    { "E0411", "return value discarded without `_`",
+      "every value must be used; write `_ = f(...)` to drop it on purpose" },
 
     /* ---- 编译期与语言规则 ---- */
     { "E0501", "value must be computable at compile time",
@@ -87,7 +97,7 @@ static const ErrDoc g_errs[] = {
     { "E0507", "`@compileError` triggered / `@trap` reached at compile time",
       "this is a deliberate error: read its message; inside a generic it means these arguments are unsupported" },
     { "E0508", "error code uses a reserved value",
-      "`0` means \"no error\" and `65535` is reserved for `error.null` -- pick another number" },
+      "`0` means \"no error\", `65535` belongs to `error.null` -- pick another number, and do not name a member `null` (that code is fixed)" },
 
     /* ---- 模块 ---- */
     { "E0601", "module resolution failed",

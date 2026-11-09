@@ -17,7 +17,7 @@
 // 管理自包含：每个档位一条「整批槽区」链，用完开新批，槽位从不搬动。
 //
 // 用法（完整例子见 tests/good/std-pool.zx）：
-//     var p = std.Pool.init(std.heap.page);
+//     var p = std.pool.Pool.init(std.heap.page);
 //     let q = p.alloc(64);              // ?*u8
 //     if (q) b { p.free(b); }           // false = 拒绝（已释放/非法块）
 //     let n = p.create(Node);           // ?*Node，按 @sizeOf(Node) 归档

@@ -4,7 +4,7 @@
 // expect-output:task caught:too_big
 // expect-output:task ret:7
 const std = module("std");
-const Task = std.Task;
+const Task = std.task.Task;
 
 const may_fail = fn (x: usize) !i32 {
     if (x > 0) { return error.too_big; }

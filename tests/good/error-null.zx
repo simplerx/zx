@@ -1,0 +1,49 @@
+// error-null.zx —— `error.null` 可以写（用户 2026-11-09 第 15 条：
+// `return error.null;` 报 "unexpected token in top-level declaration"）
+//
+// `null` 在词法里是关键字（kw_null），`error.` 后面原本只收标识符，于是
+// `error.null` 解析失败、返回语句整条哑掉。现在类型值的成员位置放行 null，
+// 对应的码是**保留码 65535**（§5.2：`?T` 被 try 时抛的就是它），
+// errName 认得它。`error{null}` 仍然不许写（E0508，见 bad/errset-null.zx）。
+//
+// 用户还提了另一种写法："或者可以接收用 null 给 error 赋值"——落点是
+// `error` 时裸 `null` 也定型成 65535，和 `error.null` 同一个值（后半段验它）。
+const std = module("std");
+
+const Err = error{boom};
+
+const f = fn (x: i32) !i32 {
+    if (x == 0) { return error.null; }
+    if (x < 0) { return Err.boom; }
+    return x * 2;
+};
+
+// 光秃秃的 `error` **不能**当返回类型（E0308，见 bad/fn-returns-error.zx）；
+// 但 `var e: error = ...` 这种"拿一个错误码"的落点仍然合法——u16 就是它的布局。
+
+pub const main = fn () i32 {
+    if (f(0)) v { std.println("ok {}", v); } else e { std.println("null {}", e == error.null); }
+    if (f(-1)) v { std.println("ok {}", v); } else e { std.println("boom {}", e == Err.boom); }
+    if (f(3)) v { std.println("ok {}", v); } else { std.println("unexpected"); }
+    std.println("name {}", std.debug.errName(error.null));
+    std.println("notfound {}", error.null == error.null);
+
+    var e: error = null;                 // 裸 null 落 error → 65535
+    std.println("assign {}", e == error.null);
+    std.println("bareCmp {}", e == null);
+    std.println("assignedName {}", std.debug.errName(e));
+    var named: error = error.boom;       // 对照：非 null 的码照旧按名字解析
+    std.println("named {}", std.debug.errName(named));
+    return 0;
+};
+
+// expect-output
+// null true
+// boom true
+// ok 6
+// name null
+// notfound true
+// assign true
+// bareCmp true
+// assignedName null
+// named boom

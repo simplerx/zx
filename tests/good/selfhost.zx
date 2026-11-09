@@ -47,7 +47,7 @@ const count_digits = fn (src: []const u8) usize {
 
 // ④ 关键字表：HashMap 是自举时查关键字的唯一现实选择
 const keyword_lookup = fn (al: std.Allocator) i32 {
-    var kw = std.HashMap(i32).init(al);
+    var kw = std.map.HashMap(i32).init(al);
     var code: i32 = 0;
     if (kw.put("fn", 1)) { code = code + 1; }
     if (kw.put("const", 2)) { code = code + 1; }

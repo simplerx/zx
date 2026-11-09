@@ -1,0 +1,15 @@
+// 无注解字面量超出 i32 但在 i64 内：放宽到 i64，不再静默截断。
+//
+// expect-output
+// 9223372036854775807
+// -9223372036854775808
+const big = 9223372036854775807;
+const small = -9223372036854775807 - 1;
+
+const main = fn () u8 {
+    std.println("{d}", big);
+    std.println("{d}", small);
+    return 0;
+};
+
+const std = module("std");

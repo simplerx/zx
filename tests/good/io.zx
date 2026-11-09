@@ -85,7 +85,7 @@ const main = fn () u8 {
         c.deinit();
     }
 
-    std.file.remove("io_test.txt");
+    _ = std.file.remove("io_test.txt");
     return 0;
 };
 

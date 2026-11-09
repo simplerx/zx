@@ -1,4 +1,4 @@
-// std.HashMap(V)：字符串键的哈希表。开放寻址 + 线性探测，负载过 3/4 翻倍。
+// std.map.HashMap(V)：字符串键的哈希表。开放寻址 + 线性探测，负载过 3/4 翻倍。
 const std = module("std");
 
 const WORDS = &.{
@@ -12,7 +12,7 @@ const main = fn () i32 {
     let al = std.heap.page;
 
     // ---- 基本操作 ----
-    var m = std.HashMap(i32).init(al);
+    var m = std.map.HashMap(i32).init(al);
     if (!m.put("one", 1)) { return 1; }
     if (!m.put("two", 2)) { return 2; }
     if (!m.put("three", 3)) { return 3; }
@@ -25,7 +25,7 @@ const main = fn () i32 {
     std.println("two now {} count {}", m.get("two"), m.count());
 
     // ---- 扩容：20 个键让容量从 8 涨到 32 ----
-    var h = std.HashMap(u32).init(al);
+    var h = std.map.HashMap(u32).init(al);
     var i: usize = 0;
     for (WORDS[0..]) w {
         if (!h.put(w, (u32)(i * 7 + 1))) { return 5; }

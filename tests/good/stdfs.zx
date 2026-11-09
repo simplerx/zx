@@ -45,9 +45,9 @@ const main = fn () i32 {
     // ---- 目录遍历：先造一个已知内容的目录，数得清 ----
     _ = std.fs.createDir(al, "fs_t_dir");
     // 已存在也当成功（第二次跑测试）
-    std.file.write("fs_t_dir/one.txt", "1");
-    std.file.write("fs_t_dir/two.txt", "22");
-    std.file.write("fs_t_dir/three.dat", "333");
+    _ = std.file.write("fs_t_dir/one.txt", "1");
+    _ = std.file.write("fs_t_dir/two.txt", "22");
+    _ = std.file.write("fs_t_dir/three.dat", "333");
 
     let d = std.fs.readDir(al, "fs_t_dir");
     if (d) items {
@@ -89,11 +89,11 @@ const main = fn () i32 {
     std.println("makedirs={} nested={}", ok1, ok2);
 
     // ---- 清理测试产物（目录删空即走） ----
-    std.fs.removeFile(al, "fs_t_dir/one.txt");
-    std.fs.removeFile(al, "fs_t_dir/two.txt");
-    std.fs.removeFile(al, "fs_t_dir/three.dat");
-    std.fs.removeDir(al, "fs_t_dir/nested");
-    std.fs.removeDir(al, "fs_t_dir2");
-    std.fs.removeDir(al, "fs_t_dir");
+    _ = std.fs.removeFile(al, "fs_t_dir/one.txt");
+    _ = std.fs.removeFile(al, "fs_t_dir/two.txt");
+    _ = std.fs.removeFile(al, "fs_t_dir/three.dat");
+    _ = std.fs.removeDir(al, "fs_t_dir/nested");
+    _ = std.fs.removeDir(al, "fs_t_dir2");
+    _ = std.fs.removeDir(al, "fs_t_dir");
     return 0;
 };

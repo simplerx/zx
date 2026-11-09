@@ -138,5 +138,10 @@ void  fe_set_mode(bool use_zx);
 void  fe_set_argv0(const char *p);
 bool  fe_is_zx(void);
 Node *fe_parse_file(const char *path);
+/* Zx 前端（zxfe 子进程）刚报过的第一条错：导入方拼 "failed to parse" 时
+ * 带上它，否则真正的原因（比如子模块里一条坏字面量）用户根本看不到。 */
+void fe_last_error_reset(void);
+bool fe_last_error(int *line, int *col, char *code, size_t ccap,
+                    char *msg, size_t mcap);
 
 #endif

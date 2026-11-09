@@ -8,7 +8,7 @@
 
 | 入口 | 用途 |
 | --- | --- |
-| `zxc errors` | 按类别列出全部 34 个码 |
+| `zxc errors` | 按类别列出全部 36 个码 |
 | `zxc explain E0304` | 单个码：什么意思、通常怎么修（大小写不敏感），末尾给本文链接 |
 | 编辑器里点诊断上的码 | 由语言服务器给出 `codeDescription`，直接打开本文对应的一条 |
 | 本文 | 完整版：触发条件、典型消息、示例 |
@@ -61,7 +61,8 @@ const q = "C:\\temp";      // 对：转义反斜杠
 <a id="e0201"></a>
 ### E0201 期待某个记号——结构没写完
 
-**典型消息**：`expected ';'`、`expected '}'`、`expected ';' after switch arm`
+**典型消息**：`expected ';'`、`expected '}'`、`expected ';' after switch arm`、
+`expected a member name after '.'`
 
 报错文字里已经写明缺的是什么，补上即可。三个高频：
 
@@ -73,6 +74,10 @@ switch (n) {
     0: { };                                 // switch 每臂都要 `;`（含末臂）
 }
 ```
+
+点号后面必须跟成员名（标识符 / 整数下标 / `null`）。编辑器里打到一半的
+`p.`、`arrs.0.` 就落在这里：报错指在点号上、语句照常收尾，不会再冒成
+`unexpected token in top-level declaration` 把整条语句吞掉。
 
 <a id="e0202"></a>
 ### E0202 记号出现在不允许的位置
@@ -107,8 +112,9 @@ Zx 不做隐式数值转换，也不做字符串/切片互转：
 
 ```zx
 let a: i32 = 1;
-let b: i64 = a;            // E0301
-let b: i64 = @intCast(a);  // 对
+let b: i64 = a;                 // E0301
+let c: i64 = (i64)a;            // 对：显式转换 `(T)expr`
+let d: i64 = @intCast(i64, a);  // 对；越界会被查出来
 ```
 
 <a id="e0302"></a>
@@ -172,6 +178,29 @@ let p = P{ .x = 1, .x = 2, .y = 3 };  // E0307 —— `.x` 写了两次
 
 字段写两遍不是"后者生效"的语法糖：到底是第一条还是第二条起作用取决于
 生成顺序，属于不写清楚的程序。
+
+<a id="e0308"></a>
+### E0308 返回类型不成立
+
+**典型消息**：`` `error` is not a return type: it does not say whether the function can fail ``
+
+返回类型只写 `error`（或只写错误集 `error{a, b}`）只说清了"码长什么样"，没说
+这条返回路径**能不能失败、载荷是什么**——完整写法只有三种：
+
+```zx
+const f = fn () error { … };            // E0308 —— 光秃秃的 error
+const g = fn () error{open} { … };      // E0308 —— 只说集合，没有 !T
+const h = fn () error{open}!void { … }; // 对：集合 ! 载荷
+const k = fn () !i32 { return error.open; };  // 对：anyerror ! 载荷
+const m = fn () !void { … };            // 对：只会失败的副作用
+```
+
+`error` 作为**值的类型**仍然合法（`var e: error = error.open;`、`error.null`），
+被禁的只是"它当一个函数的完整返回类型"。
+
+这条也顺手治了一个老歧义：`fn () error {` 的 `{` 原来被当成错误集字面量
+`error{…}` 的开头，报成 `expected identifier, found 'return'`（E0201）——
+现在花括号按"后面跟的是错误名还是语句"两 token 前瞻，函数体照常归位。
 
 ---
 
@@ -238,6 +267,25 @@ const main = fn () u8 {
 
 **错误恢复下不报**：函数体里已经有过别的错误时，这条静默——检查中途收尾
 会让"用到了"记录不全，报出来只是噪音。修完错重编，它会自己出现。
+
+<a id="e0411"></a>
+### E0411 返回值被丢弃而没有用 `_` 接收
+
+**典型消息**：`return value of type `i32` is discarded; receive it with `_ = f(...)` or use the value`
+
+```zx
+const add = fn (a: i32, b: i32) i32 { return a + b; };
+
+const main = fn () u8 {
+    add(1, 2);              // E0411 —— i32 结果被默默扔掉
+    _ = add(1, 2);          // ok：显式丢弃（M26）
+    return 0;
+};
+```
+
+语言规定**所有值都要被使用**。裸调用语句 `f();` 的非 void 返回值不许无声
+消失——那几乎总是忘了接（比如 `parse()` 的结果、`!T` 里的错误码）。要丢
+就得写出来：`_ = f(...);`。void 函数、赋值语句、`noreturn` 调用不受影响。
 
 ---
 
@@ -328,6 +376,16 @@ const check = fn (comptime T: type) void {
 const E = enum(u16) { none = 0 };      // E0508
 ```
 
+`null` 这个**名字**也不许占：它的码是固定的 65535，不参与顺序编号，所以进不了
+集合字面量——
+
+```zx
+const Bad = error{ null, boom };       // E0508：null 是保留码 65535
+```
+
+`error.null` 本身是能写的**值**（`return error.null;`、`e == error.null`），
+它就是 `?T` 被 `try` 时抛的那个码；`std.debug.errName(error.null)` 得到 `"null"`。
+
 ---
 
 ## 模块 E06xx
@@ -340,6 +398,16 @@ const E = enum(u16) { none = 0 };      // E0508
 
 - 路径按**当前文件所在目录**解析，再看工程根与 `vendor/`
 - 循环依赖要去掉一条边（把共享类型挪到第三者）
+- 子模块**自己**解析失败时，这条诊断挂在 `module(...)` 调用点上，并带上
+  子模块第一条错的行列与消息：
+
+  ```text
+  src/main.zx:2:14: error[E0601]: module 'vendor/glfw.zx' failed to parse:
+      751:35: hex literal needs digits after `0x` [E0102]
+  ```
+
+  先修那一条，别在当前文件里找：同一个模块的成员访问错误会被抑制，
+  免得一串 "has no member" 盖住真正的原因。
 
 ```zx
 const util = module("util");     // 找 util.zx：同目录 → 工程根 → vendor/

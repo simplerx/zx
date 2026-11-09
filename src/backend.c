@@ -1174,6 +1174,10 @@ static void coerce(Buf *b, Node *e, Type *to) {
             ensure_type(to); buf_puts(b, "(("); Buf n; buf_init(&n); ctype(&n, to);
             buf_printf(b, "%s){0})", n.data); return;
         }
+        /* 错误值：null 就是保留码 65535，和 `error.null` 同一个值 */
+        if (to->kind == TY_ERROR) { buf_puts(b, "65535"); return; }
+        /* 裸指针 / 函数指针：null 就是 0（与 C 的 NULL 同一含义） */
+        if (to->kind == TY_PTR || to->kind == TY_FN) { buf_puts(b, "0"); return; }
         buf_puts(b, "false");
         return;
     }
@@ -1537,6 +1541,33 @@ static void fmt_spec(Buf *spec, Buf *args, Node *a, int verb, bool *need_bin, co
     bool zerofill = o && o->fill == '0' && (o->align == 0 || o->align == '>');
 
     if (verb == 's' || t->kind == TY_SLICE) {
+        /* 字符串字面量是 *[N]const u8：长度在类型里，指针就是数据起点，
+         * 不能去读切片的 .len/.ptr。 */
+        bool str_arr = t->kind == TY_PTR && t->has_len && t->elem &&
+                       t->elem->kind == TY_INT && t->elem->bits == 8;
+        if (str_arr) {
+            if (pad) {
+                g_need_pad = true;
+                buf_puts(spec, "%s");
+                buf_puts(args, ", zx_fmt_pads((char[512]){0}, 512, (const char*)(");
+                ex(args, a);
+                buf_printf(args, "), %llu, '%c', %d, '%c')",
+                           (unsigned long long)t->len,
+                           o->fill, o->width, o->align ? o->align : '<');
+                return;
+            }
+            if (o && o->width > 0) {
+                char al = o->align ? o->align : '<';
+                buf_printf(spec, al == '<' ? "%%-%d.*s" : "%%%d.*s", o->width);
+            } else {
+                buf_puts(spec, "%.*s");
+            }
+            buf_printf(args, ", (int)%llu, (char*)(",
+                       (unsigned long long)t->len);
+            ex(args, a);
+            buf_puts(args, ")");
+            return;
+        }
         if (pad) {
             /* 字符串：ptr/len 直通助手，不经过 printf，长串不截断不了——
              * 上限 512 内安全；超长串请别配填充。 */
@@ -1762,14 +1793,15 @@ static void seg_lit(Buf *spec, const char *p, int n) {
  * 一次性定义，所以递归类型（Node 里放 ?*Node）不需要前向声明。
  */
 enum { AK_VOID = 0, AK_INT, AK_FLOAT, AK_BOOL, AK_ENUM, AK_ERROR,
-       AK_PTR, AK_SLICE, AK_STRUCT, AK_UNION, AK_TUNION, AK_OPT, AK_ERR, AK_FN };
+       AK_PTR, AK_SLICE, AK_STRUCT, AK_UNION, AK_TUNION, AK_OPT, AK_ERR, AK_FN,
+       AK_STRPTR };
 
 static const char *ak_name(int k) {
     static const char *n[] = { "ZX_AK_VOID", "ZX_AK_INT", "ZX_AK_FLOAT", "ZX_AK_BOOL",
                                "ZX_AK_ENUM", "ZX_AK_ERROR", "ZX_AK_PTR", "ZX_AK_SLICE",
                                "ZX_AK_STRUCT", "ZX_AK_UNION", "ZX_AK_TUNION", "ZX_AK_OPT",
-                               "ZX_AK_ERR", "ZX_AK_FN" };
-    return (k >= 0 && k <= AK_FN) ? n[k] : "ZX_AK_VOID";
+                               "ZX_AK_ERR", "ZX_AK_FN", "ZX_AK_STRPTR" };
+    return (k >= 0 && k <= AK_STRPTR) ? n[k] : "ZX_AK_VOID";
 }
 
 static Type **g_adt;         /* 描述符 ↔ 类型 */
@@ -1786,6 +1818,13 @@ static bool any_has_desc(Type *t) {
     }
 }
 
+/* 字符串字面量 / *[N]u8：定长字节数组指针（用户 2026-11-09：字符串 =
+ * zx 的数组 *[N]const u8）。打印/格式化要按字节序列处理，不能当指针。 */
+static bool str_ptr_ty(Type *t) {
+    return t && t->kind == TY_PTR && t->has_len && t->elem &&
+           t->elem->kind == TY_INT && t->elem->bits == 8 && !t->elem->is_signed;
+}
+
 /* []u8 / []const u8：默认 {} 当字符串打（规格 §11.1） */
 static bool any_is_str(Type *t) {
     return t && t->kind == TY_SLICE && t->elem && t->elem->kind == TY_INT &&
@@ -1796,8 +1835,9 @@ static bool any_is_str(Type *t) {
 static bool default_any(Type *t) {
     if (!t) return false;
     switch (t->kind) {
-    case TY_STRUCT: case TY_UNION: case TY_TUPLE: case TY_OPT: case TY_ERR: case TY_PTR:
+    case TY_STRUCT: case TY_UNION: case TY_TUPLE: case TY_OPT: case TY_ERR:
         return true;
+    case TY_PTR: return !str_ptr_ty(t);   /* 字符串按文本打，不展开地址 */
     case TY_SLICE: return !any_is_str(t);
     default: return false;
     }
@@ -1844,6 +1884,13 @@ static int any_desc(Type *t) {
     case TY_ERROR: kind = AK_ERROR; size = 2; break;
     case TY_FN:    kind = AK_FN; size = 8; break;
     case TY_PTR:
+        if (str_ptr_ty(t)) {
+            /* 嵌在聚合里的字符串：按文本展开（长度在类型里，走 aux_size） */
+            kind = AK_STRPTR;
+            size = 8;
+            auxsize = t->len > 0 ? (int)t->len : 1;
+            break;
+        }
         kind = AK_PTR;
         size = 8;                   /* 不跟指针走：打印值只印地址，避免环 */
         break;
@@ -1959,6 +2006,8 @@ static int any_desc(Type *t) {
     }
     if (kind == AK_ENUM || kind == AK_TUNION)
         buf_printf(&ent, ", .tags = zx_ag_%d, .names = zx_an_%d", idx, idx);
+    if (kind == AK_STRPTR)
+        buf_printf(&ent, ", .aux_size = %d", auxsize);
     if (kind == AK_SLICE) buf_printf(&ent, ", .is_str = %d", is_str);
     buf_puts(&ent, " }");
     g_anydef[idx] = ent.data;
@@ -1976,6 +2025,15 @@ static void any_addr(Buf *b, Node *e);
 static void fmt_arg_one(Buf *b, Node *a) {
     Type *t = a->ty ? a->ty : ty_i32();
 
+    /* 字符串字面量 / *[N]u8：按字节序列打，不能走指针的描述符
+     *（那样 `{}` 会打印地址）。长度在类型里，直接包成切片。 */
+    if (str_ptr_ty(t)) {
+        ensure_type(ty_slice(ty_u8(), true));
+        buf_puts(b, "zx_fa_s(((ZxSlice_u8){ (uint8_t*)(");
+        ex(b, a);
+        buf_printf(b, "), %llu }))", (unsigned long long)t->len);
+        return;
+    }
     /* 聚合值 / 指针 / 枚举：带上描述符，运行时才知道怎么展开 */
     if (any_has_desc(t)) {
         int d = any_desc(t);
@@ -2387,7 +2445,10 @@ static void emit_debug_runtime(void) {
     buf_puts(g_out, "ZxSlice_u8 zx_debug_errname(uint64_t code) {\n");
     buf_printf(g_out,
         "    ZxSlice_u8 r;\n"
-        "    const char *s = (code > 0 && code <= %d) ? zx_err_names[code] : \"?\";\n"
+        /* 65535 是 null 的保留码（`?T` 被 try 时抛的就是它），不在顺序
+         * 码表里，得单独认；否则 errName(error.null) 打 "?"。 */
+        "    const char *s = (code == 65535) ? \"null\"\n"
+        "                  : ((code > 0 && code <= %d) ? zx_err_names[code] : \"?\");\n"
         "    r.ptr = (uint8_t *)s; r.len = strlen(s);\n"
         "    return r;\n"
         "}\n\n", ne);
@@ -2424,7 +2485,8 @@ static void emit_debug_runtime(void) {
         "    fprintf(stderr, \"zx trace (oldest first):\\n\");\n"
         "    for (int i = 0; i < c->n; i++) {\n"
         "        ZxCapRec *r = &c->recs[(c->start + i) %% ZX_CAP_MAX];\n"
-        "        const char *nm = (r->code > 0 && r->code <= %d) ? zx_err_names[r->code] : \"?\";\n"
+        "        const char *nm = (r->code == 65535) ? \"null\"\n"
+        "                       : ((r->code > 0 && r->code <= %d) ? zx_err_names[r->code] : \"?\");\n"
         "        fprintf(stderr, \"  %%s at %%s:%%u:%%u in %%s\\n\",\n"
         "                nm, r->file, r->line, r->col, r->fn);\n"
         "    }\n"
@@ -3458,7 +3520,7 @@ static void emit_any_runtime(void) {
         "typedef struct { const char *name; size_t off; int ty; } ZxAnyField;\n"
         "enum { ZX_AK_VOID = 0, ZX_AK_INT, ZX_AK_FLOAT, ZX_AK_BOOL, ZX_AK_ENUM,\n"
         "       ZX_AK_ERROR, ZX_AK_PTR, ZX_AK_SLICE, ZX_AK_STRUCT, ZX_AK_UNION,\n"
-        "       ZX_AK_TUNION, ZX_AK_OPT, ZX_AK_ERR, ZX_AK_FN };\n"
+        "       ZX_AK_TUNION, ZX_AK_OPT, ZX_AK_ERR, ZX_AK_FN, ZX_AK_STRPTR };\n"
         "struct ZxAnyType { int kind; const char *name; int size; int sign; int n;\n"
         "                   const ZxAnyField *fields; int elem; int aux_off; int aux_size;\n"
         "                   const long long *tags; const char *const *names; int is_str; };\n"
@@ -3558,6 +3620,15 @@ static void emit_any_runtime(void) {
         "        memcpy(&q, p, sizeof q);\n"
         "        snprintf(b, sizeof b, \"fn@0x%llx\", (unsigned long long)q);\n"
         "        zx_any_put(out, b);\n"
+        "        break;\n"
+        "    }\n"
+        "    case ZX_AK_STRPTR: {\n"
+        "        /* 字符串字面量（*[N]const u8）：值就是基址，长度在描述符里 */\n"
+        "        const void *q = *(const void *const *)p;\n"
+        "        size_t n = (size_t)t->aux_size;\n"
+        "        if (!q) { zx_any_put(out, \"null\"); break; }\n"
+        "        if (mode == 0) zx_sink_put(out, (const char *)q, n);\n"
+        "        else zx_any_qstr(out, (const uint8_t *)q, n);\n"
         "        break;\n"
         "    }\n"
         "    case ZX_AK_SLICE: {\n"
@@ -3701,7 +3772,7 @@ static void ex_print(Buf *b, Node *n, bool newline) {
     if (!p) {
         /* 运行时格式串：交给 zx_fmt_out（同一套语法，行为一致，只是慢） */
         buf_puts(b, "zx_fmt_out(stdout, ");
-        ex(b, fmt);
+        coerce(b, fmt, ty_slice(ty_u8(), true));
         buf_puts(b, ", ");
         fmt_args(b, n, 1);
         buf_printf(b, ", %d, %d)", n->nitems - 1, newline ? 1 : 0);
@@ -3803,11 +3874,33 @@ static void ex_print(Buf *b, Node *n, bool newline) {
             /* 结构展开也是一段独立的表达式（printf 塞不进复合值） */
             seg_lit(&g.spec, p + lit, i - lit);
             seg_flush(&g);
+            if (str_ptr_ty(at)) {
+                /* `{any}` 打在字符串上：包成切片再展开，输出带引号的文本 */
+                ensure_type(ty_slice(ty_u8(), true));
+                int ds = any_desc(ty_slice(ty_u8(), true));
+                if (g.nseg) buf_puts(&g.out, ", ");
+                buf_printf(&g.out, "zx_any_stdout(&zx_at[%d], &((ZxSlice_u8){ (uint8_t*)(", ds);
+                ex(&g.out, n->items[which]);
+                buf_printf(&g.out, "), %llu }), %d)", (unsigned long long)at->len,
+                           verb == 'a' ? 1 : 0);
+                g.nseg++;
+            } else {
             int d = any_desc(at);
             if (g.nseg) buf_puts(&g.out, ", ");
             buf_printf(&g.out, "zx_any_stdout(&zx_at[%d], ", d);
             any_addr(&g.out, n->items[which]);
             buf_printf(&g.out, ", %d)", verb == 'a' ? 1 : 0);
+            g.nseg++;
+            }
+        } else if (str_ptr_ty(at) && fopt.width == 0) {
+            /* `{}` 打在字符串字面量上：长度在类型里，指针就是数据起点，
+             * 按字节原样写出（与切片同一条路径，NUL 不截断） */
+            seg_lit(&g.spec, p + lit, i - lit);
+            seg_flush(&g);
+            if (g.nseg) buf_puts(&g.out, ", ");
+            buf_puts(&g.out, "fwrite((const char*)(");
+            ex(&g.out, n->items[which]);
+            buf_printf(&g.out, "), 1, (size_t)%llu, stdout)", (unsigned long long)at->len);
             g.nseg++;
         } else if (at && at->kind == TY_SLICE && fopt.width == 0) {
             /* 不带宽度的字符串：按长度原样写出去，不走 `%.*s`。
@@ -3856,7 +3949,7 @@ static void ex_io_print(Buf *b, Node *n, bool newline) {
     buf_puts(b, "zx_fmt_out((FILE *)(uintptr_t)(");
     ex(b, n->items[0]);
     buf_puts(b, "), ");
-    ex(b, n->items[1]);
+    coerce(b, n->items[1], ty_slice(ty_u8(), true));
     buf_puts(b, ", ");
     fmt_args(b, n, 2);
     buf_printf(b, ", %d, %d)", n->nitems - 2, newline ? 1 : 0);
@@ -3869,7 +3962,7 @@ static void ex_format(Buf *b, Node *n) {
     buf_puts(b, "zx_format(");
     ex(b, n->items[0]);
     buf_puts(b, ", ");
-    ex(b, n->items[1]);
+    coerce(b, n->items[1], ty_slice(ty_u8(), true));
     buf_puts(b, ", ");
     fmt_args(b, n, 2);
     buf_printf(b, ", %d)", n->nitems - 2);
@@ -4291,11 +4384,18 @@ static void ex(Buf *b, Node *n) {
         return;
     }
     case NK_STR: {
-        /* ZxSlice_u8 的 typedef 是按需发射的；字面量常直接出现在
-         * println 实参里（没人给它落过类型定义），这里兜底 ensure。 */
-        ensure_type(n->ty && n->ty->kind == TY_SLICE ? n->ty : ty_slice(ty_u8(), true));
         Buf s; buf_init(&s);
         cstr(&s, n->str ? n->str : "", n->str_len);
+        /* 字符串字面量的类型是 *[N]const u8（用户 2026-11-09）：C 侧就是
+         * 指向字节的指针，长度留在 Zx 类型里（.len 编译期算）。落点要切片时
+         * 由 coerce 的 "*[N]T → []T" 包装成 {ptr,len}。 */
+        if (n->ty && n->ty->kind == TY_PTR) {
+            buf_printf(b, "((uint8_t*)%s)", s.data);
+            return;
+        }
+        /* 兜底：没有落点类型的字面量仍按切片发射（个别内建调用直接要
+         * ZxSlice_u8），确保 typedef 已发射。 */
+        ensure_type(ty_slice(ty_u8(), true));
         buf_printf(b, "((ZxSlice_u8){ (uint8_t*)%s, %d })", s.data, n->str_len);
         return;
     }
@@ -4310,7 +4410,11 @@ static void ex(Buf *b, Node *n) {
         buf_puts(b, n->ival ? "true" : "false");
         return;
     case NK_NULL:
-        buf_puts(b, "false");
+        /* 无 coerce 直接发射的情形（比较的另一侧、`null == null`）：
+         * 发 0——它同时是合法的空指针常量与 false，`p == false` 那种
+         * 指针比 bool 的代码就不会出现了。类型是 error 的例外：那是
+         * 保留码 65535，发 0 会把"空"比成"没有错误"。 */
+        buf_puts(b, (n->ty && n->ty->kind == TY_ERROR) ? "65535" : "0");
         return;
     case NK_UNDEF:
         buf_puts(b, "0");
@@ -4413,6 +4517,13 @@ static void ex(Buf *b, Node *n) {
                 buf_puts(b, ".ptr)");
                 return;
             }
+        }
+        /* 数组指针的 .ptr：地址就是首元素地址，直接发基址（字符串
+         * `"abc".ptr` 走这条）。长度用不着——.len 上面已经按常量发了。 */
+        if (bt && bt->kind == TY_PTR && bt->has_len && n->name &&
+            !strcmp(n->name, "ptr")) {
+            ex(b, n->a);
+            return;
         }
         if (bt && bt->kind == TY_SLICE) {
             ex(b, n->a);
@@ -4625,7 +4736,9 @@ static void ex(Buf *b, Node *n) {
             buf_printf(b, ")%s ? (", has);
             ex(b, n->a);
             buf_printf(b, ")%s : (", pay);
-            ex(b, n->b);
+            /* 右值按载荷类型落：`s orelse ""` 的 "" 是 *[0]const u8，
+             * 三元式的另一支是切片，必须在这里包成切片。 */
+            coerce(b, n->b, t->elem);
             buf_puts(b, "))");
             return;
         }
@@ -4634,7 +4747,7 @@ static void ex(Buf *b, Node *n) {
         snprintf(tmp, sizeof tmp, "_or%d", on++);
         line("%s %s = %s;", cty(t), tmp, cxs(n->a, t));
         buf_printf(b, "((%s)%s ? %s%s : (", tmp, has, tmp, pay);
-        ex(b, n->b);
+        coerce(b, n->b, t->elem);
         buf_puts(b, "))");
         return;
     }
@@ -4762,10 +4875,22 @@ static void ex(Buf *b, Node *n) {
             const char *dc = sym_cname(n->a);
             if (dc && (!strcmp(dc, "zx_debug_panic") || !strcmp(dc, "zx_debug_assert"))) {
                 need_by_cname(dc);      /* 特判路径绕过了通用发射，这里补置 need 标志 */
+                /* 参数表要和运行时原型一致：消息/文件名/函数名是 ZxSlice_u8。
+                 * 字符串字面量的 Zx 类型是 `*[N]const u8`，不 coerce 就直接
+                 * 落成 uint8_t*，C 编译器会拒。 */
+                Type *want[6];
+                int np = 0;
+                if (!strcmp(dc, "zx_debug_assert")) want[np++] = ty_bool();
+                want[np++] = ty_slice(ty_u8(), true);   /* msg */
+                want[np++] = ty_slice(ty_u8(), true);   /* file */
+                want[np++] = ty_i32();                  /* line */
+                want[np++] = ty_i32();                  /* col */
+                want[np++] = ty_slice(ty_u8(), true);   /* fn */
                 buf_printf(b, "%s(", dc);
                 for (int i = 0; i < n->nitems; i++) {
                     if (i) buf_puts(b, ", ");
-                    ex(b, n->items[i]);
+                    if (i < np) coerce(b, n->items[i], want[i]);
+                    else        ex(b, n->items[i]);
                 }
                 buf_putc(b, ')');
                 return;
@@ -4919,8 +5044,22 @@ static void ex(Buf *b, Node *n) {
         ex(b, n->a);
         return;
 
-    /* 有值的控制流：走到这里说明被当成普通表达式用了，先取个临时量 */
+    /* 有值的控制流当普通表达式用（`std.println("{}", if (c) 1 else 0)`、
+     * `f(s: blk)`、switch 表达式……）：开一个临时量，用 gen_value 把值写
+     * 进去，表达式本身引用临时量。line() 在这里落盘的语句会打印在"包着
+     * 本表达式的那条语句"之前——那条语句此刻还攒在 Buf 里没输出，顺序
+     * 天然正确（与 NK_ORELSE / try 的 _or / _ty 临时量同一套路）。
+     * 注意临时量不能包 {}：表达式在"语句"里还要引用它。 */
     default:
+        if (is_ctl(n) && n->ty) {
+            static int ivn;
+            char tmp[64];
+            snprintf(tmp, sizeof tmp, "_iv%d", ivn++);
+            line("%s %s = {0};", cty(n->ty), tmp);
+            gen_value(n, tmp, n->ty);
+            buf_puts(b, tmp);
+            return;
+        }
         err_at(n->line, n->col, "internal: expression node %d reached the C emitter", (int)n->kind);
         buf_puts(b, "0");
         return;
@@ -4970,17 +5109,24 @@ static void gen_decl_inner(Node *d) {
         bool lit = init && (init->kind == NK_ARRAY_LIT ||
                             (init->kind == NK_UN && init->op == TOK_AMP));
         if (lit) {
-            Buf decl; buf_init(&decl);
-            if (!is_var) buf_puts(&decl, "const ");
-            ctype(&decl, t->elem);
-            buf_printf(&decl, " %s[%llu]", cn, (unsigned long long)t->len);
-            buf_puts(&decl, " = { ");
+            /* `*[N]T` 只是"带长度的指针"（8 字节），变量本身是个指针槽。
+             * 字面量先落一个匿名 C 数组当存储，再让指针指向它——不能直接把
+             * 变量声明成 C 数组：那样 `&xs` 会变成 `int(*)[4]`，与"一切都
+             * 是指针"的模型不一致（用户 2026-11-10 确认的设计）。
+             * 存储仍在当前栈帧，逃逸检查（addr_frame）照旧成立。 */
+            Buf litdecl; buf_init(&litdecl);
+            if (!is_var) buf_puts(&litdecl, "const ");
+            ctype(&litdecl, t->elem);
+            buf_printf(&litdecl, " %s_lit[%llu]", cn, (unsigned long long)t->len);
+            buf_puts(&litdecl, " = { ");
             for (int i = 0; i < init->nitems; i++) {
-                if (i) buf_puts(&decl, ", ");
-                coerce(&decl, init->items[i], t->elem);
+                if (i) buf_puts(&litdecl, ", ");
+                coerce(&litdecl, init->items[i], t->elem);
             }
-            buf_puts(&decl, " };");
-            line("%s", decl.data);
+            buf_puts(&litdecl, " };");
+            line("%s", litdecl.data);
+            line("%s%s *%s = %s_lit;", is_var ? "" : "const ",
+                 cty(t->elem), cn, cn);
             return;
         }
         /* R9（v0.10 起）：数组指针 + undefined 不再隐式分配存储。
@@ -5374,9 +5520,12 @@ static void gen_if_body(Node *n, const char *slot, Type *slot_ty) {
      * 语义层剪分支时另一条根本没检查——发出来多半是合法的 C 编不过的。
      * 只看 n->flag 而不是 cond->ct：编译期执行循环会在真实节点上留下
      * 最后一轮的条件值，那种烙印不是真的常量。 */
-    if (n->flag && n->a->ct && n->a->ct->kind == V_BOOL) {
-        if (n->a->ct->bval)   gen_arm(n->b, slot, slot_ty);
-        else if (n->c)        gen_arm(n->c, slot, slot_ty);
+    if (n->flag) {
+        /* 剪枝依据：优先看条件上现存的折叠值；它常被后续流程清掉，
+         * 那就用语义层存下的结论（n->ival，见 check_if 的 KEEP）。 */
+        bool take = n->a->ct && n->a->ct->kind == V_BOOL ? n->a->ct->bval : (n->ival != 0);
+        if (take)      gen_arm(n->b, slot, slot_ty);
+        else if (n->c) gen_arm(n->c, slot, slot_ty);
         return;
     }
 
@@ -5930,7 +6079,9 @@ static void val_init(Buf *b, Value *v, Type *t) {
         return;
     }
     case V_NULL:
-        buf_puts(b, "{0}");
+        /* `error` 上的 null 是保留码 65535，不是 0（0 = "没有错误"） */
+        if (t && t->kind == TY_ERROR) buf_puts(b, "65535");
+        else buf_puts(b, "{0}");
         return;
     case V_UNDEF:
     case V_VOID:
@@ -6101,7 +6252,12 @@ static void gen_global(Node *d, bool exported) {
          * 数据复制一份——之后写进去也看不见，所以按源码表达式求值。 */
         bool view = init && init->ct && init->ct->kind == V_PTR && init->ct->base &&
                     is_view_expr(init);
-        if (init && init->ct && !view) {
+        /* 字符串常量（const F = "v={}"）是*指针*，不是数组字面量：
+         * 走下面的普通标量声明 `uint8_t *F = (uint8_t*)"v={}"`。以前这里
+         * 把所有带 ct 的初始化器都物化成 `uint8_t F[N] = {…}`——字符串
+         * 进去就变成"用指针初始化 uint8_t"，C 直接拒。 */
+        bool str_const = str_ptr_ty(t) && init && init->kind == NK_STR;
+        if (init && init->ct && !view && !str_const) {
             Buf s; buf_init(&s);
             buf_puts(&s, st);
             ctype(&s, t->elem);

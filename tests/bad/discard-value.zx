@@ -1,0 +1,19 @@
+// 语言规则「所有值都要被使用」（E0411）：裸调用语句丢弃非 void 返回值
+// 不合法，必须显式 `_ = f(...)` 接收（M26 丢弃）。
+//
+// expect-count: 3
+// expect-code: E0411 E0411 E0411
+// expect: return value of type `i32` is discarded
+// expect: return value of type `[]const u8` is discarded
+// expect: return value of type `!i32` is discarded
+
+const add = fn (a: i32, b: i32) i32 { return a + b; };
+const name = fn () []const u8 { return "zx"; };
+const mayFail = fn () !i32 { return 1; };
+
+const main = fn () u8 {
+    add(1, 2);                 // 丢弃 i32
+    name();                    // 丢弃切片
+    mayFail();                 // 丢弃错误联合——连错误都吞了，更不行
+    return 0;
+};

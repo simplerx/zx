@@ -43,7 +43,7 @@
 | 按字节扫字符串 + 分派 | ✅ 可行（见 G2） | `count_digits` |
 | 递归下降（expr→term→atom 互递归） | ✅ 方法互递归、顶层前向引用均可 | `Parser.expr/term/atom` |
 | 可变接收者、指针字段 | ✅ `self: *Parser` | `Parser` |
-| 关键字表 | ✅ `std.HashMap(i32)` | `keyword_lookup` |
+| 关键字表 | ✅ `std.map.HashMap(i32)` | `keyword_lookup` |
 | 收集子节点 | ✅ `std.ArrayList(*Node)` | `Parser.nodes` |
 | 深递归（嵌套括号） | ✅ 实测 20 层无碍（上限就是 C 栈） | `deep` |
 | 带值跳出循环（`break` 的替代） | ✅ `label: while (…) { … label: v; }` | 见 G4 |

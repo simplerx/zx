@@ -16,7 +16,8 @@ const m0 = mid.0;                // 20
 const mlen = mid.len;            // 2
 
 const tup = {1, "two", 3.0};
-const tsize = tup.size;          // 按 R7 的默认宽度算：4 + (4) + 16 + 8
+const tsize = tup.size;          // 按 R7 的默认宽度算：4 + (4) + 8 + 8
+                                 // （"two" 现在是 *[3]const u8，指针 8 字节）
 const tlen = tup.len;            // 3
 const t2 = tup.2;                // 3.0
 const {d0, d1, d2} = tup;        // 解构出来的分量也是编译期常量
@@ -38,6 +39,6 @@ const main = fn () u8 {
 // head=he len=2 c1=e
 // tail=ello a0=10 alen=3 asize=12
 // mid.len=2 m0=20
-// tup: len=3 size=32 t2=3
+// tup: len=3 size=24 t2=3
 // destructure: 1 two 3
 // payload via &maybe = 5

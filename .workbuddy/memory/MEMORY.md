@@ -17,3 +17,35 @@
 - 控制台输出（进度行、诊断、help、usage、explain）只用 ASCII；中文只留在注释和写进文件的模板（如 init 生成的 README）里。GBK 控制台把 UTF-8 的 `—`/`…` 渲染成乱码。
 - 验证习惯：LSP 改动跑 `ZXLS_BIN=<exe> python tools/lsptest.py`（要放独立目录、旁边有 std/，直接指 .tmp 会有环境假 FAIL）；编译器改动跑 `sh test.sh` 全量回归。用户偏好用实际运行验证交付。
 - 团队另有并行任务做「功能组件化」，改动尽量限定在自己的文件，提交时精确指定路径，不捎带别人的工作区改动。
+
+## 2026-11-09 压测期新钉的约定
+- **if 剪枝**：条件是编译期常量时 sema 只检查会走的那一支，结论存 `n->ival`
+  （`n->a->ct` 到后端常已被清空）。后端 `gen_if_body` 必须用
+  `ct ? ct->bval : n->ival`，只看 ct 会"两条臂都生成"→ B1001。死分支里的标识符
+  由 `mark_uses` 标 used（按名字现查，节点上还没有 sym），否则假报 E0410。
+- **zxls 文档表**：`docs` 与 `dirty` 的键共用同一份 `doc.path`。换文档/关文档时
+  **先** `dirty.fetchRemove(path)` 再 free，否则脏表留悬垂键，下一次 put 扩容
+  重哈希就 panic（`hash_map.zig growIfNeeded`）。诊断线程要深拷贝 Document。
+- **诊断码是 `src/zxc.c` 里 `g_rules` 的 strstr 顺序决定的**：加规则要放在
+  `found \``（E0301）这类笼统规则**之前**，否则帮助文案会完全不对路。
+- 语言事实（写文档/示例前先记住）：`std.process.args()` 不含 argv[0]；
+  `orelse return …` 不合法；没有 `anytype`；switch 模式没有区间（`'0'...'9'`）；
+  `if (c) { x } else { y }` 这种块臂不给值（要 `lbl: x;` 收割）；`&数组` 报 E0403。
+- 守门：`demo/snake.zx --sim` 已进 test.sh（300 局不变式）；lsptest 的
+  `completion.dupOpen.alive` 守脏表悬垂键。
+
+## 数组模型（2026-11-10 用户确认，写文档前必看）
+- **Zx 没有"数组"这种值类型**：`*[N]T` 就是**指针**（`TY_PTR` + `has_len`，
+  `ty_size` 走 `TY_PTR → 8`），长度只写在类型里，用来做编译期界检查与 `.len`。
+  C 后端把它发成 `T *`。`[]T` 是 `{ptr, len}` 16 字节。
+- 拿存储：`std.stackAlloc(T, N)`（栈，返回 `*[N]T`，`var` 绑定可写）、
+  `std.heapAlloc(alloc, T, N)`（堆）；`&.{ … }` 只是"匿名存储 + 指针"的糖。
+- `&xs`（xs 为 `*[N]T`）**合法**，得到 `**(…)`：变量本身是指针槽。
+  以前 sema 里那条"数组内联存储、&数组报 E0403"是错的，已删；
+  后端对字面量初始化也改成 `T x_lit[N] = {…}; T *x = x_lit;`（原先直接声明成
+  C 数组，导致 `&xs` 变 `int(*)[4]`）。守门用例 tests/good/addr-array.zx。
+- 文档：docs/guide.md 一直是对的；docs/manual.md §3.2 曾把 `*[N]T` 写成
+  `N*sizeof(T)` 的"数组本身"，已按本模型重写。写手册/README 别再写"内联数组"。
+- **表述红线（2026-11-10 用户再次强调）**：`&xs` 是**取指针变量的地址**（得
+  `**T`），不是"数组的地址"——Zx 里根本没有数组变量，只有指针。设计目的就是
+  划清 C 里数组/指针衰减的混淆。写文档不许出现"数组的地址"这种说法。

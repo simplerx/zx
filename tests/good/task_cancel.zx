@@ -3,7 +3,7 @@
 // expect-output:caught:cancelled
 // expect-output:after await:done
 const std = module("std");
-const Task = std.Task;
+const Task = std.task.Task;
 
 const step = fn (n: usize) !i32 {
     if (n > 100) { return error.overflow; }

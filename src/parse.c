@@ -250,12 +250,32 @@ static Node *parse_type_primary(P *p) {
 
     case TOK_KW_ERROR: {
         advance(p);
-        if (at(p, TOK_LBRACE)) {                 /* error{a, b}：错误集类型 */
+        /* `error{…}` 才是错误集字面量。可 `fn () error { … }` 的 `{` 长得一模一样
+         * ——它开的是**函数体**。两 token 前瞻区分：`{` 后面是 `}`，或者
+         * 「标识符 / null + `,` 或 `}`」，才是集合；否则（`return`、`let`、
+         * `if`、`foo(`…）就把花括号留给调用方（函数体/块），这里只吐裸 `error`，
+         * 由 sema 用 E0308 说清楚"光秃秃的 error 不是返回类型"。 */
+        bool errset = false;
+        if (at(p, TOK_LBRACE)) {
+            TokKind k1 = peek(p, 1)->kind;
+            TokKind k2 = peek(p, 2)->kind;
+            if (k1 == TOK_RBRACE) errset = true;
+            else if ((k1 == TOK_IDENT || k1 == TOK_KW_NULL) &&
+                     (k2 == TOK_COMMA || k2 == TOK_RBRACE)) errset = true;
+        }
+        if (errset) {                            /* error{a, b}：错误集类型 */
             advance(p);
             Node *n = node_new(NK_ERR_SET, t->line, t->col);
             while (!at(p, TOK_RBRACE) && !at(p, TOK_EOF_)) {
                 Node *m = node_new(NK_PAIR, cur(p)->line, cur(p)->col);
-                m->name = take_ident(p);
+                // null 也是合法的错误名（用户 2026-11-09：`null` 本身就是
+                // 一种错误，`error{null}` / `error.null` 都要能写）
+                if (at(p, TOK_KW_NULL)) {
+                    advance(p);
+                    m->name = "null";
+                } else {
+                    m->name = take_ident(p);
+                }
                 push(n, m);
                 if (!accept(p, TOK_COMMA)) break;
             }
@@ -587,10 +607,18 @@ static Node *parse_expr(P *p);
 static Node *parse_unary(P *p);
 
 static Node *parse_binary_rest(P *p, Node *lhs, int min_prec) {
+    int chain = 0;
     for (;;) {
         TokKind k = cur(p)->kind;
         int prec = bin_prec(k);
         if (prec == 0 || prec < min_prec) break;
+        /* 同层运算符连成左深链，链长 = AST 深度；序列化/装载/检查都是递归的，
+         * 8000 个 `+` 会把栈撑爆（无声退出）。与 Zx 前端同一条上限。 */
+        if (++chain > 2048) {
+            err_at(cur(p)->line, cur(p)->col,
+                   "an expression chains over 2048 operators -- split it into several statements");
+            break;
+        }
         advance(p);
         Node *rhs = parse_binary_rest(p, parse_unary(p), prec + 1);
         /* orelse 不是算术：它自带一个节点（语义是"空则取右边"，
@@ -659,6 +687,15 @@ static Node *parse_postfix(P *p, Node *base) {
                 Node *n = node_new(NK_FIELD, id->line, id->col);
                 n->a = base;
                 n->name = dup_tok(id);
+                base = n;
+            } else if (at(p, TOK_KW_NULL) && base->kind == NK_TYPE_IDENT) {
+                /* `error.null` / `Err.null`：错误名可以叫 null（用户
+                 * 2026-11-09：null 本身是一种错误）。只在类型值的成员位置
+                 * 放宽——`o.null` 这种值上的字段访问仍按错拼处理。 */
+                Token *id = advance(p);
+                Node *n = node_new(NK_FIELD, id->line, id->col);
+                n->a = base;
+                n->name = "null";
                 base = n;
             } else if (at(p, TOK_INT)) {
                 Token *ix = advance(p);
@@ -1766,8 +1803,34 @@ static size_t *bracket_match(Token *t, size_t n) {
     return m;
 }
 
+/* 括号嵌套上限：递归下降的栈深度跟着括号走。超了明确报错，不让进程撑爆
+ * 栈（撑爆的表现是"没有任何诊断就退出"，用户 2026-11-09 压力测试抓到）。
+ * 与 Zx 前端 bootstrap/parse.zx 的 NEST_MAX 保持一致。 */
+#define ZX_NEST_MAX 256
+
+static bool brackets_too_deep(Lexer *lx) {
+    int d = 0, maxd = 0;
+    for (int i = 0; i < lx->ntoks; i++) {
+        switch (lx->toks[i].kind) {
+        case TOK_LPAREN: case TOK_LBRACE: case TOK_LBRACKET: case TOK_DOT_BRACE:
+            if (++d > maxd) maxd = d;
+            break;
+        case TOK_RPAREN: case TOK_RBRACE: case TOK_RBRACKET:
+            if (d > 0) d--;
+            break;
+        default: break;
+        }
+    }
+    return maxd > ZX_NEST_MAX;
+}
+
 Node *parse_program(Lexer *lx) {
     g_parse_fname = lx->fname;   /* @file() 按模块捕获自己的源路径 */
+    if (brackets_too_deep(lx)) {
+        err_at(1, 1, "brackets nest too deeply (over %d levels) -- split it into smaller pieces",
+               ZX_NEST_MAX);
+        return NULL;
+    }
     P p = { .t = lx->toks, .n = lx->ntoks, .i = 0, .last_line = 0,
             .match = bracket_match(lx->toks, lx->ntoks) };
     Node *root = node_new(NK_ROOT, 1, 1);

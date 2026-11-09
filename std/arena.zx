@@ -3,10 +3,10 @@
 // Allocator 现在带 ctx（v0.59 起），arena 终于可以做成"真"分配器：
 // 状态存在堆上，ctx 指着它，函数指针通过 ctx 找回状态。用法：
 //
-//   var ar = std.ArenaAllocator.init(std.heap.page);
+//   var ar = std.arena.ArenaAllocator.init(std.heap.page);
 //   if (ar) a {
 //       let v = std.json.parse(a, doc);        // json 全程走 arena
-//       std.ArenaAllocator.deinit(a);           // 一次性释放全部
+//       std.arena.ArenaAllocator.deinit(a);           // 一次性释放全部
 //   }
 //
 // 语义：

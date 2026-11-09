@@ -10,7 +10,7 @@ var cnt: usize = 0;
 
 const main = fn () !i32 {
     std.atomic.atomicStore(&cnt, 5);
-    std.atomic.atomicAdd(&cnt, 2);
+    _ = std.atomic.atomicAdd(&cnt, 2);
     std.println("cnt:{}", std.atomic.atomicLoad(&cnt));
 
     let hit = std.atomic.atomicCAS(&cnt, 7, 9);

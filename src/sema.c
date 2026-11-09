@@ -11,6 +11,7 @@
 #include "ast.h"
 #include "ty.h"
 #include "val.h"
+#include <time.h>   /* clock()：ZX_TIMING2 的临时埋点 */
 
 #define BAD(n, ...) (err_at((n)->line, (n)->col, __VA_ARGS__), ty_invalid())
 /* 码由调用点指定：措辞会改，码不改（§17.1） */
@@ -126,8 +127,10 @@ struct Symbol {
     struct Module *mod;    /* 属于哪个模块（文件） */
     bool        is_pub;    /* 顶层声明带 pub，模块外可见 */
     bool        is_std;    /* 内建 "std" 命名空间 */
+    bool        broken;    /* 解析失败的绑定（module 加载失败）：成员访问一律闭嘴 */
     bool        ct_bind;   /* 泛型的编译期实参：没有 C 变量，值直接内联 */
     bool        in_fn;     /* 声明在函数体里：它的槽位在当前栈帧上 */
+    bool        fn_local;  /* hoist 时确认是函数块内的绑定：块内先声明后使用要报 */
     bool        used;      /* 被读过或写过一次；没碰过的局部绑定要报（M66） */
     struct Symbol *locals_next;  /* 本函数体的局部登记链（见 local_track） */
     bool        stack_val; /* 它的值指向当前栈帧（逃逸检查用，见 addr_frame） */
@@ -975,6 +978,11 @@ static const char *g_std_seeded[] = {
 };
 
 static Symbol *ns_member(Symbol *ns, const char *name, int line, int col) {
+    /* 模块本身没加载成功（打不开 / 解析失败）：那条错已经报在 module(...)
+     * 调用点上了，这里再报 N 条 "has no member" 只会盖住真正的原因。
+     * 尤其不能报 "module 'main' has no member"——'main' 是当前文件，
+     * 等于告诉用户去一个根本没有该名字的模块里找。 */
+    if (ns->broken) return NULL;
     if (ns->builtin == BI_HEAP) {
         if (!strcmp(name, "page")) return std_builtin("heap.page");
         {
@@ -1099,6 +1107,7 @@ typedef struct { bool ok; bool neg; uint64_t v; } IntV;
 static IntV ev_int(Node *n);
 static Value *ct_field(Node *n);
 static void ensure(Symbol *s);
+static bool decl_is_lazy_module(Node *d);
 static Module *module_load(const char *rel, int line, int col);
 static Module *module_load_full(const char *full, int line, int col);
 static Module *module_load_std(int line, int col);
@@ -1342,8 +1351,14 @@ static bool can_coerce(Type *from, Type *to) {
 
     if (from->kind == TY_UNDEF) return true;
 
+    /* `null` 的落点：`?T`（空）、裸指针/函数指针（C 的 NULL）、`bool`
+     *（`p == false` 那种），以及 **`error`**——此时它就是保留码 65535，
+     * 和 `error.null` 是同一个值（用户 2026-11-09 第 15 条：
+     * "null 也是一种错误，或者可以接收用 null 给 error 赋值"）。 */
     if (from->kind == TY_NULL)
-        return to->kind == TY_OPT || (to->kind == TY_BOOL);
+        return to->kind == TY_OPT || to->kind == TY_PTR ||
+               to->kind == TY_FN || to->kind == TY_BOOL ||
+               to->kind == TY_ERROR;
 
     /* 目标是 ?T / !T：先拆包装，再看载荷（R7.4：T → ?T、T → !T） */
     if (to->kind == TY_OPT) return can_coerce(from, to->elem);
@@ -1460,6 +1475,13 @@ static Type *resolve_type(Node *n) {
                             : s->type_val->eset;
                 continue;
             }
+            /* `null` 是保留码 65535（`?T` 被 try 时抛的"空"），不能声明成
+             * 命名成员：`error{null}` 会拿到 65535，和"没有值"撞车（E0508）。
+             * 用户 2026-11-09：`error.null` 这个**值**要能写，但集合里不能
+             * 再起一个同名成员（spec §5.2）。 */
+            if (!strcmp(m->name, "null"))
+                return BAD_CODE("E0508", m, "`null` is the reserved error code 65535 "
+                                            "(what a null optional throws) -- pick another name");
             if (k < 64) names[k++] = m->name;
         }
         void *lit = ty_errset_of(names, k);
@@ -1977,6 +1999,19 @@ static Type *resolve_fn_type(Node *fn) {
         pm->ty = ps[i];
     }
     Type *ret = fn->a ? resolve_type(fn->a) : ty_void();
+    /* 光秃秃的 `error` / `error{a, b}` 不是返回类型：它只说了"码"，没说这条
+     * 返回路径能不能失败（用户 2026-11-09：要么 `error.x`、要么
+     * `error{xx}!void`、要么 `!void`）。放在这里是因为所有 fn 类型都过这道门
+     * ——写成别名（`const E = error;`）也拦得住。 */
+    if (ret->kind == TY_ERROR || ret->kind == TY_ERRORSET) {
+        diag_code_at("E0308", fn->a ? fn->a->line : fn->line,
+                     fn->a ? fn->a->col : fn->col,
+                     "`%s` is not a return type: it does not say whether the "
+                     "function can fail", ty_str(ret));
+        /* 修法由 errors.c 的 E0308 目录文本给（`zxc explain E0308` 同一句），
+         * 这里不重复。 */
+        ret = ty_invalid();
+    }
     Type *t = ty_fn(ps, np, ret);
     free(ps);
     fn->ty = ty_type();
@@ -1991,6 +2026,14 @@ static Type *unify(Node *at, Type *a, Type *b) {
     if (!b) return a;
     if (a->kind == TY_INVALID || b->kind == TY_INVALID) return ty_invalid();
     if (ty_eq(a, b)) return a;
+
+    /* 两个长度不同的数组指针（典型：switch 各臂返回不同长度的字符串字面量）
+     * 统一成切片：`*[4]const u8` 与 `*[5]const u8` → `[]const u8`。长度是
+     * 类型的一部分，硬要相等的话每个臂都得显式转换，没法写出
+     * `switch (k) { .ident: "IDENT", … }`。 */
+    if (a->kind == TY_PTR && b->kind == TY_PTR && a->has_len && b->has_len &&
+        ty_eq(a->elem, b->elem))
+        return ty_slice(a->elem, a->is_const || b->is_const);
 
     if (a->kind == TY_COMPTIME_INT && ty_is_num(b)) return b;
     if (b->kind == TY_COMPTIME_INT && ty_is_num(a)) return a;
@@ -2327,6 +2370,22 @@ static Type *check_binary(Node *n, Type *expect) {
          * 例外：两侧都能在编译期算出来的，折叠阶段会把整个比较换成常量，
          * 永远到不了 C。`@typeName(f.ty) == "u64"` 就是这种写法——字符串
          * 常量的比较由 val_bin 直接给出结果（V_STR 分支）。 */
+        /* 非扁平可选值（`?u64` / `?struct`）在 C 里是 struct，语言层面也没有
+         * `==`，只能 `if (o) v` / `orelse` 取出来再比。这条必须放在下面的
+         * 折叠豁免**之前**：`std.str.indexOf(..) == 2` 的两侧都能被
+         * ct_eval_probe 估出值，于是豁免生效、检查跳过，最后发到 C 端变成
+         * `ZxOpt_usize == 2`（B1001，压力测试抓到的）。折叠豁免只管
+         * "C 里能比但值不同"的情形，管不了"C 里根本没有 == "的类型。 */
+        if ((a->kind == TY_OPT && !ty_opt_flat(a)) ||
+            (b->kind == TY_OPT && !ty_opt_flat(b))) {
+            Type *culprit = (a->kind == TY_OPT && !ty_opt_flat(a)) ? a : b;
+            cmp_help(culprit);
+            diag_code_at("E0306", n->line, n->col,
+                         "cannot compare `%s` with `%s`: `%s` has no `%s`",
+                         ty_str(a), ty_str(b), ty_str(culprit),
+                         n->op == TOK_EQ ? "==" : "!=");
+            return ty_invalid();
+        }
         bool ct_both = (n->a->ct || ct_eval_probe(n->a)) &&
                        (n->b->ct || ct_eval_probe(n->b));
         if (!ct_both && a->kind != TY_INVALID && b->kind != TY_INVALID &&
@@ -2339,6 +2398,11 @@ static Type *check_binary(Node *n, Type *expect) {
                          n->op == TOK_EQ ? "==" : "!=");
             return ty_invalid();
         }
+        /* `e == null`：null 在这一侧定成 error（= 保留码 65535）。不定型的话
+         * 后端只能按"无类型 null"发 0，而 0 是"没有错误"——比较会静默成 false。
+         * `p == null`（指针/可选）不受影响：那边的 null 侧类型不是 error。 */
+        if (a->kind == TY_ERROR && n->b && n->b->kind == NK_NULL) n->b->ty = a;
+        if (b->kind == TY_ERROR && n->a && n->a->kind == NK_NULL) n->a->ty = b;
         return type_of(n, ty_bool());
     }
 
@@ -2391,6 +2455,14 @@ static Type *check_array_lit(Node *n, Node **items, int nitems, Type *expect) {
             Type *d = scalar_default(it);
             if (d->kind == TY_INVALID) return d;
             elem = d;
+        } else if (it && it->kind == TY_PTR && it->has_len && it->elem &&
+                   it->elem->kind == TY_INT && it->elem->bits == 8 &&
+                   elem->kind == TY_PTR && elem->has_len && elem->elem &&
+                   elem->elem->kind == TY_INT && elem->elem->bits == 8) {
+            /* 字符串数组：长度各不相同的字面量统一成 `[]const u8`
+             *（用户 2026-11-09：字符串是 *[N]const u8；不统一的话
+             * `["alpha", "beta"]` 每个元素都得显式转换）。 */
+            elem = ty_slice(ty_u8(), it->is_const || elem->is_const);
         }
     }
     if (!elem) {
@@ -2408,6 +2480,9 @@ static Type *check_unary(Node *n, Type *expect) {
         if (n->a->kind == NK_TUPLE)      /* &{…}（不带点）也不该当元组 */
             return check_array_lit(n, n->a->items, n->a->nitems, expect);
         Type *t = check_expr(n->a, NULL);
+        /* `*[N]T` 只是"带长度的指针"：C 那边就是 `T *`，本身有槽位，
+         * `&xs` 是合法的 `**(...)`（用户 2026-11-10 确认的设计）。
+         * 以前这里错误地按"内联数组"挡掉，是文档/实现的误解。 */
         bool cst = !lvalue_mutable(n->a);
         return type_of(n, ty_ptr(t, cst, false, 0));
     }
@@ -2720,6 +2795,10 @@ static Type *check_field(Node *n) {
             if (e->kind == TY_OPT || e->kind == TY_ERR)
                 return type_of(n, e->kind == TY_OPT ? ty_bool() : ty_error());
         }
+        /* 数组指针的 .ptr：指向首元素。字符串字面量 `"abc".ptr` 走这条，
+         * 给 C 的 `*const u8` 形参用；元素自己叫 ptr 的字段优先。 */
+        if (n->name && !strcmp(n->name, "ptr") && bt->has_len && !ty_field(e, n->name))
+            return type_of(n, ty_ptr(e, bt->is_const, false, 0));
         Field *f = ty_field(e, n->name);
         if (!f) {
             Method *m = ty_method(e, n->name);
@@ -2889,9 +2968,17 @@ static Type *check_slice_expr(Node *n) {
 /* 命名空间成员（std.ArrayList / util.make）：拿到模块里那个符号 */
 static Symbol *ns_member_symbol(Node *field) {
     if (!field || field->kind != NK_FIELD || !field->a) return NULL;
-    /* 表达式位置 base 是 IDENT，类型位置（std.HashMap(i32)）是 TYPE_IDENT */
-    if (field->a->kind != NK_IDENT && field->a->kind != NK_TYPE_IDENT) return NULL;
-    Symbol *ns = lookup(field->a->name);
+    Symbol *ns = NULL;
+    /* 表达式位置 base 是 IDENT，类型位置（std.map.HashMap(i32)）是
+     * TYPE_IDENT；再往深（std.map.HashMap）base 还是 FIELD——递归到根，
+     * 每一级都必须解析成模块命名空间，否则不算模块成员链。 */
+    if (field->a->kind == NK_IDENT || field->a->kind == NK_TYPE_IDENT) {
+        ns = lookup(field->a->name);
+    } else if (field->a->kind == NK_FIELD) {
+        ns = ns_member_symbol(field->a);
+    } else {
+        return NULL;
+    }
     if (!ns) return NULL;
     /* 惰性模块别名此刻可能还是未解析的 SK_CONST（文件根声明推迟了
      * module("...") 的加载），先按需解析成 SK_NS 再看成员。 */
@@ -2938,7 +3025,10 @@ static void check_fmt_verb(Node *fmt, Node *arg, int verb) {
                    t->kind == TY_BOOL || t->kind == TY_COMPTIME_INT;
 
     if (verb == 's') {
-        if (t->kind != TY_SLICE)
+        /* 字符串字面量是 *[N]const u8：`{s}` 打印的是字节序列，不是地址 */
+        bool str_arr = t->kind == TY_PTR && t->has_len && t->elem &&
+                       t->elem->kind == TY_INT && t->elem->bits == 8;
+        if (t->kind != TY_SLICE && !str_arr)
             err_at(fmt->line, fmt->col, "format specifier `{s}` needs a slice, found `%s`", ty_str(t));
     } else if (verb == 'c') {
         if (!integer)
@@ -3262,8 +3352,21 @@ static Type *check_call(Node *n, Type *expect) {
         for (int i = 0; i < n->nitems; i++) check_expr(n->items[i], NULL);
         return type_of(n, ty_invalid());
     }
-    if (ct->kind != TY_FN)
+    if (ct->kind != TY_FN) {
+        /* 命名空间（std.debug / std.io …）被当函数调用：只说 "type" 用户
+         * 看不出该怎么写（2026-11-09 截图：std.debug("create failed.")）。
+         * 指向"调它的成员"这条路。类型名后跟括号（`Person(…)`）也是
+         * TY_TYPE，同样给这句，措辞对两者都成立。 */
+        if (ct->kind == TY_TYPE) {
+            const char *nm = (n->a && n->a->kind == NK_FIELD && n->a->name) ? n->a->name : "";
+            if (nm[0])
+                return BAD(n, "`%s` is a namespace or type, not a function; "
+                               "call one of its members (e.g. `%s.<fn>(...)`)", nm, nm);
+            return BAD(n, "this value is a namespace or type, not a function; "
+                           "call one of its members");
+        }
         return BAD(n, "called value has type `%s`, which is not a function", ty_str(ct));
+    }
 
     if (n->nitems != ct->nparams) {
         err_at(n->line, n->col, "function takes %d argument(s), %d given",
@@ -3645,13 +3748,23 @@ static Type *check_expr_raw(Node *n, Type *expect) {
         return type_of(n, ty_u8());
 
     case NK_STR:
-        return type_of(n, ty_slice(ty_u8(), true));
+        /* 字符串字面量是**定长数组指针** `*[N]const u8`（N 是字节数，
+         * 不含结尾 0），不是切片——长度挂在类型里，`.len` 是编译期常量，
+         * 也挡得住把字面量当可写缓冲区。传给 `[]const u8` 形参时按
+         * "*[N]T → []T" 的既有规则自动降级（can_coerce 已支持）。
+         * 用户 2026-11-09 定：字符串等于 zx 的数组 *[N]const u8。 */
+        return type_of(n, ty_ptr(ty_u8(), true, true, (uint64_t)n->str_len));
 
     case NK_BOOL:
         return type_of(n, ty_bool());
 
     case NK_NULL:
-        if (expect && expect->kind == TY_OPT) return type_of(n, expect);
+        /* 有落点就定型：`?T` 是原来的语义；`*T` / `*fn` 是 C 互操作——
+         * C 的 NULL 就是 0 指针，没必要逼人写 `(*T)(0)`。没有落点仍然
+         * 无类型（`let a = null;` 照旧报错），否则"null 是值"又活了。 */
+        if (expect && (expect->kind == TY_OPT || expect->kind == TY_PTR ||
+                       expect->kind == TY_FN || expect->kind == TY_ERROR))
+            return type_of(n, expect);
         return type_of(n, ty_null());
 
     case NK_UNDEF:
@@ -3671,6 +3784,18 @@ static Type *check_expr_raw(Node *n, Type *expect) {
             return BAD(n, "unknown identifier '%s'", n->name);
         }
         n->sym = s;
+        /* 块内先声明后使用（fn_local）：作用域预登记让前向引用在 sema 悄悄
+         * 解析到后面的声明，但后端按语句顺序发 C，到那边必然编不过，最后
+         * 被包装成 B1001「编译器 bug」。在这里给出人话。顶层 hoist 是有意
+         * 的（互递归），不受影响；懒模块声明（fn 里的 `const std = module(..)`）
+         * 靠使用点触发解析，也豁免。 */
+        if (s->fn_local && s->state == 0 && s->decl &&
+            !(s->decl->kind == NK_DECL && decl_is_lazy_module(s->decl))) {
+            diag_help("blocks are plain statement sequences: move the "
+                      "declaration of '%s' above this use", n->name);
+            return BAD_CODE("E0401", n, "'%s' is used before its declaration "
+                            "in this block", n->name);
+        }
         if (getenv("ZX_PROBE") && (!strcmp(n->name, "myidx") || !strcmp(n->name, "idx") || !strcmp(n->name, "dims3"))) fprintf(stderr, "[probe] USE %s sym=%p tracked=%d@%d:%d\n", n->name, (void*)s, (int)(s->locals_next != 0), n->line, n->col);
         s->used = true;      /* 求值路径就是"用到了"：读、写、取地址都算 */
         /* 正在构造的聚合类型：外壳已经挂上了，名字就能用（`Color.red` 写在
@@ -3703,7 +3828,7 @@ static Type *check_expr_raw(Node *n, Type *expect) {
             /* `null` 自己没有类型——它只是"给 ?T 填空"的那个字面量，不是 ?T。
              * 所以 `null.?` 不是"运行时空解包"，而是压根没东西可解。 */
             return BAD(n, "`.?` needs an optional or an error union, found `null` -- "
-                          "`null` only fills a `?T`, it is not one");
+                          "`null` only fills a `?T` or a `*T`, it is not one");
         if (t->kind != TY_OPT && t->kind != TY_ERR)
             return BAD(n, "`.?` needs an optional or an error union, found `%s`", ty_str(t));
         /* 编译期就知道是空的：`.?` 在这里必然 abort，和除零同一处置（§7.R10）——
@@ -3776,7 +3901,7 @@ static Type *check_expr_raw(Node *n, Type *expect) {
             /* 同 `null.?`：`null` 只在"有 ?T 落点"的位置成立。`null orelse x`
              * 没有落点，也就没有左值可看——直接报错，别退化成"右边恒为答案"。 */
             return BAD(n, "`orelse` needs an optional or an error union, found `null` -- "
-                          "`null` only fills a `?T`, it is not one");
+                          "`null` only fills a `?T` or a `*T`, it is not one");
         if (t->kind != TY_OPT && t->kind != TY_ERR)
             return BAD(n, "`orelse` needs an optional or an error union, found `%s`", ty_str(t));
         Type *elem = t->elem;
@@ -4075,6 +4200,7 @@ static void hoist(Scope *sc, Node *blk) {
                      * 模块是在**函数体里**懒性加载的（第一次用到 std 就在那时），
                      * g_fn_depth 那时已>0＜误把模块顶层声明当成局部。 */
                     if (!sc->is_module) local_track(s, id->line, id->col);
+                    s->fn_local = (!sc->is_module && g_fn_depth > 0);
                 }
             } else if (it->name) {
                 int kind = it->op == 2 ? SK_VAR : it->op == 1 ? SK_LET : SK_CONST;
@@ -4096,6 +4222,7 @@ static void hoist(Scope *sc, Node *blk) {
                 /* 模块是在函数体里懒加载的，g_fn_depth 已 > 0；
                 判文件作用域要看 sc->is_module，否则模块顶层的 extern var 会被误判成局部。 */
                 s->in_fn = (!sc->is_module && g_fn_depth > 0);
+                s->fn_local = s->in_fn;
                 it->sym = s;
                 if (!sc->is_module) local_track(s, it->line, it->col);
                 /* 泛型 lambda（`const L = fn (T: type) type { … }`）也要知道自己
@@ -4117,6 +4244,7 @@ static void hoist(Scope *sc, Node *blk) {
             /* extern fn 用**原名**当 C 名：它指向的是别人已经编好的符号，
              * 加模块前缀就链接不到了 */
             s->cname = it->is_extern ? it->name : mangle_name(it->name);
+            s->fn_local = (!sc->is_module && g_fn_depth > 0);
             it->sym = s;
         }
     }
@@ -4271,7 +4399,29 @@ static void ensure_raw(Symbol *s) {
         }
         /* var x = e; —— 无标注的字面量给默认宽度（R7） */
         if (!d->a && (t->kind == TY_COMPTIME_INT || t->kind == TY_COMPTIME_FLOAT)) {
-            t = scalar_default(t);
+            /* M19 补漏：无标注的 comptime_int 字面量默认 i32，装不下时以前
+             * 会静默截断（`const big = 9223372036854775807;` 变 -1）。现在
+             * 先放宽到 i64；还装不下就报 E0302，让用户写类型注解——绝不允许
+             * 静默截断。非纯字面量（lit_fits_expr 管不着的）维持默认宽度。 */
+            if (t->kind == TY_COMPTIME_INT && !lit_fits_expr(d->b, ty_i32())) {
+                if (lit_fits_expr(d->b, ty_int(64, true))) {
+                    t = ty_int(64, true);
+                } else {
+                    char digits[64];
+                    if (d->b->flag && d->b->str) lit_digits(d->b, digits, sizeof digits);
+                    else snprintf(digits, sizeof digits, "%llu", (unsigned long long)d->b->ival);
+                    err_at(d->line, d->col,
+                           "integer literal %s does not fit in `%s`; "
+                           "add a type annotation (`i64` / `i128` / `u64` ...)",
+                           digits, ty_str(ty_i32()));
+                    s->ty = ty_invalid();
+                    s->state = 2;
+                    d->ty = s->ty;
+                    return;
+                }
+            } else {
+                t = scalar_default(t);
+            }
             d->b->ty = t;
         }
         /* let / const 绑定数组字面量 → 只读视图（R9） */
@@ -4307,6 +4457,15 @@ static void ensure_raw(Symbol *s) {
             s->state = 2;
             return;
         }
+        /* 模块加载失败：错误已经在 module(...) 那行报过。绑定照旧算"命名
+         * 空间"（类型检查要继续走），但标成 broken —— 后面 `mod.x` 全部
+         * 静默退化成 invalid，不再刷一串 "module 'main' has no member"。 */
+        s->broken = true;
+        s->mod = NULL;
+        s->ty = ty_type();
+        s->type_val = ty_void();
+        s->state = 2;
+        return;
     }
 
     if (d->b) {
@@ -4538,9 +4697,26 @@ static Module *module_load_full(const char *full_in, int line, int col) {
     g_srcpath = m->path;
     /* 自举阶段 3：模块也走同一前端（默认 zxfe，--fe=c 时走 C 解析器）。
      * Zx 前端解析失败时诊断已由 zxfe 打到 stderr，这里补一条定位。 */
+    diag_first_error_reset();
+    fe_last_error_reset();
     m->root = fe_parse_file(m->path);
     if (!m->root) {
-        err_at(line, col, "module '%s' failed to parse", full);
+        /* 这条诊断属于导入方：位置是 module(...) 调用点，源码片段也得取
+         * 导入方那一行。之前 g_srcpath 还停在子模块上，于是行号是父文件的、
+         * 内容却是子模块的同号行——把人指到一句无关的注释上。
+         * 顺带把子模块的第一条错报出来，别让人只看到 failed to parse：
+         * 走 C 前端时错在 diag 里，走 Zx 前端时错在 zxfe 的 stderr 里。 */
+        int fl = 0, fc = 0;
+        char fcode[16] = "", fmsg[256] = "";
+        int have = diag_first_error(&fl, &fc, fcode, sizeof fcode, fmsg, sizeof fmsg)
+                || fe_last_error(&fl, &fc, fcode, sizeof fcode, fmsg, sizeof fmsg);
+        g_srcpath = save_p;
+        if (have && fmsg[0])
+            err_at(line, col, "module '%s' failed to parse: %d:%d: %s [%s]",
+                   full, fl, fc, fmsg, fcode);
+        else
+            err_at(line, col, "module '%s' failed to parse", full);
+        g_srcpath = m->path;
         return NULL;
     }
 
@@ -4737,6 +4913,16 @@ static Type *check_fn_body(Node *fn) {
 }
 
 static Type *check_block(Node *n) {
+    static int dbg_depth = 0;
+    static double dbg_t0 = 0;
+    if (getenv("ZX_TIMING2")) {
+        if (dbg_depth == 0) dbg_t0 = (double)clock() / CLOCKS_PER_SEC;
+        dbg_depth++;
+        if (dbg_depth < 6 || dbg_depth % 250 == 0) {
+            fprintf(stderr, "[blk] depth=%d t=%.3f s\n", dbg_depth,
+                    (double)clock() / CLOCKS_PER_SEC - dbg_t0);
+        }
+    }
     Scope sc;
     scope_push(&sc);
     Label *lb = n->label ? label_push(n->label, false) : NULL;
@@ -4751,6 +4937,7 @@ static Type *check_block(Node *n) {
     if (lb) t = lb->has ? lb->ty : ty_void();
     if (lb) label_pop();
     scope_pop(&sc);
+    if (getenv("ZX_TIMING2")) dbg_depth--;
     n->ty = t;
     return t;
 }
@@ -4865,9 +5052,19 @@ static void check_stmt(Node *n) {
         return;
     }
 
-    default:
-        check_expr(n, NULL);
+    default: {
+        Type *st = check_expr(n, NULL);
+        /* 语言规则「所有值都要被使用」：裸调用语句 `f();` 的非 void 返回值
+         * 不许默默丢掉，必须显式 `_ = f();`（M26 丢弃）。void 调用、赋值
+         * 语句不受影响；类型无效时上层已经报过错，别叠一条。 */
+        if (n->kind == NK_CALL && st && st->kind != TY_VOID &&
+            st->kind != TY_INVALID && st->kind != TY_NORETURN)
+            err_at(n->line, n->col,
+                   "return value of type `%s` is discarded; "
+                   "receive it with `_ = f(...)` or use the value",
+                   ty_str(st));
         return;
+    }
     }
 }
 
@@ -4902,6 +5099,22 @@ static bool ct_pure(Node *n) {
     for (int i = 0; i < n->nitems; i++)
         if (!ct_pure(n->items[i])) return false;
     return true;
+}
+
+/* 被剪掉的那一臂不做类型检查，但它里面的标识符仍然算"被用过"：
+ * `let v = if (DEBUG) x else y;` 里 x 只出现在死分支上，不标 used
+ * 就会假报"未使用"。只标 used，不动类型——剪枝的意义就是不去碰它。 */
+static void mark_uses(Node *n) {
+    if (!n) return;
+    if (n->kind == NK_IDENT && n->name) {
+        /* 死分支没检查过，节点上的 sym 还是空的——按名字现查一次。
+         * 只信 n->sym 的话这条标记等于没写（真实踩到：`let t = if (c) s else 0;`
+         * 假报 s 未使用）。 */
+        Symbol *s = n->sym ? n->sym : lookup(n->name);
+        if (s) s->used = true;
+    }
+    mark_uses(n->a); mark_uses(n->b); mark_uses(n->c); mark_uses(n->d);
+    for (int i = 0; i < n->nitems; i++) mark_uses(n->items[i]);
 }
 
 /* 臂的值是不是"就是捕获名本身"（M50 的糖）。语句臂会被解析器包成单语句块，
@@ -4970,6 +5183,13 @@ static Type *check_if(Node *n, Type *expect) {
      * 真实节点上留下最后一轮的值（jumps.zx：`a*b == 6` 在 yield 那轮
      * 被烙成 true），那种烙印不能当剪枝依据。 */
     n->flag = known;
+    /* KEEP：剪枝结果要存在节点上。后端取不到 n->a->ct（后续流程会清掉它），
+     * 只靠 ct 判就会"两条臂都生成"——而被剪掉那条根本没检查过，生成的 C
+     * 里引用的是未命名标识符（真实踩到的 B1001：`let m = if (a > b) a else b;`
+     * 生成 `m = a;`，而局部变量实际叫 `a_3_5`）。 */
+    if (known) n->ival = cv->bval ? 1 : 0;
+    if (known && !cv->bval && n->b) mark_uses(n->b);
+    if (known && cv->bval && n->c) mark_uses(n->c);
 
     Type *tt;
     {
@@ -5490,16 +5710,22 @@ static Type *check_switch(Node *n, Type *expect) {
         if (arm->name) {
             if (arm->flag)
                 err_at(arm->line, arm->col, "`else` arm has nothing to capture");
-            if (arm->nitems != 1)
+            /* 只有"单模式臂"才有得捕获。下面 switch_cap_ty 要读 items[0]：
+             * else 臂（nitems==0）与多模式臂都先在这里挡掉，否则会读到 NULL
+             * ——tests/bad/switch-cap-else.zx 曾因此段错误（模糊测试抓到的）。 */
+            else if (arm->nitems != 1)
                 err_at(arm->line, arm->col,
                        "a capture needs exactly one pattern; split the arm instead");
-            cap_ty = switch_cap_ty(arm->items[0], s);
-            if (!cap_ty || cap_ty->kind == TY_INVALID)
+            if (!arm->flag && arm->nitems == 1) {
+                cap_ty = switch_cap_ty(arm->items[0], s);
+            }
+            if (!arm->flag && arm->nitems == 1 &&
+                (!cap_ty || cap_ty->kind == TY_INVALID))
                 err_at(arm->line, arm->col,
                        "cannot capture in this arm (subject `%s`)", ty_str(s));
             /* `!void` / `?void` 的 `.ok` / `.some` 没有载荷可捕获——
              * 和 `if (x) v { … }` 同一条规则，否则后端会发 `void v = …`。 */
-            else if (cap_ty->kind == TY_VOID) {
+            else if (cap_ty && cap_ty->kind == TY_VOID) {
                 err_at(arm->line, arm->col,
                        "this arm has no payload to capture (`%s` carries no value) -- "
                        "drop the capture and match the pattern alone", ty_str(s));

@@ -46,7 +46,8 @@ if [ "${ZX_CHECKED:-0}" = "1" ]; then
     printf "== 构建编译器（Debug -O0，zig 的运行时检查开着）\n"
     $ZYG cc -std=c11 -O0 -g -o bin/zxc_checked.exe \
         src/zxc.c src/ty.c src/val.c src/lex.c src/parse.c src/sema.c \
-        src/backend.c src/main.c src/fe.c src/astload.c src/errors.c
+        src/backend.c src/main.c src/fe.c src/astload.c src/errors.c \
+        src/cbind.c src/csrc.c src/clib.c src/fetch.c
     ZXC=./bin/zxc_checked.exe
 fi
 # zxc 从自己的路径推 zig cc 的位置，给反斜杠路径它就不必靠 cwd
@@ -140,6 +141,14 @@ fi
 printf "\n== zxc include（C 头自动生成绑定）\n"
 cat > "$pdir/demo/vendor/cliadd.h" <<'CHDR'
 #define CLI_MAGIC 7
+/* 十六进制里的 a-f 是数字，不是 f 后缀：生成器以前把它们一并剥掉，
+ * `0xFFFF` 变成 `0x`（坏字面量，整个模块解析失败），`0x0002000F`
+ * 变成 `0x0002000`（能解析、但值错 15）。这两个形态各留一条。 */
+#define CLI_MASK 0xFFFF
+#define CLI_HALF 0xFF00
+#define CLI_ALL 0xffffffffu
+#define CLI_PI 3.14f
+#define CLI_NEG -1
 typedef struct Pt { int x; int y; } Pt;
 enum CliMode { CLI_A = 2, CLI_B };
 extern int cli_g;
@@ -149,6 +158,11 @@ CHDR
 if ( cd "$pdir/demo" && "$ZXCW" include cliadd > "$TPFX.cli.add" 2>&1 ) \
    && grep -q "pub fn cli_sum(a: i32, b: i32) i32;" "$pdir/demo/vendor/cliadd.zx" \
    && grep -q "pub const CLI_MAGIC: i32 = 7;" "$pdir/demo/vendor/cliadd.zx" \
+   && grep -qx "pub const CLI_MASK: i32 = 0xFFFF;" "$pdir/demo/vendor/cliadd.zx" \
+   && grep -qx "pub const CLI_HALF: i32 = 0xFF00;" "$pdir/demo/vendor/cliadd.zx" \
+   && grep -qx "pub const CLI_ALL: u32 = 0xffffffff;" "$pdir/demo/vendor/cliadd.zx" \
+   && grep -qx "pub const CLI_PI: f64 = 3.14;" "$pdir/demo/vendor/cliadd.zx" \
+   && grep -qx "pub const CLI_NEG: i32 = -1;" "$pdir/demo/vendor/cliadd.zx" \
    && grep -q "pub extern var cli_g: i32;" "$pdir/demo/vendor/cliadd.zx" \
    && ( cd "$pdir/demo" && "$ZXCW" check vendor/cliadd.zx > "$TPFX.cli.addcheck" 2>&1 ); then
     printf "  ok   zxc include 生成可检查的 C 绑定\n"
@@ -685,7 +699,7 @@ printf "\n== 实参个数不匹配不假报形参 unknown identifier\n"
 BP="$TPFX.arity"
 if mkdir -p "$BP/src" \
    && printf '{"name":"arity","version":"0.1.0","main":"src/main.zx","out":"arity"}\n' > "$BP/zx.json" \
-   && printf 'const push = fn (a: i32, b: i32) i32 {\n    return a + b;\n};\n\nconst quad = fn (x: f32, y: f32, w: f32, h: f32) void {\n    push();\n};\n\npub const main = fn () i32 {\n    quad(1.0, 2.0, 3.0, 4.0);\n    return 0;\n};\n' > "$BP/src/main.zx" \
+   && printf 'const push = fn (a: i32, b: i32) i32 {\n    return a + b;\n};\n\nconst quad = fn (x: f32, y: f32, w: f32, h: f32) void {\n    _ = push();\n};\n\npub const main = fn () i32 {\n    quad(1.0, 2.0, 3.0, 4.0);\n    return 0;\n};\n' > "$BP/src/main.zx" \
    && ( cd "$BP" && "$ZXCW" src/main.zx --check > "$TPFX.aritybad" 2>&1 || true ) \
    && grep -q "E0303" "$TPFX.aritybad" \
    && ! grep -q "unknown identifier 'a'" "$TPFX.aritybad" \
@@ -701,6 +715,27 @@ if printf 'const add = fn (a: i32, b: i32) i32 {\n    return a + b;\n};\n\npub c
     printf "  ok   实参个数正确时折叠不受影响\n"
 else
     printf "  FAIL 正常调用被误伤\n"; cat "$TPFX.arityok"; fail=1
+fi
+
+# 2.58 子模块解析失败：导入点那条诊断必须说出原因（子模块首条错的行列
+#     与消息），并且不再刷 "`mod` (module 'main') has no member"。用户
+#     2026-11-09 踩中：vendor/glfw.zx 里 `0xFFFF` 被生成成 `0x`，编辑器
+#     只显示 "module 'vendor/glfw.zx' failed to parse"，而它带的源码片段
+#     还是子模块第 2 行的注释——真凶（751 行的坏字面量）完全看不见。
+printf "\n== 子模块解析失败：导入点带上原因，不刷误导成员错误\n"
+BP="$TPFX.mfail"
+if mkdir -p "$BP/src" \
+   && printf '{"name":"mfail","version":"0.1.0","main":"src/main.zx","out":"mfail"}\n' > "$BP/zx.json" \
+   && printf 'pub const X: i32 = 0x;\n' > "$BP/src/util.zx" \
+   && printf 'const u = module("util");\n\npub const main = fn () i32 {\n    return u.nope();\n};\n' > "$BP/src/main.zx" \
+   && ( cd "$BP" && "$ZXCW" src/main.zx --check > "$TPFX.mfail1" 2>&1 || true ) \
+   && grep -q "src/main.zx:1:11: error\[E0601\]: module 'src/util.zx' failed to parse: 1:22: hex literal needs digits" "$TPFX.mfail1" \
+   && ! grep -q "has no member" "$TPFX.mfail1"; then
+    printf "  ok   导入点报出行列与原因，且无误导成员错误\n"
+else
+    printf "  FAIL 子模块解析失败的父诊断不完整\n"
+    cat "$TPFX.mfail1" 2>/dev/null
+    fail=1
 fi
 
 printf "\n== LSP 冒烟（tools/lsptest.py：补全/跳转 + vendor/ 与 deps）\n"
@@ -739,6 +774,23 @@ if [ -f "$ib.exe" ] || [ -f "$ib" ]; then
     else printf "  FAIL 重复编译又编了 %s 个单元\n" "$again"; fail=1; fi
 else
     printf "  FAIL 增量编译用例没编出二进制\n"; fail=1
+fi
+
+# 2.1 示例程序：demo/snake.zx 编得过，`--sim` 自检全过。
+#     snake 用到了 std.io 的句柄写、std.time 的单调钟、Win32 FFI 三样，
+#     外加"蛇身不重叠 / 食物不在身上 / 计分等于长度"四条不变式——它绿了，
+#     说明这几条链路在这个编译器上仍然通着。控制台画面没法在 CI 里截图，
+#     所以自检走 --sim 的 headless 分支。
+printf "\n== 示例程序（demo/snake.zx 编译 + --sim 自检）\n"
+SNK="$TPFX.snake.exe"
+if $ZXC demo/snake.zx -o "$SNK" > "$TPFX.snakebuild" 2>&1; then
+    if "$SNK" --sim > "$TPFX.snakesim" 2>&1 && grep -q '^sim ok:' "$TPFX.snakesim"; then
+        printf "  ok   %s\n" "$(cat "$TPFX.snakesim")"
+    else
+        printf "  FAIL snake --sim 自检没过\n"; cat "$TPFX.snakesim"; fail=1
+    fi
+else
+    printf "  FAIL demo/snake.zx 编译失败\n"; cat "$TPFX.snakebuild"; fail=1
 fi
 
 # 用例会在仓库根留下自己的临时文件：io_fmt.zx 写 io_fmt.tmp，stdfs.zx 建

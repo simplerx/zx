@@ -1,0 +1,13 @@
+// expect: is not a return type
+// expect-code: E0308
+// 光秃秃的 `error` 不能当返回类型：它只说"码"，没说这条返回路径能不能失败。
+// `fn () error { … }` 以前更糟——`{` 被当成错误集字面量开头，报成
+// "expected identifier, found 'return'"（E0201），完全看不出问题在哪。
+// 用户 2026-11-09 定：要么返回 `error.x`，要么 `error{xx}!void`，要么 `!void`。
+const f = fn () error {
+    return null;
+};
+
+pub const main = fn () i32 {
+    return 0;
+};

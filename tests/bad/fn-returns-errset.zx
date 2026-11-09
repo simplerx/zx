@@ -1,0 +1,17 @@
+// expect: is not a return type
+// expect-code: E0308
+// 光秃秃的错误集也不行：`error{a, b}` 只说"能出哪些码"，没说载荷是什么——
+// 完整写法是 `error{a, b}!void`（或任意 `E!T`）。
+const AnyErr = error;
+
+const g = fn () error{open, read} {
+    return error.open;
+};
+
+const h = fn () AnyErr {
+    return null;
+};
+
+pub const main = fn () i32 {
+    return 0;
+};

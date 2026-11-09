@@ -6,7 +6,16 @@
 
 | # | 改动 | 影响 |
 |---|---|---|
+| 64 | **字符串字面量的类型是 `*[N]const u8`**（定长数组指针，N 是字节数、不含结尾 0），不再是 `[]const u8`。长度挂在类型里：`.len` 是编译期常量、`.ptr` 给 `*const u8`；传给 `[]const u8` 形参按既有的 "`*[N]T` → `[]T`" 规则自动降级。不同长度的字面量统一（`switch` 各臂）取公共切片类型 | §5.1、§17.2 |
 | 63 | **switch 臂终结符 `,` → `;`**：每条臂以 `;` 结尾（含末臂）。逗号从此只作同臂模式并列（`'a', 'b', 'c': x;`），"逗号既分臂又并列"的双义消除——臂后忘写终结符的报错也从"`,` 或 `}`"变成一句明确的"expected ';' after switch arm"。同批：`(T)@builtin(...)` 直接可解析（can_follow_cast 认 `@`），不再要求外面包一层括号 | §8.4 |
+| 65 | **`error.null` 可以写**：`null` 在词法里是关键字（kw_null），`error.` 后面原来只收标识符，于是 `return error.null;` 报 E0202、整条返回语句哑掉。现在类型值的成员位置放行 `null`，它的码是保留码 **65535**（§5.2），`errName` / `printTrace` 回放显示 `null` 而不是 `?`。裸 `null` 的落点同时多了 `error`：`var e: error = null;`、`e == null`、传给 `error` 形参都定型成 65535，与 `error.null` 同一个值。`error{null}` 声明仍是 **E0508**（码是固定的，不参与顺序编号）。同批：光秃秃的 `error` / `error{a, b}` **不能当返回类型**（新增 **E0308**，要么 `error.x`、要么 `error{a, b}!void`、要么 `!void`），`fn () error { … }` 的 `{` 也不再来抢错误集的位置 | §5、§5.2 |
+
+第 64 条：字符串不是切片，是"指向定长字节数组的指针"——`"abc"` 的类型是
+`*[3]const u8`。好处是长度进类型（`.len` 编译期就有答案、C 互操作不用再猜），
+也不会有人拿字面量当可写缓冲区。凡是收 `[]const u8` 的地方（`println` 的
+`{s}`、`std.str.*`、自己写的函数）都不用改：数组指针自动降级成切片，反过来
+不行——切片要变成定长数组必须显式断言。
+
 
 ## v0.27 → v0.28 的改动
 
@@ -62,6 +71,7 @@
 
 | # | 改动 | 影响 |
 |---|---|---|
+| 59 | **`null` 也能填 `*T`**：落点是 `*T` / `*fn` 时 `null` 定型为那个指针类型、值 0（等价 C 的 `NULL`），不必再写 `(*T)(0)`；`p == null` 成立。它仍然不是值——没有落点照旧编译错误，`null.?` / `null orelse x` 不受影响 | §5.1、§17.2 |
 | 47 | **`null` 只填空、不当值**：`null` 没有自己的类型，只在有 `?T` 落点的位置成立。`null.?` / `null orelse x` 一律编译错误（原先它们"能跑"）；编译期已知为空的可选值再 `.?` 也报错（新增 **E0506**），与编译期除零对称 | §5、§5.1、§17.2 |
 
 ## v0.19 → v0.20 的改动
@@ -132,7 +142,7 @@ R10 的动机很简单：这些行为一旦发布就改不动了。趁现在只�
 
 | # | 改动 | 影响 |
 |---|---|---|
-| 33 | **`fields` 元表**：`@typeInfo(T).fields` 是编译期切片 `[]std.FieldInfo`（`FieldInfo = { name, ty }`，字段叫 `ty` 因为 `type` 是关键字），`inline for` 直接遍历；TypeInfo / FieldInfo 是**纯编译期类型**——声明成变量或参数直接报错。**`std.process`**：`args() [][]const u8`（不含 argv[0]）、`getEnv(name) ?[]const u8`、`setEnv(name, value) bool`、`exit(code) noreturn`。类型语法支持点路径（`std.HashMap` 直接写） | §13、§13.1、§14.1 |
+| 33 | **`fields` 元表**：`@typeInfo(T).fields` 是编译期切片 `[]std.FieldInfo`（`FieldInfo = { name, ty }`，字段叫 `ty` 因为 `type` 是关键字），`inline for` 直接遍历；TypeInfo / FieldInfo 是**纯编译期类型**——声明成变量或参数直接报错。**`std.process`**：`args() [][]const u8`（不含 argv[0]）、`getEnv(name) ?[]const u8`、`setEnv(name, value) bool`、`exit(code) noreturn`。类型语法支持点路径（`std.map.HashMap` 直接写） | §13、§13.1、§14.1 |
 
 ## v0.9 → v0.10 的改动
 
@@ -151,7 +161,7 @@ R10 的动机很简单：这些行为一旦发布就改不动了。趁现在只�
 | 26 | **捕获名后面只能是块或单值**：`if (u) v if (…) {…}` 直接报错，不再猜 | §8.1 |
 | 27 | **一个模块一份 `.o`**：类型/运行时/跨模块原型进共享头，改一个模块只重编它自己 | §16 |
 
-第 25 条是一次减法。上一版的 `import {a, b as c} from "…"` 单独造了一套语法，可它做的事和 `const` 完全一样——"把那个名字绑到本地"。既然是绑定，就让它长得像绑定：`const heap = std.heap;`。好处是这条路径对**函数、类型、命名空间、编译期常量**一视同仁，`std.HashMap` 这种"再导出一层"也不需要额外的语法。
+第 25 条是一次减法。上一版的 `import {a, b as c} from "…"` 单独造了一套语法，可它做的事和 `const` 完全一样——"把那个名字绑到本地"。既然是绑定，就让它长得像绑定：`const heap = std.heap;`。好处是这条路径对**函数、类型、命名空间、编译期常量**一视同仁，`std.map.HashMap` 这种"再导出一层"也不需要额外的语法。
 
 第 26 条是收紧：`if (u) v if (v > 0) { … }` 有两种都能通过的读法（第二个 `if` 是分支体 / 是兄弟语句），语义却完全不同。这种歧义不该留给读者去猜。
 
@@ -814,8 +824,12 @@ sizeof(!T) = align_up(sizeof(T) + 2, align(!T))
 | `!T` | `error`(u16) | `tag == 0` | 非 0 |
 
 - `null` 就是布尔 `false`；`(bool)null == false`。
-- `null` 是多态字面量：期望类型为 `?T` 时定型为该 `?T`。**它没有自己的类型**——
-  离开"有 `?T` 落点"的位置（初始化、赋值、实参、返回、字段）就是编译错误：
+- `null` 是多态字面量：期望类型为 `?T` 时定型为该 `?T`；期望类型为 `*T` / `*fn`
+  时定型为那个指针类型，**值就是 0**（等同 C 的 `NULL`，所以 `p == null`、
+  `if (p == null)` 都成立）；期望类型为 `error` 时定型为保留码 **65535**，
+  与 `error.null` 是同一个值（`var e: error = null;`、`e == null` 都成立）。
+  **它没有自己的类型**——离开"有落点"的位置
+  （初始化、赋值、实参、字段、比较的另一侧）就是编译错误：
   `let a = null;`、`null.?`、`null orelse x` 全错（§5.1）。
 - `?T` / `!T` **不嵌套**：`??T`、`?!T`、`!?T` 都是编译错误（E0305）。
   "可能没有"和"可能出错"要同时表达时，**空值当错误**（见下）：让 `?T`
@@ -828,6 +842,10 @@ sizeof(!T) = align_up(sizeof(T) + 2, align(!T))
   ```
   error.null ≡ 65535          // u16 最大值；命名错误码不许占用
   ```
+
+  `error.null` 就是个可写的错误值（`return error.null;`、`e == error.null`），
+  不是"仅供内部使用"的伪码；但它有固定码，不能出现在 `error{…}` 字面量里
+  （E0508）。
 
   这样"函数没找到返回 `?T`、调用方用 `try` 接"与错误传播是同一条路：
   `null` 沿 `try` 一路上行，最后从 `main` 变成退出码（Windows 原样
@@ -976,6 +994,14 @@ error{a, b}    // 集合字面量；也可以起名：const IoError = error{open
   `orelse`、`if` 捕获都按后者一视同仁；差别只在**能不能通过检查**。
 - **集合协变**：`{open} ⊆ {open, read}`，所以窄集合的值可以交给宽集合。
   反过来不行——放宽承诺必须显式改返回类型。
+- **返回类型只有三种完整写法**：`error.x` 之类靠 `!T` / `E!T` 带出来，
+  `E!T`（含 `error{a, b}!void`），或 `!void`。光秃秃的 `error` 与光秃秃的
+  `error{a, b}` 都不是返回类型（**E0308**）——它们只说了码，没说这条返回
+  路径能不能失败、载荷是什么。`error` 作**值的类型**仍然合法
+  （`var e: error = error.open;`、`error.null`）。
+  顺带：`fn () error { … }` 的 `{` 曾按错误集字面量 `error{…}` 解析，报成
+  `expected identifier, found 'return'`；现在花括号按两 token 前瞻判形态
+  （后面跟错误名才是集合，否则是函数体）。
 
 三处检查：
 
@@ -985,9 +1011,16 @@ error{a, b}    // 集合字面量；也可以起名：const IoError = error{open
 | `try e`（`e: E!T`） | E ⊆ 当前函数声明的集合 | **E0902** |
 | `try e`（`e: !T` 或 `?T`） | anyerror 抛进声明了集合的函数 | **E0903** |
 
-`?T` 的 `try` 抛保留码 `error.null`（65535），而 `error{null}` 写不出来
-（`null` 是关键字、65535 保留）——所以**带集合的函数不能 `try` 可选值**。
-要"没有"当错误用 anyerror（`!T`），要么就地 `if` / `orelse` 处理掉。
+`?T` 的 `try` 抛保留码 `error.null`（65535）。`null` 的码是**固定值**
+而不是编号分配的，所以它进不了集合字面量：`error{null}` 是编译错误
+（**E0508**，`null` 是保留码 65535）——于是**带集合的函数不能 `try`
+可选值**。要"没有"当错误用 anyerror（`!T`），要么就地 `if` / `orelse`
+处理掉。
+
+`error.null` 作为**值**是合法表达式，不受上面那条限制：`return error.null;`
+可以写、`e == error.null` 可以比、`std.debug.errName(error.null)` 得到
+`"null"`（不是 `"?"`，也不是一个编号分配出来的新码）。它和 `?T` 被 `try`
+时抛的是同一个码——这正是"空值当错误"能一路走到底的原因。
 
 ```zx
 const IoError = error{ open, read, write };
@@ -2089,7 +2122,7 @@ if (raw) p {
 | `std.str.parseInt` | `?i64` | 十进制，容忍首尾空白与 `+`/`-` |
 | `std.str.concat(alloc, a, b)` | `?[]u8` | 拼两段，末尾补 0 |
 | `std.str.split(alloc, s, sep)` | `?[][]const u8` | 切开，各段指向原串；`freeSplit(alloc, parts)` 释放 |
-| `std.HashMap(V)` | 泛型类型 | 字符串键 → `V`：`init/deinit/put/get/getPtr/contains/count/capacity/keyAt/valueAt/clear` |
+| `std.map.HashMap(V)` | 泛型类型 | 字符串键 → `V`：`init/deinit/put/get/getPtr/contains/count/capacity/keyAt/valueAt/clear` |
 | `std.map.fnv1a(s)` | `u64` | 表用的哈希函数，也可以自己拿去用 |
 | `std.io.openRead/openWrite/openAppend(path)` | `?usize` | 拿到句柄；失败是 `null` |
 | `std.io.read(h, buf)` / `write(h, data)` | `usize` | 读/写**一次**，返回实际字节数（0 = 到头或出错） |

@@ -3039,14 +3039,20 @@ int main(int argc, char **argv) {
         return 0;
     }
 
+    double t_fe0 = prog_clock();
     Node *root = fe_parse_file(file);
+    if (getenv("ZX_TIMING"))
+        fprintf(stderr, "[timing] frontend %.3f s\n", prog_clock() - t_fe0);
     if (!root || g_error_count) return 1;
 
     if (dump_ast) {
         ast_dump(root, 0);
     } else {
         if (check && g_error_count == 0) {
+            double t_s0 = prog_clock();
             sema_check(root);
+            if (getenv("ZX_TIMING"))
+                fprintf(stderr, "[timing] sema %.3f s\n", prog_clock() - t_s0);
             /* 只查不编（没 -o）不打进度：那是诊断场景，输出越干净越好 */
             if (out && g_error_count == 0)
                 prog("checked ok (%.2f s)", prog_clock() - g_prog_t0);

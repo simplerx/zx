@@ -50,7 +50,7 @@ const main = fn () u8 {
         let serial_ns = std.time.nsBetween(t0, t1);
 
         // ④ 并发：pool(4)，4 个任务各读 8 次
-        let pl = std.Task.pool(4);
+        let pl = std.task.Task.pool(4);
         var hs: *[4]usize = &.{ 0, 0, 0, 0 };
         var k: usize = 0;
         while (k < 4) {
@@ -77,7 +77,7 @@ const main = fn () u8 {
         }
 
         pl.close();
-        std.fs.removeFile(std.heap.page, PATH);
+        _ = std.fs.removeFile(std.heap.page, PATH);
         std.println("fsbatch ok serial={}ms parallel={}ms (4x8 reads each)", serial_ns / 1000000, par_ns / 1000000);
         return 0;
     } else { return 4; }

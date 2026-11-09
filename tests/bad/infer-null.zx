@@ -1,0 +1,8 @@
+// `null` 放宽到 `*T` 之后，仍然"没有落点就没有类型"。
+// expect: cannot infer the type
+// expect-code: E0301
+// expect-count: 1
+const main = fn () i32 {
+    var x = null;
+    return 0;
+};

@@ -249,8 +249,14 @@ pub const Lexer = struct {
     errs: std.ArrayList(LexErr),
 
     const init = fn (al: std.Allocator, src: []const u8) Lexer {
+        // UTF-8 BOM（EF BB BF）：Windows 编辑器常偷偷加上。跳过它，
+        // 否则首字符按"非 ASCII 标识符"报 E0102（用户压力测试抓到的）。
+        var bom: usize = 0;
+        if (src.len >= 3) {
+            if (src[0] == 0xEF && src[1] == 0xBB && src[2] == 0xBF) { bom = 3; }
+        }
         return Lexer{
-            .src = src, .p = 0, .line = 1, .col = 1,
+            .src = src, .p = bom, .line = 1, .col = 1,
             .toks = std.ArrayList(Tok).init(al),
             .strbuf = std.ArrayList(u8).init(al),
             .al = al,
@@ -372,26 +378,26 @@ pub const Lexer = struct {
         while (more) {
             let c = self.peek();
             if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
-                self.adv();
+                _ = self.adv();
             } else if (c == '/' && self.peek2() == '/') {
                 var go = self.peek() != 0 && self.peek() != '\n';
                 while (go) {
-                    self.adv();
+                    _ = self.adv();
                     go = self.peek() != 0 && self.peek() != '\n';
                 }
             } else if (c == '/' && self.peek2() == '*') {
-                self.adv();
-                self.adv();
+                _ = self.adv();
+                _ = self.adv();
                 var closed = false;
                 var scanning = true;
                 while (scanning && self.p < self.src.len) {
                     if (self.peek() == '*' && self.peek2() == '/') {
-                        self.adv();
-                        self.adv();
+                        _ = self.adv();
+                        _ = self.adv();
                         closed = true;
                         scanning = false;
                     } else {
-                        self.adv();
+                        _ = self.adv();
                     }
                 }
                 if (!closed) { self.fail("E0101", "unterminated block comment (`/*` without `*/`)"); }
@@ -433,7 +439,7 @@ pub const Lexer = struct {
                 self.fail("E0102", "`\\u` takes braces: write `\\u{4F60}`");
                 return -1;
             }
-            self.adv();                       // '{'
+            _ = self.adv();                       // '{'
             var cp: u32 = 0;
             var nd: i32 = 0;
             while (is_hex(self.peek()) && nd < 6) {
@@ -443,7 +449,7 @@ pub const Lexer = struct {
             }
             if (nd == 0) { self.fail("E0102", "`\\u{...}` needs at least one hex digit"); return -1; }
             if (self.peek() != '}') { self.fail("E0102", "`\\u{...}` is missing its closing `}`"); return -1; }
-            self.adv();                       // '}'
+            _ = self.adv();                       // '}'
             return self.utf8_encode(cp);
         }
         self.fail("E0102", "unknown escape sequence");
@@ -482,7 +488,7 @@ pub const Lexer = struct {
     // ---- 字符串 ----
 
     const lex_string = fn (self: *Lexer, start: usize) void {
-        self.adv();                       // 开引号
+        _ = self.adv();                       // 开引号
         let off = self.strbuf.len;
         var closed = false;
         var bad = false;
@@ -491,10 +497,10 @@ pub const Lexer = struct {
             if (c == 0 || c == '\n') {
                 bad = true;               // unterminated string（C 不吃掉换行，直接 break）
             } else if (c == '"') {
-                self.adv();
+                _ = self.adv();
                 closed = true;
             } else if (c == '\\') {
-                self.adv();
+                _ = self.adv();
                 _ = self.decode_escape();
                 // n < 0：错误已计数，C 侧同样不追加任何字节
             } else {
@@ -533,7 +539,7 @@ pub const Lexer = struct {
     };
 
     const lex_char = fn (self: *Lexer, start: usize) void {
-        self.adv();                       // 开引号
+        _ = self.adv();                       // 开引号
         let off = self.strbuf.len;
         let c = self.peek();
         if (c == '\'' || c == 0 || c == '\n') {
@@ -542,12 +548,12 @@ pub const Lexer = struct {
             } else {
                 self.fail("E0102", "empty char literal");
             }
-            if (c == '\'') { self.adv(); }
+            if (c == '\'') { _ = self.adv(); }
             self.emit_text(Kind.char, start, off);
             return;
         }
         if (c == '\\') {
-            self.adv();
+            _ = self.adv();
             let n = self.decode_escape();
             if (n < 0) {
                 // C 侧：n=1 且填 '?'，解码结果同样进 strbuf
@@ -568,11 +574,11 @@ pub const Lexer = struct {
             self.fail("E0102", "a char literal holds exactly one value");
             var go = self.peek() != 0 && self.peek() != '\'' && self.peek() != '\n';
             while (go) {
-                self.adv();
+                _ = self.adv();
                 go = self.peek() != 0 && self.peek() != '\'' && self.peek() != '\n';
             }
         } else {
-            self.adv();
+            _ = self.adv();
         }
         self.emit_char(Kind.char, start, off);
     };
@@ -585,18 +591,18 @@ pub const Lexer = struct {
 
         if (self.peek() == '0' && (self.peek2() == 'x' || self.peek2() == 'X')) {
             base = 16;
-            self.adv();
-            self.adv();
+            _ = self.adv();
+            _ = self.adv();
             if (!is_hex(self.peek())) { self.fail("E0102", "hex literal needs digits after `0x`"); }
         } else if (self.peek() == '0' && (self.peek2() == 'b' || self.peek2() == 'B')) {
             base = 2;
-            self.adv();
-            self.adv();
+            _ = self.adv();
+            _ = self.adv();
             if (self.peek() != '0' && self.peek() != '1') { self.fail("E0102", "binary literal needs digits after `0b`"); }
         } else if (self.peek() == '0' && (self.peek2() == 'o' || self.peek2() == 'O')) {
             base = 8;
-            self.adv();
-            self.adv();
+            _ = self.adv();
+            _ = self.adv();
             if (self.peek() < '0' || self.peek() > '7') { self.fail("E0102", "octal literal needs digits after `0o`"); }
         }
 
@@ -620,7 +626,7 @@ pub const Lexer = struct {
                 self.fail("E0102", "invalid digit in binary/octal/hex literal");
                 // 一口气吃掉剩下的标识字符：不然后缀扫描又把 12 当后缀，
                 // 多报一条"unknown suffix"——第一条已经说清了。
-                while (is_ident_char(self.peek())) { self.adv(); }
+                while (is_ident_char(self.peek())) { _ = self.adv(); }
             }
         } else {
             while (is_digit(self.peek()) || self.peek() == '_') {
@@ -636,16 +642,16 @@ pub const Lexer = struct {
             // 浮点：'.' 后必须跟数字（t.0.0 规则）
             if (self.peek() == '.' && is_digit(self.peek2())) {
                 is_float = true;
-                self.adv();
-                while (is_digit(self.peek()) || self.peek() == '_') { self.adv(); }
+                _ = self.adv();
+                while (is_digit(self.peek()) || self.peek() == '_') { _ = self.adv(); }
                 if (self.peek() == 'e' || self.peek() == 'E') {
                     let save = self.p;
                     let sline = self.line;
                     let scol = self.col;
-                    self.adv();
-                    if (self.peek() == '+' || self.peek() == '-') { self.adv(); }
+                    _ = self.adv();
+                    if (self.peek() == '+' || self.peek() == '-') { _ = self.adv(); }
                     if (is_digit(self.peek())) {
-                        while (is_digit(self.peek())) { self.adv(); }
+                        while (is_digit(self.peek())) { _ = self.adv(); }
                     } else {
                         // 回退（连列号一起）：'e' 留给后缀扫描去报"未知后缀"
                         self.p = save;
@@ -661,11 +667,11 @@ pub const Lexer = struct {
                 let save = self.p;
                 let sline = self.line;
                 let scol = self.col;
-                self.adv();
-                if (self.peek() == '+' || self.peek() == '-') { self.adv(); }
+                _ = self.adv();
+                if (self.peek() == '+' || self.peek() == '-') { _ = self.adv(); }
                 if (is_digit(self.peek())) {
                     is_float = true;
-                    while (is_digit(self.peek())) { self.adv(); }
+                    while (is_digit(self.peek())) { _ = self.adv(); }
                 } else {
                     self.p = save;
                     self.line = sline;
@@ -684,7 +690,7 @@ pub const Lexer = struct {
 
         // 后缀
         let suf_start = self.p;
-        while (is_ident_char(self.peek())) { self.adv(); }
+        while (is_ident_char(self.peek())) { _ = self.adv(); }
         let slen = self.p - suf_start;
         if (slen == 0) { return; }
         let suf = self.src[suf_start..self.p];
@@ -720,73 +726,73 @@ pub const Lexer = struct {
             ':' : { self.emit(Kind.colon, start); };
 
             '.' : {
-                if (self.peek() == '{') { self.adv(); self.emit(Kind.dot_brace, start); }
-                else if (self.peek() == '.') { self.adv(); self.emit(Kind.dotdot, start); }
+                if (self.peek() == '{') { _ = self.adv(); self.emit(Kind.dot_brace, start); }
+                else if (self.peek() == '.') { _ = self.adv(); self.emit(Kind.dotdot, start); }
                 else { self.emit(Kind.dot, start); }
             };
 
             '+' : {
-                if (self.peek() == '=') { self.adv(); self.emit(Kind.pluseq, start); }
+                if (self.peek() == '=') { _ = self.adv(); self.emit(Kind.pluseq, start); }
                 else { self.emit(Kind.plus, start); }
             };
             '-' : {
-                if (self.peek() == '=') { self.adv(); self.emit(Kind.minuseq, start); }
-                else if (self.peek() == '>') { self.adv(); self.emit(Kind.arrow, start); }
+                if (self.peek() == '=') { _ = self.adv(); self.emit(Kind.minuseq, start); }
+                else if (self.peek() == '>') { _ = self.adv(); self.emit(Kind.arrow, start); }
                 else { self.emit(Kind.minus, start); }
             };
             '*' : {
-                if (self.peek() == '=') { self.adv(); self.emit(Kind.stareq, start); }
+                if (self.peek() == '=') { _ = self.adv(); self.emit(Kind.stareq, start); }
                 else { self.emit(Kind.star, start); }
             };
             '/' : {
-                if (self.peek() == '=') { self.adv(); self.emit(Kind.slasheq, start); }
+                if (self.peek() == '=') { _ = self.adv(); self.emit(Kind.slasheq, start); }
                 else { self.emit(Kind.slash, start); }
             };
             '%' : {
-                if (self.peek() == '=') { self.adv(); self.emit(Kind.perceq, start); }
+                if (self.peek() == '=') { _ = self.adv(); self.emit(Kind.perceq, start); }
                 else { self.emit(Kind.percent, start); }
             };
             '^' : {
-                if (self.peek() == '=') { self.adv(); self.emit(Kind.careteq, start); }
+                if (self.peek() == '=') { _ = self.adv(); self.emit(Kind.careteq, start); }
                 else { self.emit(Kind.caret, start); }
             };
 
             '&' : {
-                if (self.peek() == '=') { self.adv(); self.emit(Kind.ampeq, start); }
-                else if (self.peek() == '&') { self.adv(); self.emit(Kind.andand, start); }
+                if (self.peek() == '=') { _ = self.adv(); self.emit(Kind.ampeq, start); }
+                else if (self.peek() == '&') { _ = self.adv(); self.emit(Kind.andand, start); }
                 else { self.emit(Kind.amp, start); }
             };
             '|' : {
-                if (self.peek() == '=') { self.adv(); self.emit(Kind.pipeeq, start); }
-                else if (self.peek() == '|') { self.adv(); self.emit(Kind.oror, start); }
+                if (self.peek() == '=') { _ = self.adv(); self.emit(Kind.pipeeq, start); }
+                else if (self.peek() == '|') { _ = self.adv(); self.emit(Kind.oror, start); }
                 else { self.emit(Kind.pipe, start); }
             };
 
             '=' : {
-                if (self.peek() == '=') { self.adv(); self.emit(Kind.eq, start); }
+                if (self.peek() == '=') { _ = self.adv(); self.emit(Kind.eq, start); }
                 else { self.emit(Kind.assign, start); }
             };
             '!' : {
-                if (self.peek() == '=') { self.adv(); self.emit(Kind.ne, start); }
+                if (self.peek() == '=') { _ = self.adv(); self.emit(Kind.ne, start); }
                 else { self.emit(Kind.bang, start); }
             };
 
             '<' : {
                 if (self.peek() == '<') {
-                    self.adv();
-                    if (self.peek() == '=') { self.adv(); self.emit(Kind.shleq, start); }
+                    _ = self.adv();
+                    if (self.peek() == '=') { _ = self.adv(); self.emit(Kind.shleq, start); }
                     else { self.emit(Kind.shl, start); }
                 }
-                else if (self.peek() == '=') { self.adv(); self.emit(Kind.le, start); }
+                else if (self.peek() == '=') { _ = self.adv(); self.emit(Kind.le, start); }
                 else { self.emit(Kind.lt, start); }
             };
             '>' : {
                 if (self.peek() == '>') {
-                    self.adv();
-                    if (self.peek() == '=') { self.adv(); self.emit(Kind.shreq, start); }
+                    _ = self.adv();
+                    if (self.peek() == '=') { _ = self.adv(); self.emit(Kind.shreq, start); }
                     else { self.emit(Kind.shr, start); }
                 }
-                else if (self.peek() == '=') { self.adv(); self.emit(Kind.ge, start); }
+                else if (self.peek() == '=') { _ = self.adv(); self.emit(Kind.ge, start); }
                 else { self.emit(Kind.gt, start); }
             };
 
@@ -796,7 +802,7 @@ pub const Lexer = struct {
                     self.col = self.col - 1;
                     self.lex_number(start);
                 } else if (is_ident_start(c)) {
-                    while (is_ident_char(self.peek())) { self.adv(); }
+                    while (is_ident_char(self.peek())) { _ = self.adv(); }
                     let text = self.src[start..self.p];
                     var k = keyword(text);
                     if (k) kk {
@@ -820,7 +826,7 @@ pub const Lexer = struct {
                         // 不是每个字节各报一条（`中文` 曾经报 4 条）。
                         var cont = (self.peek() & 0xC0) == 0x80;
                         while (cont) {
-                            self.adv();
+                            _ = self.adv();
                             cont = (self.peek() & 0xC0) == 0x80;
                         }
                         self.fail("E0102", "identifiers are ASCII only; non-ASCII characters cannot appear in names");

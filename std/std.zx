@@ -9,15 +9,14 @@
 // 字符串工具（str.zx）。`std.str.eq(a, b)`、`std.str.split(alloc, s, ",")` 之类。
 pub const str = module("str.zx");
 
-// 哈希表（map.zx）。`std.HashMap(i32)` 就是"字符串键 → i32"的表；
-// 下面这行是普通的名字别名，不是特殊的导出语法。
+// 哈希表（map.zx）。`std.map.HashMap(i32)` 就是"字符串键 → i32"的表。
+// 不设 `pub const HashMap = map.HashMap` 这类别名——用户要求：别名和真身
+// 分不清，类型只走一条真实路径。下面 pool/arena/task 同此约定。
 pub const map = module("map.zx");
-pub const HashMap = map.HashMap;
 
-// 内存池（pool.zx）。`var p = std.Pool.init(std.heap.page)` 之后
+// 内存池（pool.zx）。`var p = std.pool.Pool.init(std.heap.page)` 之后
 // `p.alloc(n)` / `p.free(ptr)` / `p.create(T)`；重复释放会被拦下。
 pub const pool = module("pool.zx");
-pub const Pool = pool.Pool;
 
 // 文件系统（fs.zx）。路径操作零分配；DirIter 流式遍历；stat/exists 元数据。
 pub const fs = module("fs.zx");
@@ -25,20 +24,18 @@ pub const fs = module("fs.zx");
 // JSON（json.zx）。零拷贝解析、最短 round-trip 序列化，arena 友好。
 pub const json = module("json.zx");
 
-// Arena（arena.zx）。一次性批量分配：`std.ArenaAllocator.init(std.heap.page)`
+// Arena（arena.zx）。一次性批量分配：`std.arena.ArenaAllocator.init(std.heap.page)`
 // 造出 Allocator 喂给 json.parse / ArrayList / 任何吃 Allocator 的东西，
 // deinit 一次全释放。ctx 机制下 arena 是有状态分配器的标准实现。
 pub const arena = module("arena.zx");
-pub const ArenaAllocator = arena.ArenaAllocator;
 
 // 时间（time.zx）。QPC 单调钟（nsBetween 测耗时）、墙钟、ISO 8601 格式化。
 pub const time = module("time.zx");
 
 // 任务（task.zx）。唯一的并发抽象：Task 实例物理隔离，各管一组线程与任务，
-// 通信（send/recv）也挂在实例上。`Task.coro/single/pool` 建实例，
+// 通信（send/recv）也挂在实例上。`std.task.Task.coro/single/pool` 建实例，
 // `t.spawn/await/awaitAll/close` 是实例方法。
 pub const task = module("task.zx");
-pub const Task = task.Task;
 
 // 可增长数组。`T` 是元素类型；容量不够时按倍数向分配器要内存、搬过去、释放旧的。
 pub const ArrayList = fn (T: type) type {
@@ -396,7 +393,7 @@ pub const BufWriter = struct {
     };
 
     const deinit = fn (self: *Self) void {
-        if (self.len > 0) { self.flush(); }
+        if (self.len > 0) { _ = self.flush(); }
         if (self.owned) { io.close(self.h); }
         self.alloc.free(self.alloc.ctx, self.buf, self.cap);
         self.buf = undefined;

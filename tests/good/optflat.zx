@@ -39,7 +39,7 @@ const main = fn () u8 {
     }
 
     std.println("sum={}", list_sum(&a));
-    try_thing();
+    _ = try_thing();
     return 0;
 };
 

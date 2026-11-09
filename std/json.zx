@@ -15,7 +15,7 @@
 //     （探测先比哈希，热点路径不碰字符串；扩容重排不重算哈希）——
 //     与 std.map 同一结构，但专为 Value 定制，少一层泛型间接；
 //   - **arena 友好**：解析器从头到尾只向分配器要，从不还——
-//     配 std.Pool / 自定义 arena，整棵 JSON 树一次 bump 掉。
+//     配 std.pool.Pool / 自定义 arena，整棵 JSON 树一次 bump 掉。
 //
 // 语义钉子（严格 RFC 8259）：
 //   - 重复键后者覆盖；前导零拒绝（"01" 不是数）；裸控制字符拒绝；
@@ -254,7 +254,7 @@ const Parser = struct {
         while (self.pos < self.src.len) {
             let c = self.src[self.pos];
             if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
-                self.adv();
+                _ = self.adv();
             } else {
                 return;
             }
@@ -263,7 +263,7 @@ const Parser = struct {
 
     const expect = fn (self: *Self, c: u8) bool {
         if (self.peek() == c) {
-            self.adv();
+            _ = self.adv();
             return true;
         }
         return false;
@@ -297,7 +297,7 @@ const Parser = struct {
                 let e = self.fail(ParseErr.syntax);
                 return (error)e;
             }
-            self.adv();
+            _ = self.adv();
             i = i + 1;
         }
         return v;
@@ -306,7 +306,7 @@ const Parser = struct {
     // ---- 数组 ----
 
     const arrValue = fn (self: *Self, d: u32) !Value {
-        self.adv();                                  // 吃 '['
+        _ = self.adv();                                  // 吃 '['
         let raw = self.alloc.alloc(self.alloc.ctx, @sizeOf(Arr));
         if (raw) rb {
             let a = (*Arr)rb;
@@ -317,7 +317,7 @@ const Parser = struct {
 
             self.skipWs();
             if (self.peek() == ']') {
-                self.adv();
+                _ = self.adv();
                 return Value{ .arr = a };
             }
             while (true) {
@@ -345,7 +345,7 @@ const Parser = struct {
     // ---- 对象 ----
 
     const objValue = fn (self: *Self, d: u32) !Value {
-        self.adv();                                  // 吃 '{'
+        _ = self.adv();                                  // 吃 '{'
         let raw = self.alloc.alloc(self.alloc.ctx, @sizeOf(Obj));
         if (raw) rb {
             let o = (*Obj)rb;
@@ -358,7 +358,7 @@ const Parser = struct {
 
             self.skipWs();
             if (self.peek() == '}') {
-                self.adv();
+                _ = self.adv();
                 return Value{ .obj = o };
             }
             while (true) {
@@ -395,7 +395,7 @@ const Parser = struct {
 
     // 调用点保证 peek() == '"'。
     const stringValue = fn (self: *Self) !Value {
-        self.adv();                                  // 吃 '"'
+        _ = self.adv();                                  // 吃 '"'
         let start = self.pos;
 
         // 第一遍：找结束引号，算解码后精确长度。
@@ -470,7 +470,7 @@ const Parser = struct {
         if (!sawEsc) {
             // 快路径：切片指向源缓冲，零复制
             var j = start;
-            while (j <= endI) { self.adv(); j = j + 1; }   // 含结束引号
+            while (j <= endI) { _ = self.adv(); j = j + 1; }   // 含结束引号
             return Value{ .str = self.src[start..endI] };
         }
 
@@ -514,7 +514,7 @@ const Parser = struct {
                 }
             }
             var j2 = start;
-            while (j2 <= endI) { self.adv(); j2 = j2 + 1; }  // 推进含引号
+            while (j2 <= endI) { _ = self.adv(); j2 = j2 + 1; }  // 推进含引号
             return Value{ .str = dst };
         }
         self.pos = endI;
@@ -552,7 +552,7 @@ const Parser = struct {
         let start = self.pos;
         var isInt = true;
 
-        if (self.peek() == '-') { self.adv(); }
+        if (self.peek() == '-') { _ = self.adv(); }
         // 整数部分：至少一位；前导零拒绝（"01"）
         let c0 = self.peek();
         if (!(c0 >= '0' && c0 <= '9')) {
@@ -560,37 +560,37 @@ const Parser = struct {
             return (error)e;
         }
         if (c0 == '0') {
-            self.adv();
+            _ = self.adv();
             let n = self.peek();
             if (n >= '0' && n <= '9') {
                 let e = self.fail(ParseErr.syntax);
                 return (error)e;
             }
         } else {
-            while (self.peek() >= '0' && self.peek() <= '9') { self.adv(); }
+            while (self.peek() >= '0' && self.peek() <= '9') { _ = self.adv(); }
         }
         // 小数 / 指数 → 浮点路径
         let pc = self.peek();
         if (pc == '.' || pc == 'e' || pc == 'E') {
             isInt = false;
             if (pc == '.') {
-                self.adv();
+                _ = self.adv();
                 if (!(self.peek() >= '0' && self.peek() <= '9')) {
                     let e = self.fail(ParseErr.syntax);
                     return (error)e;
                 }
-                while (self.peek() >= '0' && self.peek() <= '9') { self.adv(); }
+                while (self.peek() >= '0' && self.peek() <= '9') { _ = self.adv(); }
             }
             let ec = self.peek();
             if (ec == 'e' || ec == 'E') {
-                self.adv();
+                _ = self.adv();
                 let sc = self.peek();
-                if (sc == '+' || sc == '-') { self.adv(); }
+                if (sc == '+' || sc == '-') { _ = self.adv(); }
                 if (!(self.peek() >= '0' && self.peek() <= '9')) {
                     let e = self.fail(ParseErr.syntax);
                     return (error)e;
                 }
-                while (self.peek() >= '0' && self.peek() <= '9') { self.adv(); }
+                while (self.peek() >= '0' && self.peek() <= '9') { _ = self.adv(); }
             }
         }
         let tok = self.src[start..self.pos];

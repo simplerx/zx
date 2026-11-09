@@ -24,7 +24,7 @@ const bench_push = fn (seed: u64) u64 {
     defer al.deinit();
     var i: usize = 0;
     while (i < N) {
-        al.push((i32)i);
+        _ = al.push((i32)i);
         i = i + 1;
     }
     let xs = al.items();
@@ -71,7 +71,7 @@ const bench_insert = fn (seed: u64) u64 {
     // 先铺 1 万个底，再往中点插 2 万个
     var i: usize = 0;
     while (i < M / 2) {
-        al.push((i32)i);
+        _ = al.push((i32)i);
         i = i + 1;
     }
     i = 0;
@@ -116,7 +116,7 @@ const key_store = fn (n: usize) *u8 {
 
 const bench_map_put = fn (seed: u64) u64 {
     var h = seed;
-    var m = std.HashMap(u64).init(std.heap.page);
+    var m = std.map.HashMap(u64).init(std.heap.page);
     defer m.deinit();
     let store = key_store(KN);
     defer std.heap.page.free(std.heap.page.ctx, store, KN * KEY_MAX);
@@ -142,7 +142,7 @@ const bench_map_put = fn (seed: u64) u64 {
 
 const bench_map_get = fn (seed: u64) u64 {
     var h = seed;
-    var m = std.HashMap(u64).init(std.heap.page);
+    var m = std.map.HashMap(u64).init(std.heap.page);
     defer m.deinit();
     // 存储区多备 65536 个槽：未命中探测键的编号在 KN 之外
     let store = key_store(KN + 65_536);

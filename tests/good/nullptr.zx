@@ -1,0 +1,52 @@
+// `null` 的落点除了 `?T`，还可以是 `*T` / `*fn`（v0.29）：等价 C 的 NULL，
+// 不用再写 `(*T)(0)`。守四件事：初始化、实参、比较、字段；并确认 `?*T`
+// 没有被抢走（那里 null 是"空"，不是裸指针）。
+// expect-exit: 0
+// expect-output
+// p-null=1
+// arg-null=1
+// fn-null=7
+// opt-empty=1
+// field-null ok
+// q-null=0
+const std = module("std");
+
+const Node = struct {
+    v: i32,
+    next: *Node,
+};
+
+const cb_t = fn () void;
+
+const is_null = fn (p: *u8) i32 {
+    return if (p == null) 1 else 0;
+};
+
+const call_cb = fn (f: cb_t) i32 {
+    if (f == null) return 7;
+    return 1;
+};
+
+const main = fn () i32 {
+    var p: *u8 = null;
+    std.println("p-null={}", is_null(p));
+    std.println("arg-null={}", is_null(null));
+
+    var cb: cb_t = null;
+    std.println("fn-null={}", call_cb(cb));
+
+    var o: ?*u8 = null;                       // ?*T 语义不变：空的可选值
+    var opt: i32 = 0;
+    if (o == null) { opt = 1; }
+    std.println("opt-empty={}", opt);
+
+    var n = Node{ .v = 1, .next = null };     // 字段落点
+    if (n.next == null) { std.println("field-null ok"); }
+
+    var b: u8 = 0;
+    var q: *u8 = &b;
+    var qn: i32 = 0;
+    if (q == null) { qn = 1; }
+    std.println("q-null={}", qn);
+    return 0;
+};

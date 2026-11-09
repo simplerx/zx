@@ -36,7 +36,7 @@ pub const main = fn () i32 {
     let n = o.count;
     var s = Shape{ .circle = 1.0 };
     push(.{ .a = 1010, .msg = "hi" });
-    let g = std.Task.group();
+    let g = std.task.Task.group();
     g.wait();
     std.println("{}", n);
     return 0;
@@ -97,12 +97,14 @@ os.makedirs(os.path.join(TESTDIR, "libs"), exist_ok=True)
 # 真 std 目录拷到 <exe>/../std（即 .tmp/std）：3e/3f 用例依赖 LSP 与编译器
 # 同一条 std 解析链（find_std_path / findStdDir），仓库外测试工程够不着
 # 仓库的 std/，必须在 exe 旁备一份。
+# KEEP: 每次运行都覆盖——旧版按"task.zx 存在就跳过"只拷一次，仓库 std 改了
+# 之后 .tmp/std 一直是旧副本（还带着已删除的类型别名），LSP 用例对着旧 std
+# 跑，用户看到的就是"std 像旧版本"（2026-11-09）。
 STD_COPY = os.path.join(ROOT, ".tmp", "std")
-if not os.path.exists(os.path.join(STD_COPY, "task.zx")):
-    os.makedirs(STD_COPY, exist_ok=True)
-    for f in os.listdir(os.path.join(ROOT, "std")):
-        if f.endswith(".zx"):
-            shutil.copy(os.path.join(ROOT, "std", f), os.path.join(STD_COPY, f))
+os.makedirs(STD_COPY, exist_ok=True)
+for f in os.listdir(os.path.join(ROOT, "std")):
+    if f.endswith(".zx"):
+        shutil.copy(os.path.join(ROOT, "std", f), os.path.join(STD_COPY, f))
 open(os.path.join(TESTDIR, "zx.json"), "w", encoding="utf-8").write(
     '{\n  "name": "lsptest",\n  "main": "src/extuser.zx",\n  "out": "lsptest",\n  "deps": ["libs"]\n}\n')
 open(os.path.join(TESTDIR, "vendor", "ext.zx"), "w", encoding="utf-8").write(
@@ -158,6 +160,17 @@ def reader():
 
 threading.Thread(target=reader, daemon=True).start()
 
+# 服务器死掉的时候，光一句 "server died" 什么也查不出来——Zig 的 panic
+# 是写在 stderr 上的。这里把 stderr 持续抽干，死的时候把尾巴打出来。
+err_lines = []
+def err_reader():
+    while True:
+        l = proc.stderr.readline()
+        if not l:
+            return
+        err_lines.append(l.decode("utf-8", "replace").rstrip())
+threading.Thread(target=err_reader, daemon=True).start()
+
 def send(msg):
     data = json.dumps(msg).encode()
     proc.stdin.write(f"Content-Length: {len(data)}\r\n\r\n".encode() + data)
@@ -174,7 +187,10 @@ def recv_id(tag, want_id, timeout=30):
         except queue.Empty:
             continue
         if m is None:
-            print(f"FAIL {tag}: server died"); return None, notifs
+            print(f"FAIL {tag}: server died")
+            for l in err_lines[-20:]:
+                print("      | " + l)
+            return None, notifs
         if m.get("__badframe__"):
             print(f"FAIL {tag}: bad frame {m['err']}"); return None, notifs
         if "id" not in m:
@@ -428,9 +444,9 @@ send({"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {
     "textDocument": {"uri": uri, "version": 14},
     "contentChanges": [{"text": MAIN}]}})
 
-# 3e std.Task 静态成员：std.Task. → 全方法集（group 在列；方法签名里的
+# 3e std.task.Task 静态成员：std.task.Task. → 全方法集（group 在列；方法签名里的
 # 参数名 f/ctx/h/v 不得混入——extractBraceMembers 的圆括号深度守卫）
-off = MAIN.index("std.Task.") + len("std.Task.")
+off = MAIN.index("std.task.Task.") + len("std.task.Task.")
 send({"jsonrpc": "2.0", "id": 12, "method": "textDocument/completion", "params": {
     "textDocument": {"uri": uri}, "position": pos(MAIN, off)}})
 r, _ = recv_id("completion.stdTask", 12)
@@ -438,7 +454,7 @@ labels = {i["label"] for i in r["result"]["items"]} if r and r.get("result") els
 check("completion.stdTask", {"group", "coro", "spawn"} <= labels
       and not labels & {"ctx", "f", "h", "v"}, str(sorted(labels)))
 
-# 3f 实例类型穿透：let g = std.Task.group() → g. 出 Group 的成员
+# 3f 实例类型穿透：let g = std.task.Task.group() → g. 出 Group 的成员
 # （spawn/wait/id），不是 Task 的（coro/single/pool 不得出现）
 off = MAIN.index("g.wait();") + len("g.")
 send({"jsonrpc": "2.0", "id": 13, "method": "textDocument/completion", "params": {
@@ -601,7 +617,11 @@ vk = {i["label"]: i.get("kind") for i in vitems}
 check("completion.vendorFnDetail",
       (vd.get("hello") or "").startswith("hello(n: []const u8)"), str(vd)[:240])
 vt = {i["label"]: (i.get("insertText") or "", i.get("insertTextFormat")) for i in vitems}
-check("completion.vendorFnKind", vk.get("hello") == 15, str(vk)[:160])
+# 2026-11-09 第 13 条：函数只出一条（label 就是名字、kind=15 带 snippet
+# 占位），不再并列一条 `name(...)`；"两条都要"只针对类型（类型项 +
+# `Name{...}`）。截图 `createDir` / `createDir(...)` 就是那个多余项。
+check("completion.vendorFnKind",
+      vk.get("hello") == 15 and vk.get("hello(...)") is None, str(vk)[:160])
 check("completion.vendorFnSnippet",
       vt.get("hello") == ("hello(${1:n})$0", 2), str(vt.get("hello")))
 
@@ -667,6 +687,11 @@ while _t2.time() < deadline:
         continue
     if (m.get("method") == "textDocument/publishDiagnostics"
             and m["params"].get("uri", "").endswith("main.zx")
+            # 只认本次 didChange（version 7）的发布：此前几次 didChange 也
+            # 各自触发过一次检查，它们的发布可能还排在队列里（MAIN 文本本身
+            # 带 two 条 note 级诊断）。真实客户端同样按 version 丢弃过期诊断，
+            # 这里照做，避免测试被调度顺序左右。
+            and m["params"].get("version") == 7
             and m["params"].get("diagnostics")):
         diags = m["params"]["diagnostics"]
         diag_msgs = [d.get("message", "") for d in diags]
@@ -792,13 +817,65 @@ ph = r["result"] if r and r.get("result") is not None else []
 params = [h for h in ph if h.get("kind") == 2]
 types = [h["label"] for h in ph if h.get("kind") == 1]
 pdetail = str(sorted((h["position"]["line"], h["position"]["character"], h["label"]) for h in ph))[:300]
-check("inlayHint.param.count", len(params) == 4, pdetail)
+# 第 14 条起：字符串实参也标参数名（`println(fmt: "{}", args: n)`），
+# 所以 `take` 体内的 println、main 里的两次 println 各自多出 fmt/args。
+check("inlayHint.param.count", len(params) == 8, pdetail)
 check("inlayHint.param.labels",
-      sorted(h["label"] for h in params) == ["a: ", "b: ", "n: ", "v: "], pdetail)
+      sorted(h["label"] for h in params) ==
+      ["a: ", "args: ", "b: ", "fmt: ", "fmt: ", "fmt: ", "n: ", "v: "], pdetail)
+# 注释里的 `// add(9, 9);`（行 10）与字符串里的 `"add(1, 2)"` 都不算调用
 check("inlayHint.param.lines",
-      sorted(set(h["position"]["line"] for h in params)) == [7, 8], pdetail)
+      sorted(set(h["position"]["line"] for h in params)) == [3, 7, 8, 9, 11], pdetail)
 check("inlayHint.type.anonStruct", ": struct{x:i32,y:str}" in types, pdetail)
 check("inlayHint.type.namedStruct", ": Person" in types, pdetail)
+
+# 3q 深层路径 / 泛型实例化 / 可选解包（用户 2026-11-09 第 14 条截图：
+#    `std.arena.ArenaAllocator.init` 没有参数名提示、`var b = buf.?` 没有
+#    类型提示、`std.map.HashMap(i32).init` 与 `std.format(...)` 整条哑掉）。
+#    根因：被调方解析只认 `模块.成员`（n≤3）且不跨泛型括号，返回类型拿不到。
+DEEP = """const std = module("std");
+pub const main = fn () i32 {
+    var buf: ?std.BufReader = std.BufReader.init(std.heap.page, 0, 10);
+    var b = buf.?;
+    _ = b;
+    var arena = std.arena.ArenaAllocator.init(std.heap.page);
+    _ = arena;
+    var m = std.map.HashMap(i32).init(std.heap.page);
+    _ = m;
+    _ = std.format(std.heap.page, "hello{}", "ehl");
+    let args = std.process.args();
+    _ = args;
+    return 0;
+};
+"""
+send({"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {
+    "textDocument": {"uri": uri, "version": 13},
+    "contentChanges": [{"text": DEEP}]}})
+send({"jsonrpc": "2.0", "id": 24, "method": "textDocument/inlayHint", "params": {
+    "textDocument": {"uri": uri},
+    "range": {"start": {"line": 0, "character": 0},
+              "end": {"line": DEEP.count("\n") + 1, "character": 0}}}})
+r, _ = recv_id("inlayHint.deep", 24)
+dh = r["result"] if r and r.get("result") is not None else []
+dby = {(h["position"]["line"], h["position"]["character"]): h["label"] for h in dh}
+ddetail = str(sorted(dby.items()))[:300]
+
+def dlabel(anchor):
+    p = pos(DEEP, DEEP.index(anchor) + len(anchor))
+    return dby.get((p["line"], p["character"]))
+
+_pb = pos(DEEP, DEEP.index("var b = buf") + len("var b"))
+check("inlayHint.deep.unwrapType",
+      dby.get((_pb["line"], _pb["character"])) == ": std.BufReader", ddetail)
+check("inlayHint.deep.deepPathType", dlabel("var arena") == ": ?Allocator", ddetail)
+check("inlayHint.deep.genericInstType", dlabel("var m") == ": HashMap", ddetail)
+check("inlayHint.deep.builtinRetType", dlabel("let args") == ": [][]const u8", ddetail)
+_dlabels = [h["label"] for h in dh if h.get("kind") == 2]
+check("inlayHint.deep.deepPathParams", "backing: " in _dlabels, ddetail)
+check("inlayHint.deep.genericInstParams",
+      "V: " in _dlabels and "alloc: " in _dlabels, ddetail)
+check("inlayHint.deep.builtinParams",
+      "fmt: " in _dlabels and "args: " in _dlabels, ddetail)
 send({"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {
     "textDocument": {"uri": uri, "version": 12},
     "contentChanges": [{"text": MAIN}]}})
@@ -870,7 +947,8 @@ check("completion.externVendor.constVar",
 # 2026-11-08 用户要求：模块函数补全要给 snippet（带括号 + 预填形参），
 # 所以 kind 从 3（Function）变成 15（Snippet），detail 仍是完整签名。
 texts = {i["label"]: (i.get("insertText") or "", i.get("insertTextFormat")) for i in items}
-check("completion.externVendor.fnKind", kinds.get("glClear") == 15, str(kinds)[:240])
+check("completion.externVendor.fnKind",
+      kinds.get("glClear") == 15 and kinds.get("glClear(...)") is None, str(kinds)[:240])
 check("completion.externVendor.fnSnippet",
       texts.get("glClear") == ("glClear(${1:mask})$0", 2), str(texts.get("glClear")))
 # KEEP: fn 成员的 detail 必须是完整签名，不能落到绑定别名（2026-11-08 截图：
@@ -1202,9 +1280,45 @@ sit = nest_items(off, 300)
 slab = [i["label"] for i in sit]
 sd = {i["label"]: i.get("detail") for i in sit}
 check("completion.std.namespaceOrder",
-      slab[:1] == ["str"] and slab.index("println") > slab.index("Task"), str(slab[:6])[:200])
-check("completion.std.builtinDetail", sd.get("println") == "编译器内建", str(sd.get("println")))
+      slab[:1] == ["str"] and slab.index("println") > slab.index("task"), str(slab[:6])[:200])
+# 2026-11-09 第 2 条：内建函数不再裸出"编译器内建"——签名 detail + 调用骨架
+psn = [i for i in sit if i["label"] == "println"]
+check("completion.std.builtinSnippet",
+      bool(psn) and psn[0].get("kind") == 15 and psn[0].get("insertTextFormat") == 2
+      and psn[0].get("insertText") == 'println("${1:fmt}", $0)'
+      and (psn[0].get("detail") or "").startswith("println(fmt")
+      # 函数只一条（第 13 条）：不再并列 `println(...)` 骨架项
+      and len(psn) == 1, str(psn))
+# 2026-11-09 第 4 条：Allocator/stackAlloc/heapAlloc 暴露且带 snippet；
+# TypeKind/TypeInfo/FieldInfo 纯编译期反射仍挡住（第 1 条去污染）
+check("completion.std.noCtBuiltins",
+      not ({"TypeKind", "TypeInfo", "FieldInfo"} & set(slab))
+      and {"Allocator", "stackAlloc", "heapAlloc"} <= set(slab),
+      str(sorted(set(slab))))
+al_ = [i for i in sit if i["label"] == "Allocator{...}"]
+al_plain = [i for i in sit if i["label"] == "Allocator"]
+check("completion.std.allocatorSnippet",
+      bool(al_) and al_[0].get("kind") == 15 and al_[0].get("insertTextFormat") == 2
+      and (al_[0].get("insertText") or "").startswith("Allocator{ .ctx")
+      and bool(al_plain) and al_plain[0].get("kind") == 22
+      and (al_plain[0].get("detail") or "").startswith("Allocator: type"),
+      str(al_) + " / " + str(al_plain))
+st_ = {i["label"]: i.get("insertText") for i in sit}
+check("completion.std.allocSnippet",
+      st_.get("stackAlloc") == "stackAlloc(${1:T}, ${2:n})$0"
+      and st_.get("heapAlloc") == "heapAlloc(${1:alloc}, ${2:T}, ${3:n})$0"
+      and st_.get("stackAlloc(...)") is None,
+      str((st_.get("stackAlloc"), st_.get("heapAlloc"))))
 check("completion.std.moduleDetail", sd.get("str") == 'module("str.zx")', str(sd.get("str")))
+# 2026-11-09 截图：`std.debug("create failed.")` 报 "called value has type
+# `type`"——命名空间被当函数。补全里它们按 Module(kind=9) 出、detail 写明
+# 不能直接调用，别再像个函数。
+sk = {i["label"]: i.get("kind") for i in sit}
+check("completion.std.namespaceKind",
+      all(sk.get(x) == 9 for x in ("debug", "atomic", "heap", "io", "file", "process"))
+      and "不能直接调用" in (sd.get("debug") or "")
+      and "panic" in (sd.get("debug") or ""),
+      str({k: (sk.get(k), sd.get(k)) for k in ("debug", "io", "heap")}))
 
 # 3/6 跨模块类型：detail 是类型，不是绑定名；构造 skeleton
 off = NESTUSE.index("    a.\n") + len("    a.")
@@ -1212,10 +1326,13 @@ ait = nest_items(off, 301)
 ad = {i["label"]: i.get("detail") for i in ait}
 ak = {i["label"]: i.get("kind") for i in ait}
 at = {i["label"]: i.get("insertText") for i in ait}
-check("completion.module.typeDetail", ad.get("Cfg") != "a", str(ad)[:200])
+check("completion.module.typeDetail",
+      ad.get("Cfg") == "Cfg: type" and ak.get("Cfg") == 22, str(ad)[:200])
+# 类型项与构造骨架并存：`Cfg`（只补名字、detail 是类型）+
+# `Cfg{...}`（Tab 进字段），用户 2026-11-09 第 12 条。
 check("completion.module.ctorSnippet",
-      ak.get("Cfg") == 15 and at.get("Cfg") == "Cfg{ .w = ${1:0}, .h = ${2:0} }$0",
-      str(at.get("Cfg")))
+      ak.get("Cfg{...}") == 15 and at.get("Cfg{...}") == "Cfg{ .w = ${1:0}, .h = ${2:0} }$0",
+      str(at.get("Cfg{...}")))
 
 # 4 模块函数 snippet：前缀过滤 + 括号 + 预填形参
 off = NESTUSE.index("    let t = a.tw") + len("    let t = a.tw")
@@ -1223,6 +1340,7 @@ tit = nest_items(off, 302)
 tl = [i["label"] for i in tit]
 td = {i["label"]: i.get("detail") for i in tit}
 tt = {i["label"]: (i.get("insertText") or "", i.get("insertTextFormat")) for i in tit}
+# 函数只出一条：`twice`（kind=15 带 snippet），不再并列 `twice(...)`（第 13 条）
 check("completion.module.prefixFilter", tl == ["twice"], str(tl))
 check("completion.module.fnSnippet",
       tt.get("twice") == ("twice(${1:x})$0", 2), str(tt.get("twice")))
@@ -1262,6 +1380,745 @@ hints = (r or {}).get("result") or []
 hlab = [h["label"] for h in hints]
 check("inlayHint.anonNestedLiteral",
       ": struct{ width: i32, height: i32 }" in hlab, str(hlab)[:300])
+
+# ---------------------------------------------------------------------------
+# 12 std 线（2026-11-09 用户条目）：
+#  1 std 命名空间去污染：TypeKind/TypeInfo/FieldInfo 纯编译期反射不进补全；
+#    Allocator/stackAlloc/heapAlloc 暴露且带 snippet（用户第 4 条）
+#  2 std 内建函数与门面子模块（std.str.split）有签名 hover、成员有调用骨架
+#  3 std 类型实体（Task/ArenaAllocator/泛型 ArrayList）成员有类型、方法有签名
+#  4 std.zx 不设类型别名（用户第 4 条下午：别名和真身分不清）——
+#    类型只走 std.task.Task / std.map.HashMap 这类真实路径
+STDUSE = """const std = module("std");
+
+pub const main = fn () u8 {
+    let g = std.task.Task.single();
+    g.await(1);
+    let l = std.ArrayList(i32).init(std.heap.page);
+    l.push(1);
+    let t = std.task.Task{ .id = 0 };
+    t.await(1);
+    var m = std.map.HashMap(i32).init(std.heap.page);
+    _ = m.put("a", 1);
+    var dt = std.time.fromUnixMs(0);
+    var sm = std.fs.stat(std.heap.page, "x");
+    var r = std.BufReader.open(std.heap.page, "x", 64);
+    var w = std.BufWriter.create(std.heap.page, "y", 64);
+    var V: type = std.ArrayList(i32);
+    var list = V.init(std.heap.page);
+    _ = dt.year;
+    _ = sm.size;
+    _ = std.stackAlloc;
+    _ = std.task;
+    _ = std.map;
+    r.
+    w.
+    list.
+    std.io.
+    std.str.
+    std.arena.
+    std.json.
+    std.BufReader.
+    std.map.HashMap.
+    std.json.Value.
+    std.pool.Pool.
+    std.str.split(std.heap.page, "a", ",");
+    std.println("x");
+    return 0;
+};
+"""
+stduri = "file:///" + os.path.join(SRC_DIR, "stduser.zx").replace("\\", "/")
+open(os.path.join(SRC_DIR, "stduser.zx"), "w", encoding="utf-8").write(STDUSE)
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": stduri, "languageId": "zx", "version": 1, "text": STDUSE}}})
+
+def std_items(off, rid):
+    send({"jsonrpc": "2.0", "id": rid, "method": "textDocument/completion", "params": {
+        "textDocument": {"uri": stduri}, "position": pos(STDUSE, off)}})
+    r, _ = recv_id("completion", rid)
+    return r["result"]["items"] if r and r.get("result") else []
+
+def std_hover(anchor, within, rid):
+    a = STDUSE.index(anchor)
+    off = a + STDUSE[a:].index(within) + len(within)  # 词尾
+    send({"jsonrpc": "2.0", "id": rid, "method": "textDocument/hover", "params": {
+        "textDocument": {"uri": stduri}, "position": pos(STDUSE, off)}})
+    r, _ = recv_id("hover", rid)
+    res = (r or {}).get("result")
+    return (res.get("contents") or {}).get("value") or "" if isinstance(res, dict) else ""
+
+# 2a std.io. 成员：签名 detail + 调用骨架
+ioit = std_items(STDUSE.index("    std.io.\n") + len("    std.io."), 400)
+iod = {i["label"]: i.get("detail") for i in ioit}
+iot = {i["label"]: i.get("insertText") for i in ioit}
+check("completion.stdNs.memberSig", (iod.get("openRead") or "") == "openRead(path: []const u8) ?usize", str(iod.get("openRead")))
+check("completion.stdNs.memberSnippet",
+      iot.get("read") == "read(${1:h}, ${2:buf})$0"
+      and iot.get("read(...)") is None, str(iot.get("read")))
+
+# 2b std.str.（门面别名链）：子模块成员照常出 + 骨架
+strit = std_items(STDUSE.index("    std.str.\n") + len("    std.str."), 401)
+strd = {i["label"]: i.get("detail") for i in strit}
+check("completion.stdFacade.subModule",
+      (strd.get("split") or "").startswith("split(alloc: Allocator"), str(list(strd))[:200])
+
+# 2c 内建 hover：std.println / std.io.openRead / std.str.split / std.heap.page
+check("hover.std.builtinFn",
+      std_hover("std.println(\"x\")", "println", 500) == "```zx\nprintln(fmt: []const u8, args: anytype) void\n```",
+      std_hover("std.println(\"x\")", "println", 500))
+check("hover.stdNs.member",
+      std_hover("std.heap.page", "page", 501) == "```zx\npage: Allocator\n```",
+      std_hover("std.heap.page", "page", 501))
+check("hover.stdFacade.chain",
+      "split(alloc: Allocator" in std_hover('std.str.split(std.heap.page, "a", ",");', "split", 502),
+      std_hover('std.str.split(std.heap.page, "a", ",");', "split", 502))
+
+# 3a std 类型实例：静态成员出骨架、实例方法出签名
+off = STDUSE.index("    g.await(1);") + len("    g.")
+git = std_items(off, 403)
+gd = {i["label"]: i.get("detail") for i in git}
+gt = {i["label"]: i.get("insertText") for i in git}
+gk = {i["label"]: i.get("kind") for i in git}
+check("completion.stdInstance.staticSnippet",
+      gk.get("single") == 15 and gt.get("single") == "single()$0"
+      and gk.get("single(...)") is None, str(gt.get("single")))
+check("completion.stdInstance.methodSig",
+      (gd.get("await") or "") == "await(h: usize) !usize"
+      and gk.get("await") == 15 and gt.get("await") == "await(${1:h})$0",
+      "%r %r" % (gd.get("await"), gk.get("await")))
+
+# 3b 泛型容器实例：std.ArrayList(i32) → l. 出全部成员，字段带 T 类型
+off = STDUSE.index("    l.push(1);") + len("    l.")
+lit_ = std_items(off, 404)
+lid = {i["label"]: i.get("detail") for i in lit_}
+check("completion.genericInstance.members",
+      lid.get("push", "") == "push(v: T) bool"
+      and lid.get("buf") == "*T" and lid.get("len") == "usize", str(lid)[:240])
+
+# 3c 实例方法 hover（std 类型 + 泛型）
+check("hover.stdInstance.method",
+      std_hover("g.await(1);", "await", 505) == "```zx\nawait(self: *const Self, h: usize) !usize\n```",
+      std_hover("g.await(1);", "await", 505))
+check("hover.genericInstance.method",
+      std_hover("l.push(1);", "push", 506) == "```zx\npush(self: *Self, v: T) bool\n```",
+      std_hover("l.push(1);", "push", 506))
+
+# 3d 模块限定类型实体（`std.task.Task{…}`）：
+#   旧版 inferContainer 把 `std.task.Task{...}` 认成模块名 "task"，实例成员一个
+#   都不出；hover 又把容器声明当函数，吐 `Task() Self` 这种错签名。
+off = STDUSE.index("    t.await(1);") + len("    t.")
+tit = std_items(off, 407)
+td = {i["label"]: i.get("detail") for i in tit}
+check("completion.mqInstance.members",
+      "await" in td and "spawn" in td and td.get("id") == "usize", str(list(td))[:240])
+check("hover.mqType.definition",
+      "struct {" in std_hover("std.task.Task{", "Task", 508)
+      and "id: usize" in std_hover("std.task.Task{", "Task", 508),
+      std_hover("std.task.Task{", "Task", 508)[:200])
+# 暴露的编译期分配内建：hover 出对齐表签名（2026-11-09 用户第 4 条）
+check("hover.std.ctExposed",
+      "stackAlloc(T: type, n: usize) *[n]T" in std_hover("_ = std.stackAlloc;", "stackAlloc", 509),
+      std_hover("_ = std.stackAlloc;", "stackAlloc", 509))
+# 模块别名 hover：std.task → module `task.zx`
+check("hover.stdModuleAlias",
+      "module `task.zx`" in std_hover("_ = std.task;", "task", 510),
+      std_hover("_ = std.task;", "task", 510))
+# 5 泛型容器 hover 贴真实 struct 体（2026-11-09：std 全部类型都要有类型提示，
+# 泛型不能只出一行 `X(T: type) type` 签名）
+check("hover.generic.facadeDefinition",
+      "struct {" in std_hover("std.map.HashMap(i32)", "HashMap", 511)
+      and "vals: *V" in std_hover("std.map.HashMap(i32)", "HashMap", 511),
+      std_hover("std.map.HashMap(i32)", "HashMap", 511)[:200])
+check("hover.generic.topLevelDefinition",
+      "struct {" in std_hover("std.ArrayList(i32)", "ArrayList", 512)
+      and "buf: *T" in std_hover("std.ArrayList(i32)", "ArrayList", 512),
+      std_hover("std.ArrayList(i32)", "ArrayList", 512)[:200])
+# 5 零字段容器（ArenaAllocator）：构造形态是静态 init，出 `Name.init(…)` 骨架
+arit = std_items(STDUSE.index("    std.arena.\n") + len("    std.arena."), 406)
+ard = {i["label"]: (i.get("kind"), i.get("insertText"), i.get("detail")) for i in arit}
+# 只有方法的类型（ArenaAllocator）：`std.arena.` 这一层只出类型项，不再把
+# 下一层的 `ArenaAllocator.init` 混进来（用户 2026-11-09 第 12 条：能出
+# DirIter 这一层，不能出 DirIter.open）。`init` 在 `ArenaAllocator.` 里。
+check("completion.facade.zeroFieldInit",
+      ard.get("ArenaAllocator", (None, None, None))[0] == 22
+      and ard["ArenaAllocator"][2] == "ArenaAllocator: type"
+      and "ArenaAllocator.init" not in ard,
+      str(ard.get("ArenaAllocator")))
+# 5 union(enum)（json.Value）：出首个变体的构造骨架
+jsit = std_items(STDUSE.index("    std.json.\n") + len("    std.json."), 408)
+jsd = {i["label"]: (i.get("kind"), i.get("insertText"), i.get("detail")) for i in jsit}
+check("completion.union.ctorSnippet",
+      jsd.get("Value{...}", (None, None, None))[0] == 15
+      and jsd["Value{...}"][1] == "Value{ .nul = ${1:0} }$0"
+      and "首个变体" in jsd["Value{...}"][2]
+      and jsd.get("Value", (None, None, None))[0] == 22,
+      str(jsd.get("Value{...}")))
+# enum（ParseErr）不是字面量构造：不出骨架，保留 detail=enum
+check("completion.enum.noCtor",
+      jsd.get("ParseErr") is not None and jsd["ParseErr"][0] != 15,
+      str(jsd.get("ParseErr")))
+
+# 6 std 类型与实例（2026-11-09 第二轮：类型提示 + snippet + 实例补全）
+#  6a std. 顶层不再出现别名假项（HashMap/Pool/ArenaAllocator/Task 只走真实路径）
+top_items = std_items(STDUSE.index("    std.println") + len("    std."), 409)
+top_lab2 = [i["label"] for i in top_items]
+top_d = {i["label"]: (i.get("kind"), i.get("detail"), i.get("insertText")) for i in top_items}
+check("completion.stdTop.noAliasPhantom",
+      not ({"HashMap", "Pool", "ArenaAllocator", "Task"} & set(top_lab2)),
+      str(sorted(set(top_lab2)))[:240])
+#  6b 句柄类型（BufReader/BufWriter）：`std.` 这一层只出类型项；
+#     `open`/`create` 这些下一层成员在 `std.BufReader.`（6c）里，
+#     不再上浮成 `BufReader.open`（用户 2026-11-09 第 12 条）。
+check("completion.stdTop.typeItem",
+      top_d.get("BufReader", (None, None, None))[1] == "BufReader: type"
+      and top_d["BufReader"][0] == 22
+      and top_d.get("BufWriter", (None, None, None))[0] == 22
+      and "BufReader.open" not in top_d and "BufWriter.create" not in top_d,
+      str(top_d.get("BufReader")))
+#  6c 类型路径成员 std.BufReader.：方法有签名、静态方法有调用骨架
+rid_b = 413
+brit = std_items(STDUSE.index("    std.BufReader.") + len("    std.BufReader."), rid_b)
+brd = {i["label"]: (i.get("kind"), i.get("detail"), i.get("insertText")) for i in brit}
+check("completion.typePath.methodSig",
+      (brd.get("next", (None, ""))[1] or "") == "next() ?[]const u8"
+      and brd.get("next", (None, None, None))[0] == 15
+      and brd["next"][2] == "next()$0"
+      and brd.get("open", (None, None, None))[0] == 15
+      and brd["open"][2] == "open(${1:alloc}, ${2:path}, ${3:cap})$0",
+      str(brd.get("next")))
+#  6d 实例补全：HashMap 实例 / 模块函数返回类型实例（DateTime / ?Stat）
+mit = std_items(STDUSE.index("    _ = m.put") + len("    _ = m."), 414)
+mlab = {i["label"]: i.get("detail") for i in mit}
+check("completion.instance.hashMap",
+      "get" in mlab and "put" in mlab and (mlab.get("n") or "") == "usize", str(list(mlab))[:200])
+off = STDUSE.index("    _ = dt.year;") + len("    _ = dt.")
+dit = std_items(off, 415)
+dlab = {i["label"] for i in dit}
+check("completion.instance.moduleFnRet",
+      {"year", "month", "day", "sec", "ms"} <= dlab, str(sorted(dlab)))
+off = STDUSE.index("    _ = sm.size;") + len("    _ = sm.")
+sit2 = std_items(off, 416)
+slab2 = {i["label"] for i in sit2}
+check("completion.instance.optionalRet",
+      {"size", "mtime", "isHidden"} <= slab2, str(sorted(slab2)))
+#  6e std 类型实例的方法要带签名 + 骨架（用户 2026-11-09：BufReader/BufWriter
+#     实例的方法没有提示和 snippet）。self 是隐含接收者，签名里不出现。
+off = STDUSE.index("    r.\n") + len("    r.")
+rit = std_items(off, 417)
+rd = {i["label"]: (i.get("detail"), i.get("kind"), i.get("insertText")) for i in rit}
+check("completion.instance.bufReaderMethods",
+      rd.get("next", (None,))[0] == "next() ?[]const u8"
+      and rd.get("next", (None, None, None))[2] == "next()$0"
+      and rd.get("chunk", (None,))[0] == "chunk() ?[]const u8"
+      and rd.get("open", (None,))[0] == "open(alloc: Allocator, path: []const u8, cap: usize) ?BufReader",
+      str(rd.get("next")))
+off = STDUSE.index("    w.\n") + len("    w.")
+wit = std_items(off, 418)
+wd = {i["label"]: (i.get("detail"), i.get("insertText")) for i in wit}
+check("completion.instance.bufWriterMethods",
+      wd.get("write", (None,))[0] == "write(data: []const u8) bool"
+      and wd.get("write", (None, None))[1] == "write(${1:data})$0"
+      and wd.get("writeLine", (None, None))[1] == "writeLine(${1:s})$0"
+      and wd.get("flush", (None, None))[1] == "flush()$0",
+      str(wd.get("write")))
+#  6f 类型变量绑定：`var V: type = std.ArrayList(i32)` → `V.init(…)` 的实例
+#     也要推断成 ArrayList（用户 2026-11-09 截图里的写法）
+off = STDUSE.index("    list.\n") + len("    list.")
+lit2 = std_items(off, 419)
+lld = {i["label"]: i.get("detail") for i in lit2}
+check("completion.typeVar.instance",
+      lld.get("push") == "push(v: T) bool" and lld.get("len") == "usize"
+      and lld.get("items") == "items() []T", str(lld)[:240])
+#  6g 三段路径的泛型容器：`std.map.HashMap.` 一个成员都不出过
+off = STDUSE.index("    std.map.HashMap.") + len("    std.map.HashMap.")
+hit3 = std_items(off, 420)
+h3 = {i["label"]: (i.get("detail"), i.get("insertText")) for i in hit3}
+check("completion.typePath.genericMembers",
+      {"get", "put", "count", "contains"} <= set(h3)
+      and h3.get("get", (None,))[1] == "get(${1:key})$0"
+      and h3.get("put", (None,))[1] == "put(${1:key}, ${2:val})$0",
+      str(sorted(h3))[:240])
+#  6h union(enum) 的三段路径：Value. 出变体（构造骨架走 std.json. 类型项）
+off = STDUSE.index("    std.json.Value.") + len("    std.json.Value.")
+vit = std_items(off, 421)
+vlab = {i["label"] for i in vit}
+check("completion.typePath.unionVariants",
+      {"nul", "int", "float", "str", "arr", "obj"} <= vlab, str(sorted(vlab)))
+#  6i 零字段容器三段路径：Pool. 方法带骨架（只有方法的类型）
+off = STDUSE.index("    std.pool.Pool.") + len("    std.pool.Pool.")
+pit = std_items(off, 422)
+pd = {i["label"]: (i.get("detail"), i.get("insertText")) for i in pit}
+check("completion.typePath.poolMethods",
+      pd.get("alloc", (None,))[1] == "alloc(${1:size})$0"
+      and pd.get("free", (None,))[1] == "free(${1:p})$0"
+      and pd.get("deinit", (None,))[1] == "deinit()$0",
+      str(pd.get("alloc")))
+
+# 4/1 复核：std. 顶层暴露 Allocator/stackAlloc/heapAlloc（带 snippet），
+# TypeKind/TypeInfo/FieldInfo 仍不出现（stduser 文档再点一次）
+off = STDUSE.index("    std.println") + len("    std.")
+top_lab = {i["label"] for i in std_items(off, 405)}
+check("completion.stdTop.ctExposed",
+      {"Allocator", "stackAlloc", "heapAlloc"} <= top_lab
+      and not ({"TypeKind", "TypeInfo", "FieldInfo"} & top_lab)
+      and {"print", "println", "heap", "io", "debug", "atomic"} <= top_lab,
+      str(sorted(top_lab)))
+
+
+# ---------------------------------------------------------------------------
+# 13 std 类型全覆盖闸门
+# 用户 2026-11-09 第 7 条："递归地去找这些函数、类型实现，不能一个一个地
+# 找"。这里不写死样本：直接枚举 std/*.zx 里全部 public 类型（struct /
+# union / enum / 泛型 `fn (T: type) type`），为每个生成
+#   `std.<mod>.<Type>.`            三段类型路径
+#   `var o = std.<mod>.<Type>.<factory>(); o.`   工厂实例
+# 断言成员非空、方法一律带 snippet、hover 给的是真实定义。std 以后新增
+# 类型自动进入覆盖，不用再补用例。
+def std_public_types():
+    import re as _re
+    out = []
+    std_dir = os.path.join(ROOT, "std")
+    for fn in sorted(os.listdir(std_dir)):
+        if not fn.endswith(".zx"):
+            continue
+        mod = "" if fn == "std.zx" else fn[:-3]
+        txt = open(os.path.join(std_dir, fn), encoding="utf-8").read()
+        for m in _re.finditer(r'^(pub )?const (\w+) =', txt, _re.M):
+            if not m.group(1):
+                continue
+            name = m.group(2)
+            rest = txt[m.end():m.end() + 160].lstrip()
+            if rest.startswith("struct"):
+                shape = "struct"
+            elif rest.startswith("union"):
+                shape = "union"
+            elif rest.startswith("enum"):
+                shape = "enum"
+            elif _re.match(r'fn\s*\(', rest) and _re.search(r'\)\s*type', rest):
+                shape = "generic"
+            else:
+                continue
+            factory = None
+            for fm in _re.finditer(r'(?:pub )?const (\w+) = fn \(([^)]*)\)\s*([^\{\n]*)',
+                                   txt[m.end():]):
+                if fm.group(2).strip().startswith("self"):
+                    continue
+                if fm.group(3).strip().lstrip("?!*& ") in ("Self", name):
+                    factory = fm.group(1)
+                    break
+            out.append((mod, name, shape, factory))
+    return out
+
+
+cov_types = std_public_types()
+cov_lines = ['const std = module("std");', "", "pub const main = fn () u8 {"]
+cov_marks = []
+for _mod, _name, _shape, _factory in cov_types:
+    _qn = ("std.%s.%s" % (_mod, _name)) if _mod else ("std.%s" % _name)
+    _inst = "o_" + _name
+    cov_lines.append('    var %s = %s%s;' % (
+        _inst, _qn, (".%s()" % _factory) if _factory else "{ }"))
+    cov_marks.append((_qn, _inst, _shape, len(cov_lines)))
+    cov_lines.append("    %s." % _qn)
+    cov_lines.append("    %s." % _inst)
+cov_lines += ["    return 0;", "};", ""]
+COVTXT = "\n".join(cov_lines) + "\n"
+covuri = "file:///" + os.path.join(SRC_DIR, "stdtypes.zx").replace("\\", "/")
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": covuri, "languageId": "zx", "version": 1, "text": COVTXT}}})
+
+cov_empty, cov_nosnip, cov_badhover = [], [], []
+cov_rid = 900
+for _qn, _inst, _shape, _ln in cov_marks:
+    for _label, _row, _col in (("type", _ln, 4 + len(_qn) + 1),
+                               ("inst", _ln + 1, 4 + len(_inst) + 1)):
+        cov_rid += 1
+        send({"jsonrpc": "2.0", "id": cov_rid, "method": "textDocument/completion",
+              "params": {"textDocument": {"uri": covuri},
+                         "position": {"line": _row, "character": _col}}})
+        _r, _ = recv_id("stdCoverage", cov_rid)
+        _items = _r["result"]["items"] if _r and _r.get("result") else []
+        if not _items:
+            cov_empty.append("%s(%s)" % (_qn, _label))
+            continue
+        # 第 13 条：函数只出一条——label 就是名字、kind=15、带 snippet。
+        # 同名重复 / 残留裸名函数项（kind 2/3）/ snippet 缺 insertTextFormat
+        # 都算回归；类型项（22/13）的 `Name{...}` 构造骨架不在此列。
+        _labs = [i["label"] for i in _items]
+        _miss = sorted({l for l in _labs if _labs.count(l) > 1})
+        _miss += [i["label"] for i in _items
+                  if i.get("kind") == 15 and i.get("insertTextFormat") != 2]
+        _miss += [i["label"] for i in _items if i.get("kind") in (2, 3)]
+        if _miss:
+            cov_nosnip.append("%s(%s):%s" % (_qn, _label, _miss))
+    # hover 停在类型名上：要贴真实定义（struct/union/enum/fn）
+    cov_rid += 1
+    send({"jsonrpc": "2.0", "id": cov_rid, "method": "textDocument/hover",
+          "params": {"textDocument": {"uri": covuri},
+                     "position": {"line": _ln, "character": 4 + _qn.rfind(".") + 2}}})
+    _r, _ = recv_id("stdCoverage", cov_rid)
+    _res = (_r or {}).get("result")
+    _hv = ((_res or {}).get("contents") or {}).get("value", "") if isinstance(_res, dict) else ""
+    if not any(k in _hv for k in ("struct", "union", "enum", "fn (")):
+        cov_badhover.append("%s:%r" % (_qn, _hv.replace("\n", " ")[:60]))
+send({"jsonrpc": "2.0", "method": "textDocument/didClose",
+      "params": {"textDocument": {"uri": covuri}}})
+
+check("stdCoverage.enumerated", len(cov_types) >= 12, "types=%d" % len(cov_types))
+check("stdCoverage.typePathMembers", not cov_empty, str(cov_empty)[:300])
+check("stdCoverage.methodSnippets", not cov_nosnip, str(cov_nosnip)[:300])
+check("stdCoverage.hoverDefinition", not cov_badhover, str(cov_badhover)[:300])
+
+
+# ---------------------------------------------------------------------------
+# 12b 链式接收者（用户 2026-11-09 第 8 条：`std.map.HashMap(i32).` 连写三段
+# 没提示）。点补全的 path 回扫遇 ')' 就截止，接收者表达式解析不出 → 空列表。
+# 修复后 recvExprStart 配平括号取整条接收者，inferContainer 统一解析：泛型实例
+# / 模块函数返回 / 工厂调用 / 本地函数返回四种链式的成员与 hover 都必须有。
+CHAIN = """const std = module("std");
+
+const P = struct {
+    x: i32,
+};
+
+const mk = fn () P { return P{ .x = 0 }; };
+
+pub const main = fn () u8 {
+    var HS = std.map.HashMap(i32).init(std.heap.page);
+    _ = mk().x;
+    _ = std.time.fromUnixMs(0).year;
+    std.map.HashMap(i32).in
+    std.map.HashMap(i32).
+    std.time.fromUnixMs(0).
+    std.BufReader.open(std.heap.page, "z", 64).
+    mk().
+    return 0;
+};
+"""
+chainuri = "file:///" + os.path.join(SRC_DIR, "chainuse.zx").replace("\\", "/")
+open(os.path.join(SRC_DIR, "chainuse.zx"), "w", encoding="utf-8").write(CHAIN)
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": chainuri, "languageId": "zx", "version": 1, "text": CHAIN}}})
+
+crid = 960
+
+
+def chain_items(anchor):
+    global crid
+    crid += 1
+    off = CHAIN.index(anchor) + len(anchor.rstrip("\n"))
+    send({"jsonrpc": "2.0", "id": crid, "method": "textDocument/completion", "params": {
+        "textDocument": {"uri": chainuri}, "position": pos(CHAIN, off)}})
+    r, _ = recv_id("chain", crid)
+    return r["result"]["items"] if r and r.get("result") else []
+
+
+def chain_hover(anchor, within):
+    global crid
+    crid += 1
+    a = CHAIN.index(anchor)
+    off = a + CHAIN[a:].index(within) + len(within)
+    send({"jsonrpc": "2.0", "id": crid, "method": "textDocument/hover", "params": {
+        "textDocument": {"uri": chainuri}, "position": pos(CHAIN, off)}})
+    r, _ = recv_id("chain", crid)
+    res = (r or {}).get("result")
+    return (res.get("contents") or {}).get("value") or "" if isinstance(res, dict) else ""
+
+
+# 打到一半（`.in`）：前缀过滤后只剩 init
+ctyp = sorted(i["label"] for i in chain_items("std.map.HashMap(i32).in\n"))
+check("completion.chain.genericTyping", ctyp == ["init"], str(ctyp))
+
+# 泛型实例尾巴：字段 + 方法（方法带骨架，Self 换成真实容器名）
+cdot = {i["label"]: i for i in chain_items("std.map.HashMap(i32).\n")}
+check("completion.chain.genericDot",
+      cdot.get("put", {}).get("kind") == 15
+      and cdot["put"].get("insertText") == "put(${1:key}, ${2:val})$0"
+      and "put(...)" not in cdot
+      and cdot.get("init", {}).get("detail") == "init(alloc: Allocator) HashMap"
+      and "keys" in cdot,
+      str(sorted(cdot))[:220])
+
+# 模块函数返回类型（fromUnixMs → DateTime）
+cmod = {i["label"] for i in chain_items("std.time.fromUnixMs(0).\n")}
+check("completion.chain.moduleFn", {"year", "month", "day"} <= cmod, str(sorted(cmod)))
+
+# 工厂调用返回类型（BufReader.open → ?BufReader）
+cfac = {i["label"]: i for i in chain_items('std.BufReader.open(std.heap.page, "z", 64).\n')}
+check("completion.chain.factory",
+      cfac.get("next", {}).get("insertText") == "next()$0"
+      and cfac.get("next", {}).get("detail") == "next() ?[]const u8",
+      str(sorted(cfac))[:220])
+
+# 本地函数返回 struct（非 std 路径，证明是递归解析而不是特判）
+cloc = [i["label"] for i in chain_items("mk().\n")]
+check("completion.chain.localFn", cloc == ["x"], str(cloc))
+
+check("hover.chain.field",
+      "x: i32" in chain_hover("_ = mk().x;", "mk().x")
+      and "year: u64" in chain_hover("_ = std.time.fromUnixMs(0).year;", "fromUnixMs(0).year"),
+      chain_hover("_ = mk().x;", "mk().x")[:120])
+check("hover.chain.method",
+      "init(alloc: Allocator)" in chain_hover("var HS = std.map.HashMap(i32).init(std.heap.page);",
+                                              "HashMap(i32).init"),
+      chain_hover("var HS = std.map.HashMap(i32).init(std.heap.page);", "HashMap(i32).init")[:160])
+
+send({"jsonrpc": "2.0", "method": "textDocument/didClose",
+      "params": {"textDocument": {"uri": chainuri}}})
+
+
+# ---------------------------------------------------------------------------
+# 切片/字符串接收者的成员：`"hello".` 与 `[]const u8` 变量的 `.` 出 len/ptr。
+# 2026-11-09 用户：字符串字面量能不能 .ptr？有没有长度 len？——能，但补全里
+# 一个成员都没有（sema 的 TY_SLICE 只有 .ptr/.len/.0，源文件里没有声明）。
+STRM = """const std = module("std");
+
+pub const main = fn () i32 {
+    var a: *const u8 = "hello".;
+    var b: []const u8 = "hello";
+    b.;
+    var m: []u8 = undefined;
+    m.;
+    var n = "hello".len;
+    var p = "hello".ptr;
+    _ = a; _ = n; _ = p;
+    return 0;
+};
+"""
+strmuri = "file:///" + os.path.join(SRC_DIR, "strmuse.zx").replace("\\", "/")
+open(os.path.join(SRC_DIR, "strmuse.zx"), "w", encoding="utf-8").write(STRM)
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": strmuri, "languageId": "zx", "version": 1, "text": STRM}}})
+
+srid = 980
+
+
+def strm_items(off):
+    global srid
+    srid += 1
+    send({"jsonrpc": "2.0", "id": srid, "method": "textDocument/completion", "params": {
+        "textDocument": {"uri": strmuri}, "position": pos(STRM, off)}})
+    r, _ = recv_id("strm", srid)
+    return r["result"]["items"] if r and r.get("result") else []
+
+
+def strm_hover(anchor, within):
+    global srid
+    srid += 1
+    a = STRM.index(anchor)
+    off = a + STRM[a:].index(within) + len(within)
+    send({"jsonrpc": "2.0", "id": srid, "method": "textDocument/hover", "params": {
+        "textDocument": {"uri": strmuri}, "position": pos(STRM, off)}})
+    r, _ = recv_id("strm", srid)
+    res = (r or {}).get("result")
+    return (res.get("contents") or {}).get("value") or "" if isinstance(res, dict) else ""
+
+
+lit_m = {i["label"]: i.get("detail")
+         for i in strm_items(STRM.index('"hello".;') + len('"hello".'))}
+check("completion.strlit.lenPtr",
+      set(lit_m) == {"len", "ptr"} and lit_m.get("len") == "usize"
+      and lit_m.get("ptr") == "ptr: *const u8", str(lit_m))
+
+sl_m = {i["label"]: i.get("detail")
+        for i in strm_items(STRM.index("    b.;") + len("    b."))}
+check("completion.sliceVar.members",
+      set(sl_m) == {"len", "ptr"} and sl_m.get("ptr") == "ptr: *const u8", str(sl_m))
+
+mut_m = {i["label"]: i.get("detail")
+         for i in strm_items(STRM.index("    m.;") + len("    m."))}
+check("completion.sliceVar.mutPtr", mut_m.get("ptr") == "ptr: *u8", str(mut_m))
+
+check("hover.strlit.member",
+      "len: usize" in strm_hover('"hello".len;', '"hello".len')
+      and "ptr: *const u8" in strm_hover('"hello".ptr;', '"hello".ptr'),
+      strm_hover('"hello".len;', '"hello".len')[:120])
+# 字符串字面量 = *[N]const u8（用户 2026-11-09 定），不是切片
+check("hover.strlit.type",
+      "*[5]const u8" in strm_hover('var b: []const u8 = "hello";', '= "hell')
+      and "`.ptr" in strm_hover('var b: []const u8 = "hello";', '= "hell'),
+      strm_hover('var b: []const u8 = "hello";', '= "hell')[:160])
+
+send({"jsonrpc": "2.0", "method": "textDocument/didClose",
+      "params": {"textDocument": {"uri": strmuri}}})
+
+# ---------------------------------------------------------------------------
+# 3r 推导链：`.?` 解包 / 下标 / 位置访问（用户 2026-11-09 第 16 条）
+#   截图三处：`var b = buf.?` 之后 `b.` 没提示、`let slice = args[0][0]`
+#   没有类型提示、`const s = strs.0` 没有类型提示。根因：成员补全走的是
+#   inferContainer（只认名字/调用），推导走的是 inferExprType（认表达式）——
+#   两条链在"初始化式是表达式"的位置断开了。
+ET = """const std = module("std");
+pub const main = fn () i32 {
+    var buf = std.BufReader.init(std.heap.page, 0, 10);
+    var b = buf.?;
+    b.;
+    let args = std.process.args();
+    let slice = args[0][0];
+    let row = args[0];
+    row.;
+    let strs = &.{ "hello", "world", };
+    const s = strs.0;
+    s.;
+    strs.;
+    const t = .{ 1, 2.5 };
+    const x = t.0;
+    _ = slice; _ = x;
+    return 0;
+};
+"""
+eturi = "file:///" + os.path.join(SRC_DIR, "exprty_use.zx").replace("\\", "/")
+open(os.path.join(SRC_DIR, "exprty_use.zx"), "w", encoding="utf-8").write(ET)
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": eturi, "languageId": "zx", "version": 1, "text": ET}}})
+
+etrid = 990
+
+
+def et_items(off):
+    global etrid
+    etrid += 1
+    send({"jsonrpc": "2.0", "id": etrid, "method": "textDocument/completion", "params": {
+        "textDocument": {"uri": eturi}, "position": pos(ET, off)}})
+    r, _ = recv_id("exprty", etrid)
+    return r["result"]["items"] if r and r.get("result") else []
+
+
+uw_m = {i["label"]: i for i in et_items(ET.index("    b.;") + len("    b."))}
+check("completion.unwrap.members",
+      uw_m.get("fill", {}).get("insertText") == "fill()$0"
+      and uw_m.get("deinit", {}).get("insertText") == "deinit()$0"
+      and uw_m.get("cap", {}).get("detail") == "usize",
+      str(sorted(uw_m))[:220])
+
+row_m = {i["label"]: i.get("detail")
+         for i in et_items(ET.index("    row.;") + len("    row."))}
+check("completion.index.sliceMembers",
+      set(row_m) == {"len", "ptr"} and row_m.get("ptr") == "ptr: *const u8", str(row_m))
+
+s_m = {i["label"]: i.get("detail")
+       for i in et_items(ET.index("    s.;") + len("    s."))}
+check("completion.posIndex.strMembers",
+      set(s_m) == {"len", "ptr"} and s_m.get("ptr") == "ptr: *const u8", str(s_m))
+
+arr_m = {i["label"]: i.get("detail")
+         for i in et_items(ET.index("    strs.;") + len("    strs."))}
+check("completion.posArray.members",
+      set(arr_m) == {"len", "ptr"} and arr_m.get("len") == "usize", str(arr_m))
+
+send({"jsonrpc": "2.0", "id": 991, "method": "textDocument/inlayHint", "params": {
+    "textDocument": {"uri": eturi},
+    "range": {"start": {"line": 0, "character": 0},
+              "end": {"line": ET.count("\n") + 1, "character": 0}}}})
+r, _ = recv_id("inlayHint.exprty", 991)
+eb = r["result"] if r and r.get("result") is not None else []
+eby = {(h["position"]["line"], h["position"]["character"]): h["label"] for h in eb}
+edetail = str(sorted(eby.items()))[:300]
+
+
+def elabel(anchor, upto=None):
+    p = pos(ET, ET.index(anchor) + len(upto if upto is not None else anchor))
+    return eby.get((p["line"], p["character"]))
+
+
+check("inlayHint.expr.unwrap", elabel("var b = buf", "var b") == ": BufReader", edetail)
+check("inlayHint.expr.index", elabel("let slice") == ": const u8"
+      and elabel("let row") == ": []const u8", edetail)
+check("inlayHint.expr.posIndex", elabel("let strs") == ": *[2]str"
+      and elabel("const s = strs", "const s") == ": str", edetail)
+check("inlayHint.expr.tuple", elabel("const t") == ": {i32,f64}"
+      and elabel("const x") == ": i32", edetail)
+
+send({"jsonrpc": "2.0", "method": "textDocument/didClose",
+      "params": {"textDocument": {"uri": eturi}}})
+
+
+# ---------------------------------------------------------------------------
+# 3s 指针 / 链式解引用（用户 2026-11-09 第 17 条）
+#   截图两处：`let pp = &p; _ = pp.name` 没有类型、`arrs.0.` 一个成员都不出。
+#   编译器侧 `pp.name` / `arrs.0.name` 一直是合法的（`.` 自动穿透指针、`.N`
+#   对数组指针取元素），断的是 LSP：`&p` 没有 `*T` 规则、成员补全只认路径
+#   末段（`arrs.0` 的末段是 `0`），链式接收者两边都落空。
+PT = """const std = module("std");
+const Person = struct { name: i32, age: i32 };
+pub const main = fn () i32 {
+    let p: Person = Person{ .name = 0, .age = 1 };
+    let pp = &p;
+    pp.;
+    let nm0 = pp.name;
+    let deref = pp.0;
+    let dn = pp.0.name;
+    let args: [][]const u8 = std.process.args();
+    let slice: []const u8 = args[0];
+    let char = slice.0;
+    let char2 = slice[0];
+    let arrs: *[2]Person = &.{ Person{ .name = 0, .age = 1 }, Person{ .name = 0, .age = 1 } };
+    let pa = arrs.0;
+    pa.;
+    arrs.0.;
+    arrs[0].;
+    let nm5 = arrs[0].name;
+    _ = nm0; _ = deref; _ = dn; _ = char; _ = char2; _ = pa; _ = nm5;
+    return 0;
+};
+"""
+pturi = "file:///" + os.path.join(SRC_DIR, "ptrchain_use.zx").replace("\\\\", "/")
+open(os.path.join(SRC_DIR, "ptrchain_use.zx"), "w", encoding="utf-8").write(PT)
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": pturi, "languageId": "zx", "version": 1, "text": PT}}})
+
+ptrid = 970
+
+
+def pt_items(anchor_s):
+    global ptrid
+    ptrid += 1
+    send({"jsonrpc": "2.0", "id": ptrid, "method": "textDocument/completion", "params": {
+        "textDocument": {"uri": pturi},
+        "position": pos(PT, PT.index(anchor_s) + len(anchor_s))}})
+    r, _ = recv_id("ptrchain", ptrid)
+    return r["result"]["items"] if r and r.get("result") else []
+
+
+def pt_members(anchor_s):
+    return {i["label"]: i.get("detail") for i in pt_items(anchor_s)}
+
+
+check("completion.ptr.members", set(pt_members("    pp.")) == {"name", "age"},
+      str(sorted(pt_members("    pp.")))[:200])
+check("completion.ptrChain.posMembers", set(pt_members("    arrs.0.")) == {"name", "age"},
+      str(sorted(pt_members("    arrs.0.")))[:200])
+check("completion.ptrChain.indexMembers", set(pt_members("    arrs[0].")) == {"name", "age"},
+      str(sorted(pt_members("    arrs[0].")))[:200])
+check("completion.ptrChain.varMembers", set(pt_members("    pa.")) == {"name", "age"},
+      str(sorted(pt_members("    pa.")))[:200])
+
+send({"jsonrpc": "2.0", "id": 972, "method": "textDocument/inlayHint", "params": {
+    "textDocument": {"uri": pturi},
+    "range": {"start": {"line": 0, "character": 0},
+              "end": {"line": PT.count("\n") + 1, "character": 0}}}})
+r, _ = recv_id("inlayHint.ptrchain", 972)
+pb = r["result"] if r and r.get("result") is not None else []
+pby = {(h["position"]["line"], h["position"]["character"]): h["label"] for h in pb}
+pdetail = str(sorted(pby.items()))[:300]
+
+
+def plabel(anchor_s, upto=None):
+    q = pos(PT, PT.index(anchor_s) + len(upto if upto is not None else anchor_s))
+    return pby.get((q["line"], q["character"]))
+
+
+check("inlayHint.ptr.addr", plabel("let pp") == ": *Person", pdetail)
+check("inlayHint.ptr.member", plabel("let nm0") == ": i32", pdetail)
+check("inlayHint.ptr.deref", plabel("let deref") == ": Person"
+      and plabel("let dn") == ": i32", pdetail)
+check("inlayHint.ptr.sliceIndex", plabel("let char") == ": const u8"
+      and plabel("let char2") == ": const u8", pdetail)
+check("inlayHint.ptr.chainMember", plabel("let nm5") == ": i32", pdetail)
+
+send({"jsonrpc": "2.0", "method": "textDocument/didClose",
+      "params": {"textDocument": {"uri": pturi}}})
+
 
 
 # 9 shutdown/exit
@@ -1324,6 +2181,89 @@ def no_cd_client():
 plain = no_cd_client()
 check("diagnostics.noCodeDescriptionForOldClients",
       bool(plain) and all("codeDescription" not in d for d in plain), str(plain)[:300])
+
+# ---------------------------------------------------------------------------
+# 同一个文件反复 didOpen（守一个真崩过的悬垂键）
+#
+# didOpen/didChange 换文档时的顺序是「摘旧文档 → free 它的 path/text」。
+# 脏表（dirty）的**键就是那份 path**，如果 free 之后才摘脏表，脏表里就留
+# 下一批悬垂键：下一次 put 触发扩容重哈希，或者诊断线程拿它去 docs.get，
+# 读到的全是已释放内存。ReleaseSafe 里表现成 hash_map.zig growIfNeeded 的
+# panic——整个语言服务器直接退出，用户看到的是"补全突然全没了"。
+#
+# 触发条件就是同一个 uri 开两次（编辑器重开文件、格式化后重载都会撞上），
+# 所以这里连开 30 次、内容长度每轮不同（逼分配器换块），中间插别的文件
+# 把 docs 表撑大，最后要一条 completion 还必须应答。
+def dup_open_guard():
+    if os.name != "nt":
+        return None
+    d = os.path.join(TESTDIR, "_dup")
+    os.makedirs(d, exist_ok=True)
+    doc = "file:///" + os.path.join(d, "dup.zx").replace("\\", "/")
+    p = subprocess.Popen([ZXLS_BIN], stdin=subprocess.PIPE,
+                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+
+    def snd(m):
+        data = json.dumps(m).encode()
+        p.stdin.write(b"Content-Length: %d\r\n\r\n" % len(data) + data)
+        p.stdin.flush()
+
+    def rcv():
+        hdr = b""
+        while not hdr.endswith(b"\r\n\r\n"):
+            c = p.stdout.read(1)
+            if not c:
+                return None
+            hdr += c
+        ln = int([l for l in hdr.split(b"\r\n")
+                  if l.lower().startswith(b"content-length")][0].split(b":")[1])
+        return json.loads(p.stdout.read(ln))
+
+    try:
+        snd({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+             "params": {"capabilities": {}, "rootUri": "file:///" + d.replace("\\", "/")}})
+        while True:
+            m = rcv()
+            if m is None or m.get("id") == 1:
+                break
+        snd({"jsonrpc": "2.0", "method": "initialized", "params": {}})
+        for i in range(30):
+            body = ("const std = module(\"std\");\n\n"
+                    "pub const main = fn () i32 {\n"
+                    + ("    let a%d = %d;\n" % (i, i)) * (1 + i % 7)
+                    + "    return 0;\n};\n")
+            snd({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+                "textDocument": {"uri": doc, "languageId": "zx",
+                                 "version": i + 1, "text": body}}})
+            other = "file:///" + os.path.join(d, "o%d.zx" % i).replace("\\", "/")
+            snd({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+                "textDocument": {"uri": other, "languageId": "zx", "version": 1,
+                                 "text": "pub const x = fn () i32 {\n    return %d;\n};\n" % i}}})
+            if i % 5 == 0:
+                snd({"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {
+                    "textDocument": {"uri": doc, "version": 100 + i},
+                    "contentChanges": [{"text": body + "// tail\n"}]}})
+        snd({"jsonrpc": "2.0", "id": 2, "method": "textDocument/completion", "params": {
+            "textDocument": {"uri": doc}, "position": {"line": 1, "character": 0}}})
+        while True:
+            m = rcv()
+            if m is None:
+                return False
+            if m.get("id") == 2:
+                return True
+    finally:
+        try:
+            p.kill()
+        except Exception:
+            pass
+        shutil.rmtree(d, ignore_errors=True)
+
+dup = dup_open_guard()
+if dup is None:
+    print("skip completion.dupOpen (非 Windows)")
+else:
+    check("completion.dupOpen.alive", dup,
+          "同一文件重复 didOpen 之后服务器死了（脏表悬垂键）")
 
 # ---------------------------------------------------------------------------
 # 性能守门：inlayHint 必须是线性扫描。

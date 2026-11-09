@@ -280,8 +280,10 @@ sum(arr[1..3])           // 子切片，左闭右开
 | 切片   | 无                | `[a..b]` → `[]T`  |
 | 传参   | 按值复制整个           | 只传地址              |
 
-字符串字面量 `"hi"` 的类型是 `[]const u8`——切片，所以字符串传参就是传  
-指针 + 长度。
+字符串字面量 `"hi"` 的类型是 `*[N]const u8`——指向定长数组的指针，`N` 是字节
+数（`"hi".len == 2`，编译期常量）。赋给 `[]const u8` 时自动带出长度变成切片，
+所以字符串传参照旧是"指针 + 长度"：`let s: []const u8 = "hi";`。要裸指针就写
+`"hi".ptr`（或直接传字面量，数组指针会退化成 `*const u8`）。
 
 ### 6.3 指针
 
@@ -834,7 +836,7 @@ util.secret(1);        // ✗ 'secret' is private to module 'util'
 ```zx
 const std = module("std");
 const println = std.println;       // 函数别名
-const HashMap = std.HashMap;       // 泛型类型别名
+const HashMap = std.map.HashMap;       // 泛型类型别名
 const heap = std.heap;             // 命名空间本身也能绑
 ```
 
@@ -882,7 +884,7 @@ std.io.print(h, "{s}\n", s);         // 写任意句柄（一律运行时解析�
 | `{}`                  | 按顺序取下一个参数，默认格式   |
 | `{0}`                 | 按索引取（可与 `{}` 混用） |
 | `{d}` / `{x}` / `{b}` | 十进制 / 十六进制 / 二进制 |
-| `{s}`                 | 字符串（要求切片）        |
+| `{s}`                 | 字符串（切片或字符串字面量）    |
 | `{c}`                 | 字符（整数按码位输出）      |
 | `{{` `}}`             | 字面量花括号           |
 
@@ -943,7 +945,7 @@ xs.reverse();  xs.resize(n, fill);  xs.swap(i, j);  xs.clear();
 ### 14.2 HashMap(V)（字符串键）
 
 ```zx
-var m = std.HashMap(u64).init(std.heap.page);
+var m = std.map.HashMap(u64).init(std.heap.page);
 defer m.deinit();
 
 m.put(key, v);                   // bool；负载过 3/4 自动翻倍

@@ -1,0 +1,13 @@
+// 无类型注解的整数字面量装不进默认 i32 时，以前会静默截断
+// （`const big = 9223372036854775807;` 运行时是 -1）。现在装不下 i64
+// 直接报 E0302，让用户写注解；i64 内的先放宽到 i64（good 侧钉住）。
+//
+// expect-count: 1
+// expect-code: E0302
+// expect: does not fit
+
+const big = 9223372036854775808;
+
+const main = fn () u8 {
+    return 0;
+};

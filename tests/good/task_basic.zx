@@ -6,7 +6,7 @@
 // expect-output:awaitAll:ok
 // expect-output:main-after:ok
 const std = module("std");
-const Task = std.Task;
+const Task = std.task.Task;
 
 var order: usize = 0;
 

@@ -69,11 +69,11 @@ const main = fn () u8 {
     var raw = std.stackAlloc(i32, MAX);
     var v = Vec{ .data = raw, .len = 0 };
 
-    push(&v, 5);
-    push(&v, 3);
-    push(&v, 9);
-    push(&v, 1);
-    push(&v, 7);
+    _ = push(&v, 5);
+    _ = push(&v, 3);
+    _ = push(&v, 9);
+    _ = push(&v, 1);
+    _ = push(&v, 7);
     dump("in ", v);
 
     sortUp(&v);

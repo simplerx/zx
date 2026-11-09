@@ -1,0 +1,49 @@
+// if / 带标签的块 / switch 出现在**表达式位置**（函数实参、数组元素、
+// 返回值里）曾经直接报 E0300 internal —— 后端 ex() 没有控制流分支。
+// 现在统一用临时量接值（_ivN），表达式本身引用临时量。
+const std = module("std");
+
+const pick = fn (flag: bool) i32 {
+    return if (flag) 10 else 20;
+};
+
+const describe = fn (o: ?i32) i32 {
+    return if (o) v v + 1 else 0;
+};
+
+pub const main = fn () i32 {
+    var x: i32 = 3;
+
+    // 实参位置
+    std.println("a={}", if (x > 0) 1 else 0);            // a=1
+    std.println("p={}", pick(x > 0));                     // p=10
+    var o: ?i32 = 41;
+    std.println("o={}", if (o) v v * 2 else -1);          // o=82
+    var none: ?i32 = null;
+    std.println("n={}", if (none) v v else -7);           // n=-7
+
+    // 初始化 / 数组元素 / 返回值里的嵌套
+    var y: i32 = if (x == 3) 100 else 200;
+    var nums: *[3]i32 = &.{ if (x > 0) 1 else 2, 5, 6 };
+    var z: i32 = if (x > 0) (if (x > 2) 7 else 8) else 9;
+    std.println("y={} n0={} z={}", y, nums[0], z);        // 100 1 7
+
+    // 循环体里当右值
+    var s: i32 = 0;
+    for (0..3) i { s = s + (if (i % 2 == 0) 1 else 0); }
+    std.println("s={}", s);                               // s=2
+
+    // 带标签的块作实参（值由标签收割）
+    std.println("b={}", (blk: { if (x == 2) { blk: 9; } else { blk: 8; } })); // b=8
+
+    // else if 链
+    var w: i32 = if (x > 1) 50 else if (x > 0) 60 else 70;
+    std.println("w={}", w);                               // w=50
+
+    // ?T 条件走 capture 路径的函数
+    std.println("d={}", describe(o));                     // d=42
+
+    // 条件位置也可以
+    if ((if (x > 0) 1 else 0) != 1) { return 1; }
+    return 0;
+};

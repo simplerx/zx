@@ -26,18 +26,43 @@ void fe_set_mode(bool use_zx) { g_fe_zx = use_zx; }
 bool fe_is_zx(void) { return g_fe_zx; }
 void fe_set_argv0(const char *p) { g_fe_argv0 = p; }
 
-/* zxfe.exe 与 zxc.exe 同目录（bin/），从 argv[0] 推 */
+/* zxfe.exe 与 zxc.exe 同目录（bin/）。argv[0] 不带目录（裸 `zxc`、宿主
+ * 程序用短名拉起——Zed 的 LSP 链就是这么调的）时，退回 GetModuleFileName
+ * 拿真实 exe 路径。以前空串当"当前目录"用，.zxfe-*.ast 就落在调用方的
+ * cwd 里：写完立刻 rename/remove，用户看到的是"src/ 里有个文件一闪而过"，
+ * 还会触发文件监视器刷屏。 */
 static char *fe_exe_path(void) {
+    char buf[1024];
     const char *a = g_fe_argv0 ? g_fe_argv0 : "zxc";
     const char *slash = strrchr(a, '/');
     const char *bslash = strrchr(a, '\\');
     const char *cut = slash > bslash ? slash : bslash;
     size_t dirlen = cut ? (size_t)(cut - a) : 0;
-    char *s = malloc(dirlen + 16);
+    if (dirlen == 0) {
+#ifdef _WIN32
+        DWORD n = GetModuleFileNameA(NULL, buf, sizeof buf);
+        if (n > 0 && n < sizeof buf) {
+            char *s2 = strrchr(buf, '\\');
+            if (s2) {
+                *s2 = '\0';
+                char *s = malloc(strlen(buf) + 1);
+                if (s) strcpy(s, buf);
+                return s;
+            }
+        }
+#endif
+        /* 实在拿不到 exe 路径（极端环境）：退回旧行为"当前目录"。
+         * 这个函数还兼着定位 zxfe.exe，不能随便换成 TEMP。 */
+        char *s = malloc(1);
+        if (!s) return NULL;
+        s[0] = '\0';
+        return s;
+    }
+    char *s = malloc(dirlen + 1);
     if (!s) return NULL;
-    if (dirlen) memcpy(s, a, dirlen);
+    memcpy(s, a, dirlen);
     s[dirlen] = '\0';
-    return s;   /* 空串 = 当前目录 */
+    return s;
 }
 
 /* 读整个文件（C 前端用；Zx 前端由 zxfe 自己读） */
@@ -116,7 +141,86 @@ static void ast_cache_paths(char *cache, size_t csz, const char *tmpdir,
 }
 
 /* Zx 前端：先查缓存，未命中起 zxfe 子进程拿序列化 AST，装载成 Node 树 */
+
+/* zxfe 的诊断由它自己按同一格式打到 stderr，zxc 不重复打印。但导入方报
+ * "module 'x' failed to parse" 时必须说得清原因——所以子进程的 stderr 先
+ * 落临时文件，再原样回放（用户看到的内容一字不差），顺手记住第一条
+ * `path:line:col: error[CODE]: msg`。回放而不是直连，纯粹是为了能读一遍。 */
+static struct {
+    char path[512], code[16], msg[256];
+    int  line, col, has;
+} g_fe_err;
+
+void fe_last_error_reset(void) { g_fe_err.has = 0; }
+
+bool fe_last_error(int *line, int *col, char *code, size_t ccap,
+                   char *msg, size_t mcap) {
+    if (!g_fe_err.has) return false;
+    if (line) *line = g_fe_err.line;
+    if (col)  *col  = g_fe_err.col;
+    if (code && ccap) snprintf(code, ccap, "%s", g_fe_err.code);
+    if (msg && mcap)  snprintf(msg, mcap, "%s", g_fe_err.msg);
+    return true;
+}
+
+static void fe_note_error_line(const char *line) {
+    if (g_fe_err.has) return;
+    const char *m = strstr(line, ": error[");
+    if (!m) return;
+    const char *lb = m + 7;                  /* 指向 '[' */
+    const char *rb = strchr(lb, ']');
+    if (!rb) return;
+    size_t cl = (size_t)(rb - lb - 1);
+    if (cl == 0 || cl >= sizeof g_fe_err.code) return;
+    memcpy(g_fe_err.code, lb + 1, cl);
+    g_fe_err.code[cl] = 0;
+    const char *msg = rb + 1;
+    if (*msg == ':') msg++;
+    while (*msg == ' ') msg++;
+    snprintf(g_fe_err.msg, sizeof g_fe_err.msg, "%s", msg);
+    /* `path:line:col` 全在 ": error[" 之前：末两段是数字，前面是路径 */
+    char head[512];
+    snprintf(head, sizeof head, "%.*s", (int)(size_t)(m - line), line);
+    int ln = 0, cc = 0;
+    char *c1 = strrchr(head, ':');
+    if (c1) {
+        cc = atoi(c1 + 1); *c1 = 0;
+        char *c2 = strrchr(head, ':');
+        if (c2) { ln = atoi(c2 + 1); *c2 = 0; }
+    }
+    snprintf(g_fe_err.path, sizeof g_fe_err.path, "%s", head);
+    g_fe_err.line = ln;
+    g_fe_err.col = cc;
+    g_fe_err.has = 1;
+}
+
+/* 把子进程 stderr 文件回放到自己的 stderr，并记住第一条错误 */
+/* 回放 zxfe 的 stderr，返回"看起来是诊断"的行数。返回 0 而 rc!=0 就说明
+ * 前端是**无声失败**（栈爆、OOM、内部错误），由调用方补一条可定位的消息。 */
+static int fe_replay_stderr(const char *logpath) {
+    FILE *f = fopen(logpath, "rb");
+    if (!f) return 0;
+    static char buf[65536];
+    size_t n = fread(buf, 1, sizeof buf - 1, f);
+    fclose(f);
+    buf[n] = 0;
+    if (!n) return 0;
+    fwrite(buf, 1, n, stderr);
+    fflush(stderr);
+    int nlines = 0;
+    char *p = buf;
+    while (p && *p) {
+        char *e = strchr(p, '\n');
+        if (e) *e = 0;
+        if (strstr(p, ": error[")) nlines++;
+        fe_note_error_line(p);
+        p = e ? e + 1 : NULL;
+    }
+    return nlines;
+}
+
 static Node *fe_parse_zx(const char *path) {
+    fe_last_error_reset();
     /* 缓存路径先行：源读不出来就让 spawn 路径去报错（zxfe 的诊断
      * 带 path:line:col，比我们在这一层模仿更可信） */
     size_t slen = 0;
@@ -177,18 +281,36 @@ static Node *fe_parse_zx(const char *path) {
         else
             snprintf(tmp, sizeof tmp, "%s\\.zxfe-%llu.ast", dir, key);
     }
+    char logp[1300];
+    snprintf(logp, sizeof logp, "%s.log", tmp);
     char cmd[2800];
     if (*dir) {
         /* 注意：Windows 的 system() 会让 cmd /c 吃掉首尾引号——命令行
          * 不能以引号开头（与 main.c 里 zig cc 的拼法同一约束）。 */
-        snprintf(cmd, sizeof cmd, "%s\\zxfe.exe \"%s\" -o \"%s\"", dir, path, tmp);
+        snprintf(cmd, sizeof cmd, "%s\\zxfe.exe \"%s\" -o \"%s\" 2> \"%s\"",
+                 dir, path, tmp, logp);
     } else {
-        snprintf(cmd, sizeof cmd, "zxfe.exe \"%s\" -o \"%s\"", path, tmp);
+        snprintf(cmd, sizeof cmd, "zxfe.exe \"%s\" -o \"%s\" 2> \"%s\"",
+                 path, tmp, logp);
     }
     free(dir);
 
     int rc = system(cmd);
-    if (rc != 0) return NULL;            /* 诊断已由 zxfe 打到 stderr */
+    int ndiag = fe_replay_stderr(logp);   /* 诊断原样回放，顺带记下第一条 */
+    remove(logp);
+    if (rc != 0) {
+        /* 前端挂了却一条诊断都没有（栈爆掉、OOM、内部断言）——以前这里直接
+         * return NULL，上层只看到"检查失败、零条消息"。补一条能定位的话。 */
+        if (ndiag == 0) {
+            if (rc == 139 || rc == 134)
+                err_at(1, 1, "the Zx frontend (zxfe) crashed while parsing this file "
+                             "(signal %d) -- this is a compiler bug", rc - 128);
+            else
+                err_at(1, 1, "the Zx frontend (zxfe) failed without a diagnostic "
+                             "(exit %d) -- this is a compiler bug", rc);
+        }
+        return NULL;
+    }
 
     Node *root = ast_load_file(tmp);
     /* 装载成功才写缓存；rename 顺带把临时文件清掉（同目录，同盘） */

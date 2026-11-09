@@ -15,7 +15,7 @@
 /* 唯一版本源：`zxc -v` / `zxc --version` 与生成的工程清单都读这里。
  * 编号跟 README 的里程碑走：次版本 = 里程碑号（M49 → 0.49），修订号
  * 留给同一里程碑里的修补。改这个数就顺手在 README 的「状态」里改一行。 */
-#define ZXC_VERSION "1.0.0"
+#define ZXC_VERSION "1.1.0"
 
 /* ---------- diagnostics ---------- */
 
@@ -55,6 +55,11 @@ void diag_note(const char *path, int line, int col, const char *fmt, ...);
 extern int g_error_count;
 extern int g_diag_shown;       /* 实际打印过多少条（超过上限后只计数） */
 extern int g_diag_max_print;   /* 打印上限 */
+/* 摸清"这一轮新冒出来的第一条错"：导入方报 module(...) 失败时带上它，
+ * 否则用户只看到一句 failed to parse，真正的原因藏在校验过的那份文件里。 */
+void diag_first_error_reset(void);
+int  diag_first_error(int *line, int *col, char *code, size_t ccap,
+                      char *msg, size_t mcap);
 
 /* ---------- 外部库链接（@link） ---------- */
 

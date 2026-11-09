@@ -1,0 +1,531 @@
+// demo/snake.zx —— 控制台贪吃蛇。
+//
+// 这份 demo 只用三样东西：
+//   std.io        往 stdout 上写整块字节（一帧一次 write）
+//   std.time      单调钟给帧节奏计时（Sleep 之外不需要别的）
+//   Win32 FFI     GetAsyncKeyState 读按键（非阻塞）、Sleep 让出 CPU、
+//                 SetConsoleMode 打开 VT 转义序列（清屏 / 定位 / 颜色）
+//
+// 渲染用绝对定位（ESC[r;cH），不依赖滚动，窗口多高都不会错位。
+// 棋盘 36x16 格，每格两个字符宽，整帧 76 列 x 21 行，一帧一次 write。
+
+const std = module("std");
+
+const W: usize = 36;
+const H: usize = 16;
+const TOTAL: usize = W * H;
+const FBUF: usize = 8192;
+
+// ---- Win32 ------------------------------------------------------------------
+
+extern fn GetAsyncKeyState(vk: i32) i16;
+extern fn Sleep(ms: u32) void;
+extern fn GetStdHandle(which: i32) *u8;
+extern fn GetConsoleMode(h: *u8, mode: *u32) bool;
+extern fn SetConsoleMode(h: *u8, mode: u32) bool;
+
+const STD_OUTPUT_HANDLE: i32 = -11;
+const ENABLE_VIRTUAL_TERMINAL_PROCESSING: u32 = 0x0004;
+
+const VK_LEFT: i32 = 0x25;
+const VK_UP: i32 = 0x26;
+const VK_RIGHT: i32 = 0x27;
+const VK_DOWN: i32 = 0x28;
+const VK_W: i32 = 0x57;
+const VK_A: i32 = 0x41;
+const VK_S: i32 = 0x53;
+const VK_D: i32 = 0x44;
+const VK_P: i32 = 0x50;
+const VK_Q: i32 = 0x51;
+const VK_R: i32 = 0x52;
+
+// 高字节位：现在正按着（方向键靠它，按住不放就持续转向）。
+const held = fn (vk: i32) bool {
+    return ((u16)GetAsyncKeyState(vk) & (u16)0x8000) != 0;
+};
+
+// 最低位："上次问过之后按过"（P/R/Q 这种一次性动作用它，按住不会连发）。
+const tapped = fn (vk: i32) bool {
+    return ((u16)GetAsyncKeyState(vk) & (u16)0x0001) != 0;
+};
+
+// ---- 输出缓冲 ----------------------------------------------------------------
+//
+// 一帧攒成一个字节块再 write：每格一次 write 的话一帧 700 多次系统调用，
+// 帧率全耗在锁和 flush 上。
+
+const Out = struct {
+    buf: *[FBUF]u8,
+    n: usize,
+
+    const put = fn (self: *Out, s: []const u8) void {
+        var i: usize = 0;
+        while (i < s.len) {
+            if (self.n < FBUF) {
+                self.buf[self.n] = s[i];
+                self.n = self.n + 1;
+            }
+            i = i + 1;
+        }
+    };
+
+    const ch = fn (self: *Out, c: u8) void {
+        if (self.n < FBUF) {
+            self.buf[self.n] = c;
+            self.n = self.n + 1;
+        }
+    };
+
+    // 十进制（0 也打一位）。
+    const num = fn (self: *Out, v: usize) void {
+        if (v == 0) { self.ch(48); return; }
+        var div: usize = 1;
+        while (div * 10 <= v) { div = div * 10; }
+        var n = v;
+        while (div > 0) {
+            self.ch((u8)(48 + n / div));
+            n = n % div;
+            div = div / 10;
+        }
+    };
+
+    // 光标定位到第 row 行第 1 列（1 起）。
+    const at = fn (self: *Out, row: usize) void {
+        self.put("\x1b[");
+        self.num(row);
+        self.put(";1H");
+    };
+
+    const flush = fn (self: *Out) void {
+        if (self.n == 0) { return; }
+        _ = std.io.write(std.io.stdout(), self.buf[0..self.n]);
+        std.io.flush(std.io.stdout());
+        self.n = 0;
+    };
+};
+
+// ---- 游戏状态 ----------------------------------------------------------------
+
+const Game = struct {
+    body: *[TOTAL]i32,   // body[0] 是头，往后是身子；线性下标 y*W+x
+    len: usize,
+    dx: i32,
+    dy: i32,
+    food: i32,           // -1 = 无处可放（满盘）
+    score: usize,
+    rng: u32,
+    period: u64,         // 每步纳秒
+    alive: bool,
+    won: bool,
+};
+
+const next_rand = fn (x0: u32) u32 {
+    var x = x0;
+    x = x ^ (x << 13);
+    x = x ^ (x >> 17);
+    x = x ^ (x << 5);
+    if (x == 0) { x = 0x9E3779B9; }
+    return x;
+};
+
+const on_snake = fn (g: *Game, c: i32) bool {
+    var i: usize = 0;
+    while (i < g.len) {
+        if (g.body[i] == c) { return true; }
+        i = i + 1;
+    }
+    return false;
+};
+
+const place_food = fn (g: *Game) void {
+    var tries: usize = 0;
+    while (tries < 4096) {
+        g.rng = next_rand(g.rng);
+        let c = (i32)(g.rng % (u32)TOTAL);
+        if (!on_snake(g, c)) { g.food = c; return; }
+        tries = tries + 1;
+    }
+    // 兜底：随机撞不上就顺序扫一遍，保证只要还有空格就一定放得下。
+    var c: i32 = 0;
+    while (c < (i32)TOTAL) {
+        if (!on_snake(g, c)) { g.food = c; return; }
+        c = c + 1;
+    }
+    g.food = -1;
+};
+
+const reset = fn (g: *Game) void {
+    g.len = 3;
+    g.body[0] = (i32)((H / 2) * W + W / 2);
+    g.body[1] = (i32)((H / 2) * W + W / 2 - 1);
+    g.body[2] = (i32)((H / 2) * W + W / 2 - 2);
+    g.dx = 1;
+    g.dy = 0;
+    g.score = 0;
+    g.period = 150 * 1000000;
+    g.alive = true;
+    g.won = false;
+    place_food(g);
+};
+
+// 走一步。撞墙 / 撞自己就把 alive 置 false（由调用方渲染出局画面）。
+const step = fn (g: *Game) void {
+    let head = g.body[0];
+    let hx = head % (i32)W;
+    let hy = head / (i32)W;
+    let nx = hx + g.dx;
+    let ny = hy + g.dy;
+    if (nx < 0 || nx >= (i32)W || ny < 0 || ny >= (i32)H) {
+        g.alive = false;
+        return;
+    }
+    let nh = ny * (i32)W + nx;
+    let eat = nh == g.food;
+
+    // 不吃东西时尾巴会移开，所以最后一格不算障碍。
+    var limit: usize = g.len;
+    if (!eat) { limit = g.len - 1; }
+    var i: usize = 0;
+    while (i < limit) {
+        if (g.body[i] == nh) { g.alive = false; return; }
+        i = i + 1;
+    }
+
+    // 整体后移一格：从尾巴往前抄，天然不覆盖。
+    var j: usize = g.len;
+    if (!eat) { j = g.len - 1; }
+    while (j > 0) {
+        g.body[j] = g.body[j - 1];
+        j = j - 1;
+    }
+    g.body[0] = nh;
+
+    if (eat) {
+        g.len = g.len + 1;
+        g.score = g.score + 1;
+        if (g.period > 60 * 1000000) { g.period = g.period - 4 * 1000000; }
+        if (g.len >= TOTAL) {
+            g.alive = false;
+            g.won = true;
+            return;
+        }
+        place_food(g);
+    }
+};
+
+// 换色只在颜色真的变了时发一次转义，一帧的转义序列压到几十个。
+const set_color = fn (o: *Out, cur: *u8, want: u8) void {
+    if (cur.0 == want) { return; }
+    cur.0 = want;
+    if (want == 0) { o.put("\x1b[0m"); }
+    else if (want == 1) { o.put("\x1b[90m"); }
+    else if (want == 2) { o.put("\x1b[32m"); }
+    else if (want == 3) { o.put("\x1b[92m"); }
+    else { o.put("\x1b[91m"); }
+};
+
+// ---- 渲染 --------------------------------------------------------------------
+
+const draw = fn (o: *Out, g: *Game, best: usize) void {
+    var color: u8 = 0;   // 0 无 1 墙 2 身 3 头 4 食物
+
+    o.put("\x1b[?25l");   // 藏光标（每帧重复发，成本可忽略，断了也能自愈）
+    o.at(1);
+
+    // 上边框：两格一个 "#"，宽度对齐棋盘。
+    set_color(o, &color, 1);
+    var k: usize = 0;
+    while (k < W + 2) { o.put("##"); k = k + 1; }
+    set_color(o, &color, 0);
+
+    var y: usize = 0;
+    while (y < H) {
+        o.at(y + 2);
+        set_color(o, &color, 1);
+        o.put("##");
+        var x: usize = 0;
+        while (x < W) {
+            let c = (i32)(y * W + x);
+            if (c == g.body[0]) {
+                set_color(o, &color, 3);
+                o.put("@@");
+            } else if (on_snake(g, c)) {
+                set_color(o, &color, 2);
+                o.put("[]");
+            } else if (c == g.food) {
+                set_color(o, &color, 4);
+                o.put("()");
+            } else {
+                set_color(o, &color, 0);
+                o.put("  ");
+            }
+            x = x + 1;
+        }
+        set_color(o, &color, 1);
+        o.put("##");
+        y = y + 1;
+    }
+
+    o.at(H + 2);
+    var k2: usize = 0;
+    while (k2 < W + 2) { o.put("##"); k2 = k2 + 1; }
+    set_color(o, &color, 0);
+
+    o.at(H + 3);
+    o.put("score ");
+    o.num(g.score);
+    o.put("   len ");
+    o.num(g.len);
+    o.put("   best ");
+    var b = best;
+    if (g.score > b) { b = g.score; }
+    o.num(b);
+    o.put("   speed ");
+    o.num((usize)(g.period / 1000000));
+    o.put("ms   ");
+
+    o.at(H + 4);
+    o.put("WASD / arrows   P pause   R restart   Q quit        ");
+
+    o.at(H + 5);
+    if (!g.alive) {
+        if (g.won) {
+            o.put("\x1b[92mYOU WIN - the board is full\x1b[0m   press R to play again   ");
+        } else {
+            o.put("\x1b[91mGAME OVER\x1b[0m   press R to play again   ");
+        }
+    } else {
+        o.put("                                                  ");
+    }
+    o.flush();
+};
+
+// ---- 主循环 ------------------------------------------------------------------
+
+const play = fn (o: *Out, g: *Game, best: *usize) i32 {
+    // 返回 0 = 重开，1 = 退出。
+    reset(g);
+    draw(o, g, best.0);
+
+    var last = std.time.counter();
+    var paused = false;
+    var dirty = true;
+
+    while (true) {
+        // 方向：按住即生效，反向直接忽略（否则一步就撞自己）。
+        var ndx = g.dx;
+        var ndy = g.dy;
+        if (held(VK_RIGHT) || held(VK_D)) { ndx = 1; ndy = 0; }
+        else if (held(VK_LEFT) || held(VK_A)) { ndx = -1; ndy = 0; }
+        else if (held(VK_UP) || held(VK_W)) { ndx = 0; ndy = -1; }
+        else if (held(VK_DOWN) || held(VK_S)) { ndx = 0; ndy = 1; }
+        if (ndx != -g.dx || ndy != -g.dy) {
+            g.dx = ndx;
+            g.dy = ndy;
+        }
+
+        if (tapped(VK_Q)) { return 1; }
+        if (tapped(VK_R)) { return 0; }
+        if (tapped(VK_P)) { paused = !paused; dirty = true; }
+
+        if (g.score > best.0) { best.0 = g.score; }
+
+        if (!g.alive) {
+            if (dirty) { draw(o, g, best.0); dirty = false; }
+            Sleep(10);
+            continue;
+        }
+
+        if (paused) {
+            if (dirty) {
+                o.at(H + 5);
+                o.put("\x1b[93mPAUSED\x1b[0m   press P to resume                    ");
+                o.flush();
+                dirty = false;
+            }
+            Sleep(10);
+            continue;
+        }
+
+        if (std.time.nsSince(last) >= g.period) {
+            last = std.time.counter();
+            step(g);
+            draw(o, g, best.0);
+        }
+        Sleep(2);
+    }
+};
+
+// ---- 无人值守自检（--sim） ---------------------------------------------------
+//
+// 控制台游戏没法在 CI 里截图，所以留一个 headless 模式：让"贪心地追食物"的
+// 假玩家自己跑，每一步校验四条不变式。这一路把"吃、长、撞、重生"全走到，
+// 而且不需要控制台（GetAsyncKeyState / VT 都不参与）。
+//
+//   demo\snake.exe --sim        跑 300 局，全过打印一行 summary
+
+const blocked = fn (g: *Game, x: i32, y: i32) bool {
+    if (x < 0 || x >= (i32)W || y < 0 || y >= (i32)H) { return true; }
+    return on_snake(g, y * (i32)W + x);
+};
+
+// 贪心：先横后竖朝食物走；两个方向都不通就随便挑一个通的。
+const bot_move = fn (g: *Game, rng: *u32) void {
+    let head = g.body[0];
+    let hx = head % (i32)W;
+    let hy = head / (i32)W;
+    let fx = g.food % (i32)W;
+    let fy = g.food / (i32)W;
+
+    // 每 8 步来一次随机抖动，避免机器人在自己尾巴边打转跑不出循环。
+    rng.0 = next_rand(rng.0);
+    if (rng.0 % 8 == 0) {
+        let k = (i32)((rng.0 / 8) % 4);
+        var dx: i32 = 0;
+        var dy: i32 = 0;
+        if (k == 0) { dx = 1; } else if (k == 1) { dx = -1; } else if (k == 2) { dy = 1; } else { dy = -1; }
+        if (!(dx == -g.dx && dy == -g.dy) && !blocked(g, hx + dx, hy + dy)) {
+            g.dx = dx;
+            g.dy = dy;
+            return;
+        }
+    }
+
+    if (fx > hx && !(g.dx == -1) && !blocked(g, hx + 1, hy)) { g.dx = 1; g.dy = 0; return; }
+    if (fx < hx && !(g.dx == 1) && !blocked(g, hx - 1, hy)) { g.dx = -1; g.dy = 0; return; }
+    if (fy > hy && !(g.dy == -1) && !blocked(g, hx, hy + 1)) { g.dx = 0; g.dy = 1; return; }
+    if (fy < hy && !(g.dy == 1) && !blocked(g, hx, hy - 1)) { g.dx = 0; g.dy = -1; return; }
+
+    var k2: i32 = 0;
+    while (k2 < 4) {
+        var dx: i32 = 0;
+        var dy: i32 = 0;
+        if (k2 == 0) { dx = 1; } else if (k2 == 1) { dx = -1; } else if (k2 == 2) { dy = 1; } else { dy = -1; }
+        if (!(dx == -g.dx && dy == -g.dy) && !blocked(g, hx + dx, hy + dy)) {
+            g.dx = dx;
+            g.dy = dy;
+            return;
+        }
+        k2 = k2 + 1;
+    }
+};
+
+// 每一步之后的不变式。返回 0 = 正常，非 0 = 第几条坏了。
+const verify = fn (g: *Game) u8 {
+    var i: usize = 0;
+    while (i < g.len) {
+        let c = g.body[i];
+        if (c < 0 || c >= (i32)TOTAL) { return 1; }          // 越界
+        var j: usize = i + 1;
+        while (j < g.len) {
+            if (g.body[j] == c) { return 2; }                // 身子自己重叠
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    if (g.food >= 0 && on_snake(g, g.food)) { return 3; }    // 食物压在蛇身上
+    if (g.score != g.len - 3) { return 4; }                  // 计分和长度对不上
+    return 0;
+};
+
+const simulate = fn (g: *Game, games: usize) u8 {
+    var rng: u32 = 0x1234ABCD;
+    var eaten: usize = 0;
+    var steps: usize = 0;
+    var gi: usize = 0;
+    while (gi < games) {
+        reset(g);
+        var n: usize = 0;
+        while (g.alive && n < 20000) {
+            bot_move(g, &rng);
+            let before = g.score;
+            step(g);
+            n = n + 1;
+            steps = steps + 1;
+            if (g.score > before) { eaten = eaten + 1; }
+            if (g.alive) {
+                let bad = verify(g);
+                if (bad != 0) {
+                    std.println("sim: invariant {} broken at game {} step {} (len {}, score {})",
+                                bad, gi, n, g.len, g.score);
+                    return 2;
+                }
+            }
+        }
+        gi = gi + 1;
+    }
+    if (eaten < games) {
+        std.println("sim: the bot barely ate anything ({} in {} games)", eaten, games);
+        return 3;
+    }
+    std.println("sim ok: {} games, {} steps, {} apples eaten", games, steps, eaten);
+    return 0;
+};
+
+const new_game = fn (raw: *u8) Game {
+    var body = (*[TOTAL]i32)raw;
+    return Game{
+        .body = body,
+        .len = 0,
+        .dx = 1,
+        .dy = 0,
+        .food = 0,
+        .score = 0,
+        .rng = (u32)(std.time.counter() & (u64)0x7FFFFFFF) + 1,
+        .period = 150 * 1000000,
+        .alive = true,
+        .won = false,
+    };
+};
+
+const run = fn (raw: *u8) u8 {
+    // 一块内存切两段：蛇身（TOTAL 个 i32）+ 帧缓冲。
+    var fb = (*[FBUF]u8)(raw + 4096);
+    var o = Out{ .buf = fb, .n = 0 };
+    var g = new_game(raw);
+
+    var best: usize = 0;
+    var back = play(&o, &g, &best);
+    while (back == 0) {
+        back = play(&o, &g, &best);
+    }
+    o.put("\x1b[?25h\x1b[0m\r\n");
+    o.flush();
+    return 0;
+};
+
+const main = fn () u8 {
+    let pg = std.heap.page;
+    let mem = pg.alloc(pg.ctx, 16384);
+    let args = std.process.args();
+
+    // std.process.args() 不含 argv[0]：args[0] 就是第一个真参数。
+    if (args.len > 0 && std.str.eq(args[0], "--sim")) {
+        if (mem) raw {
+            var g0 = new_game(raw);
+            return simulate(&g0, 300);
+        }
+        return 1;
+    }
+
+    let h = GetStdHandle(STD_OUTPUT_HANDLE);
+    var orig: u32 = 0;
+    let has_mode = GetConsoleMode(h, &orig);
+    var vt = false;
+    if (has_mode) {
+        // 打不开 VT 也能跑：转义序列会以乱码出现，但游戏逻辑不受影响。
+        vt = SetConsoleMode(h, orig | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+    }
+    if (!vt) {
+        // 走 stderr：stdout 上是绝对定位的画面，多一行会把棋盘往上顶。
+        std.io.println(std.io.stderr(), "snake: this build targets the Windows console (VT mode unavailable)");
+    }
+
+    if (mem) raw {
+        let rc = run(raw);
+        if (has_mode) { _ = SetConsoleMode(h, orig); }
+        return rc;
+    }
+    std.println("snake: out of memory");
+    return 1;
+};

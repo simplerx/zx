@@ -1,10 +1,10 @@
-// std-pool.zx —— std.Pool（尺寸分级内存池）回归：
+// std-pool.zx —— std.pool.Pool（尺寸分级内存池）回归：
 // 分级、对齐、复用、重复释放拦截、大块路径、按类型分配。
 const std = module("std");
 
 const Node = struct { value: i32, next: ?*Node };
 
-const run = fn (pp: *std.Pool) u8 {
+const run = fn (pp: *std.pool.Pool) u8 {
     // ① 基本分配：20 字节落 32B 档，16 字节对齐，可写可读
     var araw: *u8 = undefined;
     let a = pp.alloc(20);
@@ -85,7 +85,7 @@ const run = fn (pp: *std.Pool) u8 {
 // done
 
 const main = fn () u8 {
-    let p = std.Pool.init(std.heap.page);
+    let p = std.pool.Pool.init(std.heap.page);
     if (p) pv {
         var pp = pv;
         return run(&pp);

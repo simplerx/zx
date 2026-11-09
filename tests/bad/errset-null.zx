@@ -1,0 +1,8 @@
+// expect: reserved error code 65535
+// `null` 是保留码（?T 被 try 时抛的"空"），不能声明成命名错误集的成员；
+// 值本身写成 `error.null` 即可（spec §5.2 / E0508）。
+const Bad = error{null, boom};
+
+pub const main = fn () i32 {
+    return 0;
+};

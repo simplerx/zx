@@ -1,0 +1,28 @@
+// E0411 的合法路径：void 调用、赋值接收、`_ =` 显式丢弃（M26）、
+// 方法调用返回值同样要接。全部编过并跑出 EXPECTED。
+//
+// expect: EXPECTED 48
+
+const add = fn (a: i32, b: i32) i32 { return a + b; };
+const log = fn (_msg: []const u8) void {};
+
+const Counter = struct {
+    n: i32,
+    const bump = fn (self: *Counter) i32 {
+        self.n = self.n + 1;
+        return self.n;
+    };
+};
+
+const main = fn () u8 {
+    log("ok");                 // void：直接当语句
+    _ = add(1, 2);             // 显式丢弃
+    var x: i32 = 0;
+    x = add(3, 4);             // 赋值接收
+    var c = Counter{ .n = 40 };
+    x = x + c.bump();          // 方法返回值参与运算
+    std.println("EXPECTED {d}", x);
+    return 0;
+};
+
+const std = module("std");

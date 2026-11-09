@@ -125,17 +125,17 @@ const main = fn () i32 {
     let empt = std.json.parse(al, "{}");
     if (empt) ev {
         if (asObj(ev)) op {
-            op.put("k", std.json.Value{ .int = 1 });
-            op.put("k", std.json.Value{ .int = 2 });   // 后者赢
+            _ = op.put("k", std.json.Value{ .int = 1 });
+            _ = op.put("k", std.json.Value{ .int = 2 });   // 后者赢
             if (op.get("k")) kv { dup = asInt(kv) orelse -1; }
         }
     }
     let earr = std.json.parse(al, "[]");
     if (earr) ev2 {
         if (asArr(ev2)) ap {
-            ap.push(std.json.Value{ .int = 10 });
-            ap.push(std.json.Value{ .int = 20 });
-            ap.push(std.json.Value{ .int = 30 });
+            _ = ap.push(std.json.Value{ .int = 10 });
+            _ = ap.push(std.json.Value{ .int = 20 });
+            _ = ap.push(std.json.Value{ .int = 30 });
             if (ap.at(2)) tv { third = asInt(tv) orelse -1; }
         }
     }

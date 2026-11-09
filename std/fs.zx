@@ -173,7 +173,7 @@ pub const stat = fn (alloc: Allocator, path: []const u8) ?Stat {
             let h = FindFirstFileA((*const u8)z.ptr, fd);
             if (h != INVALID_HANDLE) {
                 let s = statFrom(fd);
-                FindClose(h);
+                _ = FindClose(h);
                 alloc.free(alloc.ctx, fd, FD_BUF);
                 return s;
             }
@@ -270,7 +270,7 @@ pub const DirIter = struct {
     // 关闭并归还工作区。重复调用无害（靠句柄哨兵防双重释放）。
     const close = fn (self: *Self) void {
         if (self.h != INVALID_HANDLE) {
-            FindClose(self.h);
+            _ = FindClose(self.h);
             self.h = INVALID_HANDLE;
             self.alloc.free(self.alloc.ctx, self.buf, FD_BUF);
         }

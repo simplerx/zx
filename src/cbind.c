@@ -791,6 +791,12 @@ static void scan_ast(const char *text, int pass, int allow_system,
 
 /* ---------------- 头文件里的简单 #define 常量 ---------------- */
 
+/* 按字面量语法扫描，而不是"逐字符白名单 + 全局剥后缀"。
+ * 老写法把 U/L/F 当后缀从整串里删掉，于是 `0xFFFF` 里的 F 也一起没了，
+ * 生成出 `pub const UNICODE_NOCHAR: i32 = 0x;` —— 这条非法字面量会让
+ * 整个 vendor 模块解析失败，导入方只看到一句 "failed to parse"。
+ * 现在：先认数字主体（十六进制里的 a-f 是数字），再只吃末尾的 u/U/l/L
+ * 与浮点的 f/F，主体原样保留。 */
 static int numeric_macro(const char *v, char *out, size_t cap, const char **zty) {
     char buf[256];
     snprintf(buf, sizeof buf, "%s", v);
@@ -802,27 +808,45 @@ static int numeric_macro(const char *v, char *out, size_t cap, const char **zty)
     }
     n = strlen(buf);
     if (!n) return 0;
+
+    size_t i = 0;
+    if (buf[i] == '+' || buf[i] == '-') i++;
+    int hex = (buf[i] == '0' && (buf[i+1] == 'x' || buf[i+1] == 'X'));
     int is_float = 0, uns = 0;
-    for (size_t i = 0; i < n; i++) {
+    if (hex) {
+        i += 2;
+        size_t d0 = i;
+        while (isxdigit((unsigned char)buf[i])) i++;
+        if (i == d0) return 0;       /* `0x` 后面没数字：根本不是字面量 */
+    } else {
+        int digits = 0;
+        while (isdigit((unsigned char)buf[i])) { i++; digits = 1; }
+        if (buf[i] == '.') {
+            is_float = 1; i++;
+            while (isdigit((unsigned char)buf[i])) { i++; digits = 1; }
+        }
+        if (digits && (buf[i] == 'e' || buf[i] == 'E')) {
+            size_t save = i;
+            i++;
+            if (buf[i] == '+' || buf[i] == '-') i++;
+            if (isdigit((unsigned char)buf[i])) {
+                is_float = 1;
+                while (isdigit((unsigned char)buf[i])) i++;
+            } else i = save;         /* 不是指数（`)` 之类）：留给后缀判定 */
+        }
+        if (!digits) return 0;       /* 没有数字主体：表达式宏，不猜 */
+    }
+    size_t dend = i;                 /* 数字主体到此为止，后面只能是后缀 */
+    for (; buf[i]; i++) {
         char c = buf[i];
-        if (isdigit((unsigned char)c) || c == 'x' || c == 'X' ||
-            (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') ||
-            c == '+' || c == '-' || c == '.') continue;
         if (c == 'U' || c == 'u' || c == 'L' || c == 'l') { uns = 1; continue; }
-        if (c == 'F' || c == 'f' || c == 'e' || c == 'E') { is_float = 1; continue; }
+        if (!hex && is_float && (c == 'F' || c == 'f')) continue;
         return 0;                    /* 表达式宏：不猜，跳过 */
     }
-    /* 剥掉 U/L/F 后缀（Zx 不认 42UL 这种写法） */
-    char clean[256]; size_t m = 0;
-    for (size_t i = 0; i < n; i++) {
-        char c = buf[i];
-        if (c == 'U' || c == 'u' || c == 'L' || c == 'l' || c == 'F' || c == 'f') continue;
-        clean[m++] = c;
-    }
-    clean[m] = 0;
-    if (!m) return 0;
+    if (dend == 0) return 0;
     *zty = is_float ? "f64" : (uns ? "u32" : "i32");
-    snprintf(out, cap, "%s", clean);
+    size_t m = dend < cap - 1 ? dend : cap - 1;
+    memcpy(out, buf, m); out[m] = 0;
     return 1;
 }
 

@@ -1,0 +1,14 @@
+// 块内先声明后使用：作用域预登记让 sema 悄悄解析到后面的声明，但后端按
+// 语句顺序发 C，到那边必然编不过，曾被包装成 B1001「编译器 bug」。
+// 现在在 sema 拦下（E0401）。
+//
+// expect-count: 1
+// expect-code: E0401
+// expect: used before its declaration
+
+const main = fn () u8 {
+    let a = b;
+    let b: i64 = 42;
+    _ = a;
+    return 0;
+};

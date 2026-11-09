@@ -17,8 +17,8 @@ const describe = fn (T: type) u8 {
 };
 
 const main = fn () u8 {
-    describe(P);
-    describe(Color);
+    _ = describe(P);
+    _ = describe(Color);
 
     const si = @typeInfo(i32);
     std.println("i32 fields={d}", si.fields.len);

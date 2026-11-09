@@ -1,0 +1,13 @@
+// expect: expected a member name after '.'
+// expect-code: E0201
+// 编辑器里打到一半的 `p.` / `arrs.0.`：以前后缀链直接 Fail，错误冒到最外层
+// 报成 "unexpected token in top-level declaration"——点号本身不指出来，
+// 整条语句还被吞掉（用户 2026-11-09 第 17 条截图）。现在就地报一句、
+// 结束这条后缀链，语句照常收尾（与 C 前端 parse.c 的恢复方式一致）。
+const Person = struct { name: i32, age: i32 };
+
+pub const main = fn () i32 {
+    let p: Person = Person{ .name = 0, .age = 1 };
+    let x = p.;
+    return 0;
+};

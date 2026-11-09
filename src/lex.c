@@ -526,6 +526,13 @@ static void lex_token(Lex *l) {
 
 void lexer_init(Lexer *lx, const char *src, size_t len) {
     memset(lx, 0, sizeof *lx);
+    /* UTF-8 BOM（EF BB BF）：Windows 编辑器常偷偷加上。跳过它，否则首字符
+     * 按"非 ASCII 标识符"报 E0102。列号相对 BOM 之后算，BOM 本身不可见。 */
+    if (len >= 3 && (unsigned char)src[0] == 0xEF &&
+        (unsigned char)src[1] == 0xBB && (unsigned char)src[2] == 0xBF) {
+        src += 3;
+        len -= 3;
+    }
     lx->src = src;
     lx->src_len = len;
     buf_init(&lx->strbuf);
