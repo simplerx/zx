@@ -139,17 +139,16 @@ zxc fetch                # 换机器时按锁复现 vendor/
 | `tests/` | `good/` 正例、`bad/` 反例（带期望错误码）、`multi/` 多文件 |
 | `demo/` | `snake.zx` 控制台游戏；`ffi/` Win32 + OpenGL 绑定示例 |
 | `bench/` | 与手写 C 对照的基准与基线 |
-| `docs/` | `manual.md`（手册）、`guide.md`（教程）、`errors.md`（错误码）、`site/`（离线站） |
 | `spec/` | `zx-spec.md` 规格、`zx.ebnf` 文法、`decisions.md` 设计裁定 |
 | `editor/` | Zed 扩展与语言服务器源码 `tools/zxls.zig` |
 
-## 文档
+## 错误码
 
 ```sh
 zxc errors               # 所有错误码，按类别
 zxc explain E0304        # 单个错误码的含义与修法
 ```
 
-完整手册见 `docs/manual.md`；离线全文检索双击 `docs/site/index.html`
-（单文件、零依赖，`Ctrl/Cmd+K` 搜索）。文档源改动后跑 `python tools/mksite.py`
-重新生成，`test.sh` 会检查它有没有过期。
+错误码文案就在 `src/errors.c` 里，`zxc errors` / `zxc explain` 直接念它，
+不用翻文件。手册与教程正在重写，暂时没有成体系的文档；语言规格与设计裁定
+在 `spec/`（`zx-spec.md`、`decisions.md`）。

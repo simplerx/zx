@@ -38,6 +38,8 @@ pub const main = fn () i32 {
     push(.{ .a = 1010, .msg = "hi" });
     let g = std.task.Task.group();
     g.wait();
+    let t = std.task.Task.single();
+    t.close();
     std.println("{}", n);
     return 0;
 };
@@ -464,6 +466,23 @@ labels = {i["label"] for i in r["result"]["items"]} if r and r.get("result") els
 check("completion.groupInst", {"id", "spawn", "wait"} <= labels
       and not labels & {"coro", "single", "pool"}, str(sorted(labels)))
 
+# 3f2 同名成员跨容器不串签名（用户 2026-11-10 截图：实例上"显示关联函数"）：
+#   `Task.spawn` 与 `Group.spawn` 同名。t. 的 detail 必须是 Task 的 `?usize` 版，
+#   不能是 Group 的 `bool` 版——以前 findDeclStmt 在整份声明文件里按名字找，
+#   拿到的是文件里第一个（Group.spawn，std/task.zx 里在前）。
+off = MAIN.index("    t.close();") + len("    t.")
+send({"jsonrpc": "2.0", "id": 991, "method": "textDocument/completion", "params": {
+    "textDocument": {"uri": uri}, "position": pos(MAIN, off)}})
+r, _ = recv_id("completion.instance.sameNameMember", 991)
+tmap = {i["label"]: i.get("detail") for i in r["result"]["items"]} if r and r.get("result") else {}
+check("completion.instance.sameNameMember",
+      tmap.get("spawn") == "spawn(f: fn (usize) !usize, ctx: usize) ?usize"
+      and tmap.get("awaitAll") == "awaitAll() !void"
+      and tmap.get("close") == "close() void"
+      # 关联函数（首参不是 self）一律不进实例补全
+      and not ({"coro", "single", "pool", "fromId", "group"} & set(tmap)),
+      str(tmap)[:300])
+
 # 3g hover 变量 → 推断类型（var p = Person{…} 式结构体字面量也要出类型）
 off = MAIN.index("var s = Shape") + len("var s")
 send({"jsonrpc": "2.0", "id": 14, "method": "textDocument/hover", "params": {
@@ -699,12 +718,14 @@ while _t2.time() < deadline:
 ok_help = any("did you mean" in m for m in diag_msgs)
 check("diagnostics.helpInMsg", ok_help, str(diag_msgs)[:300])
 
-# 10c 诊断上的码要能点开文档：codeDescription.href 指向 docs/errors.md 的锚点
-href = ""
-for d in diags:
-    if d.get("code") == "E0304":
-        href = (d.get("codeDescription") or {}).get("href", "")
-check("diagnostics.codeDescription", href.endswith("docs/errors.md#e0304"), href or str(diags)[:300])
+# 10c 诊断要带稳定的码与来源名。codeDescription 暂时不发——手册/错误码文档
+#     已经删掉、正在重写，没有可指向的地址；等文档回来再在这里恢复
+#     `href` 的断言（否则就是给用户一个 404 链接）。
+d304 = next((x for x in diags if x.get("code") == "E0304"), None)
+check("diagnostics.codeStable",
+      d304 is not None and d304.get("source") == "zxc"
+      and "codeDescription" not in d304,
+      str(diags)[:300])
 
 # 10d 没有具体 fix-it 的诊断，消息里要带上该码的通用修法（errors.c 的文案）
 ok_fix = any(d.get("code") == "E0301" and "(T)expr" in d.get("message", "") for d in diags)

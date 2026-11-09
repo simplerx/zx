@@ -111,11 +111,6 @@ fn findStdDir() ?[]const u8 {
     return null;
 }
 
-/// 错误码说明文档的地址（`<base>#e0304` 直达一条）。与 src/errors.c 的
-/// ZX_DOCS_URL 是同一个字面量——C 常量传不到 Zig 这边，只能各存一份，
-/// test.sh 会校验两处一致，改地址记得两边一起改。
-const docs_base = "https://gitcode.com/simplex/zx/blob/main/docs/errors.md";
-
 /// 客户端有没有在 initialize 里声明 codeDescriptionSupport。
 /// 没有就别发 codeDescription（见 publishDiags 里的注释）。
 var cap_code_desc = false;
@@ -2453,6 +2448,44 @@ fn declStmtAt(text: []const u8, c: usize, kw: []const u8, name: []const u8) ?[]c
                 }
             }
             return text[start..];
+    }
+    return null;
+}
+
+/// 容器体**内部**的成员声明：`const spawn = fn (self: *const Self, …) …;`。
+///
+/// 拼签名 / 判 self / 出调用骨架都必须用它，不能拿整个声明文件去
+/// findDeclStmt(名字)：两个结构体有同名成员时（`Task.spawn` 与
+/// `Group.spawn`），全文查找拿到的是文件里第一个，签名和 self 判定都会串
+/// ——`t.spawn` 的 detail 曾显示成 Group 的 `spawn(…) bool`，看上去就像
+/// 实例上冒出个关联函数（用户 2026-11-10 报的正是这个）。
+///
+/// 只认容器体**顶层**（相对深度 1）的声明：嵌套 struct 的同名成员不算。
+fn findMemberStmt(body: []const u8, name: []const u8) ?[]const u8 {
+    const kws = [_][]const u8{ "const ", "let ", "var ", "fn " };
+    var depth: usize = 0;
+    var in_str = false;
+    var i: usize = 0;
+    while (i < body.len) : (i += 1) {
+        const c = body[i];
+        if (in_str) {
+            if (c == '\\') { i += 1; continue; }
+            if (c == '"') in_str = false;
+            continue;
+        }
+        if (c == '"') { in_str = true; continue; }
+        if (c == '/' and i + 1 < body.len and body[i + 1] == '/') {
+            while (i < body.len and body[i] != '\n') i += 1;
+            continue;
+        }
+        if (c == '{') { depth += 1; continue; }
+        if (c == '}') { if (depth > 0) depth -= 1; continue; }
+        if (depth != 1) continue;                    // 只看容器体顶层
+        if (i > 0 and isIdentChar(body[i - 1])) continue;
+        for (kws) |kw| {
+            if (!std.mem.startsWith(u8, body[i..], kw)) continue;
+            if (declStmtAt(body, i, kw, name)) |st| return st;
+        }
     }
     return null;
 }
@@ -5844,6 +5877,12 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
             }
             if (handled) {
                 const src: []const u8 = mem_txt orelse text;
+                // 接收者容器的体（顶层成员表）：成员声明的查找范围只在里面
+                //（`t.spawn` 不能拿到 Group.spawn 的签名）。
+                const mem_body: ?[]const u8 = if (owner.len > 0) blk2: {
+                    if (findContainerBody(&[_][]const u8{src}, owner)) |h| break :blk2 h.body;
+                    break :blk2 genericBodyOf(&[_][]const u8{src}, owner);
+                } else null;
                 for (decls.items) |dcl| {
                     // 字面量初始化只能写字段/变体，方法（name = fn …）不出
                     if (lit_ctx and dcl.kind == .value) continue;
@@ -5851,7 +5890,14 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                     // 列表全弹出来，用户 2026-11-08 第 3/4/6 条）
                     if (prefix.len > 0 and !std.mem.startsWith(u8, dcl.name, prefix)) continue;
                     // 声明语句（模块文件/当前文档）：签名、容器判定、骨架共用
-                    const stmt: ?[]const u8 = findDeclStmt(src, dcl.name);
+                    // 成员声明的查找范围必须锁在接收者自己的容器体里
+                    //（同名成员跨容器时全文查找会串签名，见 findMemberStmt）
+                    const stmt: ?[]const u8 = blk2: {
+                        if (mem_body) |b| {
+                            if (findMemberStmt(b, dcl.name)) |st| break :blk2 st;
+                        }
+                        break :blk2 findDeclStmt(src, dcl.name);
+                    };
                     const cinit: ?[]const u8 = if (stmt) |st| containerInitOf(st) else null;
                     // KEEP —— 类型 / 实例命名空间分离（用户 2026-11-10：
                     // "Task 命名空间污染了"）。补全不能比编译器宽松：
@@ -6322,16 +6368,8 @@ fn publishDiags(doc: *const Document, diags: []const Diag) void {
         // docs/errors.md 里对应的一条（锚点 = 小写码）。
         // 只在客户端声明支持时才发——不支持的老客户端看到未知字段会
         // 严格校验失败，整条 publishDiagnostics 就被丢弃，诊断全没了。
-        if (cap_code_desc and d.code.len == 5) {
-            j.buf.appendSlice(gpa, ",\"codeDescription\":{\"href\":\"") catch @panic("oom");
-            j.buf.appendSlice(gpa, docs_base) catch @panic("oom");
-            j.buf.append(gpa, '#') catch @panic("oom");
-            for (d.code) |ch| {
-                const lo: u8 = if (ch >= 'A' and ch <= 'Z') ch + 32 else ch;
-                j.buf.append(gpa, lo) catch @panic("oom");
-            }
-            j.buf.appendSlice(gpa, "\"}") catch @panic("oom");
-        }
+        // codeDescription 暂时不发：手册/错误码文档已删、正在重写，没有可
+        // 指向的地址（客户端声明了能力也不影响它缺席）。
         j.buf.appendSlice(gpa, ",\"source\":\"zxc\",\"message\":") catch @panic("oom");
         j.str(d.msg);
         j.buf.appendSlice(gpa, "}") catch @panic("oom");

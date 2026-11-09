@@ -2492,6 +2492,20 @@ static const char *errset_missing(const void *a, const void *b) {
     return out;
 }
 
+/* 关联常量（写在 struct/union 体里的 `const K: i32 = 7`）：值只依赖声明，
+ * 与实例无关。`O.K` 走 TY_TYPE 分支，靠 ct_eval 折成字面量；`c.K` 以前只
+ * 返回类型，后端照着普通字段发 `c.K`，而 C 的 struct 里根本没这个成员
+ * ——B1001（用户 2026-11-10 报的编译器 bug）。这里把声明初值折到节点上，
+ * 后端 ex() 的 `n->ct` 分支直接发字面量。静态 var 成员不折（它可变）。 */
+static Type *static_member_ty(Node *n, Field *f) {
+    if (f->is_static && !f->is_var && f->dflt) {
+        Value *cv = ct_eval_probe(f->dflt);
+        if (cv && f->ty) cv = val_cast(f->ty, cv);
+        if (cv && cv->kind != V_UNDEF) n->ct = cv;
+    }
+    return type_of(n, f->ty);
+}
+
 static Type *check_field(Node *n) {
     Node *base = n->a;
     /* 投机类型解析会把 `@typeName(f.ty)` 的实参吃成 TYPE_IDENT(f).ty；
@@ -2596,6 +2610,15 @@ static Type *check_field(Node *n) {
             if (tv->kind == TY_ENUM && !f->is_static) return type_of(n, tv);
             if (!f->is_static)
                 return BAD(n, "'%s' is an instance field; construct a value first", n->name);
+            /* 嵌套类型成员（`const Inner = struct { … };`）：成员的值就是这个
+             * 类型。只返回 TY_TYPE 不够——`O.Inner{ .z = 1 }` 的构造、`var x:
+             * O.Inner` 的标注都要 type_val，缺了它构造函数拿不到目标类型，
+             * 后端就发出未声明的变量（B1001，用户 2026-11-10）。 */
+            if (f->ty && f->ty->kind == TY_TYPE) {
+                if (f->dflt && f->dflt->ty && f->dflt->ty->kind == TY_TYPE)
+                    n->type_val = f->dflt->type_val;
+                return type_of(n, ty_type());
+            }
             return type_of(n, f->ty);
         }
         return BAD(n, "`%s` needs a field name", ty_str(tv));
@@ -2648,7 +2671,7 @@ static Type *check_field(Node *n) {
             }
             return BAD(n, "`%s` has no member '%s'", ty_str(e), n->name);
         }
-        if (f->is_static) return type_of(n, f->ty);
+        if (f->is_static) return static_member_ty(n, f);
         return type_of(n, f->ty);
     }
 
@@ -2695,6 +2718,7 @@ static Type *check_field(Node *n) {
             n->type_val = (cv && cv->kind == V_TYPE) ? cv->tval : ty_invalid();
             return type_of(n, ty_type());
         }
+        if (f->is_static) return static_member_ty(n, f);
         return type_of(n, f->ty);
     }
 
@@ -2708,6 +2732,7 @@ static Type *check_field(Node *n) {
             if (m) { n->inst = m->fn; n->flag = m->has_self; return type_of(n, m->fnty); }
             return BAD(n, "`%s` has no member '%s'", ty_str(bt), n->name);
         }
+        if (f->is_static) return static_member_ty(n, f);
         return type_of(n, f->ty);
     }
 

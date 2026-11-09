@@ -82,5 +82,17 @@
 - 守门（lsptest 217 项）：completion.optional.gate / instance.optionalRet /
   builtin.allocatorMembers / typePath.noField / chain.genericInstField /
   stdInstance.staticSnippet（反转成"实例无静态构造器"）。
-- 已知遗留：结构体里的 `const K: i32 = 7`（关联常量）sema 通过，后端发 `ZxS1.K`
-  报 B1001——尚未修。
+- 关联常量/嵌套类型已修（05:xx）：`static_member_ty()` 把 `c.K` 折成值；
+  后端物化静态成员时跳过 TY_TYPE（`const Inner = struct{…}`）；类型成员把
+  `dflt->type_val` 挂到节点上（`O.Inner{…}` 才能构造）；静态切片常量显式发
+  `{ptr,len}`。守门 tests/good/assoc-const.zx。
+- **列成员声明只能在自己容器体里找**（`findMemberStmt`）：整份文件按名字
+  findDeclStmt 会让同名成员串签名（Task.spawn / Group.spawn 等 8 组），
+  `t.spawn` 曾显示成 Group 的 `… bool`，看着像"实例上冒出关联函数"。
+  守门 lsptest `completion.instance.sameNameMember`。
+- **docs/ 已整体删除（用户 2026-11-10："丢弃现在这个手册, 文档也不要了;
+  以后再重新写"）**：manual/guide/errors/site/zxc-usage + tools/mksite.py
+  都没了，test.sh 里的文档检查、errors.c 的 ZX_DOCS_URL、zxls 的
+  codeDescription 一并撤掉。写文档是后续独立任务，别再引用 docs/ 路径；
+  lsptest 的 `diagnostics.codeStable` 目前守"不发 codeDescription"，文档
+  回来要改成 href 断言。

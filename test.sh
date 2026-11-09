@@ -560,10 +560,10 @@ fi
 rm -rf "$pdir" 2>/dev/null || true
 
 # 2.55 错误码目录：诊断里出现的每个码都必须查得到。
-# 三处码集要完全一致——src/zxc.c 的 g_rules（真源）、src/errors.c 的文案
-# （`zxc explain` 念它）、docs/errors.md（完整参考）。漏一处就是"用户拿着码
-# 搜不到东西"，而码一旦发布又不能改，只能靠这里挡。
-printf "\n== 错误码目录（zxc errors / explain / docs/errors.md 三方一致）\n"
+# 两处码集要完全一致——src/zxc.c 的 g_rules（真源）与 src/errors.c 的文案
+# （`zxc errors` / `zxc explain` 都念它）。漏一处就是"用户拿着码搜不到东西"，
+# 而码一旦发布又不能改，只能靠这里挡。
+printf "\n== 错误码目录（zxc errors / explain 与编译器码集一致）\n"
 # 真源 = 编译器里实际会发出的码；文案表必须与它**相等**（多一个少一个都算漂移）
 codes=$(grep -ohE '"E[0-9]{4}"' src/zxc.c src/sema.c src/parse.c src/lex.c src/backend.c | tr -d '"' | sort -u)
 codes_doc=$(grep -ohE '"E[0-9]{4}"' src/errors.c | tr -d '"' | sort -u)
@@ -600,33 +600,6 @@ if $ZXC explain E9999 > /dev/null 2>&1; then
 else
     printf "  ok   explain 对未知码返回非零\n"
 fi
-doc_miss=""
-anchor_miss=""
-for c in $codes; do
-    grep -q "$c" docs/errors.md || doc_miss="$doc_miss $c"
-    # 锚点：lsp 的 codeDescription 与 `zxc explain` 都靠 `#e0304` 直接跳转
-    lc=$(printf '%s' "$c" | tr 'A-Z' 'a-z')
-    grep -q "id=\"$lc\"" docs/errors.md || anchor_miss="$anchor_miss $c"
-done
-if [ -z "$doc_miss" ]; then
-    printf "  ok   docs/errors.md 覆盖全部 %s 个码\n" "$ncodes"
-else
-    printf "  FAIL docs/errors.md 缺:%s\n" "$doc_miss"; fail=1
-fi
-if [ -z "$anchor_miss" ]; then
-    printf "  ok   docs/errors.md 每个码都有锚点\n"
-else
-    printf "  FAIL docs/errors.md 缺锚点:%s\n" "$anchor_miss"; fail=1
-fi
-# 文档地址在 C（zxc explain 输出）和 Zig（lsp codeDescription）各存一份，
-# 只能靠这里挡住漂移：两处字面量必须一致，否则编辑器里的链接指向旧位置。
-url_c=$(grep -oE 'https://[^"]*docs/errors\.md' src/errors.c | head -1)
-url_zig=$(grep -oE 'https://[^"]*docs/errors\.md' tools/zxls.zig | head -1)
-if [ -n "$url_c" ] && [ "$url_c" = "$url_zig" ]; then
-    printf "  ok   errors.c 与 zxls.zig 的文档地址一致\n"
-else
-    printf "  FAIL 文档地址漂移\n        errors.c:%s\n        zxls.zig:%s\n" "$url_c" "$url_zig"; fail=1
-fi
 # 兜底修法：诊断里没有具体建议时，help 行要换成该码的通用修法
 printf 'const main = fn () void {\n    let y: i32 = "abc";\n};\n' > "$TPFX.fix.zx"
 $ZXC "$TPFX.fix.zx" --check > "$TPFX.fix.log" 2>&1 || true
@@ -635,11 +608,6 @@ if grep -q "E0301" "$TPFX.fix.log" && grep -q "help: .*@intCast" "$TPFX.fix.log"
 else
     printf "  FAIL 诊断没带通用修法\n"; cat "$TPFX.fix.log"; fail=1
 fi
-if $ZXC explain E0304 2>&1 | grep -q "#e0304"; then
-    printf "  ok   zxc explain 给出文档链接\n"
-else
-    printf "  FAIL zxc explain 没给文档链接\n"; fail=1
-fi
 
 
 # 2.6 LSP 冒烟：语言服务器的模块解析必须和编译器**同一条链**（vendor/ +
@@ -647,15 +615,6 @@ fi
 # 两侧各写一份解析链，缺一个目录就是一个点了没反应的句点。
 # zxls 编进临时目录并把 zxc.exe 拷到它旁边——zxls 按兄弟目录找 zxc，
 # 这样格式化冒烟才能打到真 fmt，而不是空响应假通过。
-# 2.55b 离线文档站：源 md 改了必须重跑 tools/mksite.py，否则用户查到的是
-# 旧内容。产物里内嵌各源的 sha256 清单，--check 只比对摘要、不重新渲染。
-printf "\n== 离线文档站（docs/site/index.html 与源文档一致）\n"
-if python tools/mksite.py --check > "$TPFX.site" 2>&1; then
-    printf "  ok   %s\n" "$(cat "$TPFX.site")"
-else
-    printf "  FAIL 离线文档站过期或缺失\n"; cat "$TPFX.site"; fail=1
-fi
-
 # 2.56 名字只由显式绑定产生（用户 2026-11-08 否掉「裸模块名即命名空间」）。
 #     隐式名一旦和别名/再导出撞名，`pub const glfw3 = glfw3;` 右边会被
 #     自己的绑定吃掉，文件一多必乱。守门钉死三态：① 未绑定裸名照常报

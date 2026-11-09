@@ -1,0 +1,36 @@
+// 关联常量与嵌套类型（用户 2026-11-10 报的 B1001）：
+//   struct 体里 `const K: i32 = 7` 是编译期常量——`O.K` 和实例上的 `c.K`
+//   都必须折成值，绝不能发成 C 的 `c.K`（struct 里没这个成员）；
+//   `const Inner = struct { … };` 是**类型**成员，没有运行期表示，
+//   但构造 `O.Inner{ .z = … }` 要能拿到它的类型。
+const std = module("std");
+
+const O = struct {
+    N: i32,
+    const K: i32 = 7;
+    const NAME: []const u8 = "assoc";
+    const Inner = struct { z: i32 };
+
+    const mk = fn () O { return O{ .N = 1 }; };
+    const bump = fn (self: *const O) i32 { return self.N + O.K; };
+};
+
+const main = fn () u8 {
+    // 类型上取
+    if (O.K != 7) { return 1; }
+    // 实例上取（以前后端照字段发 `c.K`，C 编译器拒收 → B1001）
+    let c = O.mk();
+    if (c.K != 7) { return 2; }
+    if (c.bump() != 8) { return 3; }
+    // 常量当编译期数组长度用
+    var xs: *[O.K]i32 = &.{ 0, 0, 0, 0, 0, 0, 0 };
+    xs[6] = 1;
+    if (xs.len != 7) { return 4; }
+    // 嵌套类型成员：构造 + 类型标注
+    let f = O.Inner{ .z = 5 };
+    var g: O.Inner = .{ .z = 6 };
+    if (f.z + g.z != 11) { return 5; }
+    // 静态 var 不折叠（值由运行期决定）
+    std.println("{} {} {} {}", c.K, O.NAME, f.z, g.z);
+    return 0;
+};

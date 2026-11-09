@@ -35,6 +35,7 @@ static Buf *g_out;
 static int  g_ind;
 
 static void cname(Buf *b, const char *s);   /* 成员名转义（定义在下方），ensure_type 先用到 */
+static void cstr(Buf *b, const char *s, int n);  /* C 字符串字面量：静态成员初始化先用 */
 static void mname(Buf *b, const char *s);
 static void dotname(Buf *b, const char *s);
 static void arrowname(Buf *b, const char *s);
@@ -428,6 +429,12 @@ static void ensure_type(Type *t) {
             for (int k = 0; k < t->nfields; k++) {
                 Field *f = &t->fields[k];
                 if (!f->is_static) continue;
+                /* 静态**类型**成员（`const Inner = struct { … };`）：它是
+                 * 类型不是值，没有运行期表示。以前照样物化成 C 变量，
+                 * ctype 把类型发成 void、初值是 struct 类型字面量节点，
+                 * 后端直接撞 E0300 + B1003（用户 2026-11-10 报的 B1001
+                 * 同一条线上的坑）。 */
+                if (f->ty && f->ty->kind == TY_TYPE) continue;
                 Buf s; buf_init(&s);
                 buf_puts(&s, "static ");
                 ctype(&s, f->ty);
@@ -435,7 +442,19 @@ static void ensure_type(Type *t) {
                 mname(&s, f->name);
                 if (f->dflt) {
                     buf_puts(&s, " = ");
-                    ex(&s, f->dflt);
+                    /* 切片类型的字符串初值：C 里 `static ZxSlice_u8 x =
+                     * (uint8_t*)"…"` 不是合法的聚合初始化（会报
+                     * incompatible type）。这里显式发 {ptr, len}。 */
+                    if (f->ty && f->ty->kind == TY_SLICE && f->dflt->kind == NK_STR) {
+                        Buf c; buf_init(&c);
+                        cstr(&c, f->dflt->str ? f->dflt->str : "", f->dflt->str_len);
+                        Buf ts; buf_init(&ts);
+                        ctype(&ts, f->ty);
+                        buf_printf(&s, "((%s){ (uint8_t*)%s, %d })",
+                                   ts.data, c.data, f->dflt->str_len);
+                    } else {
+                        ex(&s, f->dflt);
+                    }
                 }
                 buf_puts(&s, ";\n");
                 buf_puts(g_out, s.data);      /* 跟类型定义一起进头文件 */
@@ -501,6 +520,8 @@ static void ensure_type(Type *t) {
         /* 枚举体里的 `const` / `var` 成员：和结构体的静态成员一样，全程序一份 */
         for (int k = 0; k < t->nstatics; k++) {
             Field *f = &t->statics[k];
+            /* 类型成员没有 C 表示（同 struct 静态成员） */
+            if (f->ty && f->ty->kind == TY_TYPE) continue;
             ensure_type(f->ty);
             Buf s; buf_init(&s);
             buf_puts(&s, "static ");
