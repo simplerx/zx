@@ -1091,6 +1091,18 @@ src/main.zx:12:9: error[E0304]: `Point` has no field 'coutn'
 | 格式化 | 与 `zxc fmt` 同一实现 |
 | 文档符号 / 签名帮助 | |
 
+成员补全按编译器的三套命名空间分开，不会串门：
+
+| 接收者 | 补什么 | 反例（编译器会拒） |
+| --- | --- | --- |
+| `Task.` / `std.BufReader.` / `HashMap(i32).` | 静态成员：静态函数、嵌套类型、关联常量；方法也在（未绑定调用 `Task.spawn(&t, f, 0)`） | `Task.id` → E0300 实例字段，先造值 |
+| `t.` / `o.` / `g.` | 实例字段、实例方法（首参 `self`）、关联常量 | `t.coro()` → E0303 首参不是 `self`，不是方法；`t.Group` → E0304 |
+| `std.` / 模块绑定 | 模块的 `pub` 成员 | — |
+
+可选值先解包：`var arena: ?Allocator = …` 的 `arena.` 只提示 `?`（补成
+`arena.?`），`arena.?.` 才列 `Allocator` 的 `ctx` / `alloc` / `free`。
+`if (arena) a { a. }` 的捕获变量同样按解包后的 `Allocator` 提示。
+
 Zed 里的配置（`.zed/settings.json`）：
 
 ```json

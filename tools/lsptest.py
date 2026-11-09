@@ -1407,12 +1407,13 @@ pub const main = fn () u8 {
     var V: type = std.ArrayList(i32);
     var list = V.init(std.heap.page);
     _ = dt.year;
-    _ = sm.size;
+    _ = sm.?.size;
+    _ = std.heap.page.ctx;
     _ = std.stackAlloc;
     _ = std.task;
     _ = std.map;
-    r.
-    w.
+    r.?.
+    w.?.
     list.
     std.io.
     std.str.
@@ -1479,9 +1480,11 @@ git = std_items(off, 403)
 gd = {i["label"]: i.get("detail") for i in git}
 gt = {i["label"]: i.get("insertText") for i in git}
 gk = {i["label"]: i.get("kind") for i in git}
+# 用户 2026-11-10："Task 命名空间污染了"。`g.single()` 编译报 E0303
+#（首参不是 self，不是方法），静态构造器只属于 `Task.`，不许混进实例补全。
 check("completion.stdInstance.staticSnippet",
-      gk.get("single") == 15 and gt.get("single") == "single()$0"
-      and gk.get("single(...)") is None, str(gt.get("single")))
+      not ({"single", "coro", "pool", "fromId", "group"} & set(gk)) and "id" in gk,
+      str(sorted(gk)))
 check("completion.stdInstance.methodSig",
       (gd.get("await") or "") == "await(h: usize) !usize"
       and gk.get("await") == 15 and gt.get("await") == "await(${1:h})$0",
@@ -1596,23 +1599,38 @@ dit = std_items(off, 415)
 dlab = {i["label"] for i in dit}
 check("completion.instance.moduleFnRet",
       {"year", "month", "day", "sec", "ms"} <= dlab, str(sorted(dlab)))
-off = STDUSE.index("    _ = sm.size;") + len("    _ = sm.")
+# 可选值先解包（用户 2026-11-10："?T 类型 .? 之后丢失类型"）：
+# `sm.` 唯一合法后缀是 `.?`，只出解包项；`sm.?.` 才出 Stat 的成员。
+off = STDUSE.index("    _ = sm.?.size;") + len("    _ = sm.")
+sgate = {i["label"] for i in std_items(off, 4160)}
+check("completion.optional.gate", sgate == {"?"}, str(sorted(sgate)))
+off = STDUSE.index("    _ = sm.?.size;") + len("    _ = sm.?.")
 sit2 = std_items(off, 416)
 slab2 = {i["label"] for i in sit2}
 check("completion.instance.optionalRet",
       {"size", "mtime", "isHidden"} <= slab2, str(sorted(slab2)))
+# 内建类型 Allocator（sema 合成，源文件里没有声明）：实例的三字段
+off = STDUSE.index("    _ = std.heap.page.ctx;") + len("    _ = std.heap.page.")
+alit = std_items(off, 4166)
+alab = {i["label"]: i.get("detail") for i in alit}
+check("completion.builtin.allocatorMembers",
+      alab.get("ctx") == "?*u8"
+      and (alab.get("alloc") or "").startswith("fn (?*u8, usize)")
+      and (alab.get("free") or "").startswith("fn (?*u8, *u8, usize)"), str(alab))
 #  6e std 类型实例的方法要带签名 + 骨架（用户 2026-11-09：BufReader/BufWriter
 #     实例的方法没有提示和 snippet）。self 是隐含接收者，签名里不出现。
-off = STDUSE.index("    r.\n") + len("    r.")
+off = STDUSE.index("    r.?.\n") + len("    r.?.")
 rit = std_items(off, 417)
 rd = {i["label"]: (i.get("detail"), i.get("kind"), i.get("insertText")) for i in rit}
 check("completion.instance.bufReaderMethods",
       rd.get("next", (None,))[0] == "next() ?[]const u8"
       and rd.get("next", (None, None, None))[2] == "next()$0"
       and rd.get("chunk", (None,))[0] == "chunk() ?[]const u8"
-      and rd.get("open", (None,))[0] == "open(alloc: Allocator, path: []const u8, cap: usize) ?BufReader",
+      # `open` 是静态工厂（首参不是 self）：`r.open()` 报 E0303，只在
+      # `BufReader.` 上出现（用户 2026-11-10 命名空间分离）。
+      and "open" not in rd,
       str(rd.get("next")))
-off = STDUSE.index("    w.\n") + len("    w.")
+off = STDUSE.index("    w.?.\n") + len("    w.?.")
 wit = std_items(off, 418)
 wd = {i["label"]: (i.get("detail"), i.get("insertText")) for i in wit}
 check("completion.instance.bufWriterMethods",
@@ -1621,6 +1639,14 @@ check("completion.instance.bufWriterMethods",
       and wd.get("writeLine", (None, None))[1] == "writeLine(${1:s})$0"
       and wd.get("flush", (None, None))[1] == "flush()$0",
       str(wd.get("write")))
+# 类型路径不出实例字段（用户 2026-11-10 同一处：`std.BufReader.h` 是
+# E0300）。方法留在类型上（未绑定调用合法：`Task.spawn(&t, f, 0)`）。
+off = STDUSE.index("    std.BufReader.") + len("    std.BufReader.")
+bpt = {i["label"] for i in std_items(off, 4167)}
+check("completion.typePath.noField",
+      {"open", "init", "next", "chunk"} <= bpt
+      and not ({"h", "buf", "cap", "start", "end", "eof", "owned", "alloc"} & bpt),
+      str(sorted(bpt)))
 #  6f 类型变量绑定：`var V: type = std.ArrayList(i32)` → `V.init(…)` 的实例
 #     也要推断成 ArrayList（用户 2026-11-09 截图里的写法）
 off = STDUSE.index("    list.\n") + len("    list.")
@@ -1728,6 +1754,7 @@ send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
     "textDocument": {"uri": covuri, "languageId": "zx", "version": 1, "text": COVTXT}}})
 
 cov_empty, cov_nosnip, cov_badhover = [], [], []
+cov_empty_pair = {}   # 类型 → [type 是否空, inst 是否空]
 cov_rid = 900
 for _qn, _inst, _shape, _ln in cov_marks:
     for _label, _row, _col in (("type", _ln, 4 + len(_qn) + 1),
@@ -1739,7 +1766,8 @@ for _qn, _inst, _shape, _ln in cov_marks:
         _r, _ = recv_id("stdCoverage", cov_rid)
         _items = _r["result"]["items"] if _r and _r.get("result") else []
         if not _items:
-            cov_empty.append("%s(%s)" % (_qn, _label))
+            _slot = cov_empty_pair.setdefault(_qn, [True, True])
+            _slot[0 if _label == "type" else 1] = False
             continue
         # 第 13 条：函数只出一条——label 就是名字、kind=15、带 snippet。
         # 同名重复 / 残留裸名函数项（kind 2/3）/ snippet 缺 insertTextFormat
@@ -1765,6 +1793,12 @@ send({"jsonrpc": "2.0", "method": "textDocument/didClose",
       "params": {"textDocument": {"uri": covuri}}})
 
 check("stdCoverage.enumerated", len(cov_types) >= 12, "types=%d" % len(cov_types))
+# 用户 2026-11-10：类型路径只出静态成员、实例路径只出实例成员——
+#   `ArenaAllocator{ }` 没有实例成员（构造入口是静态 init）→ inst 空是正常的
+#   `Stat`/`Obj`/`DateTime` 全是字段 → type 空是正常的
+# 两边都空才说明解析链断了。
+cov_empty = ["%s(type+inst)" % q for q, (t, i) in sorted(cov_empty_pair.items())
+             if not t and not i]
 check("stdCoverage.typePathMembers", not cov_empty, str(cov_empty)[:300])
 check("stdCoverage.methodSnippets", not cov_nosnip, str(cov_nosnip)[:300])
 check("stdCoverage.hoverDefinition", not cov_badhover, str(cov_badhover)[:300])
@@ -1790,8 +1824,9 @@ pub const main = fn () u8 {
     std.map.HashMap(i32).in
     std.map.HashMap(i32).
     std.time.fromUnixMs(0).
-    std.BufReader.open(std.heap.page, "z", 64).
+    std.BufReader.open(std.heap.page, "z", 64).?.
     mk().
+    HS.
     return 0;
 };
 """
@@ -1836,15 +1871,19 @@ check("completion.chain.genericDot",
       and cdot["put"].get("insertText") == "put(${1:key}, ${2:val})$0"
       and "put(...)" not in cdot
       and cdot.get("init", {}).get("detail") == "init(alloc: Allocator) HashMap"
-      and "keys" in cdot,
+      and "keys" not in cdot,
       str(sorted(cdot))[:220])
+# 字段在实例上（`HS.keys`），类型上取字段是 E0300
+cinst = {i["label"] for i in chain_items("HS.\n")}
+check("completion.chain.genericInstField",
+      {"keys", "vals", "cap", "n"} <= cinst, str(sorted(cinst))[:220])
 
 # 模块函数返回类型（fromUnixMs → DateTime）
 cmod = {i["label"] for i in chain_items("std.time.fromUnixMs(0).\n")}
 check("completion.chain.moduleFn", {"year", "month", "day"} <= cmod, str(sorted(cmod)))
 
 # 工厂调用返回类型（BufReader.open → ?BufReader）
-cfac = {i["label"]: i for i in chain_items('std.BufReader.open(std.heap.page, "z", 64).\n')}
+cfac = {i["label"]: i for i in chain_items('std.BufReader.open(std.heap.page, "z", 64).?.\n')}
 check("completion.chain.factory",
       cfac.get("next", {}).get("insertText") == "next()$0"
       and cfac.get("next", {}).get("detail") == "next() ?[]const u8",

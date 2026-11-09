@@ -49,3 +49,38 @@
 - **表述红线（2026-11-10 用户再次强调）**：`&xs` 是**取指针变量的地址**（得
   `**T`），不是"数组的地址"——Zx 里根本没有数组变量，只有指针。设计目的就是
   划清 C 里数组/指针衰减的混淆。写文档不许出现"数组的地址"这种说法。
+
+## 内建只有九个（2026-11-10 03:xx 用户拍板，1.2.0）
+- 只留：`@sizeOf @alignOf @typeName @memcpy @memmove @memset @link @compileError @trap`。
+- **转换只有 `(T)val`**：@intCast/@ptrCast/@bitCast/@as 全删；castable 表本来就覆盖
+  窄化/扩宽/整数浮点/指针互转/指针整数互转。别再往手册里加 cast 内建。
+- 反射只有名字/大小/对齐；@typeInfo/@field*@hasField/@offsetOf/@typeOf/@embedFile
+  与位置内建（@file/@line/@col/@fnName）全删。字段偏移用 `((usize)&v.f)-((usize)&v)`。
+- 老名字报 **E0211**（src/sema.c check_builtin 末尾的 gone[] 表 + zxc.c g_rules 的
+  `"was removed:"` 规则 + errors.c 条目），提示里直接给替代写法。
+- std.debug.panic/assert 的位置实参改为 debug_inject_loc 现造字面量节点
+  （NK_STR/NK_INT），不再合成位置内建。
+- std.TypeKind/TypeInfo/FieldInfo 连 sema_ty_ct_only/typeinfo_value/typekind_tag
+  一起删除；zxls 的内建补全表也只剩九个（含 @link）。
+- 守门：tests/good/casts-one-way.zx（(T)v 全场景）、tests/bad/removed-*.zx（4 个 E0211）。
+
+## 补全命名空间三分 + 可选值解包（2026-11-10 用户："Task 命名空间污染了"）
+- zxls 点补全按 **RecvKind{module, ty, instance}** 分开：
+  - `Task.` / `std.BufReader.` / `HashMap(i32).` → 只出静态成员（静态 fn、嵌套类型、
+    关联常量）+ 方法（未绑定调用合法）；**不出实例字段**（`Task.id` 是 E0300）。
+  - `t.` / `g.` / `v.` → 只出字段、实例方法（首参 self）、关联常量；**不出静态构造器**
+    （`t.coro()` 是 E0303）与嵌套类型（`t.Group` 是 E0304）。
+  - 判据：`sigOfStmt` 首参是否 `self`；字面量上下文（`Person{.`）不过滤，那里只能写字段。
+  - 链式接收者要再分：末位被调名本身是容器名（`HashMap(i32)`）才是类型，`f(…).` 是值。
+- **可选值 `?T`**：`arena.` 只提示 `?`（补成 `arena.?`），`arena.?.` 才出内层成员。
+  `recvOptionalTy` 负责识别；`recvExprStart` 要吞 `.?`（`?` 不是标识符字符），
+  `inferContainer` 开头剥 `.?`。`if (x) v {` 的捕获绑定由 `captureBindTy` 推。
+- **内建类型 Allocator** 在源文件里没有声明：`builtinTyMembers` 硬编码 ctx/alloc/free，
+  与 src/sema.c 的 sema_allocator_type 对齐；`isBuiltinTy` 让 inferContainer 认
+  `init(...) ?Allocator`，否则会退回接收者 ArenaAllocator（弹出编译不过的 init/reset/deinit）。
+- `std.heap.page` 是**值**（Allocator），不是命名空间：`std.heap.page.` 不能走 std_ns_table。
+- 守门（lsptest 217 项）：completion.optional.gate / instance.optionalRet /
+  builtin.allocatorMembers / typePath.noField / chain.genericInstField /
+  stdInstance.staticSnippet（反转成"实例无静态构造器"）。
+- 已知遗留：结构体里的 `const K: i32 = 7`（关联常量）sema 通过，后端发 `ZxS1.K`
+  报 B1001——尚未修。

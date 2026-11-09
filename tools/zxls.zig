@@ -2686,6 +2686,9 @@ fn inferExprType(text: []const u8, doc: *const Document, expr: []const u8, depth
     const e = trimSl(expr);
     if (e.len == 0) return null;
     if (std.mem.startsWith(u8, e, "module(")) return null;
+    // 编译器 seed 的分配器值：sema 里 page_s.ty = sema_allocator_type()。
+    // 不特判的话 `var b = std.heap.page; b.` 会被当成类型名 page 而落空。
+    if (std.mem.eql(u8, e, "std.heap.page")) return "Allocator";
     if (std.mem.startsWith(u8, e, "\"")) return "str";
     if (std.mem.eql(u8, e, "true") or std.mem.eql(u8, e, "false")) return "bool";
     // 数字
@@ -3025,6 +3028,10 @@ fn inferExprType(text: []const u8, doc: *const Document, expr: []const u8, depth
             }
             return null;
         }
+        // 捕获绑定（`if (arena) a {` 的 a）：没有声明语句，类型来自条件解包
+        if (depth < 4) {
+            if (captureBindTy(text, doc, e)) |t| return t;
+        }
     }
     return null;
 }
@@ -3214,6 +3221,29 @@ fn containerNameOf(ty0: []const u8) []const u8 {
     return t;
 }
 
+// ---------------------------------------------------------------- 内建类型
+//
+// KEEP —— 编译器内建类型在源文件里没有声明（Allocator 由 sema 的
+// sema_allocator_type 合成），std/ 目录里查不到它的 struct 体，点补全只能
+// 按编译器定义硬编码。用户 2026-11-10：`var arena: ?Allocator` 解包后
+// `arena.?.` 一个成员都不出。这份表与 src/sema.c 的 sema_allocator_type
+// 逐字段对齐——改那边要同步改这里。
+
+fn isBuiltinTy(ty0: []const u8) bool {
+    return std.mem.eql(u8, containerNameOf(ty0), "Allocator");
+}
+
+fn builtinTyMembers(ty0: []const u8, out: *std.ArrayList(Decl)) bool {
+    if (!std.mem.eql(u8, containerNameOf(ty0), "Allocator")) return false;
+    // 顺序同 sema_allocator_type：ctx / alloc / free
+    out.append(gpa, .{ .name = "ctx", .kind = .field, .ty = "?*u8" }) catch {};
+    out.append(gpa, .{ .name = "alloc", .kind = .field,
+                       .ty = "fn (?*u8, usize) ?*u8" }) catch {};
+    out.append(gpa, .{ .name = "free", .kind = .field,
+                       .ty = "fn (?*u8, *u8, usize) void" }) catch {};
+    return true;
+}
+
 /// 切片 / 定长数组接收者的成员：`.len` 与 `.ptr`。源文件里没有声明文本，
 /// 只能按语义规则直接出（sema 的 TY_SLICE 分支也只认这两个）。
 fn addSliceMembers(list: *Json, seen: *std.StringHashMapUnmanaged(void),
@@ -3345,6 +3375,12 @@ fn recvExprStart(text: []const u8, at: usize) usize {
             s -= 1;
             continue;
         }
+        // `x.?` 可选解包：`?` 不是标识符字符，但它是接收者的一部分
+        //（`arena.?.` 的 path 必须是 `arena.?`，否则推断不出内层类型）。
+        if (ch == '?' and s >= 2 and text[s - 2] == '.') {
+            s -= 2;
+            continue;
+        }
         if (ch != ')' and ch != ']') break;
         // 配平回对应的开括号：跳过去继续取 `(` 前面的被调名/限定链
         var depth: usize = 0;
@@ -3399,6 +3435,8 @@ fn isContainerIn(files: []const []const u8, base: []const u8) bool {
 fn inferContainer(files: []const []const u8, text: []const u8, expr: []const u8, depth: u8) ?[]const u8 {
     if (depth > 6) return null;
     var e = trimSl(expr);
+    // `x.?` 解包不改变容器身份：`arena.?.` 的接收者是 arena 的内层值
+    if (e.len > 2 and std.mem.endsWith(u8, e, ".?")) e = trimSl(e[0 .. e.len - 2]);
     // 剥包装：?T / !T / &x / *T / *const T / []T / [n]T
     var guard: usize = 0;
     while (guard < 8) : (guard += 1) {
@@ -3431,6 +3469,8 @@ fn inferContainer(files: []const []const u8, text: []const u8, expr: []const u8,
         // 裸名字：扫描集里的容器 → 自己；否则按别名/类型变量追初始化
         // （`var V: type = std.ArrayList(i32)` 的 V 在这里接住）
         if (isContainerIn(files, head) or genericBodyOf(files, head) != null) return head;
+        // 内建类型（Allocator）：没有声明文本，但成员表在
+        if (isBuiltinTy(head)) return containerNameOf(head);
         if (findDeclStmt(text, head)) |s2| {
             if (declInitOf(s2)) |init2| return inferContainer(files, text, init2, depth + 1);
         }
@@ -3481,6 +3521,10 @@ fn inferContainer(files: []const []const u8, text: []const u8, expr: []const u8,
         if (methodRetIn(files, recv, last)) |ret| {
             const rt = trimSl(ret);
             if (std.mem.eql(u8, rt, "Self")) return recv;
+            // 内建类型先判：`init(...) ?Allocator` 的 Allocator 不在源文件里，
+            // 落到下面"方法没写返回类型就按接收者算"会错成 ArenaAllocator，
+            // 于是 `arena.` 弹 init/reset/deinit（全编译不过）。
+            if (isBuiltinTy(rt)) return containerNameOf(rt);
             if (inferContainer(files, text, rt, depth + 1)) |r2| return r2;
         }
         // 方法没写返回类型 / 解析不出：按接收者容器算（保底）
@@ -5127,6 +5171,77 @@ fn addIdents(list: *Json, seen: *std.StringHashMapUnmanaged(void), doc_text: []c
     }
 }
 
+/// 点补全的接收者是什么：
+///   module   模块命名空间（std.* / `const a = module("…")` 绑定）—— 全是模块成员
+///   ty       类型（`Task.` / `std.BufReader.` / `HashMap(i32).`）—— 只有静态成员
+///   instance 值（`t.` / `v.` / `arena.?.`）—— 只有实例成员
+/// 三者不能混。sema 的规则：`Task.id` 是 E0300（实例字段要先造值），
+/// `t.coro()` 是 E0303（首参不是 self，不是方法），`t.Group` 是 E0304
+///（实例上没有嵌套类型）。用户 2026-11-10："Task 命名空间污染了"。
+const RecvKind = enum { module, ty, instance };
+
+/// `if (arena) a { … }` / `while (x) v { … }` 的捕获绑定：返回条件表达式
+/// 解包后的类型（`?Allocator` → `Allocator`）。捕获变量没有声明语句，
+/// findDeclStmt 找不到，补全/hover 的整条类型链就断在 `a.` 上。
+fn captureBindTy(text: []const u8, doc: *const Document, name: []const u8) ?[]const u8 {
+    if (name.len == 0) return null;
+    const kws = [_][]const u8{ "if (", "while (" };
+    for (kws) |kw| {
+        var from: usize = 0;
+        while (std.mem.indexOfPos(u8, text, from, kw)) |kp| {
+            from = kp + kw.len;
+            if (inLineComment(text, kp)) continue;
+            // 配平 '(' → ')'，条件表达式在括号内
+            var d: usize = 1;
+            var i = kp + kw.len;
+            var in_str = false;
+            while (i < text.len and d > 0) : (i += 1) {
+                const c = text[i];
+                if (in_str) {
+                    if (c == '\\') { i += 1; continue; }
+                    if (c == '"') in_str = false;
+                    continue;
+                }
+                if (c == '"') { in_str = true; continue; }
+                if (c == '(') d += 1;
+                if (c == ')' and d > 0) d -= 1;
+            }
+            if (d != 0) continue;
+            const cond = trimSl(text[kp + kw.len .. i - 1]);
+            if (cond.len == 0) continue;
+            // ')' 之后跳过空白就是绑定名（`if (x) v {` / `while (q) it {`）
+            var k = i;
+            while (k < text.len and (text[k] == ' ' or text[k] == '\t')) k += 1;
+            if (!std.mem.startsWith(u8, text[k..], name)) continue;
+            const e = k + name.len;
+            if (e < text.len and isIdentChar(text[e])) continue;
+            var t = inferExprType(text, doc, cond, 1) orelse continue;
+            t = trimSl(t);
+            if (t.len > 0 and (t[0] == '?' or t[0] == '!')) t = trimSl(t[1..]);
+            if (t.len > 0) return t;
+        }
+    }
+    return null;
+}
+
+/// 接收者的声明类型是可选值（`?T`）时，返回解包后的内层类型串。
+/// `arena.` 在 Zx 里唯一合法后缀是 `.?`——`arena.alloc` 编译不过，所以
+/// 不能把内层类型的成员摆出来（用户 2026-11-10 截图同一处）。
+fn recvOptionalTy(text: []const u8, doc: *const Document, recv: []const u8) ?[]const u8 {
+    if (recv.len == 0) return null;
+    const ty0: []const u8 = blk: {
+        if (findDeclStmt(text, recv)) |st| {
+            if (declTyOf(st)) |dt| break :blk trimSl(dt);
+        }
+        break :blk inferExprType(text, doc, recv, 0) orelse return null;
+    };
+    var t = trimSl(ty0);
+    if (t.len < 2 or t[0] != '?') return null;
+    t = trimSl(t[1..]);
+    if (t.len == 0 or t.len > 80) return null;
+    return t;
+}
+
 fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
     const text = doc.text;
     const off = posToOffset(text, line, character);
@@ -5265,11 +5380,33 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
         const path = text[base_start..path_end];
 
         var handled = false;
+        // 接收者是类型还是值：决定成员的命名空间（见 RecvKind 注释）。
+        // 默认 module——std.* / module 绑定走这条，后面各分支按需改写。
+        var recv_kind: RecvKind = .module;
+
+        // KEEP —— 可选值先解包（用户 2026-11-10）：`var arena: ?Allocator` 的
+        // `arena.` 只该提示 `?`（补成 `arena.?`）。此前落到表达式兜底，把
+        // init 的返回类型忽略、按接收者 ArenaAllocator 出 init/reset/deinit，
+        // 三条全是编译错误（optional 没有成员，只有 `.?`）。
+        if (!lit_ctx) {
+            if (recvOptionalTy(text, doc, path)) |inner| {
+                if (prefix.len == 0 or std.mem.startsWith(u8, "?", prefix)) {
+                    var db: std.ArrayList(u8) = .empty;
+                    db.print(gpa, "解包可选值 → {s}", .{inner}) catch {};
+                    addItem(&list, &seen, "?", 14, db.items, 0);
+                }
+                handled = true;
+            }
+        }
 
         // std.<ns>.：编译器内建命名空间成员。名字表定成员集，签名/骨架从
         // std_builtin_docs 出（用户 2026-11-09 第 2 条）；输入中途
         // （std.io.op）时最后一段当成员前缀过滤。
-        if (std.mem.startsWith(u8, path, "std.")) {
+        // 例外：`std.heap.page.` 的接收者是**值**（Allocator），不是命名空间——
+        // 按命名空间表会被拆成 `std.heap` + 前缀 `page`，只弹回 page 自己。
+        // 让它落到下面的表达式推断（inferExprType 特判 std.heap.page）。
+        if (!std.mem.eql(u8, path, "std.heap.page") and
+            std.mem.startsWith(u8, path, "std.")) {
             var ns = path["std.".len..];
             var mem_prefix: []const u8 = "";
             if (std.mem.lastIndexOfScalar(u8, ns, '.')) |d2| {
@@ -5461,6 +5598,18 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                     if (containerMembersAny(cf.items, ty0, &decls)) |ctxt0| {
                         handled = decls.items.len > 0;
                         if (handled) {
+                            // `X(T).` 是类型（泛型实例化），`f(…).` / `x.init(…).`
+                            // 是值：判据是末位调用的被调名本身是不是容器名。
+                            // 混为一谈的话 `std.time.fromUnixMs(0).` 会被当成
+                            // 类型，字段全被命名空间过滤掉（year/month/day 消失）。
+                            recv_kind = .instance;
+                            if (finalCallOpen(path)) |lp3| {
+                                const callee3 = trimSl(path[recvExprStart(path, lp3)..lp3]);
+                                var last3 = callee3;
+                                if (std.mem.lastIndexOfScalar(u8, callee3, '.')) |d3| last3 = callee3[d3 + 1 ..];
+                                if (isContainerIn(cf.items, last3) or
+                                    genericBodyOf(cf.items, last3) != null) recv_kind = .ty;
+                            }
                             mem_txt = ctxt0;
                             markContainerFns(ctxt0, &decls);
                             owner = ty0;
@@ -5490,6 +5639,7 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                 if (modContainerOf(doc, text, path)) |mc0| {
                     if (containerMembersAny(&[_][]const u8{mc0.txt}, mc0.member, &decls) != null) {
                         handled = decls.items.len > 0;
+                        if (handled) recv_kind = .ty;
                         mem_txt = mc0.txt;
                         // KEEP — 类型路径成员（用户 2026-11-09：std.BufReader.
                         // 的方法全是 kind=6 detail=None 没骨架）：容器体在模块
@@ -5549,6 +5699,7 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                 }
                 if (containerMembersAny(files.items, container, &decls)) |ctxt| {
                     handled = decls.items.len > 0;
+                    if (handled) recv_kind = .ty;
                     // KEEP — 类型路径成员（用户 2026-11-09：std.BufReader. 的
                     // 方法全是 kind=6 detail=None 没骨架）：容器体可能在 std/
                     // 模块文件里，findDeclStmt(当前文档) 落空。带上声明文件
@@ -5559,6 +5710,11 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                         owner = container;
                     }
                 }
+                if (!handled and builtinTyMembers(container, &decls)) {
+                    // 内建类型（Allocator）没有声明文本：按编译器定义出成员
+                    handled = decls.items.len > 0;
+                    if (handled) recv_kind = .ty;
+                }
                 if (!handled) {
                     // 不是模块/类型名——按实例变量处理：推断类型再补容器成员
                     //（let v = Obj.init(...) → v. 出 Obj 的字段与方法）
@@ -5568,6 +5724,7 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                     // 解析补齐（2026-11-08：vendor struct 也要查）。
                     if (vendorInstanceFields(doc, text, container, &decls)) {
                         handled = decls.items.len > 0;
+                        if (handled) recv_kind = .instance;
                     }
                     if (!handled) {
                         if (inferContainer(files.items, text, container, 0) orelse blk: {
@@ -5584,6 +5741,7 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                             if (containerMembersAny(files.items, ty, &decls)) |ctxt| {
                                 handled = decls.items.len > 0;
                                 if (handled) {
+                                    recv_kind = .instance;
                                     mem_txt = ctxt;
                                     markContainerFns(ctxt, &decls);
                                     owner = ty;
@@ -5623,11 +5781,17 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                                 if (containerMembersAny(files.items, ty, &decls)) |ctxt| {
                                     handled = decls.items.len > 0;
                                     if (handled) {
+                                        recv_kind = .instance;
                                         mem_txt = ctxt;
                                         markContainerFns(ctxt, &decls);
                                         owner = ty;
                                     }
                                 }
+                            }
+                            if (!handled and builtinTyMembers(ty, &decls)) {
+                                // 内建类型（解包后的 Allocator 等）
+                                handled = decls.items.len > 0;
+                                if (handled) recv_kind = .instance;
                             }
                             if (!handled) {
                                 if (sliceOrArrayRecv(raw)) |si| {
@@ -5644,6 +5808,7 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                         if (anonTyOfPath(text, doc, path, off)) |aty| {
                             if (parseAnonTy(aty)) |flds| {
                                 handled = flds.items.len > 0;
+                                if (handled) recv_kind = .instance;
                                 for (flds.items) |f| {
                                     decls.append(gpa, .{ .name = f.name, .kind = .field, .ty = f.ty }) catch {};
                                 }
@@ -5666,6 +5831,7 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                                 defer mf.deinit(gpa);
                                 if (containerMembersAny(&[_][]const u8{mt}, mty, &mf) != null) {
                                     handled = mf.items.len > 0;
+                                    if (handled) recv_kind = .instance;
                                     for (mf.items) |d2| decls.append(gpa, d2) catch {};
                                     mem_txt = mt;
                                     owner = mty;
@@ -5687,6 +5853,35 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                     // 声明语句（模块文件/当前文档）：签名、容器判定、骨架共用
                     const stmt: ?[]const u8 = findDeclStmt(src, dcl.name);
                     const cinit: ?[]const u8 = if (stmt) |st| containerInitOf(st) else null;
+                    // KEEP —— 类型 / 实例命名空间分离（用户 2026-11-10：
+                    // "Task 命名空间污染了"）。补全不能比编译器宽松：
+                    //   `Task.id`   E0300 实例字段；类型上只有静态成员
+                    //   `t.coro()`  E0303 首参不是 self，不是方法
+                    //   `t.Group`   E0304 实例上没有嵌套类型
+                    // 类型接收者不出字段，值接收者不出静态函数与嵌套类型。
+                    // 字面量上下文（`Person{.`）不过滤：那里只能是字段。
+                    if (!lit_ctx) {
+                        var has_self = false;
+                        var is_fn_decl = false;
+                        if (stmt) |st| {
+                            const sg = sigOfStmt(st);
+                            if (sg.is_fn) {
+                                is_fn_decl = true;
+                                has_self = sg.params.len > 0 and
+                                    std.mem.eql(u8, paramName(sg.params[0]), "self");
+                            }
+                        }
+                        switch (recv_kind) {
+                            .instance => {
+                                if (cinit != null) continue;            // t.Group
+                                if (is_fn_decl and !has_self) continue; // t.coro()
+                            },
+                            .ty => {
+                                if (dcl.kind == .field) continue;       // Task.id
+                            },
+                            .module => {},
+                        }
+                    }
                     // 类型项用类型 kind（struct/union=22、enum=13），弹窗里
                     // 一眼能看出这是类型而不是变量。
                     const k: u32 = if (dcl.is_fn) 3 else switch (dcl.kind) {
