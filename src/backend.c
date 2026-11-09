@@ -5043,6 +5043,7 @@ static void gen_decl_inner(Node *d) {
     /* std.TypeInfo / std.FieldInfo 只在编译期存在：这些"声明"是编译期
      * 绑定，所有使用点在语义层都折成字面量了，C 里不该有它们。
      * 但字段类型（TypeKind 枚举之类）可能被没折干净的 switch 引用，照发。 */
+    if (sema_ty_ct_only(t)) return;
     /* 别名（const heap = std.heap;）也是个编译期名字：它没有自己的存储，
      * 引用处直接落到被指向的那份上 */
     if (!sema_sym_has_storage(d->sym)) return;
@@ -6138,6 +6139,9 @@ static void gen_global(Node *d, bool exported) {
     Type *t = d->ty;
     if (!t || t->kind == TY_INVALID || t->kind == TY_TYPE) return;
     if (t->kind == TY_VOID) return;      /* `const x = { 42; }` 没有运行时表示 */
+    /* TypeInfo / FieldInfo 描述符只活在编译期：使用点全部折成字面量，
+     * 全局里不物化（跟 gen_decl_inner 同一条规则）。 */
+    if (sema_ty_ct_only(t)) return;
 
     /* extern var：外部 C 全局变量——只发一条 extern 声明进共享头，
      * 不定义存储（定义在 C 那边）。名字原样发，跟 extern fn 同一条规则。 */

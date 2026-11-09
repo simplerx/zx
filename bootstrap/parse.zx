@@ -1572,11 +1572,12 @@ pub const Parser = struct {
             _ = self.advance();
             let n = self.new_at(NK.builtin, t);
             n.name = try self.take_ident();
-            // @typeOf/@field/@memcpy/@memmove/@memset 收表达式；其余收类型
+            // @typeInfo/@memcpy/@memmove/@memset 收表达式；其余收类型。
+            // @typeInfo 的实参类型与表达式都收（类型在表达式位置也是值），
+            // 按表达式解析，`@typeInfo(y)` 里的 y 才不会被打成"不是类型"。
             let nm = n.name orelse "";
             var value_first = false;
-            if (std.str.eq(nm, "typeOf")) { value_first = true; }
-            if (std.str.eq(nm, "field")) { value_first = true; }
+            if (std.str.eq(nm, "typeInfo")) { value_first = true; }
             if (std.str.eq(nm, "memcpy")) { value_first = true; }
             if (std.str.eq(nm, "memmove")) { value_first = true; }
             if (std.str.eq(nm, "memset")) { value_first = true; }

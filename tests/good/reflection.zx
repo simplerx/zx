@@ -1,0 +1,57 @@
+// reflection.zx —— 反射收敛成一个 @typeInfo（2026-11-10 用户拍板）
+//
+// @typeInfo(x)：x 是类型或表达式都行（@typeOf 并了进来）。描述符
+// TypeInfo{.ty,.name,.bytes,.align,.fieldCount,.fields[i]{.name,.ty,.offset}}
+// 全部是编译期值，只许 const 绑定。字段偏移在 FieldInfo.offset 里。
+const std = module("std");
+
+const Point = struct {
+    x: i32,
+    y: i32,
+    const ORIGIN = Point{ .x = 0, .y = 0 };   // 静态成员不是实例布局，不进 fields
+};
+
+// 泛型体里用描述符：ct_clear 之后 ct_eval 靠 type_val 重建
+const sizeOfT = fn (T: type) usize {
+    const ti = @typeInfo(T);
+    return ti.bytes;
+};
+
+// 编译期类型分派：T 的比较在 specialize 时折成常量，死分支不检查、
+// 裸 @compileError 守卫只对没列出的类型炸（E0301/B1001 守门）
+const dispatch = fn (T: type, x: T) T {
+    if (T == i32) { return x + 1; }
+    if (T == f64) { return x * 2.0; }
+    @compileError("dispatch: unsupported type");
+};
+
+const main = fn () u8 {
+    // ---- 类型实参与表达式实参二合一 ----
+    const tp = @typeInfo(Point);
+    if (tp.ty != Point) { return 1; }
+    var y: i32 = 1;
+    if (@typeInfo(y).ty != i32) { return 2; }
+
+    // ---- 标量四样 ----
+    if (tp.bytes != 8 || tp.align != 4) { return 3; }
+    if (tp.fieldCount != 2) { return 4; }
+
+    // ---- 字段：名字 / 类型 / 偏移 ----
+    const f0 = tp.fields[0];
+    const f1 = tp.fields[1];
+    if (f0.name[0] != 'x' || f1.name[0] != 'y') { return 5; }
+    if (f0.ty != i32 || f1.ty != i32) { return 6; }
+    if (f1.offset != @sizeOf(i32)) { return 7; }
+
+    // ---- 泛型实例化 ----
+    if (sizeOfT(Point) != 8) { return 8; }
+
+    // ---- 编译期类型分派 ----
+    let d1 = dispatch(i32, 41);
+    if (d1 != 42) { return 9; }
+    let d2 = dispatch(f64, 1.5);
+    if (d2 != 3.0) { return 10; }
+
+    std.println("typeInfo ok: {} {} {} {}", tp.name[0], tp.fieldCount, f1.offset, sizeOfT(Point));
+    return 0;
+};

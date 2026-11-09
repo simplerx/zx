@@ -1042,11 +1042,13 @@ static Node *parse_primary(P *p) {
         n->name = take_ident(p);
 
         /* 语法只有两种形状：@sizeOf/@alignOf/@typeName 先收类型，
-         * @memcpy/@memmove/@memset 与 @compileError 先收表达式。
+         * @memcpy/@memmove/@memset/@typeInfo 先收表达式——@typeInfo 的
+         * 实参类型与表达式都收（类型在表达式位置也是合法的值），
+         * 表达式按值解析，`@typeInfo(y)` 里的 y 才不会被打成"不是类型"。
          * （1.2.0 删掉了 @typeOf/@field/@*Cast 这批，转换统一写 `(T)value`。） */
         bool value_first = n->name &&
             (!strcmp(n->name, "memcpy") || !strcmp(n->name, "memmove") ||
-             !strcmp(n->name, "memset"));
+             !strcmp(n->name, "memset") || !strcmp(n->name, "typeInfo"));
         expect(p, TOK_LPAREN);
         if (!at(p, TOK_RPAREN)) {
             int ai = 0;

@@ -5,7 +5,7 @@
 //     解析 stderr 的 `path:line:col: error[CODE]: msg` 行 → publishDiagnostics。
 //     直接复用自举前端（zxfe），诊断与编译器 100% 同源。
 //   - 补全：
-//       `@` 前缀      → 顶层内建（@sizeOf/@typeName/@memcpy/… 共九个）
+//       `@` 前缀      → 顶层内建（@sizeOf/@typeName/@typeInfo/… 共十个）
 //       `X.`          → std 内建命名空间 / module 绑定的顶层 pub 声明 /
 //                       容器（struct/union/enum）的成员与方法（含实例推断：
 //                       `let v = Obj.init(...)` 后 `v.` 出 Obj 的成员）
@@ -291,10 +291,13 @@ fn stdBuiltinDoc(path: []const u8) ?StdBuiltin {
     return null;
 }
 
-/// 1.2.0 起没有编译期反射类型（TypeKind/TypeInfo/FieldInfo 随 @typeInfo 一起删了），
-/// 这里保留函数是为了不动调用点：永远 false。
+/// 1.2.1 反射收敛成一个 @typeInfo：TypeInfo/FieldInfo 描述符仍只在编译期
+/// 存在，不许进 std. 补全列表（去污染）。
 fn isCtBuiltin(name: []const u8) bool {
-    _ = name;
+    const ct = [_][]const u8{ "TypeKind", "TypeInfo", "FieldInfo" };
+    for (ct) |c| {
+        if (std.mem.eql(u8, name, c)) return true;
+    }
     return false;
 }
 
@@ -306,12 +309,13 @@ const std_seeded = [_][]const u8{
 
 const BuiltinDoc = struct { name: []const u8, detail: []const u8 };
 
-// @ 内建（与 src/sema.c check_builtin() 逐字对齐，1.2.0 只剩这九个）：
-// 类型转换统一写 `(T)value`；反射只有 @typeName / @sizeOf / @alignOf。
+// @ 内建（与 src/sema.c check_builtin() 逐字对齐，1.2.1 反射收敛成
+// 一个 @typeInfo）：类型转换统一写 `(T)value`；描述符全在编译期。
 const builtin_docs = [_]BuiltinDoc{
     .{ .name = "sizeOf", .detail = "@sizeOf(T) 类型大小（字节）" },
     .{ .name = "alignOf", .detail = "@alignOf(T) 类型对齐" },
     .{ .name = "typeName", .detail = "@typeName(T) 类型名字符串" },
+    .{ .name = "typeInfo", .detail = "@typeInfo(x) 编译期描述符：.ty/.name/.bytes/.align/.fieldCount/.fields[i]{.name,.ty,.offset}" },
     .{ .name = "memcpy", .detail = "@memcpy(dest, src, count) 内存复制" },
     .{ .name = "memmove", .detail = "@memmove(dest, src, count) 内存移动" },
     .{ .name = "memset", .detail = "@memset(dest, fill, count) 内存填充" },
@@ -321,7 +325,8 @@ const builtin_docs = [_]BuiltinDoc{
 };
 
 const toplevel_builtins = [_][]const u8{
-    "sizeOf", "alignOf", "typeName", "memcpy", "memmove", "memset",
+    "sizeOf", "alignOf", "typeName", "typeInfo",
+    "memcpy", "memmove", "memset",
     "link",   "trap",    "compileError",
 };
 
