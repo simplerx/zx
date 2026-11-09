@@ -76,7 +76,7 @@ bool    val_eq(Value *a, Value *b);    /* 用于 switch / 模式比较 */
 /* 运算：返回 NULL 表示"这个操作在编译期做不了"（例如浮点取模） */
 Value  *val_bin(int op, Value *a, Value *b, int line, int col);
 Value  *val_un(int op, Value *a, int line, int col);
-/* 显式转换（(T)e / @intCast）：只做截断与重解释 */
+/* 显式转换（(T)e）：只做截断与重解释 */
 Value  *val_cast(Type *to, Value *v);
 
 void    val_dump(Value *v, Buf *b);

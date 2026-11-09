@@ -43,7 +43,7 @@ const len = nums.len;
 const sum2 = fn (xs: []const i32, ys: []const i32) i32 {
     var total: i32 = 0;
     for (xs, ys) x, y { total = total + x * y; }
-    for (xs, 0..) x, i { total = total + x * @as(i32, (i64)i); }
+    for (xs, 0..) x, i { total = total + x * (i32)i; }
     return total;
 };
 

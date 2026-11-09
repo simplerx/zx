@@ -1,0 +1,6 @@
+// expect: @field was removed: write the field access directly: `v.name`
+const S = struct { x: i32 };
+const main = fn () u8 {
+    var s = S{ .x = 1 };
+    return (u8)@field(s, "x");
+};

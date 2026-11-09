@@ -707,7 +707,7 @@ for d in diags:
 check("diagnostics.codeDescription", href.endswith("docs/errors.md#e0304"), href or str(diags)[:300])
 
 # 10d 没有具体 fix-it 的诊断，消息里要带上该码的通用修法（errors.c 的文案）
-ok_fix = any(d.get("code") == "E0301" and "@intCast" in d.get("message", "") for d in diags)
+ok_fix = any(d.get("code") == "E0301" and "(T)expr" in d.get("message", "") for d in diags)
 check("diagnostics.genericFix", ok_fix, str(diag_msgs)[:300])
 
 # 3n 行内类型提示（textDocument/inlayHint）：没写类型的绑定要出 `: Type`

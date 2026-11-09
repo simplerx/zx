@@ -541,154 +541,13 @@ Type *sema_allocator_type(void) {
     return t;
 }
 
-/* ---------------- @typeInfo 的两种类型 ----------------
- *
- * TypeKind 是一个普通的枚举（变体名把关键字加上下划线避让：`void_` / `struct_`），
- * TypeInfo 是它的载体：kind + name + size + align + fieldCount。
- * 两个类型都只当"身份证"用，不进任何作用域；@typeInfo 返回的值全部是编译期值。
- */
-static const char *g_typekind_names[] = {
-    "other", "void_", "bool_", "int_", "float_", "pointer", "slice",
-    "array", "struct_", "union_", "enum_", "optional", "error_union",
-    "function", "type_",
-};
 
-Type *sema_typekind_type(void) {
-    static Type *t;
-    if (t) return t;
-    static Node id;
-    memset(&id, 0, sizeof id);
-    id.kind = NK_ENUM_TYPE;
-    id.name = "TypeKind";
 
-    t = ty_agg(TY_ENUM, &id, "TypeKind");
-    if (t->fields) return t;
-    t->elem = ty_int(8, false);
-    int n = (int)(sizeof g_typekind_names / sizeof g_typekind_names[0]);
-    t->nfields = n;
-    t->fields = calloc((size_t)n, sizeof(Field));
-    for (int i = 0; i < n; i++) {
-        t->fields[i].name = g_typekind_names[i];
-        t->fields[i].ty = t;
-        t->fields[i].has_tag = true;
-        t->fields[i].tag = (uint64_t)i;
-    }
-    return t;
-}
-
-Type *sema_fieldinfo_type(void);
-
-Type *sema_typeinfo_type(void) {
-    static Type *t;
-    if (t) return t;
-    static Node id;
-    memset(&id, 0, sizeof id);
-    id.kind = NK_STRUCT_TYPE;
-    id.name = "TypeInfo";
-
-    t = ty_agg(TY_STRUCT, &id, "TypeInfo");
-    if (t->fields) return t;
-    t->nfields = 6;
-    t->fields = calloc(6, sizeof(Field));
-    t->fields[0].name = "kind";       t->fields[0].ty = sema_typekind_type();
-    t->fields[1].name = "name";       t->fields[1].ty = ty_slice(ty_u8(), true);
-    t->fields[2].name = "bytes";      t->fields[2].ty = ty_usize();
-    t->fields[3].name = "align";      t->fields[3].ty = ty_usize();
-    t->fields[4].name = "fieldCount"; t->fields[4].ty = ty_usize();
-    t->fields[5].name = "fields";     t->fields[5].ty = ty_slice(sema_fieldinfo_type(), true);
-    return t;
-}
-
-/* std.FieldInfo —— fields 元表的元素。字段叫 `ty` 而不是 `type`：
- * `type` 是关键字，当不了字段名。整个类型只在编译期存在（里面装着
- * 一个 `type` 值，运行时没有对应物），所以 sema_ty_ct_only() 会拦下任何
- * 想把它变成运行时存储的写法。 */
-Type *sema_fieldinfo_type(void) {
-    static Type *t;
-    if (t) return t;
-    static Node id;
-    memset(&id, 0, sizeof id);
-    id.kind = NK_STRUCT_TYPE;
-    id.name = "FieldInfo";
-
-    t = ty_agg(TY_STRUCT, &id, "FieldInfo");
-    if (t->fields) return t;
-    t->nfields = 2;
-    t->fields = calloc(2, sizeof(Field));
-    t->fields[0].name = "name"; t->fields[0].ty = ty_slice(ty_u8(), true);
-    t->fields[1].name = "ty";   t->fields[1].ty = ty_type();
-    return t;
-}
-
-/* TypeInfo / FieldInfo 只活在编译期：任何把它们变成运行时存储的
- * 声明（局部 / 全局变量、参数）都在这里报错。 */
-bool sema_ty_ct_only(Type *t) {
-    if (!t) return false;
-    if (t == sema_typeinfo_type() || t == sema_fieldinfo_type()) return true;
-    if (t->kind == TY_SLICE || t->kind == TY_PTR || t->kind == TY_OPT)
-        return sema_ty_ct_only(t->elem);
-    return false;
-}
-
-/* 一个 Type 在 TypeKind 里对应哪个变体 */
-static int typekind_tag(Type *t) {
-    if (!t) return 0;
-    switch (t->kind) {
-    case TY_VOID:     return 1;
-    case TY_BOOL:     return 2;
-    case TY_INT:
-    case TY_ERROR:
-    case TY_COMPTIME_INT: return 3;
-    case TY_FLOAT:
-    case TY_COMPTIME_FLOAT: return 4;
-    case TY_PTR:      return t->has_len ? 7 : 5;
-    case TY_SLICE:    return 6;
-    case TY_STRUCT:   return 8;
-    case TY_UNION:    return 9;
-    case TY_ENUM:     return 10;
-    case TY_OPT:      return 11;
-    case TY_ERR:      return 12;
-    case TY_FN:       return 13;
-    case TY_TYPE:     return 14;
-    default:          return 0;
-    }
-}
-
-/* @typeInfo(T) 的值：6 个字段，全是编译期就能定的东西。
- * fields 是"切片视图"：V_PTR 指向一块 V_AGG 数组值，nitems 记长度——
- * `.len` / 下标 / 切片在 ct_eval 里都走 ct_view_len / ct_index 那条路。 */
-static Value *typeinfo_value(Type *t) {
-    Value *v = val_agg(sema_typeinfo_type(), 6);
-    int sz = ty_size(t);
-    int al = ty_align(t);
-    v->items[0] = val_int(sema_typekind_type(), (uint64_t)typekind_tag(t), false);
-    v->items[1] = val_str(ty_str(t), (int)strlen(ty_str(t)));
-    v->items[2] = val_int(ty_usize(), (uint64_t)(sz < 0 ? 0 : sz), false);
-    v->items[3] = val_int(ty_usize(), (uint64_t)(al < 0 ? 1 : al), false);
-    /* 枚举的"字段"就是变体；结构体/联合体是成员。其余类型没有 */
-    bool has_fields = t->kind == TY_STRUCT || t->kind == TY_UNION || t->kind == TY_ENUM;
-    int nf = has_fields ? t->nfields : 0;
-    v->items[4] = val_int(ty_usize(), (uint64_t)nf, false);
-
-    Type *fit = sema_fieldinfo_type();
-    Value *arr = val_agg(ty_slice(fit, true), nf);
-    for (int i = 0; i < nf; i++) {
-        Value *fv = val_agg(fit, 2);
-        fv->items[0] = val_str(t->fields[i].name, (int)strlen(t->fields[i].name));
-        fv->items[1] = val_type(t->fields[i].ty);
-        arr->items[i] = fv;
-    }
-    Value *sv = val_ptr(ty_slice(fit, true), arr, 0);
-    sv->nitems = nf;
-    v->items[5] = sv;
-    return v;
-}
 
 /* std 下由编译器提供的名字。它们都挂在 std 模块的作用域里，于是
  * `std.println` / `std.file.read` 走的是同一条"模块成员"查找路径。 */
 static Symbol *std_builtin(const char *name) {
     static Symbol print_s, println_s, format_s, heap_s, page_s, file_s, alloc_s;
-    static Symbol tk_s, ti_s, fi_s;
     static Symbol salloc_s, halloc_s;
     static Symbol f_read, f_write, f_append, f_exists, f_remove;
     static Symbol io_s, i_openr, i_openw, i_opena, i_read, i_write;
@@ -738,24 +597,6 @@ static Symbol *std_builtin(const char *name) {
 
         /* @typeInfo 用到的两个类型也挂在 std 上，于是 `std.TypeKind.struct_`
          * 和 `var i: std.TypeInfo` 都写得出来 */
-        tk_s.name = "TypeKind";
-        tk_s.kind = SK_CONST;
-        tk_s.state = 2;
-        tk_s.ty = ty_type();
-        tk_s.type_val = sema_typekind_type();
-
-        ti_s.name = "TypeInfo";
-        ti_s.kind = SK_CONST;
-        ti_s.state = 2;
-        ti_s.ty = ty_type();
-        ti_s.type_val = sema_typeinfo_type();
-
-        fi_s.name = "FieldInfo";
-        fi_s.kind = SK_CONST;
-        fi_s.state = 2;
-        fi_s.ty = ty_type();
-        fi_s.type_val = sema_fieldinfo_type();
-
         /* std.file：普通函数调用，C 那边是编译器生成的运行时函数 */
         Type *s8 = ty_slice(ty_u8(), true);
         Type *p1[1] = { s8 };
@@ -929,9 +770,7 @@ static Symbol *std_builtin(const char *name) {
     if (!strcmp(name, "io.read"))    return &i_read;
     if (!strcmp(name, "io.write"))   return &i_write;
     if (!strcmp(name, "Allocator")) return &alloc_s;
-    if (!strcmp(name, "TypeKind"))  return &tk_s;
-    if (!strcmp(name, "TypeInfo"))  return &ti_s;
-    if (!strcmp(name, "FieldInfo")) return &fi_s;
+
     if (!strcmp(name, "stackAlloc")) return &salloc_s;
     if (!strcmp(name, "heapAlloc"))  return &halloc_s;
     if (!strcmp(name, "read"))      return &f_read;
@@ -1168,7 +1007,7 @@ static IntV ev_int(Node *n) {
             Field *f = ty_field(bt, n->name);
             if (f && f->has_tag) return intv(f->tag);
         }
-        /* 聚合值的字段：const info = @typeInfo(T); 后 info.fieldCount。
+        /* 聚合值的字段访问（.len / .name 之类）。
          * check_expr 已把它折进 n->ct。 */
         if (n->ct && n->ct->kind == V_INT) {
             IntV r = { true, n->ct->neg, n->ct->ival };
@@ -3202,20 +3041,40 @@ static Type *check_method_call(Node *n) {
     return type_of(n, ret);
 }
 
-/* std.debug.panic / assert：把 @file/@line/@col/@fnName 四个位置内建追加到
- * 实参尾部（decisions §85）。节点在 check 时自行折成编译期常量，后端发的
- * 是零开销字面量——不走到这里（release 也不擦调用点，只擦运行时函数体）。 */
+static const char *g_cur_fn_name;   /* 当前函数名（位置实参注入用） */
+
+/* std.debug.panic / assert：把 文件 / 行 / 列 / 函数名 四个位置实参追加到实参
+ * 尾部（decisions §85）。1.2.0 删掉了 @file/@line/@col/@fnName 四个内建，
+ * 这里改为直接造字面量节点——效果一样（编译期常量、零运行时开销），
+ * 但源码里已经没有任何位置内建可写了。 */
 static void debug_inject_loc(Node *n) {
-    static const char *loc[4] = { "file", "line", "col", "fnName" };
     int old = n->nitems;
     Node **items = calloc((size_t)(old + 4), sizeof(Node *));
     for (int i = 0; i < old; i++) items[i] = n->items[i];
-    for (int k = 0; k < 4; k++) {
-        Node *b = node_new(NK_BUILTIN, n->line, n->col);
-        b->name = loc[k];
-        check_expr(b, NULL);
-        items[old + k] = b;
-    }
+
+    const char *path = (g_mod && g_mod->path) ? g_mod->path
+                    : (g_srcpath ? g_srcpath : "");
+    Node *nf = node_new(NK_STR, n->line, n->col);
+    nf->str = (char *)path; nf->str_len = (int)strlen(path);
+    check_expr(nf, NULL);
+
+    Node *nl = node_new(NK_INT, n->line, n->col);
+    nl->ival = (uint64_t)n->line;
+    check_expr(nl, NULL);
+
+    Node *nc = node_new(NK_INT, n->line, n->col);
+    nc->ival = (uint64_t)n->col;
+    check_expr(nc, NULL);
+
+    const char *fn = g_cur_fn_name ? g_cur_fn_name : "?";
+    Node *nn = node_new(NK_STR, n->line, n->col);
+    nn->str = (char *)fn; nn->str_len = (int)strlen(fn);
+    check_expr(nn, NULL);
+
+    items[old + 0] = nf;
+    items[old + 1] = nl;
+    items[old + 2] = nc;
+    items[old + 3] = nn;
     free(n->items);
     n->items = items;
     n->nitems = old + 4;
@@ -3479,12 +3338,8 @@ static Type *check_tuple_lit(Node *n, Type *expect) {
 
 static Value *arg_ct(Node *a, Type *want);      /* 在后面，泛型实参用 */
 
-static const char *g_cur_fn_name;   /* 当前函数名：@fnName() 与断言消息用 */
-
-/* 路径/读文件助手定义在模块加载区（~3900+），@embedFile 在这里就要用 */
 static char *path_dup_dir(const char *path);
 static char *path_join(const char *dir, const char *rel);
-static char *read_source(const char *path, size_t *out_len);
 
 static Type *check_builtin(Node *n, Type *expect) {
     (void)expect;
@@ -3500,52 +3355,6 @@ static Type *check_builtin(Node *n, Type *expect) {
         return type_of(n, ty_usize());
     }
 
-    if (!strcmp(nm, "embedFile")) {
-        /* @embedFile("rel/path")：编译期把文件内容嵌成 []const u8（M26）。
-         * 相对当前模块所在目录解析（跟 module() 同一规则）；不查 vendor
-         * 搜索路径——资源文件跟着源码走。字节数不设上限，但会进 C 字符串
-         * 字面量，几 MB 以内都合理。 */
-        if (n->nitems != 1 || n->items[0]->kind != NK_STR || !n->items[0]->str)
-            return BAD(n, "@embedFile needs one string literal path");
-        const char *rel = n->items[0]->str;
-        char *dir  = path_dup_dir(g_mod ? g_mod->path : g_srcpath);
-        char *full = path_join(dir, rel);
-        free(dir);
-        size_t len = 0;
-        char *data = read_source(full, &len);
-        free(full);
-        if (!data)
-            return BAD(n, "@embedFile: cannot read `%s` (relative to `%s`)", rel,
-                       (g_mod && g_mod->path) ? g_mod->path : (g_srcpath ? g_srcpath : "."));
-        n->str = data;
-        n->str_len = (int)len;
-        return type_of(n, ty_slice(ty_u8(), true));
-    }
-
-    if (!strcmp(nm, "offsetOf")) {
-        /* @offsetOf(T, "field")：字段偏移。布局在 ty_size 里顺带算好
-         * （fields[i].offset），FFI 对外部结构体的布局验证靠它。 */
-        if (n->nitems < 2) return BAD(n, "@offsetOf needs (type, \"field\")");
-        Type *t = resolve_type(n->items[0]);
-        if (ty_size(t) < 0)
-            return BAD(n, "@offsetOf of `%s` is not known at compile time", ty_str(t));
-        Value *sv = arg_ct(n->items[1], NULL);
-        if (!sv || sv->kind != V_STR)
-            return BAD(n, "@offsetOf: the field name must be a string literal");
-        int i = ty_field_index(t, sv->sval);
-        if (i < 0 || t->fields[i].is_static)
-            return BAD(n, "@offsetOf: `%s` has no field `%s`", ty_str(t), sv->sval);
-        n->ival = t->fields[i].offset;
-        return type_of(n, ty_usize());
-    }
-
-    if (!strcmp(nm, "typeOf")) {
-        if (n->nitems < 1) return BAD(n, "@typeOf needs a value");
-        Type *t = check_expr(n->items[0], NULL);
-        n->type_val = t;
-        return type_of(n, ty_type());
-    }
-
     if (!strcmp(nm, "typeName")) {
         if (n->nitems < 1) return BAD(n, "@typeName needs a type");
         Type *t = resolve_type(n->items[0]);
@@ -3558,32 +3367,6 @@ static Type *check_builtin(Node *n, Type *expect) {
         /* 只有真的执行到这一行才报错：放在 `if` 里的 @compileError 是编译期
          * 分支的一部分，不能在检查函数体时就炸。 */
         return type_of(n, ty_noreturn());
-    }
-
-    /* 源码位置内建：编译期已知，零运行时开销（decisions §85）。
-     * 路径 / 函数名在语义阶段落定——不依赖前端（C 前端与 Zx 自举前端
-     * 都走同一条 sema 路），多模块下各自指向自己的源文件：
-     *   @file   → 当前模块 g_mod->path（多文件检查时 g_srcpath 已被设成
-     *             p->mod->path，见 sema_check 的待查体循环）
-     *   @fnName → check_fn_body 维护的 g_cur_fn_name（fn 字面量无名时为 "?"） */
-    if (!strcmp(nm, "file")) {
-        if (n->nitems != 0) return BAD(n, "@file takes no arguments");
-        const char *p = (g_mod && g_mod->path) ? g_mod->path
-                      : (g_srcpath ? g_srcpath : "");
-        n->str = p;
-        n->str_len = (int)strlen(p);
-        return type_of(n, ty_slice(ty_u8(), true));
-    }
-    if (!strcmp(nm, "fnName")) {
-        if (n->nitems != 0) return BAD(n, "@fnName takes no arguments");
-        n->str = g_cur_fn_name ? g_cur_fn_name : "?";
-        n->str_len = (int)strlen(n->str);
-        return type_of(n, ty_slice(ty_u8(), true));
-    }
-    if (!strcmp(nm, "line") || !strcmp(nm, "col")) {
-        if (n->nitems != 0) return BAD(n, "@%s takes no arguments", nm);
-        n->ival = (nm[0] == 'l') ? (uint64_t)n->line : (uint64_t)n->col;
-        return type_of(n, ty_i32());
     }
 
     if (!strcmp(nm, "trap")) return type_of(n, ty_noreturn());
@@ -3626,85 +3409,30 @@ static Type *check_builtin(Node *n, Type *expect) {
         return type_of(n, ty_void());
     }
 
-    if (!strcmp(nm, "as")) {
-        if (n->nitems < 2) return BAD(n, "@as needs (type, value)");
-        Type *to = resolve_type(n->items[0]);
-        Type *from = check_expr(n->items[1], to);
-        if (!castable(from, to))
-            return BAD(n, "@as: cannot convert `%s` to `%s`", ty_str(from), ty_str(to));
-        return type_of(n, to);
-    }
-
-    if (!strcmp(nm, "intCast") || !strcmp(nm, "ptrCast") || !strcmp(nm, "bitCast")) {
-        if (n->nitems < 2) return BAD(n, "@%s needs (type, value)", nm);
-        Type *to = resolve_type(n->items[0]);
-        Type *from = check_expr(n->items[1], to);
-        if (!castable(from, to))
-            return BAD(n, "@%s: cannot convert `%s` to `%s`", nm, ty_str(from), ty_str(to));
-        return type_of(n, to);
-    }
-
-    if (!strcmp(nm, "typeInfo")) {
-        if (n->nitems < 1) return BAD(n, "@typeInfo needs a type");
-        Type *t = resolve_type(n->items[0]);
-        if (!t || t->kind == TY_INVALID) return type_of(n, ty_invalid());
-        n->ct = typeinfo_value(t);          /* 整个描述都是编译期值 */
-        return type_of(n, sema_typeinfo_type());
-    }
-
-    if (!strcmp(nm, "hasField")) {
-        if (n->nitems < 2) return BAD(n, "@hasField needs (type, \"name\")");
-        Type *t = resolve_type(n->items[0]);
-        Value *sv = arg_ct(n->items[1], NULL);
-        if (!sv || sv->kind != V_STR)
-            return BAD(n, "@hasField: the field name must be known at compile time");
-        bool has = ty_field(t, sv->sval) != NULL || ty_static_member(t, sv->sval) != NULL;
-        n->ival = has ? 1 : 0;
-        return type_of(n, ty_bool());
-    }
-
-    if (!strcmp(nm, "fieldType")) {
-        if (n->nitems < 2) return BAD(n, "@fieldType needs (type, \"name\")");
-        Type *t = resolve_type(n->items[0]);
-        Value *sv = arg_ct(n->items[1], NULL);
-        if (!sv || sv->kind != V_STR)
-            return BAD(n, "@fieldType: the field name must be known at compile time");
-        Field *fd = ty_field(t, sv->sval);
-        if (!fd) return BAD(n, "`%s` has no field '%s'", ty_str(t), sv->sval);
-        n->type_val = fd->ty;
-        return type_of(n, ty_type());
-    }
-
-    if (!strcmp(nm, "fieldName")) {
-        /* @fieldName(T, i)：第 i 个数据字段的名字（编译期值）。
-         * 和 fieldCount / @fieldType 组成遍历字段的三件套。 */
-        if (n->nitems < 2) return BAD(n, "@fieldName needs (type, index)");
-        Type *t = resolve_type(n->items[0]);
-        Value *iv = arg_ct(n->items[1], ty_usize());
-        if (!iv || iv->kind != V_INT)
-            return BAD(n, "@fieldName: the index must be known at compile time");
-        if ((size_t)iv->ival >= (size_t)t->nfields)
-            return BAD(n, "field index %llu out of range: `%s` has %d field(s)",
-                       (unsigned long long)iv->ival, ty_str(t), t->nfields);
-        Field *fd = &t->fields[iv->ival];
-        n->str = fd->name;
-        n->str_len = fd->name ? (int)strlen(fd->name) : 0;
-        n->ct = val_str(n->str, n->str_len);   /* 别处当编译期值用 */
-        return type_of(n, ty_slice(ty_u8(), true));
-    }
-
-    if (!strcmp(nm, "field")) {
-        /* @field(base, name)：按编译期名字取字段。语义检查和后端发射
-         * 都复用普通的字段访问路径——直接把节点改写成 NK_FIELD。 */
-        if (n->nitems < 2) return BAD(n, "@field needs (value, \"name\")");
-        Value *sv = arg_ct(n->items[1], NULL);
-        if (!sv || sv->kind != V_STR)
-            return BAD(n, "@field: the field name must be known at compile time");
-        n->kind = NK_FIELD;
-        n->a    = n->items[0];
-        n->name = sv->sval;
-        n->items = NULL; n->nitems = 0;
-        return check_expr(n, expect);
+    /* 1.2.0 起砍到只剩 9 个内建（见 docs/manual.md §7）。老代码里残留的
+     * 名字给一条能照着改的提示，而不是含糊的 "unknown builtin"。 */
+    {
+        static const struct { const char *name, *hint; } gone[] = {
+            { "as",       "type conversion is written `(T)value`" },
+            { "intCast",  "type conversion is written `(T)value`" },
+            { "ptrCast",  "type conversion is written `(T)value`" },
+            { "bitCast",  "type conversion is written `(T)value`" },
+            { "typeOf",   "take a `T: type` parameter instead" },
+            { "typeInfo", "use @typeName / @sizeOf / @alignOf" },
+            { "hasField", "use @typeName / @sizeOf / @alignOf" },
+            { "fieldType","use @typeName / @sizeOf / @alignOf" },
+            { "fieldName","use @typeName / @sizeOf / @alignOf" },
+            { "field",    "write the field access directly: `v.name`" },
+            { "offsetOf", "compute offsets from @sizeOf / @alignOf" },
+            { "embedFile","embed the bytes yourself (a literal or std.fs)" },
+            { "file",     "source-location builtins are gone" },
+            { "line",     "source-location builtins are gone" },
+            { "col",      "source-location builtins are gone" },
+            { "fnName",   "source-location builtins are gone" },
+        };
+        for (size_t i = 0; i < sizeof gone / sizeof gone[0]; i++)
+            if (!strcmp(nm, gone[i].name))
+                return BAD(n, "@%s was removed: %s", nm, gone[i].hint);
     }
 
     return BAD(n, "unknown builtin @%s", nm);
@@ -4374,12 +4102,6 @@ static void ensure_raw(Symbol *s) {
     }
 
     Type *ann = d->a ? resolve_type(d->a) : NULL;
-    if (sema_ty_ct_only(ann)) {
-        err_at(d->line, d->col,
-               "`%s` exists only at compile time; bind it with `const` "
-               "straight from `@typeInfo`", ty_str(ann));
-        return;
-    }
     Type *init = d->b ? check_expr(d->b, ann) : NULL;
     if (d->b) s->stack_val = expr_frame(d->b);   /* 初值指向当前栈帧？记下来 */
 
@@ -4574,21 +4296,6 @@ static char *path_stem(const char *path) {
     return s;
 }
 
-static char *read_source(const char *path, size_t *out_len) {
-    FILE *f = fopen(path, "rb");
-    if (!f) return NULL;
-    fseek(f, 0, SEEK_END);
-    long n = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    if (n < 0) { fclose(f); return NULL; }
-    char *buf = malloc((size_t)n + 1);
-    if (!buf) { fclose(f); return NULL; }
-    if (n > 0 && fread(buf, 1, (size_t)n, f) != (size_t)n) { fclose(f); free(buf); return NULL; }
-    buf[n] = '\0';
-    fclose(f);
-    if (out_len) *out_len = (size_t)n;
-    return buf;
-}
 
 static Module *module_load(const char *rel, int line, int col);
 
@@ -4879,10 +4586,7 @@ static Type *check_fn_body(Node *fn) {
         Symbol *s = scope_add(&sc, pm->name, pm->flag ? SK_VAR : SK_PARAM);
         if (getenv("ZX_DBG")) fprintf(stderr, "[dbg]   bind param '%s' -> %p\n", pm->name ? pm->name : "(null)", (void*)s);
         if (!s) { err_at(pm->line, pm->col, "duplicate parameter '%s'", pm->name); continue; }
-        if (sema_ty_ct_only(pm->ty))
-            err_at(pm->line, pm->col,
-                   "parameter '%s' has type `%s`, which exists only at compile time",
-                   pm->name, ty_str(pm->ty));
+
         s->ty = pm->ty;
         s->state = 2;
         s->in_fn = true;      /* 形参槽位也在被调方的栈帧上：&pm 不可返回 */
@@ -6662,19 +6366,8 @@ static Value *ct_eval(Node *n) {
         const char *nm = n->name ? n->name : "";
         if (!strcmp(nm, "sizeOf") || !strcmp(nm, "alignOf")) {
             v = val_int(ty_usize(), n->ival, false);
-        } else if (!strcmp(nm, "typeOf") && n->type_val) {
-            v = val_type(n->type_val);
         } else if (!strcmp(nm, "typeName") && n->str) {
             v = val_str(n->str, n->str_len);
-        } else if (!strcmp(nm, "embedFile") && n->str) {
-            /* 字节在 check_builtin 里就读好了；R1 的 const 初始化靠这一步 */
-            v = val_str(n->str, n->str_len);
-        } else if (!strcmp(nm, "typeInfo") && n->ct) {
-            v = n->ct;
-        } else if (!strcmp(nm, "hasField")) {
-            v = val_bool(n->ival != 0);
-        } else if (!strcmp(nm, "fieldType") && n->type_val) {
-            v = val_type(n->type_val);
         } else if (!strcmp(nm, "compileError")) {
             if (!n->flag) {            /* 折叠可能重试，只报一次 */
                 n->flag = true;
@@ -6696,11 +6389,6 @@ static Value *ct_eval(Node *n) {
             }
             g_ct_stuck = true;
             return NULL;
-        } else if (n->nitems >= 2 &&
-                   (!strcmp(nm, "as") || !strcmp(nm, "intCast") ||
-                    !strcmp(nm, "ptrCast") || !strcmp(nm, "bitCast"))) {
-            Value *a = ct_eval(n->items[1]);
-            if (a) v = val_cast(n->ty, a);
         }
         break;
     }

@@ -1,0 +1,37 @@
+// 类型转换只有一种写法：(T)v。1.2.0 删掉了 @intCast/@ptrCast/@bitCast/@as，
+// 这个用例把"以前要分四个内建"的情形全部走一遍，保证能力没丢。
+// expect-exit: 0
+// expect-output
+// trunc=44 widen=300 f=300 back=300 ptr=300 reread=7 len=2 same=true
+const std = module("std");
+
+const main = fn () u8 {
+    var a: i32 = 300;
+    let trunc: u8 = (u8)a;             // 窄化：截断
+    let widen: i64 = (i64)a;           // 扩宽
+    let f: f64 = (f64)a;               // 整数 → 浮点
+    let back: i32 = (i32)f;            // 浮点 → 整数
+
+    var p: *i32 = &a;
+    let as_int = (u64)p;               // 指针 → 整数
+    let q = (*i32)as_int;              // 整数 → 指针
+    let reread = q[0];                 // 读回来还是 300
+
+    // 指针互转 + 按位重解释：同一段内存换个类型读
+    var raw: u64 = 0;
+    let bits = (*u8)&raw;              // 位型视角
+    bits[0] = 7;
+    let reread_bits = (i64)raw;
+
+    // 定长指针 → 短定长指针（长度只写在类型里）
+    var xs: *[4]i32 = &.{ 1, 2, 3, 4 };
+    let sl = (*[2]i32)xs;
+
+    // 普通指针 ↔ 数组指针
+    let same = ((*i32)xs) == &xs[0];
+
+    std.println("trunc={} widen={} f={} back={} ptr={} reread={} len={} same={}",
+                trunc, widen, (i32)f, back, q[0], reread_bits, sl.len, same);
+    _ = reread;
+    return 0;
+};

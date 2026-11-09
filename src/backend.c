@@ -1353,18 +1353,9 @@ static bool is_assign_op(int k) {
 static void ex_builtin(Buf *b, Node *n) {
     const char *nm = n->name ? n->name : "";
 
-    if (!strcmp(nm, "sizeOf") || !strcmp(nm, "alignOf") || !strcmp(nm, "offsetOf")) {
+    if (!strcmp(nm, "sizeOf") || !strcmp(nm, "alignOf")) {
         /* sema 已经把结果算好放在 ival 里（它是编译期值，不是运行时 sizeof） */
         buf_printf(b, "((size_t)%llu)", (unsigned long long)n->ival);
-        return;
-    }
-    if (!strcmp(nm, "embedFile")) {
-        /* sema 已把文件字节放进 n->str/n->str_len；按字符串字面量同款发射
-         * （cstr 转义成 C 串，NUL 也安全），结果是 ZxSlice_u8 视图。 */
-        ensure_type(ty_slice(ty_u8(), true));
-        Buf s; buf_init(&s);
-        cstr(&s, n->str ? n->str : "", n->str_len);
-        buf_printf(b, "((ZxSlice_u8){ (uint8_t*)%s, %d })", s.data, n->str_len);
         return;
     }
     if (!strcmp(nm, "typeName")) {
@@ -1379,57 +1370,6 @@ static void ex_builtin(Buf *b, Node *n) {
         Buf s; buf_init(&s);
         cstr(&s, p, len);
         buf_printf(b, "((ZxSlice_u8){(uint8_t*)%s, %d})", s.data, len);
-        return;
-    }
-    if (!strcmp(nm, "as") || !strcmp(nm, "intCast") || !strcmp(nm, "ptrCast") ||
-        !strcmp(nm, "bitCast")) {
-        Type *to = n->ty;
-        if (n->nitems >= 2) coerce(b, n->items[1], to);
-        else buf_puts(b, "0");
-        return;
-    }
-    if (!strcmp(nm, "hasField")) {
-        buf_printf(b, "%d", n->ival ? 1 : 0);
-        return;
-    }
-    if (!strcmp(nm, "fieldType")) {
-        buf_puts(b, "0");           /* 类型只活在编译期 */
-        return;
-    }
-    if (!strcmp(nm, "fieldName")) {
-        /* 和 typeName 一样：sema 已把名字算进 n->str，直接发字面量切片 */
-        const char *p = n->str;
-        int len = n->str_len;
-        if (!p) { ensure_type(ty_slice(ty_u8(), true)); buf_puts(b, "((ZxSlice_u8){0})"); return; }
-        if (len <= 0) len = (int)strlen(p);
-        ensure_type(ty_slice(ty_u8(), true));
-        Buf s; buf_init(&s);
-        cstr(&s, p, len);
-        buf_printf(b, "((ZxSlice_u8){(uint8_t*)%s, %d})", s.data, len);
-        return;
-    }
-    if (!strcmp(nm, "file") || !strcmp(nm, "fnName")) {
-        /* 路径 / 函数名在编译期就定死了：直接发 C 字符串字面量切片，零开销 */
-        const char *p = n->str ? n->str : "";
-        int len = n->str_len > 0 ? n->str_len : (int)strlen(p);
-        ensure_type(ty_slice(ty_u8(), true));
-        Buf s; buf_init(&s);
-        cstr(&s, p, len);
-        buf_printf(b, "((ZxSlice_u8){(uint8_t*)%s, %d})", s.data, len);
-        return;
-    }
-    if (!strcmp(nm, "line") || !strcmp(nm, "col")) {
-        int v = (nm[0] == 'l') ? n->line : n->col;
-        buf_printf(b, "((int32_t)%d)", v);
-        return;
-    }
-    if (!strcmp(nm, "typeInfo")) {
-        /* 正常情况下它会在编译期折叠掉；真漏到运行时就是一块全零的描述 */
-        if (n->ty && n->ty->kind != TY_INVALID) {
-            ensure_type(n->ty);
-            Buf t; buf_init(&t); ctype(&t, n->ty);
-            buf_printf(b, "((%s){0})", t.data);
-        } else buf_puts(b, "0");
         return;
     }
     if (!strcmp(nm, "trap") || !strcmp(nm, "panic")) {
@@ -5082,12 +5022,6 @@ static void gen_decl_inner(Node *d) {
     /* std.TypeInfo / std.FieldInfo 只在编译期存在：这些"声明"是编译期
      * 绑定，所有使用点在语义层都折成字面量了，C 里不该有它们。
      * 但字段类型（TypeKind 枚举之类）可能被没折干净的 switch 引用，照发。 */
-    if (sema_ty_ct_only(t)) {
-        if (t->kind == TY_STRUCT || t->kind == TY_UNION)
-            for (int i = 0; i < t->nfields; i++)
-                if (!sema_ty_ct_only(t->fields[i].ty)) ensure_type(t->fields[i].ty);
-        return;
-    }
     /* 别名（const heap = std.heap;）也是个编译期名字：它没有自己的存储，
      * 引用处直接落到被指向的那份上 */
     if (!sema_sym_has_storage(d->sym)) return;
@@ -6203,12 +6137,6 @@ static void gen_global(Node *d, bool exported) {
         return;
     }
 
-    if (sema_ty_ct_only(t)) {            /* std.TypeInfo 等：编译期绑定，不物化 */
-        if (t->kind == TY_STRUCT || t->kind == TY_UNION)
-            for (int i = 0; i < t->nfields; i++)
-                if (!sema_ty_ct_only(t->fields[i].ty)) ensure_type(t->fields[i].ty);
-        return;
-    }
     /* 别名（const heap = std.heap;）不占存储：它连的是模块里那份 */
     if (!sema_sym_has_storage(d->sym)) return;
 

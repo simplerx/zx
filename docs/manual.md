@@ -404,9 +404,7 @@ std.println("{}", b.get());
 ```zx
 @sizeOf(T)        // 字节数
 @alignOf(T)       // 对齐
-@offsetOf(T, "f") // 字段偏移
 @typeName(T)      // 类型名（字符串）
-@typeInfo(T)      // 编译期元信息：字段表、变体表、参数表
 ```
 
 结构体按字段声明顺序布局，遵循 C 的对齐规则（有填充，不重排）。要和 C 对接
@@ -634,41 +632,56 @@ std.println("{}", max(i32, 3, 7));
 
 ## 7. 内建 `@`
 
-内建是编译器直接处理的表达式，不能重定义、不能当值传。全部 25 个：
+内建是编译器直接处理的表达式，不能重定义、不能当值传。**全部只有九个**：
 
 | 内建 | 类型 | 说明 |
 | --- | --- | --- |
 | `@sizeOf(T)` | `usize` | 字节数（含填充） |
 | `@alignOf(T)` | `usize` | 对齐 |
-| `@offsetOf(T, "f")` | `usize` | 字段偏移 |
-| `@typeName(T)` | `[]const u8` | 类型名 |
-| `@typeOf(expr)` | `type` | 表达式的类型 |
-| `@typeInfo(T)` | 编译期元信息 | `fields` / `fieldCount` / `variants` 等，配 `inline for` 用 |
-| `@hasField(T, "f")` | `bool` | 编译期 |
-| `@fieldType(T, "f")` | `type` | 字段类型 |
-| `@fieldName(T, i)` | `[]const u8` | 第 i 个字段名 |
-| `@field(v, "f")` | 字段类型 | 按名字取字段（名字可以是编译期字符串） |
-| `@intCast(T, v)` | `T` | 带范围检查的整数转换 |
-| `@ptrCast(T, v)` | `T` | 指针类型互转 |
-| `@bitCast(T, v)` | `T` | 按位重解释 |
-| `@as(T, v)` | `T` | 显式定型（主要给字面量） |
+| `@typeName(T)` | `[]const u8` | 类型名（编译期定死） |
 | `@memcpy(d, s, n)` | `void` | 批量复制（不重叠） |
 | `@memmove(d, s, n)` | `void` | 批量复制（可重叠） |
 | `@memset(d, byte, n)` | `void` | 批量填充 |
-| `@embedFile("path")` | `*[N]const u8` | 编译期把文件内容嵌进二进制 |
-| `@link("ws2_32")` | `void` | 链接一个系统库 / 静态库 |
-| `@compileError("…")` | `noreturn` | 编译期报错并停下 |
+| `@link("ws2_32")` | `void` | 链接一个系统库 / 静态库（FFI 用） |
+| `@compileError("…")` | `noreturn` | 编译期报错并停下（泛型拒绝非法类型） |
 | `@trap()` | `noreturn` | 编译期可达就报错；否则运行期 trap |
-| `@line()` `@col()` `@file()` `@fnName()` | | 当前源码位置 / 文件名 / 函数名 |
 
-`@typeInfo` 是写通用代码的唯一钩子（没有 `anytype`）：
+**类型转换只有一种写法：`(T)val`。** 没有 `@intCast` / `@ptrCast` / `@bitCast` /
+`@as` 这些变体，`castable` 规则统一在 §3.6 说明：
 
 ```zx
-const dump = fn (T: type) void {
-    inline for (0..@typeInfo(T).fieldCount) i {
-        std.println("{}: {}", @fieldName(T, i), @typeName(@fieldType(T, i)));
-    }
+var a: i32 = 300;
+let b: u8  = (u8)a;         // 截断 → 44
+let c: i64 = (i64)a;        // 扩宽 → 300
+let d: f64 = (f64)a;        // 整数 → 浮点 → 300.0
+let p: *i32 = &a;
+let q = (u64)p;             // 指针 → 整数
+let r = (*i32)q;            // 整数 → 指针
+std.println("{} {} {} {}", b, c, d, r[0]);   // 44 300 300 300
+```
+
+**反射只有三个**：`@typeName` / `@sizeOf` / `@alignOf`。够拿名字、大小、对齐，
+足够写序列化、FFI 布局校验、分配器；不再提供字段遍历（没有 `@typeInfo` /
+`@fieldName` / `@fieldType` / `@field` / `@hasField` / `@offsetOf`）。
+
+字段偏移要自己算：拿真实地址相减，和 `offsetof` 等价，而且零依赖。
+
+```zx
+const Buf = extern struct { data: *[16]u8, n: u32 };
+
+const check = fn () bool {
+    var b: Buf = undefined;
+    return ((usize)&b.n) - ((usize)&b) == 16;   // 字段偏移
 };
+```
+
+**源码位置**（`@file` / `@line` / `@col` / `@fnName`）也删了：位置信息只由
+`std.debug.panic` / `std.debug.assert` 在调用点由编译器注入，语言层不再暴露。
+
+被删掉的老名字会报 E0211，并直接告诉你换成什么写法：
+
+```
+error[E0211]: @intCast was removed: type conversion is written `(T)value`
 ```
 
 ---
@@ -1114,7 +1127,7 @@ Zed 里的配置（`.zed/settings.json`）：
 或运行时长度时切 `s[0..]`。Zx 字符串不带 NUL 结尾。
 
 **没有隐式数值转换。** `i32 + u64` 是错误，`let x: i64 = i32值` 也是错误，
-都要写 `(i64)v` 或 `@intCast(i64, v)`。
+都要写 `(i64)v`（转换只有这一种写法；`@intCast` 那类内建在 1.2.0 已删）。
 
 **整型溢出回绕，除零未定义。** 常量除零在编译期就报 E0305；运行时除以 0
 是未定义行为，自己先判。

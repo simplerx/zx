@@ -1,0 +1,7 @@
+// expect: @typeInfo was removed: use @typeName / @sizeOf / @alignOf
+// 反射只剩 @typeName / @sizeOf / @alignOf 三个，字段遍历不再提供。
+const S = struct { x: i32 };
+const main = fn () u8 {
+    let info = @typeInfo(S);
+    return (u8)info.kind;
+};

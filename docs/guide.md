@@ -863,8 +863,16 @@ const Allocator = struct {
 // 任何符合签名的函数都能填进来；std.heap.page 就是现成实现
 ```
 
-1. **泛型 + `@typeInfo`**——编译期多态：要求"有这些字段"用  
-   `@hasField(T, "len")` 编译期自检，缺了在实例化点报错。
+1. **泛型 + 编译期断言**——要求"这个类型支持某操作"时，用 `@compileError`
+   在实例化点报错（1.2.0 起没有 `@typeInfo`，也没有字段存在性检查）：
+
+```zx
+const onlyWord = fn (T: type) void {
+    if (@sizeOf(T) != 2 && @sizeOf(T) != 4 && @sizeOf(T) != 8) {
+        @compileError("onlyWord: unsupported element size");
+    }
+};
+```
 
 ---
 
@@ -1006,45 +1014,34 @@ if (std.BufWriter.create(al, "out.txt", 4096)) w0 {
 
 ## 15. 内建函数（@ 前缀）
 
-不可重定义，用户标识符不能以 `@` 开头。
+不可重定义，用户标识符不能以 `@` 开头。**一共九个**：
 
-| 内建                                                   | 用途                |
-| ---------------------------------------------------- | ----------------- |
-| `@sizeOf(T)` / `@alignOf(T)`                         | 字节数 / 对齐          |
-| `@typeOf(e)` / `@typeName(T)`                        | 取类型 / 类型名         |
-| `@typeInfo(T)`                                       | 类型元数据（编译期值）       |
-| `@hasField(T, "name")`                               | 字段或静态成员存在性        |
-| `@fieldType(T, "name")`                              | 字段类型              |
-| `@fieldName(T, i)`                                   | 第 i 个字段名          |
-| `@field(v, "name")`                                  | 按编译期字符串取/写字段      |
-| `@trap()`                                            | 中止（noreturn）      |
-| `@compileError(msg)`                                 | 编译期报错             |
+| 内建 | 用途 |
+| --- | --- |
+| `@sizeOf(T)` / `@alignOf(T)` | 字节数 / 对齐 |
+| `@typeName(T)` | 类型名（编译期常量字符串） |
 | `@memcpy(d, s, n)` / `@memmove` / `@memset(d, v, n)` | 批量内存原语（std 容器的底座） |
+| `@link("lib")` | 链接系统库 / 静态库（FFI 唯一入口） |
+| `@compileError(msg)` | 编译期报错并停下 |
+| `@trap()` | 中止（noreturn） |
 
-**cast 类内建没有**：指针互转、位重解释、窄化转换统一是 `(T) v`（§7.R4）。
+**转换只有 `(T) v`**：指针互转、位重解释、窄化/扩宽、整数与浮点，全是这一种写法。
 
-### 15.1 元编程：@typeInfo + inline for
-
-`@typeInfo(T)` 是纯编译期值（kind / name / bytes / align / fieldCount / fields），  
-配 `inline for` 就能对任意结构体写字段无关的泛型代码：
+**没有 `@typeInfo` / `@field` / `@fieldName` / `@fieldType` / `@hasField` /
+`@offsetOf`**：反射只保留名字、大小、对齐三件。要字段偏移就拿地址相减：
 
 ```zx
-const eql = fn (T: type, x: T, y: T) bool {
-    const info = @typeInfo(T);
-    if (info.kind != std.TypeKind.struct_) {
-        return x == y;                        // 标量直接比
-    }
-    inline for (0..info.fieldCount) i {       // 编译期展开：每个字段一份
-        const FT = @fieldType(T, @fieldName(T, i));
-        if (!eql(FT, @field(x, @fieldName(T, i)), @field(y, @fieldName(T, i)))) {
-            return false;
-        }
-    }
-    return true;
-};
+if (((usize)&s.field) - ((usize)&s) != 12) { return 1; }
 ```
 
-这就是 Zx 的"反射"：全部发生在编译期，运行时零开销，生成的 C 和手写的一样。
+也没有 `@file` / `@line` / `@col` / `@fnName`：位置信息只由 `std.debug.panic`
+与 `std.debug.assert` 在调用点注入。
+
+被删的老名字点名报 E0211，并附上该写什么：
+
+```
+error[E0211]: @intCast was removed: type conversion is written `(T)value`
+```
 
 ---
 

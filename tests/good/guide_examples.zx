@@ -42,18 +42,10 @@ const Vec = struct {
     };
 };
 
-const eql = fn (T: type, x: T, y: T) bool {
-    const info = @typeInfo(T);
-    if (info.kind != std.TypeKind.struct_) {
-        return x == y;
-    }
-    inline for (0..info.fieldCount) i {
-        const FT = @fieldType(T, @fieldName(T, i));
-        if (!eql(FT, @field(x, @fieldName(T, i)), @field(y, @fieldName(T, i)))) {
-            return false;
-        }
-    }
-    return true;
+// 结构体没有内建 ==，写个逐字段比较（1.2.0 起没有 @typeInfo 反射，
+// 泛型按类型分派也就没有了：要进比较的类型直接写出来）。
+const eql = fn (x: Vec, y: Vec) bool {
+    return x.x == y.x && x.y == y.y;
 };
 
 const sum = fn (xs: []const i32) i32 {
@@ -126,7 +118,7 @@ const main = fn () u8 {
     std.println("port={}", maybe orelse 8080);
 
     // §15 eql
-    std.println("eql={} eql={}", eql(Vec, a, a), eql(Vec, a, Vec{ .x = 1, .y = 2 }));
+    std.println("eql={} eql={}", eql(a, a), eql(a, Vec{ .x = 1, .y = 2 }));
 
     // §14 ArrayList
     var list = std.ArrayList(i32).init(std.heap.page);

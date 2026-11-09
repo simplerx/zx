@@ -310,6 +310,7 @@ defer  errdefer  struct  union  enum  error  pub  extern  orelse  try
 | `union{…}` | 联合体 | 最大成员（带标签再 + 标签） | |
 | `?T` | 空值联合体 | `1 + pad + sizeof T` | §5 |
 | `!T` | 错误联合体 | `2 + pad + sizeof T` | §5 |
+| 0 | **内建收敛到九个**（v1.2.0）：`@sizeOf` `@alignOf` `@typeName` `@memcpy` `@memmove` `@memset` `@link` `@compileError` `@trap`；转换只有 `(T)v`；反射只有名字/大小/对齐；`@typeInfo`/`@field*`/`@*Cast`/`@typeOf`/`@offsetOf`/`@embedFile`/位置内建全部删除（报 E0211） | §14 |
 | `fn(P…) R` | 函数 | 8 | const 指针 |
 | `comptime_int` `comptime_float` | 字面量类型 | — | 不可写出 |
 | `noreturn` | 不返回 | 0 | |
@@ -1439,8 +1440,8 @@ inline for (0..len)          { … }        // 无绑定的纯重复
 
 - `inline for` **不是循环**：语义层按序列的编译期长度把循环体克隆 N 份，每份把绑定
   换成对应的编译期常量。发出来的代码和手写 N 遍一模一样，运行时没有任何循环。
-- 序列必须是**编译期长度**：`0..3`（两端都是编译期整数）、`@typeInfo(T).fieldCount`
-  这类编译期值都行；运行时长度直接报错。
+- 序列必须是**编译期长度**：`0..3`（两端都是编译期整数）或 `const N = 8;` 这样的
+  编译期常量；运行时长度直接报错。（`@typeInfo(T).fieldCount` 那类反射入口 1.2.0 已删。）
 - 循环变量（绑定）是**编译期常量**：可以当数组长度用（`var buf: *[i + 1]u8`）、
   可以传给要求 `type` 或编译期字符串的内建。
 - 每份展开是一个独立的块作用域：里面的 `let` / `var` 不会跨份撞名。
@@ -2190,109 +2191,42 @@ if (std.BufReader.open(al, "big.txt", 4096)) r0 {
 
 ## 14. 内建（`@` 前缀，不可重定义）
 
+**只有九个**（1.2.0 收敛；`docs/manual.md` §7 是面向使用者的版本）：
+
 | 内建 | 签名 | 用途 |
 |---|---|---|
 | `@sizeOf(T)` | `fn(type) usize` | 字节大小 |
 | `@alignOf(T)` | `fn(type) usize` | 对齐 |
-| `@typeOf(e)` | `fn(any) type` | 取类型 |
-| `@typeName(T)` | `fn(type) []const u8` | 类型名 |
-| `@typeInfo(T)` | `fn(type) TypeInfo` | 类型描述（编译期值，见 §14.1） |
-| `@hasField(T, name)` | `fn(type, str) bool` | 有没有这个字段 / 静态成员 |
-| `@fieldType(T, name)` | `fn(type, str) type` | 字段的类型 |
-| `@fieldName(T, i)` | `fn(type, usize) []const u8` | 第 i 个字段的名字 |
-| `@field(v, name)` | 字段访问 | 按编译期字符串取字段，可读可写 |
-| `@trap()` | `fn() noreturn` | 中止 |
-| `@compileError(msg)` | `fn([]const u8) noreturn` | 编译期报错 |
+| `@typeName(T)` | `fn(type) []const u8` | 类型名（编译期常量） |
+| `@memcpy(d, s, n)` | `fn(ptr\|slice, ptr\|slice, usize) void` | 批量复制（不重叠） |
+| `@memmove(d, s, n)` | 同上 | 批量复制（可重叠） |
+| `@memset(d, byte, n)` | `fn(ptr\|slice, int, usize) void` | 批量填充 |
+| `@link("lib")` | `fn(str) void` | 链接外部库（FFI 唯一入口） |
+| `@compileError(msg)` | `fn([]const u8) noreturn` | 编译期报错并停下 |
+| `@trap()` | `fn() noreturn` | 编译期可达就报错，否则运行期 trap |
 
-**没有 cast 类内建**：`@ptrCast` / `@bitCast` / `@intCast` 不存在——类型转换
-只有一种写法，C 风格的 `(T) v`（§7.R4）。指针互转、按位重解释、窄化转换
-都是它：写法唯一，行为查同一张表，不出现"三个 cast 该用哪个"的选择题。
-`@` 前缀保留给内建，用户标识符不能以 `@` 起始。
+**类型转换只有一种写法：`(T) v`。** 没有 `@ptrCast` / `@bitCast` / `@intCast` /
+`@as`——指针互转、按位重解释、窄化扩宽、整数与浮点，全走同一张 `castable` 表。
 
-### 14.1 `@typeInfo(T)`
+**反射只有三个**：`@typeName` / `@sizeOf` / `@alignOf`。没有 `@typeInfo`，
+因此也没有字段遍历（`@fieldName` / `@fieldType` / `@field` / `@hasField` 一并
+删除）；字段偏移用 `((usize)&v.f) - ((usize)&v)` 现场算。
+没有源码位置内建（`@file` / `@line` / `@col` / `@fnName`）：位置只在
+`std.debug.panic` / `std.debug.assert` 的调用点由编译器注入。
 
-返回值是**纯编译期值**，六个字段：
+老名字点名报 E0211，并附替代写法。`@` 前缀保留给内建，用户标识符不能以 `@` 起始。
 
-| 字段 | 类型 | 含义 |
-|---|---|---|
-| `kind` | `std.TypeKind` | 种类，见下表 |
-| `name` | `[]const u8` | 类型名（就是 `@typeName(T)` 那个串） |
-| `bytes` | `usize` | 字节数，等于 `@sizeOf(T)` |
-| `align` | `usize` | 对齐，等于 `@alignOf(T)` |
-| `fieldCount` | `usize` | 结构体/联合体的成员数；枚举的变体数；其余为 0 |
-| `fields` | `[]std.FieldInfo` | 字段元表，见下 |
+### 14.1 删掉的那批内建（1.2.0）
 
-`std.TypeKind` 是个普通枚举，变体名把和关键字撞车的加上下划线：
+| 老内建 | 替代 |
+|---|---|
+| `@intCast(T,v)` `@ptrCast` `@bitCast` `@as` | `(T)v` |
+| `@typeOf(x)` | `T: type` 形参 |
+| `@typeInfo` `@fieldName` `@fieldType` `@hasField` `@field` | `@typeName` / `@sizeOf` / `@alignOf` + 直写字段 |
+| `@offsetOf(T,"f")` | 地址相减 |
+| `@embedFile("p")` | `std.fs` 读文件，或字面量 |
+| `@file` `@line` `@col` `@fnName` | 编译器在 std.debug 调用点注入 |
 
-```
-other, void_, bool_, int_, float_, pointer, slice, array,
-struct_, union_, enum_, optional, error_union, function, type_
-```
-
-`*[N]T` 的 `kind` 是 `.array`（数量在类型里），裸 `*T` 才是 `.pointer`。
-
-```zx
-const kindName = fn (T: type) []const u8 {
-    return switch (@typeInfo(T).kind) {
-        .int_: "int",
-        .struct_: "struct",
-        .slice: "slice",
-        else: "?",
-    };
-};
-```
-
-因为它整块都是编译期值，`const info = @typeInfo(T);` 之后 `info.kind` / `info.bytes`
-都能参与 `switch`、`if` 和数组长度；**没有运行时表示**（真漏到运行时只会得到一块全零）。
-
-配套的查询都是编译期的（`name` / 参数位置接受**编译期字符串**——字符串字面量，
-或者 `inline for` 绑定的 `@fieldName(T, i)`）：
-
-- `@hasField(T, "name")` —— 字段或结构体静态成员在不在。
-- `@fieldType(T, "name")` —— 字段的类型；不存在就报错。
-- `@fieldName(T, i)` —— 第 i 个字段的名字，越界报错。
-- `@field(v, "name")` —— 按名字取字段，**可读可写**：`@field(m, "n") = 42;`
-  等价于 `m.n = 42;`，名字是编译期常量时行为与 `.name` 完全一致。
-
-**`fields` 元表**把上面这些串成一个整体：`info.fields` 是编译期切片
-`[]std.FieldInfo`，元素是 `std.FieldInfo = struct { name: []const u8, ty: type }`
-（字段叫 `ty` 而不是 `type`——关键字当不了字段名）。`.len`、下标、`.name`、
-`.ty` 全是编译期值，`inline for` 遍历之后 `f.ty` 可以直接当类型用——递归描述、
-自动生成序列化 / 比较 / 打印都靠它：
-
-```zx
-inline for (0..info.fields.len) i {
-    const f = info.fields[i];
-    std.println("  {s} : {s}", f.name, @typeName(f.ty));
-}
-```
-
-TypeInfo / FieldInfo 是**纯编译期类型**（FieldInfo 里装着一个 `type` 值，运行时
-没有对应物）：把 `std.TypeInfo` 写成变量类型、把 `std.FieldInfo` 当参数类型都会
-被拒绝——引用它们就用 `const info = @typeInfo(T)`，让编译器把值折进常量。
-
-要注意 `.size` 是语言自己的编译期字段（字节数，见 §3），所以描述里用 **`bytes`** 而不是
-`size`——叫 `size` 会被 `.size` 规则截胡。
-
-字段遍历用 `inline for`（§8.3.1）。比较任意结构体的泛型函数只需要这几行：
-
-```zx
-const eql = fn (T: type, x: T, y: T) bool {
-    const info = @typeInfo(T);
-    if (info.kind != std.TypeKind.struct_) {
-        return x == y;              // 标量 / bool：直接比
-    }
-    inline for (0..info.fieldCount) i {
-        const FT = @fieldType(T, @fieldName(T, i));
-        if (!eql(FT, @field(x, @fieldName(T, i)), @field(y, @fieldName(T, i)))) {
-            return false;
-        }
-    }
-    return true;
-};
-```
-
----
 
 ## 15. 附录：与 C / Zig 差异速查
 

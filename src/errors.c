@@ -38,11 +38,16 @@ static const ErrDoc g_errs[] = {
       "usually a statement at top level, a declaration inside an expression, or an unterminated switch arm" },
 
     /* ---- 类型 ---- */
+    { "E0211", "builtin removed (1.2.0 trimmed the set to nine)",
+      "write conversions as `(T)value`; reflection is @typeName / @sizeOf / @alignOf; "
+      "`zxc explain E0211` lists which names went away and what to write instead" },
+
     { "E0300", "type error (uncategorized)",
       "compare the expression's type at the caret with the expected type" },
     { "E0301", "type mismatch, no implicit conversion",
-      "write the conversion explicitly: `(T)expr`, or `@intCast(T, v)` when the value "
-      "needs a range check; both sides of arithmetic and assignment must match" },
+      "write the conversion explicitly as `(T)expr` -- that is the only conversion "
+      "syntax (the @intCast/@as family is gone); both sides of arithmetic and "
+      "assignment must have the same type" },
     { "E0302", "literal out of range for the target type",
       "use a wider type (`i32` -> `i64`), or double-check the literal itself" },
     { "E0303", "argument count or type mismatch",

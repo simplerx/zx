@@ -5,7 +5,7 @@
 //     解析 stderr 的 `path:line:col: error[CODE]: msg` 行 → publishDiagnostics。
 //     直接复用自举前端（zxfe），诊断与编译器 100% 同源。
 //   - 补全：
-//       `@` 前缀      → 顶层内建（@sizeOf/@typeInfo/…）
+//       `@` 前缀      → 顶层内建（@sizeOf/@typeName/@memcpy/… 共九个）
 //       `X.`          → std 内建命名空间 / module 绑定的顶层 pub 声明 /
 //                       容器（struct/union/enum）的成员与方法（含实例推断：
 //                       `let v = Obj.init(...)` 后 `v.` 出 Obj 的成员）
@@ -262,9 +262,7 @@ const std_builtin_docs = [_]StdBuiltin{
     // （下午）：这三个要暴露出来，还要带 snippet。
     .{ .path = "std.Allocator", .sig = "Allocator: type — 分配器接口 { ctx: ?*u8, alloc: fn(?*u8, usize) ?*u8, free: fn(?*u8, *u8, usize) void }",
        .snip = "{ .ctx = ${1:null}, .alloc = ${2:allocFn}, .free = ${3:freeFn} }$0" },
-    .{ .path = "std.TypeKind", .sig = "TypeKind: type — 编译期类型种类（std.TypeKind.struct_ 等）" },
-    .{ .path = "std.TypeInfo", .sig = "TypeInfo: type — 编译期类型信息" },
-    .{ .path = "std.FieldInfo", .sig = "FieldInfo: type — 编译期字段信息" },
+
     .{ .path = "std.stackAlloc", .sig = "stackAlloc(T: type, n: usize) *[n]T — 栈上分配（编译期 n）",
        .snip = "(${1:T}, ${2:n})$0" },
     .{ .path = "std.heapAlloc", .sig = "heapAlloc(alloc: Allocator, T: type, n: usize) *[n]T — 堆分配，OOM abort",
@@ -291,53 +289,38 @@ fn stdBuiltinDoc(path: []const u8) ?StdBuiltin {
     return null;
 }
 
-/// 纯编译期反射类型（TypeKind/TypeInfo/FieldInfo）：不进 std. 补全列表
-/// （用户 2026-11-09 第 1 条：std 命名空间不被编译期东西污染）；hover 仍可查。
-/// Allocator/stackAlloc/heapAlloc 用户明确要暴露（第 4 条），不过滤。
+/// 1.2.0 起没有编译期反射类型（TypeKind/TypeInfo/FieldInfo 随 @typeInfo 一起删了），
+/// 这里保留函数是为了不动调用点：永远 false。
 fn isCtBuiltin(name: []const u8) bool {
-    const ct = [_][]const u8{ "TypeKind", "TypeInfo", "FieldInfo" };
-    for (ct) |c| {
-        if (std.mem.eql(u8, name, c)) return true;
-    }
+    _ = name;
     return false;
 }
 
 // std 顶层由编译器 seed 的名字（src/sema.c g_std_seeded；std.zx 自己的声明另行扫描）
 const std_seeded = [_][]const u8{
     "print",     "println", "format",   "heap",     "file",
-    "io",        "Allocator", "TypeKind", "TypeInfo", "FieldInfo",
-    "stackAlloc", "heapAlloc", "process",
+    "io",        "Allocator", "stackAlloc", "heapAlloc", "process",
 };
 
 const BuiltinDoc = struct { name: []const u8, detail: []const u8 };
 
-// @ 内建（与 src/sema.c check_builtin() 逐字对齐——没有 @print/@panic，那些是 std 成员）
+// @ 内建（与 src/sema.c check_builtin() 逐字对齐，1.2.0 只剩这九个）：
+// 类型转换统一写 `(T)value`；反射只有 @typeName / @sizeOf / @alignOf。
 const builtin_docs = [_]BuiltinDoc{
     .{ .name = "sizeOf", .detail = "@sizeOf(T) 类型大小（字节）" },
     .{ .name = "alignOf", .detail = "@alignOf(T) 类型对齐" },
-    .{ .name = "typeOf", .detail = "@typeOf(v) 值的类型" },
     .{ .name = "typeName", .detail = "@typeName(T) 类型名字符串" },
-    .{ .name = "typeInfo", .detail = "@typeInfo(T) 编译期类型信息" },
-    .{ .name = "as", .detail = "@as(T, v) 定向类型转换" },
-    .{ .name = "intCast", .detail = "@intCast(T, v) 整数类型转换" },
-    .{ .name = "ptrCast", .detail = "@ptrCast(T, p) 指针类型转换" },
-    .{ .name = "bitCast", .detail = "@bitCast(T, v) 位型重解释" },
-    .{ .name = "field", .detail = "@field(obj, \"name\") 按编译期名取字段" },
-    .{ .name = "hasField", .detail = "@hasField(T, \"name\") 编译期字段检查" },
-    .{ .name = "fieldType", .detail = "@fieldType(T, \"name\") 字段类型" },
-    .{ .name = "fieldName", .detail = "@fieldName(T, i) 第 i 个字段名" },
     .{ .name = "memcpy", .detail = "@memcpy(dest, src, count) 内存复制" },
     .{ .name = "memmove", .detail = "@memmove(dest, src, count) 内存移动" },
     .{ .name = "memset", .detail = "@memset(dest, fill, count) 内存填充" },
+    .{ .name = "link", .detail = "@link(\"lib\") 链接外部库" },
     .{ .name = "trap", .detail = "@trap() 触发断点/中止" },
     .{ .name = "compileError", .detail = "@compileError(msg) 编译期报错" },
 };
 
 const toplevel_builtins = [_][]const u8{
-    "sizeOf",       "alignOf", "typeOf",   "typeName", "typeInfo",
-    "as",           "intCast", "ptrCast",  "bitCast",
-    "field",        "hasField", "fieldType", "fieldName",
-    "memcpy",       "memmove", "memset",   "trap",     "compileError",
+    "sizeOf", "alignOf", "typeName", "memcpy", "memmove", "memset",
+    "link",   "trap",    "compileError",
 };
 
 // ---------------------------------------------------------------- utils

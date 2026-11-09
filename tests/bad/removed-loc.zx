@@ -1,0 +1,5 @@
+// expect: @file was removed: source-location builtins are gone
+const main = fn () u8 {
+    let f = @file();
+    return (u8)f.len;
+};

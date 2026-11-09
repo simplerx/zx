@@ -1,7 +1,5 @@
-// debug_builtin.zx —— std.debug 与位置内建（decisions §85）
-//
-// `@file` / `@line` / `@col` / `@fnName` 在编译期折成字面量，零运行时开销；
-// `std.debug.panic` / `std.debug.assert` 的位置实参由编译器在调用点自动注入。
+// debug_builtin.zx —— std.debug（1.2.0 起 @file/@line/@col/@fnName 已删，
+// 位置信息由编译器在 panic/assert 调用点自动注入，源码里不再有位置内建）
 //   assert：条件为假才 panic（带位置）；release（-DZX_RELEASE）整段擦除
 //   panic：永不返回（noreturn），之后的代码按不可达处理（E0502）
 //   errName：错误码 → 名字，静态表由编译器按编译期登记的错误集生成
@@ -9,10 +7,6 @@
 //   放在 .tmp 手工验证，不进回归。）
 
 const std = module("std");
-
-const probe = fn () []const u8 {
-    return @fnName();
-};
 
 const main = fn () !i32 {
     // 错误码在编译期登记，errName 查静态表
@@ -22,7 +16,6 @@ const main = fn () !i32 {
     // 通过的断言不打印任何东西
     std.debug.assert(2 + 2 == 4, "arithmetic is broken");
     std.println("assert:ok");
-    std.println("fn:{}", probe());
     return 0;
 };
 
@@ -31,4 +24,3 @@ const main = fn () !i32 {
 // e2:bad_arg
 // e3:never_registered
 // assert:ok
-// fn:probe

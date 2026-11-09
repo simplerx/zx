@@ -1,0 +1,7 @@
+// expect: @intCast was removed: type conversion is written `(T)value`
+// 1.2.0 砍内建：转换只剩 `(T)val` 一种写法。
+const main = fn () u8 {
+    let a: i32 = 7;
+    let b: i64 = @intCast(i64, a);
+    return (u8)b;
+};

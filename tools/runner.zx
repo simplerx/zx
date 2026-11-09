@@ -211,7 +211,7 @@ const verify_err = fn (al: std.Allocator, f: []const u8, ps: [][]const u8, log: 
     if (directive(ps, "// expect-count: ")) cs {
         if (std.str.parseInt(cs)) wn {
             let got = count_errors(log);
-            if (got != @intCast(usize, wn)) {
+            if (got != (usize)wn) {
                 std.println("  FAIL {} -- {} error(s) reported, want {}", f, got, wn);
                 std.println("       {}", log);
                 ok = false;

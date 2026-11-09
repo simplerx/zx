@@ -42,6 +42,7 @@ static const DiagRule g_rules[] = {
     { "type parameters",                  "E0701" },
 
     /* 内建与格式串 */
+    { "was removed:",                     "E0211" },
     { "format specifier",                 "E0802" },
     { "format string",                    "E0802" },
     { "sequence(s) but",                  "E0802" },

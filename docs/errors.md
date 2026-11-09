@@ -8,7 +8,7 @@
 
 | 入口 | 用途 |
 | --- | --- |
-| `zxc errors` | 按类别列出全部 36 个码 |
+| `zxc errors` | 按类别列出全部 37 个码 |
 | `zxc explain E0304` | 单个码：什么意思、通常怎么修（大小写不敏感），末尾给本文链接 |
 | 编辑器里点诊断上的码 | 由语言服务器给出 `codeDescription`，直接打开本文对应的一条 |
 | 本文 | 完整版：触发条件、典型消息、示例 |
@@ -98,6 +98,25 @@ const r = blk: {
 
 ## 类型 E03xx
 
+<a id="e0211"></a>
+### E0211 内建已被删除（1.2.0 只留九个）
+
+**典型消息**：`@intCast was removed: type conversion is written \`(T)value\``
+
+1.2.0 把内建砍到九个：`@sizeOf` / `@alignOf` / `@typeName` / `@memcpy` /
+`@memmove` / `@memset` / `@link` / `@compileError` / `@trap`。
+
+| 老写法 | 换成 |
+| --- | --- |
+| `@intCast(T, v)` `@ptrCast` `@bitCast` `@as` | `(T)v` |
+| `@typeOf(x)` | 形参写成 `T: type` |
+| `@typeInfo` `@fieldName` `@fieldType` `@hasField` `@field` | `@typeName` / `@sizeOf` / `@alignOf`；字段访问直接写 |
+| `@offsetOf(T, "f")` | `((usize)&v.f) - ((usize)&v)` |
+| `@embedFile("p")` | 自己用 `std.fs` 读，或写成字面量 |
+| `@file()` `@line()` `@col()` `@fnName()` | 已移除；位置只由 `std.debug` 自动注入 |
+
+---
+
 <a id="e0300"></a>
 ### E0300 类型错误（未归类）
 
@@ -112,9 +131,8 @@ Zx 不做隐式数值转换，也不做字符串/切片互转：
 
 ```zx
 let a: i32 = 1;
-let b: i64 = a;                 // E0301
-let c: i64 = (i64)a;            // 对：显式转换 `(T)expr`
-let d: i64 = @intCast(i64, a);  // 对；越界会被查出来
+let b: i64 = a;         // E0301
+let c: i64 = (i64)a;    // 对：转换只有这一种写法 `(T)expr`
 ```
 
 <a id="e0302"></a>

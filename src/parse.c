@@ -1040,19 +1040,12 @@ static Node *parse_primary(P *p) {
         advance(p);
         Node *n = node_new(NK_BUILTIN, t->line, t->col);
         n->name = take_ident(p);
-        /* @file() 在解析期就把当前模块路径存进节点：多模块下每个 @file 都
-         * 指向自己所在的源文件，而不是入口文件（decisions §85）。 */
-        if (n->name && !strcmp(n->name, "file")) {
-            n->str = g_parse_fname ? g_parse_fname : "";
-            n->str_len = (int)strlen(n->str);
-        }
-        /* @typeOf(e) / @field(v, "name") 收表达式；@sizeOf / @alignOf /
-         * @typeName / @fieldName(T, i) 收类型；
-         * @intCast / @ptrCast / @bitCast 是 (类型, 表达式)；
-         * @memcpy / @memmove / @memset 全是运行时值，没有类型参数。 */
+
+        /* 语法只有两种形状：@sizeOf/@alignOf/@typeName 先收类型，
+         * @memcpy/@memmove/@memset 与 @compileError 先收表达式。
+         * （1.2.0 删掉了 @typeOf/@field/@*Cast 这批，转换统一写 `(T)value`。） */
         bool value_first = n->name &&
-            (!strcmp(n->name, "typeOf") || !strcmp(n->name, "field") ||
-             !strcmp(n->name, "memcpy") || !strcmp(n->name, "memmove") ||
+            (!strcmp(n->name, "memcpy") || !strcmp(n->name, "memmove") ||
              !strcmp(n->name, "memset"));
         expect(p, TOK_LPAREN);
         if (!at(p, TOK_RPAREN)) {
@@ -1810,7 +1803,7 @@ static size_t *bracket_match(Token *t, size_t n) {
 
 static bool brackets_too_deep(Lexer *lx) {
     int d = 0, maxd = 0;
-    for (int i = 0; i < lx->ntoks; i++) {
+    for (size_t i = 0; i < lx->ntoks; i++) {
         switch (lx->toks[i].kind) {
         case TOK_LPAREN: case TOK_LBRACE: case TOK_LBRACKET: case TOK_DOT_BRACE:
             if (++d > maxd) maxd = d;
