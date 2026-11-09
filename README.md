@@ -104,7 +104,7 @@ zxc fmt [--check]        # 格式化
 ```sh
 zxc include ../raylib    # 目录 → vendor/<名>.zx 绑定 + vendor/<名>.clib 清单
 zxc include foo.h        # 单个头文件
-zxc add https://.../stb_image.h   # 从网上拉，SHA-256 / commit 写进 zx.lock
+zxc add https://.../xx.h  or xx.git  or lib  # 从网上拉, 存入vendor，SHA-256 / commit 写进 zx.lock
 zxc fetch                # 换机器时按锁复现 vendor/
 ```
 
