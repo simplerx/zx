@@ -5153,8 +5153,9 @@ static void gen_stmt(Node *n) {
                 Node *id = n->c->items[i];
                 Type *ft = (tt && tt->kind == TY_TUPLE && i < tt->nfields)
                            ? tt->fields[i].ty : ty_i32();
-                const char *dn2 = (id->name && !strcmp(id->name, "_"))
-                                      ? ignored_cname() : cnames(id->name);
+                const char *dnm = sym_cname(id);
+                const char *dn2 = (dnm && !strcmp(dnm, "_"))
+                                      ? ignored_cname() : cnames(dnm);
                 line("%s %s = %s.f%d;", cty(ft), dn2, tmp, i);
             }
             return;
@@ -6186,7 +6187,8 @@ static void gen_global(Node *d, bool exported) {
             Node *id = d->c->items[k];
             Type *it = id->ty;
             if (!it || it->kind == TY_INVALID || it->kind == TY_VOID) continue;
-            char *inn = cnames(id->name ? id->name : "_");
+            const char *inm = sym_cname(id);
+            char *inn = (inm && !strcmp(inm, "_")) ? ignored_cname() : cnames(inm);
             if (!id->ct) {
                 err_at(id->line, id->col,
                        "destructuring at file scope needs a compile-time value (R1)");

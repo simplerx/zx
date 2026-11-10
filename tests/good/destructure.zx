@@ -1,0 +1,17 @@
+// 解构：局部 / 顶层，含 `_` 槽位。
+// 守门背景：局部解构的各分量在 sema 侧有位置后缀 C 名（a_4_11），
+// 发射侧曾用原名，导致声明与引用对不上（B1001 use of undeclared
+// identifier）——而这个路径一直没用例覆盖。
+//
+// expect: 1 1 2 3
+
+const std = module("std");
+const tup = .{ 1, 2 };
+const { g1, g2 } = tup;                 // 顶层解构：常量值
+
+const main = fn () u8 {
+    let { a, _ } = tup;                 // `_` 槽位：不建可用名
+    let { b, c } = tup;                 // 两个分量都要能引用
+    std.println("{} {} {} {}", a, b, c, g1 + g2);
+    return 0;
+};
