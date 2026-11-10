@@ -3586,3 +3586,44 @@ fixture 是只引用 std 的 `defstd.zx`，不含本地容器，不会串味。
 completion.paramChain.localTypeValue、snippet.paramChain.{unnamedParams,namedParam}；
 fixture `paramchain.zx`（`Pc*` 前缀，形参 `t: *PcT`，两级嵌套类型 + 一个无名形参
 函数 + 一个有名字形参函数）。
+
+## 112. 模块当接收者的类型链（`const P = m.Root.P1.P2;`）
+
+**裁定（2026-11-11，用户："如果 t 是 module，还是不会显示，这是不是另一条链路"）**：
+是另一条链路，而且断在两处，都断在"模块"这个身份上。
+
+`inferExprType` 的点路径分支对模块有两条互不衔接的出口：
+
+1. `base` 是**模块绑定**（`std` / `const m = module(…)`）→ 直接 `return e`，
+   把整条路径文本当类型返回。于是 `const Q = m.Root;` 推出来是 `"m.Root"`：
+   和初值同名，行内提示被当成冗余吞掉（`t` 是 module 时"还是不会显示"）；
+   多层时又显示成 `: m.Root` 这种路径串。
+2. `base` 是**模块名 + 容器名**（`m.Root.P1`）→ 既不是模块绑定（
+   `moduleOfBinding` 只认 `m` 这一段），也不是本地容器，上一轮加的
+   "链式 base 当容器路径解"分支还显式用 `is_mod_path` 把模块路径排除了
+   → 整段跳过，什么都推不出。
+
+修法（不再按"是不是模块"分叉，统一成"成员是什么"）：
+
+- `moduleTextOf(doc, text, base)`：`base` 是模块就取模块文件文本。挂在
+  `qualModulePath` 上，所以 `std`、`m`、再导出子模块 `std.json` 都认。
+- `moduleMemberTy(files, doc, mt, member)`：容器/类型声明 → `"type"`；
+  指向容器的别名常量（`pub const Alias = Root.P1.P2;`）→ `"type"`（在本模块
+  文本 + 扫描集里逐段解）；写了标注的常量 → 标注类型；**函数 → null**
+  （函数值没有可读类型串，不能拿返回类型冒充）。
+- 模块绑定分支：`moduleMemberTy` 有结果就返回，没有就 `return null`——
+  绝不把 `m.cnt` 这种路径文本当类型（`return e` 只留给子模块别名）。
+- 链式 base 分支：先试 `moduleTextOf(base)`（`base` 是模块名的情形），
+  再试 `resolveContainerPath(base)`（`base` 是模块里容器路径的情形）。
+  `is_mod_path` 的排除删掉——它正是"t 是 module 就没提示"的开关。
+
+顺带确认的能力（同一条链的其它出口本来就通，探针逐个验过）：
+`m.Root.P1.` 逐段补全、`const P = …; P.` 出成员、`P.P3` 跳到模块文件里的
+声明行、`std.json.Value` / `std.BufReader` / `std.map.HashMap(i32)` 都开始
+标 `: type`（以前是路径文本或空）。
+
+守门（lsptest 260 项）：inlayHint.modChain.{typeValueP,typeValueQ,typeValueAlias}、
+completion.modChain.{typeValueMembers,typeValueMembersQ,modulePath}、
+definition.modChain.member；fixture `modchain.zx`（模块侧，`Mc*` 前缀）+
+`moduse.zx`（使用侧）。已知未做：模块**顶层**别名常量当接收者的成员补全
+（`pub const Alias = Root.P1.P2;` 之后 `Alias.` 仍为空，std 里没有这种写法）。

@@ -2612,6 +2612,41 @@ fn qualModulePath(doc: *const Document, text: []const u8, path: []const u8) ?[]c
     return mp;
 }
 
+/// `base` 是模块（`std` / `const t = module(…)` / 再导出子模块 `std.json`）时
+/// 返回该模块文件的文本；不是模块返回 null。挂在 qualModulePath 上，因此
+/// 再导出的子模块（std.zx 里 `pub const json = module("json.zx")`）也认。
+fn moduleTextOf(doc: *const Document, text: []const u8, base: []const u8) ?[]const u8 {
+    const mp = qualModulePath(doc, text, base) orelse return null;
+    return readFileSmall(mp);
+}
+
+/// 模块文件里的成员是什么：容器/类型声明 → "type"；指向容器/类型的别名常量
+/// （`pub const Entry = Base;`）→ "type"；写了标注的常量 → 标注类型；
+/// 函数 → null（函数值的类型没有可读串，不能拿返回类型冒充）。
+/// 用于 `const P = t.Inner;` / `const X = t.Inner.Sub;` 的类型推断
+///（用户 2026-11-11 第 4 张截图：`t` 是 module 时没有 `: type`）。
+fn moduleMemberTy(files: []const []const u8, doc: *const Document,
+                  mt: []const u8, member: []const u8) ?[]const u8 {
+    if (isContainerIn(&[_][]const u8{mt}, member)) return "type";
+    const st = findDeclStmt(mt, member) orelse return null;
+    const sig = sigOfStmt(st);
+    if (sig.is_fn) return null;
+    if (declTyOf(st)) |dt| {
+        const t = trimSl(dt);
+        if (t.len > 0 and !std.mem.eql(u8, t, "type")) return t;
+    }
+    const ini = trimSl(declInitOf(st) orelse return null);
+    if (ini.len == 0 or !isPurePath(ini)) return null;
+    // 别名指向的容器：先在本模块文件里逐段找，再借扫描集
+    //（模块可能在 std/ 或 vendor 里，扫描集里没有它的文本）。
+    var afiles: std.ArrayList([]const u8) = .empty;
+    defer afiles.deinit(gpa);
+    afiles.append(gpa, mt) catch {};
+    for (files) |f| afiles.append(gpa, f) catch {};
+    if (resolveContainerPathD(afiles.items, doc, mt, ini, 1) != null) return "type";
+    return null;
+}
+
 fn definitionAt(doc: *const Document, line: u32, character: u32) ?[]const u8 {
     const text = doc.text;
     const off = posToOffset(text, line, character);
@@ -3611,10 +3646,23 @@ fn inferExprType(text: []const u8, doc: *const Document, expr: []const u8, depth
             const base = e[0..dot];
             const member = e[dot + 1 ..];
             if (base.len == 0 or member.len == 0) return null;
-            // base 是模块绑定（std.Buffer / task.Obj）→ 类型路径原样
-            if (std.mem.eql(u8, base, "std") or moduleOfBinding(text, base) != null) return e;
             var sf = scanFiles(doc, text);
             defer sf.deinit(gpa);
+            // base 是模块绑定（std / const t = module(…)）：成员是容器/类型
+            // 就写 `type`，函数值/普通常量就不再往下猜。以前一律 `return e`——
+            // 类型路径原样返回，于是 `const P = t.Inner;` 推出来的是 "t.Inner"
+            // 这串**文本**，行内提示要么不显示（和初值同名被当成冗余），要么
+            // 显示一长串模块路径（用户 2026-11-11 第 4 张截图）。
+            // 子模块别名（std.json / std.time）落不下去，仍按原样返回。
+            if (std.mem.eql(u8, base, "std") or moduleOfBinding(text, base) != null) {
+                if (moduleTextOf(doc, text, base)) |mt| {
+                    // 模块成员：类型 → `type`；函数值/普通常量 → 推不出（返回
+                    // null，别再退回整条路径文本 `t.cnt` 当类型）。
+                    if (moduleMemberTy(sf.items, doc, mt, member)) |t| return t;
+                    return null;
+                }
+                return e;
+            }
             // 类型值接收者（`const P = t.p1.P2T;` 之后的 `P.P3T`）：容器是
             // 它背后的那个类型；成员本身还是类型就写 `type`，是字段出字段类型。
             if (isTypeValuedRecv(sf.items, doc, text, base, 0)) {
@@ -3631,21 +3679,21 @@ fn inferExprType(text: []const u8, doc: *const Document, expr: []const u8, depth
             // 接收者是**链式子表达式**时也落到容器：`t.P1`（实例上取类型成员）、
             // `t.P1.P2`（再取一层）。isTypeValuedRecv 只覆盖"绑定名 → 类型值"，
             // base 是 `t.P1` 这种链就认不出，`const P = t.P1.P2;` 整条推不出类型、
-            // 也就没有 `: type`（用户 2026-11-11 截图 1）。模块路径（std./绑定名.）
-            // 归上面的分支和 `instanceContainerTy`，这里不掺和。
+            // 也就没有 `: type`（用户 2026-11-11 截图 1）。
+            // `t` 是 module 时走的是同一条链的**另一头**：`t.P1` 的 base 是
+            // "模块名.容器名"，既不是模块绑定也不是本地容器，必须让模块文件
+            // 也进解析（moduleTextOf），否则 `const P = t.P1.P2;` 只有模块那条
+            // 分支能返回、落到这里就被跳过（用户 2026-11-11 第 4 张截图）。
             if (isPurePath(base)) {
-                const seg0_end = std.mem.indexOfScalar(u8, base, '.') orelse base.len;
-                const seg0 = base[0..seg0_end];
-                const is_mod_path = std.mem.eql(u8, seg0, "std") or
-                    moduleOfBinding(text, seg0) != null;
-                if (!is_mod_path) {
-                    if (resolveContainerPath(sf.items, doc, text, base)) |pc| {
-                        if (memberIsTypeDecl(sf.items, pc.body, member)) return "type";
-                        if (fieldTypeIn(pc.body, member)) |t| return t;
-                        if (findDeclStmt(pc.body, member)) |stmt| {
-                            const sig = sigOfStmt(stmt);
-                            if (sig.is_fn and sig.ret.len > 0) return sig.ret;
-                        }
+                if (moduleTextOf(doc, text, base)) |mt| {
+                    if (moduleMemberTy(sf.items, doc, mt, member)) |t| return t;
+                }
+                if (resolveContainerPath(sf.items, doc, text, base)) |pc| {
+                    if (memberIsTypeDecl(sf.items, pc.body, member)) return "type";
+                    if (fieldTypeIn(pc.body, member)) |t| return t;
+                    if (findDeclStmt(pc.body, member)) |stmt| {
+                        const sig = sigOfStmt(stmt);
+                        if (sig.is_fn and sig.ret.len > 0) return sig.ret;
                     }
                 }
             }

@@ -2157,6 +2157,86 @@ check("snippet.paramChain.namedParam",
       _pby.get("g", {}).get("insertText") == "g(${1:n})$0",
       str(_pby.get("g", {}).get("insertText")))
 
+# 模块当接收者：`const P = t.P1.P2;`（t 是 module）也要 `: type`，`P.` 要出成员。
+# 这是**另一条链路**：base 是 "模块名.容器名"，既不是模块绑定（moduleOfBinding
+# 只认 "t"）也不是本地容器，inferExprType 以前把它整段跳过，只剩模块那一支
+# 一律 `return e` —— 于是提示要么空、要么是 "t.Inner" 这种路径文本
+#（用户 2026-11-11 第 4 张截图："如果 t 是 module，还是不会显示"）。
+MCMOD = """pub const McRoot = struct {
+    pub const McP1 = struct {
+        pub const McP2 = struct {
+            pub const McP3 = struct {
+                pub const mf = fn (n: i32) i32 { return n; };
+            };
+        };
+    };
+};
+
+pub const McAlias = McRoot.McP1.McP2;
+"""
+open(os.path.join(SRC_DIR, "modchain.zx"), "w", encoding="utf-8").write(MCMOD)
+MCUSE = """const m = module("modchain");
+
+const mcUse = fn () i32 {
+    const McP = m.McRoot.McP1.McP2;
+    const McQ = m.McRoot;
+    const McA = m.McAlias;
+    McP.
+    McQ.
+    m.McRoot.McP1.
+    _ = McP.McP3.mf(1);
+    return 0;
+};
+"""
+mcuri = "file:///" + os.path.join(SRC_DIR, "moduse.zx").replace("\\", "/")
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": mcuri, "languageId": "zx", "version": 1, "text": MCUSE}}})
+_lineMcP = MCUSE[:MCUSE.index("const McP =")].count("\n")
+_lineMcQ = MCUSE[:MCUSE.index("const McQ =")].count("\n")
+_lineMcA = MCUSE[:MCUSE.index("const McA =")].count("\n")
+_rid += 1
+send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/inlayHint", "params": {
+    "textDocument": {"uri": mcuri},
+    "range": {"start": {"line": 0, "character": 0},
+              "end": {"line": len(MCUSE.split("\n")), "character": 0}}}})
+_r, _ = recv_id("modchain", _rid)
+_mih = {}
+if _r and _r.get("result"):
+    for _h in _r["result"]:
+        _lblm = _h.get("label")
+        _txtm = _lblm if isinstance(_lblm, str) else (
+            _lblm.get("value", "") + "".join(x.get("value", "") for x in _lblm.get("labelParts", []) if isinstance(x, dict)))
+        _mih[_h["position"]["line"]] = _txtm
+check("inlayHint.modChain.typeValueP", _mih.get(_lineMcP) == ": type", str(_mih))
+check("inlayHint.modChain.typeValueQ", _mih.get(_lineMcQ) == ": type", str(_mih))
+check("inlayHint.modChain.typeValueAlias", _mih.get(_lineMcA) == ": type", str(_mih))
+
+for _recv, _want, _tag in (
+        ("McP.", {"McP3"}, "modChain.typeValueMembers"),
+        ("McQ.", {"McP1"}, "modChain.typeValueMembersQ"),
+        ("m.McRoot.McP1.", {"McP2"}, "modChain.modulePath")):
+    _rid += 1
+    _offm = MCUSE.index("    %s\n" % _recv) + len("    ") + len(_recv)
+    send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/completion", "params": {
+        "textDocument": {"uri": mcuri}, "position": pos(MCUSE, _offm)}})
+    _r, _ = recv_id("modchain", _rid)
+    _labsm = sorted({i["label"] for i in (_r["result"]["items"] if _r and _r.get("result") else [])})
+    check("completion." + _tag, set(_labsm) == _want, str(_labsm))
+
+# 模块链上的成员也要能跳（`McP.McP3` → modchain.zx 的嵌套类型声明）
+_rid += 1
+_mneed = "McP.McP3"
+_moff = MCUSE.index(_mneed) + _mneed.rindex("McP3")
+send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/definition", "params": {
+    "textDocument": {"uri": mcuri}, "position": pos(MCUSE, _moff)}})
+_r, _ = recv_id("modchain", _rid)
+_mloc = (_r or {}).get("result") or {}
+if isinstance(_mloc, list):
+    _mloc = _mloc[0] if _mloc else {}
+check("definition.modChain.member",
+      isinstance(_mloc, dict) and "modchain.zx" in (_mloc.get("uri") or ""),
+      str(_mloc)[:200])
+
 cov_lines = ['const std = module("std");', "", "pub const main = fn () u8 {"]
 cov_marks = []
 for _mod, _name, _shape, _factory in cov_types:
