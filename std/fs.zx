@@ -297,13 +297,13 @@ pub const DirIter = struct {
     };
 
     // 当前条目是不是目录（紧跟 next() 之后问，下一个 next() 之前有效）。
-    const isDir = fn (self: *Self) bool {
+    pub const isDir = fn (self: *Self) bool {
         let d = (*FindData)self.buf;
         return (d.attr & ATTR_DIR) != 0;
     };
 
     // 当前条目的大小（目录是 0）。
-    const size = fn (self: *Self) u64 {
+    pub const size = fn (self: *Self) u64 {
         let d = (*FindData)self.buf;
         return ((u64)d.szHi << 32) | (u64)d.szLo;
     };

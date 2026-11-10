@@ -241,14 +241,17 @@ switch (v) {
 ```zx
 var s: ?i32 = null;                 // ?T：空值联合体，null 是字面量
 if (s) v { use(v); } else { … }     // 捕获绑定（无竖线）
-let u = s orelse 0;                 // 空则取右值
+let u = s orelse 0;                 // 空则取右值（右边必须是表达式）
 let w = s.?;                        // 断言非空，空则 trap
-let m = s orelse return;            // orelse 后可接 return 等
+// 没有 `orelse return`——提前返回要写 if/else：
+if (s) v { use(v); } else { return error.noent; }
 
 const f = fn (path: []const u8) !i32 {    // !T：错误联合体（anyerror）
-    const h = std.io.openRead(path) orelse return error.noent;   // 可选值 → 错误
-    …
-    const n = try read(h);            // try：出错就把错误码原样返回
+    if (std.io.openRead(path)) h {        // 可选值 → 错误要手工转
+        …
+        const n = try read(h);            // try：出错就把错误码原样返回
+    }
+    return error.noent;
 };
 
 const E = error{no, io};             // 命名错误集
@@ -350,10 +353,21 @@ inline for (0..ti.fieldCount) i {
 
 `std.print` / `std.println` / `std.format` / `std.io.print(ln)` 共用一套格式化：
 
-- `{}` 按类型的默认格式；`{any}` 结构展开；`{s}` 字符串、`{d}` 整数、`{x}` 十六进制。
-- 宽度/对齐/精度：`{[1]:>8.2}`（参数下标 + 右对齐 + 两位小数）。
+- `{}` 顺取下一个实参，按类型的默认格式。
+- `{N}` 绝对下标：`N` 从 0 数实参（`{0}` 就是第一个实参）；可带选项 `{0:>6}`。
+- verb（只能顺序用，不能写成 `{0:x}`）：`{d}` 十进制、`{x}` 十六进制、
+  `{b}` 二进制、`{s}` 字符串、`{c}` 字符、`{any}` 聚合展开。
+- 选项在冒号后：填充符 + 对齐 + 宽度 + `.精度`——
+  `{:>8}` 右对齐宽 8（数字默认右）、`{:<6}` 左对齐（字符串默认左）、
+  `{:0>2}` 零填充、`{:*^7}` 自定义填充居中、`{:.3}` 浮点精度（`%f` 语义）。
+- **顺取与 `{N}` 绝对下标互不感知**：`std.println("{2} {}", a, b, c)` 里
+  `{2}` 是 `c`，但后面的 `{}` 仍从 `a` 顺取。混用容易数错，不建议。
 - 占位符与实参个数不匹配报 E0802。
-- 能编译期算的部分编译期算好（§11.1 of spec）。
+
+```zx
+std.println("[{x}] [{b}] [{0:>6}] [{1:.2}]", 255, 3.5, 42);
+// [ff] [11111111] [    42] —— {N} 与选项可组合，verb 不行
+```
 
 ---
 
@@ -387,7 +401,7 @@ pub const task = module("task.zx"); // 再导出：别的模块经 std.task 访�
 | `std.heapAlloc(al, T, n)` | 函数 | 堆分配 → `*[n]T`，OOM abort |
 | `std.file.read(al, path)` | 函数 | 整块读，`?[]const u8`（NUL 结尾） |
 | `std.file.write / append(path, data)` | 函数 | 整块写/追加，`bool` |
-| `std.file.exists(al, path)` / `remove` | 函数 | 元信息 |
+| `std.file.exists(path)` / `remove(path)` | 函数 | 元信息，`bool`（不带分配器） |
 | `std.io.openRead / openWrite / openAppend(path)` | 函数 | `?usize` 句柄 |
 | `std.io.read(h, buf) usize` / `write(h, data) usize` | 函数 | 分次读写 |
 | `std.io.seek / tell / close / flush` | 函数 | 句柄操作 |
@@ -460,25 +474,28 @@ defer m.deinit();
 _ = m.put("a", 1);
 std.println("{}", m.get("a") orelse 0);
 var i: usize = 0;
-while (i < m.capacity()) : (i = i + 1) {
+while (i < m.capacity()) {          // 没有 while 续写语法，递增写在体内
     if (m.keyAt(i)) k { … }
+    i = i + 1;
 }
 ```
 
 - `HashMap(V)`：开放寻址 + 线性探测，容量 2 的幂，负载 3/4 翻倍；哈希 FNV-1a
   （`std.map.fnv1a(s) u64`）。键不复制——键要比表活得久。
-- 成员：`init / deinit / count / capacity / empty / get / contains / getPtr /
-  put(覆盖) / putNew(已存在返回旧值) / clear / keyAt(i) / valueAt(i)`。
-- **没有 remove**：要删就重建一张表（探测链无墓碑，少一类 bug）。
+- 成员（全部）：`init(al) Self` / `deinit(self)` / `count() usize` /
+  `capacity() usize` / `get(key) ?V` / `put(key, val) bool`（覆盖旧值）/
+  `keyAt(i) ?[]const u8` / `valueAt(i) ?V`。字段私有。
+- **没有 remove / contains / clear**：要删就重建一张表（探测链无墓碑，
+  少一类 bug）。含不存在等价于 `get(key) != null`。
 
 ### 14.5 std.pool.Pool —— 尺寸分级内存池
 
 ```zx
-var p = std.pool.Pool.init(al) orelse …;
+var p = std.pool.Pool.init(al) orelse return 1;   // ?Pool
 defer p.deinit();
-let q = p.alloc(64);                 // ?*u8
+let q = p.alloc(64);                 // ?*u8（19 档按尺寸归档）
 if (q) b { if (!p.free(b)) …; }      // false = 重复释放/非法块，被拦下
-let n = p.create(Node);              // ?*Node（见 std-pool.zx 用例）
+_ = p.used(64);                      // 诊断：该档已用字节
 ```
 
 19 档（16–128 每 16B 一档；256B–256KiB 每档 ×2），更大绕过池直连分配器。
@@ -488,35 +505,54 @@ let n = p.create(Node);              // ?*Node（见 std-pool.zx 用例）
 
 - 纯路径（零分配，切片指向原串）：`isAbs / basename / dirname / ext / stem`；
   `join(al, a, b) ?[]u8`（NUL 结尾）。
-- 元数据：`stat(al, path) ?Stat{size, mtime, isDir, isHidden}` / `exists`。
-- 变更：`createDir`（单层）/ `removeFile` / `removeDir`（空目录）。
-- 遍历：`DirIter.open(al, path) ?Self`（流式零拷贝，`next() ?[]const u8` 之后失效，
-  `isDir()` / `size()` 跟随当前条目，`close()`）；
-  `readDir(al, path) ?[][]const u8`（收集版，名字带 NUL）。
+- 元数据：`stat(al, path) ?Stat{size, mtime, isDir, isHidden}` / `exists(al, path) bool`。
+- 变更：`createDir(al, path)`（单层）/ `removeFile` / `removeDir`（空目录），都返回 `bool`。
+- 遍历：`DirIter.open(al, path) ?Self`（流式零拷贝）。**没有 break**，
+  用 while 捕获收尾：
+
+```zx
+if (std.fs.DirIter.open(al, path)) dd {
+    var d = dd;                     // next/isDir 要可变接收者
+    defer d.close();
+    while (d.next()) n {            // ?[]const u8，指向内部缓冲，next 后失效
+        std.println("{} {}", d.isDir(), n);   // isDir() bool / size() u64
+    }
+}
+```
+
+  `readDir(al, path) ?[][]const u8`（收集版，名字带 NUL，空目录返回长度 0 切片）。
 - 批量整块：`readAll(al, path) ?[]const u8` / `writeAll(path, data) bool` /
   `appendAll(path, data) bool`。
 - 平台：Windows 先行（kernel32）；POSIX 等条件编译后再补。
 
 ### 14.7 std.json —— JSON
 
+**没有 `catch` 语法**。`parse` 返回 `!Value`，用 `if (x) v { … }` 捕获成功值、
+`else` 收错误，或 `.?` 断言 / `try` 传播：
+
 ```zx
-const v = std.json.parse(al, text) catch |e| { … };   // !Value，errLine/errCol 记位置
-const name = std.json.text(std.json.member(v, "name") orelse …);
-const out = std.json.stringify(al, v);                // 最短 round-trip
+if (std.json.parse(al, text)) v {
+    if (std.json.member(v, "name")) m {          // 取成员（?Value）
+        if (std.json.text(m)) s { … }            // text 只对 str 成员有值
+    }
+} else { /* errLine / errCol 已记录位置 */ }
+const f = parsed.?.float;                        // float 成员直接读
 ```
 
-- `Value = union(enum) { nul, boolean, int: i64, float: f64, str, arr: *Arr, obj: *Obj }`
+- `Value = union(enum) { nul: u8, boolean: bool, int: i64, float: f64,
+  str: []const u8, arr: *Arr, obj: *Obj }`——`nul` 是 `u8` 占位（恒 0），
+  因为 **void 载荷的 union 成员构造不出来**。
 - `Arr.at(i)` / `Obj.get(key)` / `Obj.put` / `Obj.count`；
-  辅助：`member(v, key)` / `item(v, i)` / `text(v)`。
+  辅助：`member(v, key) ?Value` / `item(v, i) ?Value` / `text(v) ?[]const u8`。
 - `ParseErr = { syntax, depth, oom, trailing }`；`errLine` / `errCol`（1 起，成功归零）。
 - 零拷贝解析（字符串指向原文本）；arena 友好。
 
 ### 14.8 std.arena.ArenaAllocator —— 一次性批量分配
 
 ```zx
-var ar = std.arena.ArenaAllocator.init(std.heap.page) orelse …;
-let v = std.json.parse(ar, doc);        // 全程 arena
-std.arena.ArenaAllocator.deinit(ar);    // 一次全释放
+var ar = std.arena.ArenaAllocator.init(std.heap.page) orelse return 1;
+defer ar.deinit();                       // 一次全释放（free 本身是 no-op）
+if (std.json.parse(ar, doc)) v { … }     // 全程 arena
 ```
 
 `init(backing) ?Allocator` / `reset(a)`（保留块、bump 归零）/ `deinit(a)`。
@@ -534,11 +570,13 @@ alloc 是 O(1) bump、16 对齐；free 是 no-op（arena 语义）。**不是线
 ### 14.10 std.task —— 唯一的并发抽象
 
 ```zx
+const job = fn (ctx: usize) !usize { … };    // 任务函数形状固定
+
 var t = std.task.Task.single();       // 或 coro() / pool(n)
 defer t.close();
-const job = fn (ctx: usize) !usize { … };   // 任务函数形状固定
-const h = t.spawn(job, ctx) orelse …;
-const r = try t.await(h);
+if (t.spawn(job, ctx)) h {            // spawn 返回 ?usize（句柄）
+    if (t.await(h)) r { … }           // await 返回 !usize，捕获或 try
+}                                     //（try 要求所在函数返回 !T）
 try t.awaitAll();
 try t.send(v);  const x = try t.recv();     // 实例自带 rendezvous 通道
 ```
