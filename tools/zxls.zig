@@ -1014,6 +1014,16 @@ fn markContainerFns(src: []const u8, decls: *std.ArrayList(Decl)) void {
     }
 }
 
+/// 同上，但声明查找锁在容器体 `body` 里：同名成员（`A.B.Cfg.mk` 与顶层
+/// `Cfg.mk`）在整份 src 里 findDeclStmt 会拿到别人的签名。
+fn markContainerFnsIn(body: []const u8, src: []const u8, decls: *std.ArrayList(Decl)) void {
+    for (decls.items) |*d| {
+        if (d.is_fn or d.kind != .value) continue;
+        const stmt = findMemberStmt(body, d.name) orelse findDeclStmt(src, d.name) orelse continue;
+        if (sigOfStmt(stmt).is_fn) d.is_fn = true;
+    }
+}
+
 /// 补全/hover/签名提示共用的扫描文件集：当前文档 + 文档目录 .zx + std 目录 .zx。
 /// 自身文件跳过（text 已含）。调用方 defer deinit。
 fn scanFiles(doc: *const Document, text: []const u8) std.ArrayList([]const u8) {
@@ -1230,6 +1240,160 @@ fn resolveMemberPath(files: []const []const u8, doc: *const Document,
 fn resolvePathStmt(files: []const []const u8, doc: *const Document, text: []const u8, path: []const u8) ?[]const u8 {
     const hit = resolveMemberPath(files, doc, text, path, 0) orelse return null;
     return hit.stmt;
+}
+
+/// 纯点路径（`A.B.C` / `m.A.B`）：每段都是标识符，中间只有 '.'。
+/// 只给"逐段下钻容器体"用；带调用/字面量/包装的表达式一律 false。
+fn isPurePath(e0: []const u8) bool {
+    const e = trimSl(e0);
+    if (e.len == 0 or e.len > 120) return false;
+    var seg_len: usize = 0;
+    for (e) |c| {
+        if (isIdentChar(c)) {
+            seg_len += 1;
+            continue;
+        }
+        if (c == '.' and seg_len > 0) {
+            seg_len = 0;
+            continue;
+        }
+        return false;
+    }
+    return seg_len > 0;
+}
+
+/// `A.B.Cfg{ .x = 1 }` → "A.B.Cfg"（'{' 前的纯点路径）；不是具名字面量返回 null。
+fn literalPathOf(e0: []const u8) ?[]const u8 {
+    const e = trimSl(e0);
+    const lb = std.mem.indexOfScalar(u8, e, '{') orelse return null;
+    const pre = trimSl(e[0..lb]);
+    if (pre.len == 0 or !isPurePath(pre)) return null;
+    return pre;
+}
+
+/// 实例绑定 → 逐段解析出来的容器：`var z: A.B.C`（声明类型）或
+/// `let x = A.B.Cfg{…}`（具名字面量）里的限定路径。单段名走老路（null）。
+fn instancePathContainer(files: []const []const u8, doc: *const Document,
+                         text: []const u8, name: []const u8) ?PathContainer {
+    const st = findDeclStmt(text, name) orelse return null;
+    var te: ?[]const u8 = null;
+    if (declTyOf(st)) |dt| {
+        const t = trimSl(dt);
+        if (isPurePath(t)) te = t;
+    } else if (declInitOf(st)) |ini| {
+        const t = trimSl(ini);
+        if (isPurePath(t)) te = t else if (literalPathOf(ini)) |lp| te = lp;
+    }
+    const path = te orelse return null;
+    if (std.mem.indexOfScalar(u8, path, '.') == null) return null;
+    return resolveContainerPath(files, doc, text, path);
+}
+
+/// 逐段解析出来的容器：体、声明所在文件文本、容器名、是否 enum。
+const PathContainer = struct {
+    body: []const u8,
+    src: []const u8,
+    name: []const u8,
+    is_enum: bool,
+};
+
+/// 在 `cur` 容器体里找成员 `seg` 的体；`cur` 为空时在整份 src 里按名字找。
+/// 关键：有 cur 时必须**只在这个体的顶层**找声明（findMemberStmt 是深度
+/// 感知的），否则 `A.B.Cfg` 会先撞上文件里顶层的同名 Cfg。
+fn bodyOfMemberDecl(src: []const u8, seg: []const u8, cur: ?[]const u8) ?ContainerHit {
+    if (cur) |body| {
+        const st = findMemberStmt(body, seg) orelse return null;
+        if (findContainerBody(&[_][]const u8{st}, seg)) |h| return h;
+        if (genericBodyOf(&[_][]const u8{st}, seg)) |gb| return .{ .body = gb, .is_enum = false };
+        return null;
+    }
+    if (findContainerBody(&[_][]const u8{src}, seg)) |h| return h;
+    if (genericBodyOf(&[_][]const u8{src}, seg)) |gb| return .{ .body = gb, .is_enum = false };
+    return null;
+}
+
+/// 限定路径 → 那一层容器的体。`A.B.C` 的每一段都只在上一层的体里找，
+/// 绝不用末段名字在全文件里瞎配：同名嵌套类型（`A.B.Cfg` 与顶层 `Cfg`）
+/// 过去会被外层同名的抢走——第二层丢类型、第三层直接空列表
+///（用户 2026-11-11："嵌套的 pub 类型导出不全"）。
+fn resolveContainerPath(files: []const []const u8, doc: *const Document,
+                        text: []const u8, path: []const u8) ?PathContainer {
+    if (!isPurePath(path)) return null;
+    var segs: [10][]const u8 = undefined;
+    const n = splitPathSegs(path, &segs);
+    if (n == 0) return null;
+    var src: []const u8 = text;
+    var at: usize = 0;
+    if (n > 1) {
+        if (moduleOfBinding(text, segs[0])) |mod| {
+            const p = resolveModuleFile(doc, mod) orelse return null;
+            src = readFileSmall(p) orelse return null;
+            at = 1;
+        } else if (std.mem.eql(u8, segs[0], "std")) {
+            const p = resolveModuleFile(doc, "std") orelse return null;
+            src = readFileSmall(p) orelse return null;
+            at = 1;
+        }
+    }
+    var hit: ContainerHit = undefined;
+    var name: []const u8 = "";
+    if (at == 0) {
+        // 起点：当前文档 / 扫描集里的容器（单段 `A.` 也走这里）
+        if (findContainerBody(files, segs[0])) |h| {
+            hit = h;
+            src = containerSrcOf(files, segs[0]) orelse text;
+        } else if (genericBodyOf(files, segs[0])) |gb| {
+            hit = .{ .body = gb, .is_enum = false };
+            src = containerSrcOf(files, segs[0]) orelse text;
+        } else return null;
+        name = segs[0];
+        at = 1;
+    } else {
+        // 起始模块之后的第一段才是容器名（segs[0] 是绑定名 m / std）
+        hit = bodyOfMemberDecl(src, segs[at], null) orelse return null;
+        name = segs[at];
+        at += 1;
+    }
+    var cur: []const u8 = hit.body;
+    var is_enum = hit.is_enum;
+    while (at < n) : (at += 1) {
+        const seg = segs[at];
+        var st: ?[]const u8 = null;
+        var h2: ?ContainerHit = null;
+        if (findMemberStmt(cur, seg)) |s| {
+            st = s;
+            if (findContainerBody(&[_][]const u8{s}, seg)) |h| h2 = h
+            else if (genericBodyOf(&[_][]const u8{s}, seg)) |gb| h2 = .{ .body = gb, .is_enum = false };
+        }
+        if (h2 == null) {
+            // 类型别名：`pub const Entry = Base;`（同层优先）或限定路径
+            if (st) |s| if (declInitOf(s)) |ini| {
+                const t = trimSl(ini);
+                if (isPurePath(t)) {
+                    if (std.mem.indexOfScalar(u8, t, '.') == null) {
+                        if (findMemberStmt(cur, t)) |s2| {
+                            if (findContainerBody(&[_][]const u8{s2}, t)) |h| h2 = h
+                            else if (genericBodyOf(&[_][]const u8{s2}, t)) |gb| h2 = .{ .body = gb, .is_enum = false };
+                        }
+                    }
+                    if (h2 == null) {
+                        if (resolveContainerPath(files, doc, src, t)) |pc| {
+                            cur = pc.body;
+                            src = pc.src;
+                            name = pc.name;
+                            is_enum = pc.is_enum;
+                            continue;
+                        }
+                    }
+                }
+            };
+        }
+        const h3 = h2 orelse return null;
+        cur = h3.body;
+        is_enum = h3.is_enum;
+        name = seg;
+    }
+    return .{ .body = cur, .src = src, .name = name, .is_enum = is_enum };
 }
 
 
@@ -3887,11 +4051,16 @@ fn hoverAt(doc: *const Document, line: u32, character: u32) ?[]const u8 {
         if (member.len > 0) {
             var sf = scanFiles(doc, text);
             defer sf.deinit(gpa);
-            if (instanceContainerTy(sf.items, text, bind)) |ty| {
+            // 绑定是限定类型路径（`let x = A.B.Cfg{…}` / `var z: A.B.C`）：
+            // 逐段解析拿**那一层**的容器体，和补全用同一套判定——按末段
+            // 名字找会撞上外层同名容器，字段 hover 直接空掉。
+            const ipc = instancePathContainer(sf.items, doc, text, bind);
+            const ity: ?[]const u8 = if (ipc) |pc| pc.name else instanceContainerTy(sf.items, text, bind);
+            if (ity) |ty| {
                 // 泛型容器（std.ArrayList(i32) 实例）：findContainerBody 只认
                 // `const X = struct`，泛型 fn 里的 `return struct {…}` 落空，
                 // genericBodyOf 兜住（用户 2026-11-09 第 3 条）。
-                const body: ?[]const u8 = if (findContainerBody(sf.items, ty)) |ch|
+                const body: ?[]const u8 = if (ipc) |pc| pc.body else if (findContainerBody(sf.items, ty)) |ch|
                     ch.body
                 else
                     genericBodyOf(sf.items, ty);
@@ -5487,7 +5656,8 @@ fn fnRetExprOf(text: []const u8, name: []const u8) ?[]const u8 {
 /// `const V = ArrayList(i32);`、`const T = Make(i32)`（Make 返回 type）、
 /// 以及它们的别名链。类型值上只有静态成员——判错就会把字段和方法全
 /// 摆出来（用户 2026-11-10 截图：`HS.` 弹出 alloc/cap/hashes/…）。
-fn isTypeValuedRecv(files: []const []const u8, text: []const u8, name: []const u8, depth: u8) bool {
+fn isTypeValuedRecv(files: []const []const u8, doc: *const Document,
+                    text: []const u8, name: []const u8, depth: u8) bool {
     if (depth > 4 or name.len == 0) return false;
     const st = findDeclStmt(text, name) orelse return false;
     if (declTyOf(st)) |dt| {
@@ -5499,7 +5669,12 @@ fn isTypeValuedRecv(files: []const []const u8, text: []const u8, name: []const u
     // 裸别名：const A = B;
     var j: usize = 0;
     while (j < e.len and isIdentChar(e[j])) j += 1;
-    if (j == e.len) return isTypeValuedRecv(files, text, e, depth + 1);
+    if (j == e.len) return isTypeValuedRecv(files, doc, text, e, depth + 1);
+    // 限定路径别名：`const AB = m.A.B;` —— 也是类型值（此前只认裸名字
+    // 别名，多段引用被判成实例，`AB.` 的静态成员与嵌套类型全被过滤掉）。
+    if (isPurePath(e)) {
+        if (resolveContainerPath(files, doc, text, e) != null) return true;
+    }
     const last = finalCalleeOf(e) orelse return false;
     if (isContainerIn(files, last) or genericBodyOf(files, last) != null) return true;
     if (findDeclStmt(text, last)) |fst| {
@@ -5510,7 +5685,8 @@ fn isTypeValuedRecv(files: []const []const u8, text: []const u8, name: []const u
 }
 
 /// 类型值背后的容器：`HS` → HashMap、`T2` → Make 体里 return 的容器。
-fn typeValuedContainer(files: []const []const u8, text: []const u8, name: []const u8, depth: u8) ?[]const u8 {
+fn typeValuedContainer(files: []const []const u8, doc: *const Document,
+                       text: []const u8, name: []const u8, depth: u8) ?[]const u8 {
     if (depth > 4 or name.len == 0) return null;
     const st = findDeclStmt(text, name) orelse return null;
     const init = declInitOf(st) orelse return null;
@@ -5518,7 +5694,10 @@ fn typeValuedContainer(files: []const []const u8, text: []const u8, name: []cons
     if (e.len == 0) return null;
     var j: usize = 0;
     while (j < e.len and isIdentChar(e[j])) j += 1;
-    if (j == e.len) return typeValuedContainer(files, text, e, depth + 1);
+    if (j == e.len) return typeValuedContainer(files, doc, text, e, depth + 1);
+    if (isPurePath(e)) {
+        if (resolveContainerPath(files, doc, text, e)) |pc| return pc.name;
+    }
     const last = finalCalleeOf(e) orelse return null;
     if (isContainerIn(files, last) or genericBodyOf(files, last) != null) return last;
     if (fnRetExprOf(text, last)) |ret| return inferContainer(files, text, ret, depth + 1);
@@ -5864,6 +6043,9 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
             // 成员声明所在的文本（模块文件 / 模块容器所在文件）；emit 循环
             // 用它取签名、判容器、生成调用/构造骨架。null 表示当前文档。
             var mem_txt: ?[]const u8 = null;
+            // 逐段解析得到的容器体：emit 循环查成员声明要锁在这个体里，
+            // 否则同名嵌套类型会串到外层同名容器的成员（见 resolveContainerPath）。
+            var mem_body_fix: ?[]const u8 = null;
             // 成员所属容器名：方法签名里 `Self` 要换成真实类型名
             // （`next(self: *Self) ?[]const u8` → `next() ?[]const u8`）。
             var owner: []const u8 = "";
@@ -5977,6 +6159,25 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
 
                 var files = scanFiles(doc, text);
                 defer files.deinit(gpa);
+                // KEEP — 限定路径逐段下钻（用户 2026-11-11："嵌套的 pub 类型
+                // 导出不全，只能导出第一层的，第二层丢失类型，第三层根本没
+                // 提示"）。以前所有多段路径都退化成"拿末段名字在全文里配容器"：
+                //   `A.B.Cfg.` 撞上顶层同名 Cfg → 第三层空列表；
+                //   `A.B.Kind.` 变体给了外层 Kind 的 → 第二层类型串味。
+                // 现在每一段都只在上一层的容器体里找（findMemberStmt + 取体）。
+                if (!handled and std.mem.indexOfScalar(u8, path, '.') != null) {
+                    if (resolveContainerPath(files.items, doc, text, path)) |pc| {
+                        extractBraceMembers(pc.body, pc.is_enum, &decls);
+                        handled = decls.items.len > 0;
+                        if (handled) {
+                            recv_kind = .ty;
+                            mem_txt = pc.src;
+                            mem_body_fix = pc.body;
+                            markContainerFnsIn(pc.body, pc.src, &decls);
+                            owner = pc.name;
+                        }
+                    }
+                }
                 // 错误集成员：`error.`（全局码名）或 `Err.`（`const Err = error{…}`）。
                 if (!handled) {
                     if (std.mem.eql(u8, container, "error"))
@@ -5984,17 +6185,22 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                     else
                         handled = collectNamedErrMembers(files.items, container, &decls);
                 }
-                if (containerMembersAny(files.items, container, &decls)) |ctxt| {
-                    handled = decls.items.len > 0;
-                    if (handled) recv_kind = .ty;
-                    // KEEP — 类型路径成员（用户 2026-11-09：std.BufReader. 的
-                    // 方法全是 kind=6 detail=None 没骨架）：容器体可能在 std/
-                    // 模块文件里，findDeclStmt(当前文档) 落空。带上声明文件
-                    // 文本并标回方法，emit 循环才能拼签名、出调用骨架。
-                    if (handled) {
-                        mem_txt = ctxt;
-                        markContainerFns(ctxt, &decls);
-                        owner = container;
+                // 逐段解析已经填过成员就不要再按末段名字追加一遍——同名
+                // 嵌套类型的成员会被外层同名容器污染（`A.B.C.Kind` 曾同时
+                // 弹出外层 Kind 的变体）。
+                if (!handled) {
+                    if (containerMembersAny(files.items, container, &decls)) |ctxt| {
+                        handled = decls.items.len > 0;
+                        if (handled) {
+                            recv_kind = .ty;
+                            // KEEP — 类型路径成员（用户 2026-11-09：std.BufReader.
+                            // 的方法全是 kind=6 detail=None 没骨架）：容器体可能在
+                            // std/模块文件里，带上声明文件文本并标回方法，emit
+                            // 循环才能拼签名、出调用骨架。
+                            mem_txt = ctxt;
+                            markContainerFns(ctxt, &decls);
+                            owner = container;
+                        }
                     }
                 }
                 if (!handled and builtinTyMembers(container, &decls)) {
@@ -6010,11 +6216,26 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                     // `const HS: type = std.map.HashMap(V: i32); HS.` 是"类型上
                     // 只有静态成员"，不是实例——此前按初始化式推出 HashMap 就当
                     // 实例，alloc/cap/hashes/n/vals 和全部方法一起弹出来。
-                    const recv_type = isTypeValuedRecv(files.items, text, container, 0);
+                    const recv_type = isTypeValuedRecv(files.items, doc, text, container, 0);
+                    // 绑定的声明/初始化是限定类型路径（`var z: A.B.C`、
+                    // `let x = A.B.Cfg{…}`）：逐段解析到那一层容器。以前
+                    // inferContainer 把 `A.B.Cfg{…}` 折成末段 "Cfg"，撞上
+                    // 顶层同名容器——字段变别人的、第三层直接空列表。
+                    if (instancePathContainer(files.items, doc, text, container)) |pc| {
+                        extractBraceMembers(pc.body, pc.is_enum, &decls);
+                        handled = decls.items.len > 0;
+                        if (handled) {
+                            recv_kind = if (recv_type) .ty else .instance;
+                            mem_txt = pc.src;
+                            mem_body_fix = pc.body;
+                            markContainerFnsIn(pc.body, pc.src, &decls);
+                            owner = pc.name;
+                        }
+                    }
                     // KEEP: vendor/deps 容器实例（var c = vp.Cfg{…}）——
                     // inferContainer 对绑定名打头的初始化一律 null，先走模块
                     // 解析补齐（2026-11-08：vendor struct 也要查）。
-                    if (vendorInstanceFields(doc, text, container, &decls)) {
+                    if (!handled and vendorInstanceFields(doc, text, container, &decls)) {
                         handled = decls.items.len > 0;
                         if (handled) recv_kind = .instance;
                     }
@@ -6045,7 +6266,7 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                     // Make(i32)`，Make 的返回类型是 type，容器在它 return 的
                     // 表达式里）——按类型成员出，绝不退回实例。
                     if (!handled and recv_type) {
-                        if (typeValuedContainer(files.items, text, container, 0)) |cty| {
+                        if (typeValuedContainer(files.items, doc, text, container, 0)) |cty| {
                             if (containerMembersAny(files.items, cty, &decls)) |ctxt| {
                                 handled = decls.items.len > 0;
                                 if (handled) {
@@ -6074,18 +6295,37 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                             if (tried.len > 0 and std.mem.eql(u8, tried, recv)) continue;
                             tried = recv;
                             var ity: ?[]const u8 = null;
+                            // 能逐段解析的限定类型路径（`A.B.C` / `A.B.Cfg{…}`）：
+                            // inferExprType 只剩末段名，同名嵌套类型会解析到外层
+                            // 同名容器（用户 2026-11-11 第三层空列表的根因）。
+                            var tyexpr: ?[]const u8 = null;
                             if (findDeclStmt(text, recv)) |st| {
                                 if (declTyOf(st)) |dt| {
                                     ity = trimSl(dt);
+                                    tyexpr = trimSl(dt);
                                 } else if (declInitOf(st)) |ini| {
                                     ity = inferExprType(text, doc, ini, 0);
+                                    if (literalPathOf(ini)) |lp| tyexpr = lp;
                                 }
                             } else {
                                 ity = inferExprType(text, doc, recv, 0);
                             }
+                            if (tyexpr) |te| {
+                                if (resolveContainerPath(files.items, doc, text, te)) |pc| {
+                                    extractBraceMembers(pc.body, pc.is_enum, &decls);
+                                    handled = decls.items.len > 0;
+                                    if (handled) {
+                                        recv_kind = if (recv_type) .ty else .instance;
+                                        mem_txt = pc.src;
+                                        mem_body_fix = pc.body;
+                                        markContainerFnsIn(pc.body, pc.src, &decls);
+                                        owner = pc.name;
+                                    }
+                                }
+                            }
                             const raw = ity orelse continue;
                             const ty = containerNameOf(raw);
-                            if (ty.len > 0) {
+                            if (!handled and ty.len > 0) {
                                 if (containerMembersAny(files.items, ty, &decls)) |ctxt| {
                                     handled = decls.items.len > 0;
                                     if (handled) {
@@ -6153,8 +6393,9 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
             if (handled) {
                 const src: []const u8 = mem_txt orelse text;
                 // 接收者容器的体（顶层成员表）：成员声明的查找范围只在里面
-                //（`t.spawn` 不能拿到 Group.spawn 的签名）。
-                const mem_body: ?[]const u8 = if (owner.len > 0) blk2: {
+                //（`t.spawn` 不能拿到 Group.spawn 的签名）。逐段路径解析过就
+                //用它带回来的体——按 owner 名字再找一次会撞上外层同名容器。
+                const mem_body: ?[]const u8 = mem_body_fix orelse if (owner.len > 0) blk2: {
                     if (findContainerBody(&[_][]const u8{src}, owner)) |h| break :blk2 h.body;
                     break :blk2 genericBodyOf(&[_][]const u8{src}, owner);
                 } else null;

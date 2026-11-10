@@ -1881,6 +1881,75 @@ for _row, _col, _tag, _want in ((4, 17, "type", ["norm"]), (5, 6, "inst", None))
               {"keys", "vals", "n", "cap", "alloc", "put", "get", "count"} <= set(_labs),
               str(_labs)[:200])
 
+# 8j 嵌套 pub 类型逐段解析（用户 2026-11-11："嵌套的 pub 类型导出不全，
+# 只能导出第一层的，第二层丢失类型，第三层根本没提示"）。旧实现把所有多段
+# 路径都退化成"拿末段名字在全文里配容器"：`A.B.Cfg` 撞上顶层同名 Cfg（第三层
+# 空列表）、`A.B.Kind` 变体串成外层 Kind 的（第二层类型串味）。现在每一段只在
+# 上一层的体里找（resolveContainerPath）。
+DEEPLIB = """pub const Cfg = struct {
+    pub w: i32,
+};
+
+pub const A = struct {
+    pub const Kind = enum { ka, kb };
+    pub const B = struct {
+        pub const Kind = enum { kb1, kb2 };
+        pub const Cfg = struct {
+            pub deep: i32,
+            pub const mk = fn () i32 { return 1; };
+        };
+        pub const C = struct {
+            pub const Kind = enum { kc1, kc2 };
+            pub k: i32;
+        };
+    };
+};
+"""
+open(os.path.join(SRC_DIR, "deep3.zx"), "w", encoding="utf-8").write(DEEPLIB)
+DEEPUSE = """const m = module("deep3");
+const AB = m.A.B;
+
+pub const main = fn () u8 {
+    m.A.B.
+    m.A.B.Cfg.
+    m.A.B.C.Kind.
+    m.A.B.Kind.
+    AB.
+    let x = m.A.B.Cfg{ .deep = 1 };
+    x.
+    _ = x.deep;
+    return 0;
+};
+"""
+deepuri = "file:///" + os.path.join(SRC_DIR, "deepuse.zx").replace("\\", "/")
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": deepuri, "languageId": "zx", "version": 1, "text": DEEPUSE}}})
+_rid = 930
+for _recv, _want, _tag in (
+        ("m.A.B.", {"Cfg", "C", "Kind", "Cfg{...}", "C{...}"}, "deep.l2Types"),
+        ("m.A.B.Cfg.", {"mk"}, "deep.l3Static"),
+        ("m.A.B.C.Kind.", {"kc1", "kc2"}, "deep.l3Enum"),
+        ("m.A.B.Kind.", {"kb1", "kb2"}, "deep.l2Enum"),
+        ("AB.", {"Cfg", "C", "Kind", "Cfg{...}", "C{...}"}, "deep.aliasType"),
+        ("x.", {"deep"}, "deep.instField")):
+    _rid += 1
+    _off = DEEPUSE.index("    %s\n" % _recv) + len("    ") + len(_recv)
+    send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/completion", "params": {
+        "textDocument": {"uri": deepuri}, "position": pos(DEEPUSE, _off)}})
+    _r, _ = recv_id("deep3", _rid)
+    _labs = sorted({i["label"] for i in (_r["result"]["items"] if _r and _r.get("result") else [])})
+    check("completion." + _tag, set(_labs) == _want, str(_labs))
+
+# 8k 嵌套实例的字段 hover：`x.deep` 要报 deep: i32（容器体逐段解析过才
+# 知道 x 是 A.B.Cfg，不是顶层同名 Cfg）。
+_rid += 1
+_off = DEEPUSE.index("    _ = x.deep;") + len("    _ = x.")
+send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/hover", "params": {
+    "textDocument": {"uri": deepuri}, "position": pos(DEEPUSE, _off)}})
+r, _ = recv_id("deep3", _rid)
+_hv = r["result"]["contents"]["value"] if r and r.get("result") else ""
+check("hover.deepNestField", "deep: i32" in _hv, _hv[:120])
+
 cov_lines = ['const std = module("std");', "", "pub const main = fn () u8 {"]
 cov_marks = []
 for _mod, _name, _shape, _factory in cov_types:
