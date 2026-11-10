@@ -124,3 +124,13 @@
   parse.c 与 bootstrap/parse.zx 三个体循环的 mem_pub；守门 tests/multibad/private-member。
 - 自举注意：zxfe 旧版不认容器体 pub —— 必须先重建 zxfe 再同步标记（旁路已删，
   别再加 ZX_NO_MEMBER_PRIV 这类环境开关）。
+
+## 嵌套类型补全（2026-11-11 用户："嵌套的 pub 类型导出不全"）
+- zxls 解析多段路径**不许**再"拿末段名字配容器"：`containerNameOf` 会丢限定、
+  `containerMembersAny` 按名字全文找，同名嵌套类型必被外层同名的抢走
+  （第二层串味、第三层空列表）。统一走 `resolveContainerPath`：起点模块/顶层容器，
+  每段只在上一层体里 `findMemberStmt`（深度感知），再取该声明的 struct/泛型体。
+- 三处入口：限定类型路径（补全 recv_kind=.ty）、`instancePathContainer`（声明类型 /
+  具名字面量实例）、`isTypeValuedRecv/typeValuedContainer`（`const AB = m.A.B;` 是类型值）。
+  emit 用解析回来的 `mem_body_fix` 查成员声明；hover 实例分支同源。
+- 守门 lsptest：`completion.deep.*` 6 条 + `hover.deepNestField`，fixture 刻意同名。
