@@ -50,8 +50,14 @@
   `**T`），不是"数组的地址"——Zx 里根本没有数组变量，只有指针。设计目的就是
   划清 C 里数组/指针衰减的混淆。写文档不许出现"数组的地址"这种说法。
 
-## 内建只有九个（2026-11-10 03:xx 用户拍板，1.2.0）
-- 只留：`@sizeOf @alignOf @typeName @memcpy @memmove @memset @link @compileError @trap`。
+## 内建只有七个（2026-11-10 15:xx 用户拍板，1.2.2；1.2.0 曾是九个）
+- 只留：`@type @memcpy @memmove @memset @link @compileError @trap`。
+- **@type(x) 是唯一反射**（用户把 @sizeOf/@alignOf/@typeName/@typeInfo 全并了进来）：
+  描述符 `Type{.name,.size,.align,.ty,.fieldCount,.fields[i]{.name,.ty,.offset}}`，
+  FieldInfo→Field、TypeInfo→Type、bytes→size。老拼写报 E0211。
+  描述符类型 ct-only（sema_ty_ct_only），只许 const 绑定。
+- ct_clear 有个"只擦语句子树"的新函数 `ct_clear_stmts`：结构体字面量字段里的
+  折值字段访问（`N{.a=@type(T).size}`）的 ct 绝不能擦，擦了后端发 `0.size`。
 - **转换只有 `(T)val`**：@intCast/@ptrCast/@bitCast/@as 全删；castable 表本来就覆盖
   窄化/扩宽/整数浮点/指针互转/指针整数互转。别再往手册里加 cast 内建。
 - 反射只有名字/大小/对齐；@typeInfo/@field*@hasField/@offsetOf/@typeOf/@embedFile
@@ -104,3 +110,17 @@
   "你那些打印提示的可以留着"）。lsptest 的 `diagnostics.codeDescription` 守
   `href` 以 `docs/errors.md#e0304` 结尾。README 里写明"std/ 源码 + 补全就是文档"。
   以后重写手册是独立任务，别把 errors.md 一起删。
+
+## 容器成员可见性（2026-11-10 用户拍板，长期语义）
+- 容器体里的**字段 / 方法 / 静态成员默认私有**，只在声明它的文件内可见；`pub` 才对外。
+  跨文件访问私有成员报 **E0404**（`'x' is a private member of \`T\` (declared in <文件>)`）。
+- **枚举 / union(enum) 变体是值，恒公开**，不要求逐个写 `pub`。
+- 函数定义只有 `const F = fn(…) ret {…};` 一种写法——**没有 `pub fn` 语法**，
+  `pub` 是前缀修饰符（对文件作用域声明与容器成员同义）。文档里别再写 "pub fn"。
+- 带私有字段的容器跨文件构造走 **pub 构造器**；字面量 `T{…}` 会撞 E0300 缺字段。
+- std 现状：ArrayList / BufReader / BufWriter / Stat / DirIter / json.Value·Obj·Arr 全 pub；
+  HashMap 的字段与 norm/slotFor **保持私有**（跨文件只出 pub 方法）——这是有意的示范。
+- 实现锚点：sema.c `member_hidden/deny_member/stamp_mod`、Node.is_pub/is_pub+Node.mod、
+  parse.c 与 bootstrap/parse.zx 三个体循环的 mem_pub；守门 tests/multibad/private-member。
+- 自举注意：zxfe 旧版不认容器体 pub —— 必须先重建 zxfe 再同步标记（旁路已删，
+  别再加 ZX_NO_MEMBER_PRIV 这类环境开关）。
