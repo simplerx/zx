@@ -1463,6 +1463,279 @@ fn containerOfBinding(files: []const []const u8, doc: *const Document,
     return null;
 }
 
+/// [start, end) 里的顶层逗号段（字符串感知、括号配平），最多 16 段。
+fn splitTopSegs(txt: []const u8, start: usize, end: usize, out: *[16][]const u8) usize {
+    var n: usize = 0;
+    var d: usize = 0;
+    var in_str = false;
+    var seg = start;
+    var i = start;
+    while (i < end) : (i += 1) {
+        const ch = txt[i];
+        if (in_str) {
+            if (ch == '\\') { i += 1; continue; }
+            if (ch == '"') in_str = false;
+            continue;
+        }
+        if (ch == '"') { in_str = true; continue; }
+        if (ch == '(' or ch == '[' or ch == '{') { d += 1; continue; }
+        if (ch == ')' or ch == ']' or ch == '}') { if (d > 0) d -= 1; continue; }
+        if (ch == ',' and d == 0) {
+            if (n < 16) out[n] = trimSl(txt[seg..i]);
+            n += 1;
+            seg = i + 1;
+        }
+    }
+    if (end > seg) {
+        if (n < 16) out[n] = trimSl(txt[seg..end]);
+        n += 1;
+    }
+    return n;
+}
+
+/// '(' 在 lp 的配平 ')'
+fn matchParen(txt: []const u8, lp: usize) ?usize {
+    var d: usize = 0;
+    var i = lp;
+    while (i < txt.len) : (i += 1) {
+        if (txt[i] == '(') d += 1
+        else if (txt[i] == ')') {
+            d -= 1;
+            if (d == 0) return i;
+        }
+    }
+    return null;
+}
+
+/// 泛型形参接收者（§117 的 LSP 半边，用户 2026-11-11 第 9 张截图）：
+///
+///   const fill = fn (T: type, val: T) void {
+///       let v = val.a;      // ← 定义处根本不知道 T 是什么
+///   };
+///   fill(P3, p);            // ← 调用点才知道：T = P3
+///
+/// `val.` / `val.a` 过去一个成员都推不出。这里从扫描集里的**调用点**反推：
+/// 找到形参 `val: T`（T 是同一张形参表里的 `T: type`），再扫 `fill(…)` 的
+/// 调用点，取 **T 那一位**的实参（不是 val 那位——那是值）解析成容器。
+/// `off` 是光标偏移（补全用：确认 recv 在这个函数体里）；0 表示没有位置
+/// 信息（inferExprType 用），取第一份匹配的声明。
+/// 找不到调用点返回 null——列表保持空，绝不回落全局标识符噪音。
+fn genericParamRecvTy(files: []const []const u8, doc: *const Document,
+                      text: []const u8, recv: []const u8, off: usize) ?PathContainer {
+    if (recv.len == 0) return null;
+    var from: usize = 0;
+    while (std.mem.indexOfPos(u8, text, from, recv)) |c| {
+        from = c + recv.len;
+        // 词边界：排除 self.val / valX
+        if (c > 0 and (isIdentChar(text[c - 1]) or text[c - 1] == '.')) continue;
+        var j = c + recv.len;
+        if (j < text.len and isIdentChar(text[j])) continue;
+        while (j < text.len and (text[j] == ' ' or text[j] == '\t')) j += 1;
+        if (j >= text.len or text[j] != ':') continue;   // 只要 `val:` 形参位
+        j += 1;
+        while (j < text.len and (text[j] == ' ' or text[j] == '\t')) j += 1;
+        // 形参类型读到顶层分隔符（同 namedTypeNear 的截法）
+        var depth: usize = 0;
+        var e = j;
+        while (e < text.len) : (e += 1) {
+            const ch = text[e];
+            if (ch == '(' or ch == '[' or ch == '{') { depth += 1; continue; }
+            if (ch == ')' or ch == ']' or ch == '}') {
+                if (depth == 0) break;
+                depth -= 1;
+                continue;
+            }
+            if (depth == 0 and (ch == ',' or ch == ';' or ch == '=')) break;
+        }
+        const pty = trimSl(text[j..e]);
+        if (!isPurePath(pty)) continue;                  // T 是裸名字
+        if (std.mem.eql(u8, pty, "type")) continue;      // `val: type` 本身
+        // 形参表：向左最近未配平的 '('，且 '(' 前紧贴 `fn`
+        var d2: usize = 0;
+        var lp: ?usize = null;
+        var w = j;
+        while (w > 0) {
+            w -= 1;
+            const ch = text[w];
+            if (ch == ')' or ch == ']' or ch == '}') d2 += 1
+            else if (ch == '(') {
+                if (d2 == 0) { lp = w; break; }
+                d2 -= 1;
+            }
+        }
+        const lpx = lp orelse continue;
+        var e2 = lpx;
+        while (e2 > 0 and (text[e2 - 1] == ' ' or text[e2 - 1] == '\t')) e2 -= 1;
+        if (e2 < 2 or !std.mem.eql(u8, text[e2 - 2 .. e2], "fn")) continue;
+        const rpx = matchParen(text, lpx) orelse continue;
+        // T 是这张表里第几个形参（`T: type` 的位置）
+        var psegs: [16][]const u8 = undefined;
+        const np = splitTopSegs(text, lpx + 1, rpx, &psegs);
+        var targi: ?usize = null;
+        for (psegs[0..np], 0..) |sg, si| {
+            if (sg.len > pty.len and std.mem.startsWith(u8, sg, pty)) {
+                var q = pty.len;
+                while (q < sg.len and (sg[q] == ' ' or sg[q] == '\t')) q += 1;
+                if (q < sg.len and sg[q] == ':' and
+                    std.mem.startsWith(u8, trimSl(sg[q + 1 ..]), "type"))
+                    targi = si;
+            }
+        }
+        const tpos = targi orelse continue;              // 不是类型形参的值
+        // off 有值时：光标必须在这个 fn 的体里（体从签名 ')' 后第一个 '{' 起）
+        if (off > 0) {
+            const br = fnBodyRange(text, rpx) orelse continue;
+            if (off < br.start or off > br.end) continue;
+        }
+        if (callSiteArgTy(files, doc, text, fnameOfFnHead(text, e2), tpos, lpx)) |pc| return pc;
+    }
+    return null;
+}
+
+/// fn 头的名字：`fn name(` 具名取 name；`fn (` 匿名（`const fill = fn (`）
+/// 往前找 `const`/`let`/`var` 取绑定名。找不到返回空。
+fn fnameOfFnHead(text: []const u8, fn_end: usize) []const u8 {
+    var q = fn_end;
+    while (q < text.len and (text[q] == ' ' or text[q] == '\t')) q += 1;
+    if (q < text.len and isIdentChar(text[q])) {
+        var fe = q;
+        while (fe < text.len and isIdentChar(text[fe])) fe += 1;
+        if (fe > q) return text[q..fe];
+    }
+    var b = fn_end - 2;
+    var guard: usize = 0;
+    while (b > 0 and guard < 400) : (guard += 1) {
+        b -= 1;
+        if (std.mem.startsWith(u8, text[b..], "const ") or
+            std.mem.startsWith(u8, text[b..], "let ") or
+            std.mem.startsWith(u8, text[b..], "var ")) break;
+    }
+    if (guard < 400 and b > 0) {
+        var ns = b;
+        while (ns < text.len and text[ns] != ' ') ns += 1;
+        while (ns < text.len and text[ns] == ' ') ns += 1;
+        var ne = ns;
+        while (ne < text.len and isIdentChar(text[ne])) ne += 1;
+        if (ne > ns) return text[ns..ne];
+    }
+    return "";
+}
+
+/// 签名 ')' 在 rpx 的 fn：')' 之后（跳过返回类型）第一个 '{' 起的平衡体
+fn fnBodyRange(text: []const u8, rpx: usize) ?struct { start: usize, end: usize } {
+    var lb: ?usize = null;
+    var i = rpx + 1;
+    while (i < text.len) : (i += 1) {
+        if (text[i] == '{') { lb = i; break; }
+        if (text[i] == ';') return null;   // 还没 '{' 就出语句了：不是 fn 头
+    }
+    const lbx = lb orelse return null;
+    var depth: usize = 0;
+    var in_str = false;
+    var k = lbx;
+    while (k < text.len) : (k += 1) {
+        const ch = text[k];
+        if (in_str) {
+            if (ch == '\\') { k += 1; continue; }
+            if (ch == '"') in_str = false;
+            continue;
+        }
+        if (ch == '"') { in_str = true; continue; }
+        if (ch == '{') depth += 1;
+        if (ch == '}') {
+            depth -= 1;
+            if (depth == 0) return .{ .start = lbx, .end = k };
+        }
+    }
+    return .{ .start = lbx, .end = text.len };  // 未闭合（正在打字）
+}
+
+/// `fname(…)` 的调用点 → 同位实参的类型路径解析成容器。
+/// decl_lp 是声明自己的签名 '('（跳过它）。先扫 files（文档+同目录+std），
+/// 落空再扫模块目录（vendor / zx.json deps / 工程根，跳 std，≤240 文件），
+/// 与编译器 module_load 同一条链。
+fn callSiteArgTy(files: []const []const u8, doc: *const Document,
+                 text: []const u8, fname: []const u8, targi: usize, decl_lp: usize) ?PathContainer {
+    if (fname.len == 0) return null;
+    for (files) |ftxt| {
+        var from: usize = 0;
+        while (std.mem.indexOfPos(u8, ftxt, from, fname)) |c| {
+            from = c + fname.len;
+            if (c > 0 and isIdentChar(ftxt[c - 1])) continue;
+            var j = c + fname.len;
+            while (j < ftxt.len and (ftxt[j] == ' ' or ftxt[j] == '\t')) j += 1;
+            if (j >= ftxt.len or ftxt[j] != '(') continue;
+            if (ftxt.ptr == text.ptr and j == decl_lp) continue;   // 自己的签名
+            if (callSiteArgOnce(files, doc, text, ftxt, j, targi)) |pc| return pc;
+        }
+    }
+    // 模块目录兜底：vendor / deps / 工程根里的调用点
+    const doc_dir = dirName(doc.path);
+    var mdirs: std.ArrayList([]const u8) = .empty;
+    defer mdirs.deinit(gpa);
+    modDirsInto(doc_dir, &mdirs);
+    var nfiles: usize = 0;
+    for (mdirs.items) |md2| {
+        if (g_std_dir) |sd2| {
+            if (std.mem.eql(u8, md2, sd2)) continue;
+        }
+        if (std.mem.eql(u8, md2, doc_dir)) continue;
+        var d9 = Io.Dir.cwd().openDir(g_io, md2, .{ .iterate = true }) catch continue;
+        defer d9.close(g_io);
+        var it9 = d9.iterate();
+        while (it9.next(g_io) catch null) |e9| {
+            if (e9.kind != .file or !std.mem.endsWith(u8, e9.name, ".zx")) continue;
+            if (nfiles >= 240) return null;
+            nfiles += 1;
+            var fp9: std.ArrayList(u8) = .empty;
+            defer fp9.deinit(gpa);
+            fp9.appendSlice(gpa, md2) catch continue;
+            fp9.append(gpa, '/') catch continue;
+            fp9.appendSlice(gpa, e9.name) catch continue;
+            const t9 = readFileSmall(fp9.items) orelse continue;
+            var from: usize = 0;
+            while (std.mem.indexOfPos(u8, t9, from, fname)) |c| {
+                from = c + fname.len;
+                if (c > 0 and isIdentChar(t9[c - 1])) continue;
+                var j = c + fname.len;
+                while (j < t9.len and (t9[j] == ' ' or t9[j] == '\t')) j += 1;
+                if (j >= t9.len or t9[j] != '(') continue;
+                if (callSiteArgOnce(files, doc, text, t9, j, targi)) |pc| return pc;
+            }
+        }
+    }
+    return null;
+}
+
+fn callSiteArgOnce(files: []const []const u8, doc: *const Document,
+                   text: []const u8, ftxt: []const u8, lp: usize, targi: usize) ?PathContainer {
+    const rpx = matchParen(ftxt, lp) orelse return null;
+    var asegs: [16][]const u8 = undefined;
+    const na = splitTopSegs(ftxt, lp + 1, rpx, &asegs);
+    if (targi >= na) return null;
+    const arg = asegs[targi];
+    // 只要纯类型路径：`P3` / `vp.Cfg` / `m.A.B`。表达式（`T` 之外的变量、
+    // 字面量、调用）不认识就放弃——宁缺毋滥。
+    if (!isPurePath(arg)) return null;
+    if (resolveContainerPathD(files, doc, text, arg, 0)) |pc| return pc;
+    // 退路：调用点在别的文件、类型在那里定义。按末段名字找容器。
+    var last = arg;
+    if (std.mem.lastIndexOfScalar(u8, arg, '.')) |d3| last = arg[d3 + 1 ..];
+    if (findContainerBody(files, last)) |h| return .{
+        .body = h.body,
+        .src = containerSrcOf(files, last) orelse text,
+        .name = last,
+        .is_enum = h.is_enum,
+    };
+    if (genericBodyOf(files, last)) |gb| return .{
+        .body = gb,
+        .src = containerSrcOf(files, last) orelse text,
+        .name = last,
+        .is_enum = false,
+    };
+    return null;
+}
+
 fn resolveContainerPathD(files: []const []const u8, doc: *const Document,
                          text: []const u8, path: []const u8, depth: u8) ?PathContainer {
     if (depth > 6) return null;
@@ -3860,6 +4133,19 @@ fn inferExprType(text: []const u8, doc: *const Document, expr: []const u8, depth
                 }
                 if (resolveContainerPath(sf.items, doc, text, base) orelse
                     resolveContainerPathLoose(sf.items, doc, text, base)) |pc| {
+                    if (memberIsTypeDecl(sf.items, pc.body, member)) return "type";
+                    if (fieldTypeIn(pc.body, member)) |t| return t;
+                    if (findDeclStmt(pc.body, member)) |stmt| {
+                        const sig = sigOfStmt(stmt);
+                        if (sig.is_fn and sig.ret.len > 0) return sig.ret;
+                    }
+                }
+            }
+            // 泛型形参接收者（§117）：`val.a` 的 base 是 `T: type` 的形参，
+            // 从调用点反推容器再读字段类型 / 方法返回类型。没有光标位置，
+            // 取第一份匹配的形参声明（同名形参的歧义在实践中罕见）。
+            if (depth < 4 and isPurePath(base)) {
+                if (genericParamRecvTy(sf.items, doc, text, base, 0)) |pc| {
                     if (memberIsTypeDecl(sf.items, pc.body, member)) return "type";
                     if (fieldTypeIn(pc.body, member)) |t| return t;
                     if (findDeclStmt(pc.body, member)) |stmt| {
@@ -6980,6 +7266,24 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                     if (!handled and vendorInstanceFields(doc, text, container, &decls)) {
                         handled = decls.items.len > 0;
                         if (handled) recv_kind = .instance;
+                    }
+                    // KEEP — 泛型形参接收者（§117，用户 2026-11-11 第 9 张截图）：
+                    // `const fill = fn (T: type, val: T) void { let v = val.a; }`
+                    // 的 `val.` —— 定义处不知道 T 是什么，从调用点反推：
+                    // `fill(P3, p)` 的 T 位实参就是具体类型，按实例出成员。
+                    // 找不到调用点保持空列表，绝不回落全局噪音。
+                    if (!handled) {
+                        if (genericParamRecvTy(files.items, doc, text, path, off)) |pc| {
+                            extractBraceMembers(pc.body, pc.is_enum, &decls);
+                            handled = decls.items.len > 0;
+                            if (handled) {
+                                recv_kind = .instance;
+                                mem_txt = pc.src;
+                                mem_body_fix = pc.body;
+                                markContainerFnsIn(pc.body, pc.src, &decls);
+                                owner = pc.name;
+                            }
+                        }
                     }
                     if (!handled) {
                         if (inferContainer(files.items, text, container, 0) orelse blk: {

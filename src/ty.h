@@ -16,6 +16,7 @@
 
 typedef struct Node Node;
 typedef struct Type Type;
+typedef struct Value Value;   /* val.h：编译期值（静态成员的值槽用） */
 
 typedef enum {
     TY_INVALID = 0,        /* 错误哨兵：吸收所有级联错误 */
@@ -47,6 +48,10 @@ typedef struct Field {
     const char *name;
     Type       *ty;
     Node       *dflt;      /* 字段默认值表达式，可为 NULL */
+    Value      *ct;        /* 编译期值槽（§117）：const 静态成员的初值在解析/
+                            * 特化期（泛型实参还在作用域里）折好存这里，惰性
+                            * 引用直接取——那时 T 的作用域早已弹掉，dflt 克隆
+                            * 里靠 sym 指针折不动的就只能从槽里拿。 */
     bool        is_static; /* 结构体体里的 `var` / `const`（静态命名空间成员） */
     bool        is_var;    /* 静态成员是否可写 */
     uint64_t    offset;    /* 布局时填 */

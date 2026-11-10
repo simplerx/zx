@@ -1875,6 +1875,14 @@ static Type *resolve_struct_body(Node *n, Type *agg, bool is_union) {
         ensure(it->sym);
         Type *ft = (it->sym && it->sym->ty) ? it->sym->ty : ty_invalid();
         if (it->index >= 0 && it->index < nfields) agg->fields[it->index].ty = ft;
+        /* 编译期值槽（§117）：const 静态成员的初值此刻（泛型实参 T / cap 还
+         * 在作用域里）已经折进 sym->ct，抄进 Field 留作后用。惰性引用——
+         * 尤其 `Slots(P3,4).sz2` 这种链式实例——发生在作用域弹掉之后。
+         * var 成员可变不进槽；类型成员没有"值"，走 type_val 那条路。 */
+        if (it->index >= 0 && it->index < nfields && it->op != 2 &&
+            it->sym && it->sym->ct &&
+            !(it->sym->ty && it->sym->ty->kind == TY_TYPE))
+            agg->fields[it->index].ct = it->sym->ct;
     }
 
     /* 方法：函数体里的第一个参数就是接收者 */
@@ -1965,6 +1973,10 @@ static Type *resolve_enum_body(Node *n, Type *e) {
         f->is_pub = it->is_pub;
         ensure(it->sym);
         f->ty = (it->sym && it->sym->ty) ? it->sym->ty : ty_invalid();
+        /* 编译期值槽（§117）：同 struct 静态成员。 */
+        if (!f->is_var && it->sym && it->sym->ct &&
+            !(f->ty && f->ty->kind == TY_TYPE))
+            f->ct = it->sym->ct;
     }
     e->nstatics = si;
 
@@ -2652,7 +2664,7 @@ static const char *errset_missing(const void *a, const void *b) {
  * 后端 ex() 的 `n->ct` 分支直接发字面量。静态 var 成员不折（它可变）。 */
 static Type *static_member_ty(Node *n, Field *f) {
     if (f->is_static && !f->is_var && f->dflt) {
-        Value *cv = ct_eval_probe(f->dflt);
+        Value *cv = f->ct ? f->ct : ct_eval_probe(f->dflt);   /* §117 值槽优先 */
         if (cv && f->ty) cv = val_cast(f->ty, cv);
         if (cv && cv->kind != V_UNDEF) n->ct = cv;
         /* 嵌套类型成员（`const Inner = struct {…};` / `const Sub = Other;`）：
@@ -6681,6 +6693,23 @@ static Value *ct_eval(Node *n) {
                 if (f && f->has_tag) { v = val_int(f->ty ? f->ty : tv, f->tag, false); break; }
             }
         }
+        /* 类型值上的静态成员（§117 值槽的另一半）：X.K，X 是"求出来才知道
+         * 是什么类型"的表达式——泛型工厂的链式实例 `Slots(P3,4).sz2` 最多。
+         * ct_eval 折不动调用表达式，但 base 节点上挂着实例类型（type_val，
+         * 后端发符号名也靠它），直接从成员的编译期值槽取；槽空再试 dflt
+         * （克隆里的 sym 指针还活着）。类型成员没有值，留给 type_val 路径。 */
+        if (!v && n->a && n->name && n->a->ty &&
+            n->a->ty->kind == TY_TYPE && n->a->type_val) {
+            Type *tv = n->a->type_val;
+            Field *st = ty_field(tv, n->name);
+            if (!st || !st->is_static) st = ty_static_member(tv, n->name);
+            if (st && st->is_static && !st->is_var &&
+                !(st->ty && st->ty->kind == TY_TYPE)) {
+                if (st->ct) v = st->ct;
+                else if (st->dflt) v = ct_eval_probe(st->dflt);
+            }
+        }
+        if (v) break;
         v = ct_field(n);
         break;
     case NK_INDEX:  v = ct_index(n); break;

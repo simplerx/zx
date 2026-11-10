@@ -1,0 +1,40 @@
+// static-ct-slot.zx —— 静态成员的编译期值槽（§117，2026-11-11）
+//
+// 用户拍板的"静态成员补编译期值槽"：泛型工厂返回的 struct 里，const 静态
+// 成员的初值在特化期（T / cap 还在作用域里）就折好了，抄进 Field.ct；
+// 惰性引用——尤其 `Slots(P3, 4).sz2` 这种**链式实例**——发生在作用域弹掉
+// 之后，ct_eval 折不动调用表达式，只能从槽里拿。以前后端发出未定义的
+// `ZxS5_sz2` 符号引用，C 直接编译失败（compiler bug）。
+//
+// 覆盖：链式实例 / 兄弟静态成员引用 / 多实例互不串值 / via-info 再取一层。
+const std = module("std");
+
+const P3 = struct { a: i32, b: i64 };
+const Pair = struct { a: i32, b: i64 };
+
+const Slots = fn (T: type, cap: usize) type {
+    return struct {
+        pub const sz = @type(T).size;
+        pub const dcap = cap * 2;
+        pub const sz2 = sz + 1;              // 兄弟静态成员
+        pub const info = @type(T);           // 描述符本体也进槽
+    };
+};
+
+pub const main = fn () u8 {
+    // 链式实例：没有名字的临时实例上取静态成员
+    std.println("direct: {}", Slots(P3, 4).sz2);
+    // 多实例：各自的 T / cap 各自的槽，互不串值
+    const S = Slots(P3, 4);
+    const S2 = Slots(Pair, 2);
+    std.println("S.sz={} S2.sz={} S.dcap={} S2.dcap={}",
+                S.sz, S2.sz, S.dcap, S2.dcap);
+    // 值槽里的描述符再取一层
+    std.println("info: {} {} {}", S.info.name, S.info.size, S2.info.fields[1].name);
+    return 0;
+};
+
+// expect-output
+// direct: 17
+// S.sz=16 S2.sz=16 S.dcap=8 S2.dcap=4
+// info: P3 16 b

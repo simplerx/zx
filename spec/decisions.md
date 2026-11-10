@@ -3788,3 +3788,43 @@ inlay 两条与 definition 一条必挂，`VdQ.`/`VdP.` 两条本来就通。
 以外那些 `@type(T)…` 的）在容器级被引用时仍不物化：`dflt` 节点是定义时的克隆，
 惰性检查发生在 T 的作用域已经弹掉之后，`@type(T)` 折不出值，C 里漏出 `0.name`。
 函数体里写的反射（`const info = @type(T); info.fields[0].name`）是好的。
+
+## 117. 静态成员补编译期值槽 + 泛型形参接收者从调用点反推
+
+**裁定（2026-11-11，接第 9 张截图，用户拍板"静态成员补编译期值槽，这个也一起做"）**：
+
+1. **编译器：`Field.ct` 值槽**（src/ty.h + src/sema.c）。泛型工厂返回的
+   struct 里 `pub const sz2 = sz + 1;` 这类静态成员，初值在**特化期**
+   （resolve_struct_body / resolve_enum_body 的第二遍，T / cap 还在作用域里）
+   已经折进 `sym->ct`——抄进 `Field.ct` 留作后用。var 成员可变不进槽；
+   类型成员（`const Inner = struct{…}`）没有"值"，走 type_val 那条路。
+   消费点三处：
+   - `static_member_ty`：`f->ct ? f->ct : ct_eval_probe(f->dflt)`；
+   - `ct_eval` 的 NK_FIELD 分支：base 节点带 `type_val` 时直接从成员槽取
+     ——这是**链式实例** `Slots(P3,4).sz2` 的正解。ct_eval 折不动调用表达式，
+     但 base 上挂着实例类型（后端发符号名也靠它），从槽里拿值后发字面量；
+     槽空再试 dflt（克隆里的 sym 指针还活着）。
+   - `ct_field` 的 V_TYPE 分支同源。
+   修前：`Slots(P3,4).sz2` 后端发未定义的 `ZxS5_sz2` 符号引用，C 编译失败
+   （compiler bug）；命名实例 `S.sz2` 反而是好的（ident 能折出 V_TYPE）。
+2. **zxls：泛型形参接收者从调用点反推**。`const fill = fn (T: type, val: T)
+   void { let v = val.a; }` 定义处根本不知道 T 是什么，`val.` 一个成员都不出、
+   `val.a` 推不出类型。新增 `genericParamRecvTy`：找到形参 `val: T`（T 是同一张
+   形参表里的 `T: type`），扫扫描集（文档 + 同目录 + std，兜底 modDirsInto 的
+   vendor / deps / 工程根，≤240 文件）里 `fill(…)` 的调用点，取 **T 那一位**的
+   实参（不是 val 那位——那是值）解析成容器（resolveContainerPathD，退路按
+   末段找容器）。两个消费点：
+   - completeAt 实例分支：`val.` 出成员（recv_kind=.instance，带
+     mem_body_fix / owner，方法签名 Self 换真名）；
+   - inferExprType 成员分支：`val.a` → 字段类型（inlay `let v = val.a;`
+     出 `: i32`，hover 出 `let w: i64 = val.b`）。
+   `off > 0` 时要求光标在该函数体里（fnBodyRange 配平）；inferExprType 没有
+   位置信息，取第一份匹配的形参声明。**找不到调用点保持空列表**——宁缺毋滥，
+   绝不回落全局标识符噪音。
+3. 顺带的语言事实：成员索引 `.N` 只有 `.0` 合法（`fields.1` 报 E0300），
+   第二个起要写 `fields[1]`。
+
+守门：编译器 `tests/good/static-ct-slot.zx`（链式实例 / 兄弟引用 / 多实例 /
+via-info 再取一层，修前必挂 compiler bug）；lsptest `completion.genparam.valFields`、
+`inlayHint.genparam.fieldTy`、`completion.genparam.noCallSite`（最后一条反向守
+空列表）。

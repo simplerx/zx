@@ -2600,6 +2600,81 @@ check("definition.depsChain.nestedType",
       isinstance(_dloc, dict) and "deepmod.zx" in (_dloc.get("uri") or ""),
       str(_dloc)[:200])
 
+# ------------------------------------------------ 泛型形参接收者（§117）
+#
+# 用户 2026-11-11 第 9 张截图：`const fill = fn (T: type, val: T) void
+# { let v = val.a; }` —— 定义处不知道 T 是什么，`val.` 一个成员都不出、
+# `val.a` 推不出类型（inlay 没有 : i32）。修法是从扫描集里的调用点反推：
+# `fill(P3, p)` 的 **T 位**实参就是具体类型，解析成容器后按实例出成员。
+# 注意取的是类型形参那一位的实参，不是 val 自己那位（那是值）。
+GPSRC = """const std = module("std");
+
+const GpT = struct {
+    ga: i32,
+    gb: []const u8,
+};
+
+const gpfill = fn (T: type, val: T) void {
+    let gv = val.ga;
+    _ = gv;
+    val.
+};
+
+pub const main = fn () u8 {
+    const gp = GpT{ .ga = 1, .gb = "x" };
+    gpfill(GpT, gp);
+    return 0;
+};
+"""
+gpuri = "file:///" + os.path.join(SRC_DIR, "genparam.zx").replace("\\", "/")
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": gpuri, "languageId": "zx", "version": 1, "text": GPSRC}}})
+
+_rid += 1
+_gpoff = GPSRC.index("val.\n") + len("val.")
+send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/completion", "params": {
+    "textDocument": {"uri": gpuri}, "position": pos(GPSRC, _gpoff)}})
+_r, _ = recv_id("genparam", _rid)
+_labgp = sorted({i["label"] for i in ((_r or {}).get("result") or {}).get("items") or []})
+check("completion.genparam.valFields", set(_labgp) == {"ga", "gb"}, str(_labgp))
+
+_rid += 1
+send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/inlayHint", "params": {
+    "textDocument": {"uri": gpuri},
+    "range": {"start": {"line": 0, "character": 0},
+              "end": {"line": len(GPSRC.split("\n")), "character": 0}}}})
+_r, _ = recv_id("genparam", _rid)
+_gpih = {}
+if _r and _r.get("result"):
+    for _h in _r["result"]:
+        _lbgp = _h.get("label")
+        if isinstance(_lbgp, str):
+            _gpih[_h["position"]["line"]] = _lbgp
+check("inlayHint.genparam.fieldTy",
+      _gpih.get(GPSRC[:GPSRC.index("let gv =")].count("\n")) == ": i32", str(_gpih))
+
+# 反向守门：没有调用点就保持空列表——宁缺毋滥，绝不回落全局标识符噪音。
+GPQSRC = """const GpQ = struct { qc: u8 };
+
+const gpquiet = fn (T: type, val: T) void {
+    val.
+};
+
+pub const main = fn () u8 {
+    return 0;
+};
+"""
+gpquri = "file:///" + os.path.join(SRC_DIR, "genparam_quiet.zx").replace("\\", "/")
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": gpquri, "languageId": "zx", "version": 1, "text": GPQSRC}}})
+_rid += 1
+_gpqoff = GPQSRC.index("val.\n") + len("val.")
+send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/completion", "params": {
+    "textDocument": {"uri": gpquri}, "position": pos(GPQSRC, _gpqoff)}})
+_r, _ = recv_id("genparam_quiet", _rid)
+_labgpq = sorted({i["label"] for i in ((_r or {}).get("result") or {}).get("items") or []})
+check("completion.genparam.noCallSite", _labgpq == [], str(_labgpq))
+
 cov_lines = ['const std = module("std");', "", "pub const main = fn () u8 {"]
 cov_marks = []
 for _mod, _name, _shape, _factory in cov_types:
