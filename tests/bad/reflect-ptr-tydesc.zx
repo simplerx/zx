@@ -1,0 +1,10 @@
+// expect: needs a descriptor from
+// 纯类型描述符（@type(类型)）没有实例可指：ptr 槽为空，引用必须报错。
+// 要字段值指针得写 @type(某个左值)（变量 / 字段 / 解引用）。
+const P5 = struct { x: i32 };
+const info = @type(P5);
+const main = fn () void {
+    const f = info.fields.0;
+    let v = f.ptr.0;
+    _ = v;
+};

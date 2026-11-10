@@ -3828,3 +3828,45 @@ inlay 两条与 definition 一条必挂，`VdQ.`/`VdP.` 两条本来就通。
 via-info 再取一层，修前必挂 compiler bug）；lsptest `completion.genparam.valFields`、
 `inlayHint.genparam.fieldTy`、`completion.genparam.noCallSite`（最后一条反向守
 空列表）。
+
+## 118. 反射取值：字段值指针（ptr 槽）+ 静态成员切片（statics）
+
+**裁定（2026-11-11，用户拍板"使用指针取值——在 @type(T) 的 field 里加值的指针，指针 = *self + offset，这两个在编译期都已知"）**：
+
+1. **背景**：@type(T) 描述符能拿到字段名（字符串字面量）、类型（type 值）、
+   偏移（usize），但从这三样到"值"没有桥——`v.f.name` 不存在、`(f.ty)` 是值
+   当不了 cast 目标、指针算术/整数地址往返都不是合法语法。这是设计缺口不是 bug。
+2. **字段值指针**：`@type(x)` 的 x 是**有存储的左值**（变量/字段/解引用，
+   addr_ok 判定；类型名不算——NK_IDENT 无条件 true 的坑已堵，ty 是 TY_TYPE
+   的实参不当 inst）时，`fields[i]` 多第 4 项 `ptr`：
+   - 值 = 基址 + offset（编译期两头都已知），基址表达式克隆进 `Value.xexpr`；
+   - 静态类型 `*(f.ty)`，逐字段不同——`Type.is_fldptr` 标记，ty_eq 不看它
+     （存进 *T 变量、传参都合法）；
+   - 后端发 `((fldty *)((char *)&(base) + off))`——**指针值**（不解引用），
+     `f.ptr.0` 走普通 .0 解引用；读值、写值（var 实例）、取址、传 *T 形参全免费；
+   - **运行期地址折不成编译期常量**：ct_field 对描述符的 .ptr 特判返回 NULL
+     （R1 拦 `const q = f.ptr;`）；别放行——会被切片 .ptr 分支误折成聚合视图；
+   - 纯类型描述符（@type(T)）ptr 恒空，`f.ptr` 报 E0306（守门
+     tests/bad/reflect-ptr-tydesc.zx）。
+3. **statics 切片**：Type 描述符 6 → 7 成员，`statics[i]` 与 fields 同一个
+   Field 描述符（name/ty 有意义；offset=0；ptr 恒空——静态成员没有逐实例
+   存储，取值走容器名限定）。收录范围：struct/union/enum 里 is_static 且
+   ty 不是 TY_TYPE 的声明——const/var 数据与 fn 都算？**fn 成员走 methods
+   线不进 fields，所以 statics 实际是静态 const/var 数据成员**；枚举显式
+   tag（`LIMIT = 99`）是变体不是静态常量，不进。`info.statics.len` /
+   `statics[i].name/.ty` 在 inline for 里用。
+4. **zxls**：Type 表加 statics、Field 表加 ptr；builtinFieldTy 对 Field.ptr
+   特判返回 null——具体 `*(f.ty)` 只有编译器逐字段知道，别把描述文案当类型
+   弹 inlay（表里 ty 字段的中文文案只给补全 detail）。
+
+**调试踩坑（必记）**：fldptr 发码第一版判 `bt = n->a->ty`（描述符 fit，
+TY_STRUCT）永远不中——is_fldptr 挂在**节点自己的类型**上，判 `n->ty`；
+发码用 ctype() 不是 tn()（tn 对 i32 发内部名 ZxE5）；发指针值不发解引用
+（外层 .0 会包 `(*…)`，自己再解一层就双重括号错）。
+
+守门：tests/good/reflect-ptr.zx（读/写/嵌套基址/传 *T 形参/statics 遍历，
+expect-output）、tests/bad/reflect-ptr-tydesc.zx（E0306）。
+
+**遗留（独立线）**：函数体内 `const F = fn(…){…}; F(x)` 的局部 fn 绑定调用，
+后端发 `ZxFn… F = 0; F(x)`——空指针调用必炸（顶层 const fn 没问题）。
+调用点应解析到 fn 节点直接调，与反射无关，待用户点头再修。

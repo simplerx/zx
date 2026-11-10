@@ -76,6 +76,9 @@ struct Type {
 
     bool        is_const;   /* TY_PTR / TY_SLICE：只读视图 */
     bool        has_len;    /* TY_PTR：数量写在类型里（*[N]T） */
+    bool        is_fldptr;  /* TY_PTR：字段值指针（§118 @type(左值) 描述符的
+                             * fields[i].ptr）。发码/判左值跟普通指针两样，
+                             * 但 ty_eq 不看它——存进 *T 变量、传参都合法。 */
     uint64_t    len;
 
     bool        is_tagged;  /* TY_UNION：成员是 {标签, 载荷} 形式 */

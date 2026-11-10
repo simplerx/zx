@@ -499,6 +499,8 @@ static bool  stmt_blocks_next(Node *s);     /* 不可达代码：这条之后的
 /* ---------------- 内建 / 基础类型 ---------------- */
 static Type *sema_type_type(void);
 static Type *sema_type_field_type(void);
+static Node *clone_tree(Node *n);       /* 泛型单态化用；type_desc_value 的 ptr 槽也要 */
+static bool  lvalue_mutable(Node *n);   /* ptr 槽的只读性跟基址走 */
 
 static Type *base_type(const char *n) {
     if (!n) return NULL;
@@ -589,12 +591,15 @@ static Type *sema_type_field_type(void) {
 
     t = ty_agg(TY_STRUCT, &id, "Field");
     if (!t->fields) {
-        /* 字段叫 `ty` 而不是 `type`：`type` 是关键字，当不了字段名。 */
-        t->nfields = 3;
-        t->fields = calloc(3, sizeof(Field));
+        /* 字段叫 `ty` 而不是 `type`：`type` 是关键字，当不了字段名。
+         * `ptr`（§118）：字段值指针，只在 @type(左值) 的描述符上有值——
+         * 类型上的占位没人读（check_field / ct_field 都对它特判）。 */
+        t->nfields = 4;
+        t->fields = calloc(4, sizeof(Field));
         t->fields[0].name = "name";   t->fields[0].ty = ty_slice(ty_u8(), true);
         t->fields[1].name = "ty";     t->fields[1].ty = ty_type();
         t->fields[2].name = "offset"; t->fields[2].ty = ty_usize();
+        t->fields[3].name = "ptr";    t->fields[3].ty = ty_ptr(ty_u8(), true, false, 0);
     }
     return t;
 }
@@ -609,14 +614,15 @@ static Type *sema_type_type(void) {
 
     t = ty_agg(TY_STRUCT, &id, "Type");
     if (!t->fields) {
-        t->nfields = 6;
-        t->fields = calloc(6, sizeof(Field));
+        t->nfields = 7;
+        t->fields = calloc(7, sizeof(Field));
         t->fields[0].name = "name";       t->fields[0].ty = ty_slice(ty_u8(), true);
         t->fields[1].name = "size";       t->fields[1].ty = ty_usize();
         t->fields[2].name = "align";      t->fields[2].ty = ty_usize();
         t->fields[3].name = "ty";         t->fields[3].ty = ty_type();
         t->fields[4].name = "fieldCount"; t->fields[4].ty = ty_usize();
         t->fields[5].name = "fields";     t->fields[5].ty = ty_slice(sema_type_field_type(), true);
+        t->fields[6].name = "statics";    t->fields[6].ty = ty_slice(sema_type_field_type(), true);
     }
     return t;
 }
@@ -637,8 +643,8 @@ bool sema_ty_ct_only(Type *t) {
  * 在 ct_eval 里都走 ct_view_len / ct_index 那条路。
  * fields 只装数据字段（关联常量/嵌套类型这些静态成员不是实例布局，
  * offset 对它们没有意义）。 */
-static Value *type_desc_value(Type *t) {
-    Value *v = val_agg(sema_type_type(), 6);
+static Value *type_desc_value(Type *t, Node *inst) {
+    Value *v = val_agg(sema_type_type(), 7);
     int sz = ty_size(t);
     int al = ty_align(t);
     v->items[0] = val_str(ty_str(t), (int)strlen(ty_str(t)));
@@ -658,15 +664,56 @@ static Value *type_desc_value(Type *t) {
     if (has_fields)
         for (int i = 0; i < t->nfields; i++) {
             if (t->fields[i].is_static) continue;
-            Value *fv = val_agg(fit, 3);
+            Value *fv = val_agg(fit, 4);
             fv->items[0] = val_str(t->fields[i].name, (int)strlen(t->fields[i].name));
             fv->items[1] = val_type(t->fields[i].ty);
             fv->items[2] = val_int(ty_usize(), (uint64_t)t->fields[i].offset, false);
+            /* §118 字段值指针（用户 2026-11-11 拍板"使用指针取值"）：inst 是
+             * 有存储的左值（@type(v) / @type(p.inner)）时，ptr = 基址 + offset，
+             * 编译期两头都已知。类型 *(f.ty)；只读性跟基址走（const 实例的
+             * 字段不可写）。运行期地址折不成编译期常量——ct 折值在 ct_field
+             * 里特判返回 NULL，发码时后端现拼。 */
+            fv->items[3] = NULL;
+            if (inst) {
+                Value *pv = val_undef(ty_ptr(t->fields[i].ty,
+                                             !lvalue_mutable(inst), false, 0));
+                pv->xexpr = clone_tree(inst);
+                pv->off = (uint64_t)t->fields[i].offset;
+                fv->items[3] = pv;
+            }
             arr->items[k++] = fv;
         }
     Value *sv = val_ptr(ty_slice(fit, true), arr, 0);
     sv->nitems = nf;
     v->items[5] = sv;
+
+    /* statics（§118 续，用户 2026-11-11："@type(T) 还应该有静态成员的切片"）：
+     * 容器（struct/union/enum）里所有 is_static 且不是类型成员的声明——
+     * const 常量、var 静态、fn 都算。元素与 fields 同一个 Field 描述符：
+     * name / ty 有意义；offset 填 0（静态成员不在实例布局里）；ptr 恒空
+     * （静态成员没有逐实例存储，取值走容器名限定，不走这里）。 */
+    int ns = 0;
+    if (t->kind == TY_STRUCT || t->kind == TY_UNION || t->kind == TY_ENUM)
+        for (int i = 0; i < t->nfields; i++)
+            if (t->fields[i].is_static &&
+                !(t->fields[i].ty && t->fields[i].ty->kind == TY_TYPE)) ns++;
+    Value *sarr = val_agg(ty_slice(fit, true), ns);
+    int sk = 0;
+    if (ns)
+        for (int i = 0; i < t->nfields; i++) {
+            if (t->fields[i].is_static &&
+                !(t->fields[i].ty && t->fields[i].ty->kind == TY_TYPE)) {
+                Value *fv = val_agg(fit, 4);
+                fv->items[0] = val_str(t->fields[i].name, (int)strlen(t->fields[i].name));
+                fv->items[1] = val_type(t->fields[i].ty);
+                fv->items[2] = val_int(ty_usize(), 0, false);
+                fv->items[3] = NULL;
+                sarr->items[sk++] = fv;
+            }
+        }
+    Value *ssv = val_ptr(ty_slice(fit, true), sarr, 0);
+    ssv->nitems = ns;
+    v->items[6] = ssv;
     return v;
 }
 
@@ -2695,6 +2742,24 @@ static Type *check_field(Node *n) {
     }
     Type *bt = check_expr(base, NULL);
 
+    /* §118 字段值指针：f.ptr —— 描述符 Field 的 ptr 槽。类型是 *(f.ty)，
+     * 基址/偏移挂在节点上（b / ival），后端发 ((fldty *)((char *)&base + off))。
+     * `f.ptr.0` 解引用走普通 .0 路径：读值、写值（var 实例）、取址、传给
+     * *T 形参全是现成机制。const 语境折不出运行期地址——ct_field 特判 NULL，
+     * R1 会拦。 */
+    if (bt == sema_type_field_type() && n->name && !strcmp(n->name, "ptr")) {
+        Value *fv = fold(base);
+        if (!fv || fv->kind != V_AGG || fv->nitems < 4 || !fv->items[3])
+            return BAD(n, "`.ptr` needs a descriptor from `@type(lvalue)`; "
+                          "`@type(SomeType)` has no instance to point into");
+        Value *pv = fv->items[3];
+        n->b = clone_tree(pv->xexpr);
+        n->ival = pv->off;
+        Type *pt = ty_ptr(pv->ty->elem, !lvalue_mutable(n->b), false, 0);
+        pt->is_fldptr = true;
+        return type_of(n, pt);
+    }
+
     /* 类型值上的成员：Color.red / Counter.n / ShapeTag.circle */
     if (bt && bt->kind == TY_TYPE) {
         Type *tv = base->type_val ? base->type_val : ty_invalid();
@@ -3602,7 +3667,11 @@ static Type *check_builtin(Node *n, Type *expect) {
         if (!t || t->kind == TY_INVALID)
             return BAD(n, "@type: the type is not known at compile time");
         n->type_val = t;        /* ct_clear 之后 ct_eval 里可以重建 */
-        n->ct = type_desc_value(t);
+        /* §118：实参是有存储的左值（变量/字段/解引用）时描述符带 ptr 槽 */
+        n->ct = type_desc_value(t,
+            (t->kind == TY_STRUCT || t->kind == TY_UNION) &&
+            !(n->items[0]->ty && n->items[0]->ty->kind == TY_TYPE) &&
+            addr_ok(n->items[0]) ? n->items[0] : NULL);
         return type_of(n, sema_type_type());
     }
 
@@ -6208,6 +6277,12 @@ static Value *ct_field(Node *n) {
         return NULL;
     }
 
+    /* §118：描述符的 .ptr 是运行期字段地址（@type(左值) 才有），折不成
+     * 编译期常量——放行会被下面的切片 .ptr 分支误折成聚合视图。 */
+    if (n->name && !strcmp(n->name, "ptr") &&
+        n->a && n->a->ty == sema_type_field_type())
+        return NULL;
+
     /* 切片的 .ptr：指向底层数据的当前位置 */
     if (n->name && !strcmp(n->name, "ptr")) {
         int64_t po = 0;
@@ -6738,7 +6813,12 @@ static Value *ct_eval(Node *n) {
         if (!strcmp(nm, "type")) {
             /* ct_clear 会把 n->ct 洗掉（泛型体每次执行前都清）：
              * type_val 上留着类型，这里重建描述符。 */
-            v = n->ct ? n->ct : (n->type_val ? type_desc_value(n->type_val) : NULL);
+            v = n->ct ? n->ct : (n->type_val ?
+                type_desc_value(n->type_val,
+                    (n->type_val->kind == TY_STRUCT || n->type_val->kind == TY_UNION) &&
+                    n->nitems >= 1 &&
+                    !(n->items[0]->ty && n->items[0]->ty->kind == TY_TYPE) &&
+                    addr_ok(n->items[0]) ? n->items[0] : NULL) : NULL);
         } else if (!strcmp(nm, "compileError")) {
             if (!n->flag) {            /* 折叠可能重试，只报一次 */
                 n->flag = true;

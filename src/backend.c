@@ -4419,6 +4419,18 @@ static void ex(Buf *b, Node *n) {
             cname(b, n->name);
             return;
         }
+        /* §118 字段值指针：f.ptr —— @type(左值) 描述符的 ptr 槽。
+         * 发 ((fldty *)((char *)&(base) + off))：指向这个实例的字段。
+         * f.ptr.0 解引用、赋值、传给 *T 形参都是普通 C 指针语义。
+         * 基址克隆在 n->b、字节偏移在 n->ival（检查期放好的）。 */
+        if (n->ty && n->ty->kind == TY_PTR && n->ty->is_fldptr && n->b) {
+            Buf et; buf_init(&et);
+            ctype(&et, n->ty->elem);
+            buf_printf(b, "((%s *)((char *)&(", et.data);
+            ex(b, n->b);
+            buf_printf(b, ") + %llu))", (unsigned long long)n->ival);
+            return;
+        }
         /* 编译期数量 / 大小 */
         if (bt && n->name) {
             /* 聚合体自己有同名字段时，**字段优先**：`.size` 对数组/元组是

@@ -312,7 +312,7 @@ const BuiltinDoc = struct { name: []const u8, detail: []const u8 };
 // @ 内建（与 src/sema.c check_builtin() 逐字对齐，1.2.2 反射只剩 @type）：
 // 类型转换统一写 `(T)value`；描述符全在编译期。
 const builtin_docs = [_]BuiltinDoc{
-    .{ .name = "type", .detail = "@type(x) 编译期描述符：.name/.size/.align/.ty/.fieldCount/.fields[i]{.name,.ty,.offset}" },
+    .{ .name = "type", .detail = "@type(x) 编译期描述符：.name/.size/.align/.ty/.fieldCount/.fields[i]{.name,.ty,.offset,.ptr}/.statics[i]；x 是左值时 ptr 指向该实例的字段，f.ptr.0 取值" },
     .{ .name = "memcpy", .detail = "@memcpy(dest, src, count) 内存复制" },
     .{ .name = "memmove", .detail = "@memmove(dest, src, count) 内存移动" },
     .{ .name = "memset", .detail = "@memset(dest, fill, count) 内存填充" },
@@ -4445,7 +4445,7 @@ const builtin_ty_table = [_]BuiltinTyDef{
         .{ .name = "alloc", .ty = "fn (?*u8, usize) ?*u8" },
         .{ .name = "free", .ty = "fn (?*u8, *u8, usize) void" },
     } },
-    // Type  = { name, size, align, ty, fieldCount, fields: []Field }
+    // Type  = { name, size, align, ty, fieldCount, fields: []Field, statics: []Field }
     .{ .name = "Type", .fields = &.{
         .{ .name = "name", .ty = "[]const u8" },
         .{ .name = "size", .ty = "usize" },
@@ -4453,12 +4453,16 @@ const builtin_ty_table = [_]BuiltinTyDef{
         .{ .name = "ty", .ty = "type" },
         .{ .name = "fieldCount", .ty = "usize" },
         .{ .name = "fields", .ty = "[]Field" },
+        .{ .name = "statics", .ty = "[]Field" },
     } },
-    // Field = { name, ty, offset }（字段叫 ty，type 是关键字）
+    // Field = { name, ty, offset, ptr }（字段叫 ty，type 是关键字）。
+    // ptr 是字段值指针（§118）：@type(左值) 的描述符才有，`f.ptr.0` 取值 /
+    // 写值。具体类型 *(f.ty) 只在编译器里知道，ty 留空不给误导提示。
     .{ .name = "Field", .fields = &.{
         .{ .name = "name", .ty = "[]const u8" },
         .{ .name = "ty", .ty = "type" },
         .{ .name = "offset", .ty = "usize" },
+        .{ .name = "ptr", .ty = "字段值指针：f.ptr.0 取值，@type(左值) 才有" },
     } },
 };
 
@@ -4479,6 +4483,10 @@ fn isBuiltinTy(ty0: []const u8) bool {
 /// `const n = info.fieldCount` / `info.fields[0].offset` 用它。
 fn builtinFieldTy(ty0: []const u8, member: []const u8) ?[]const u8 {
     const b = builtinTyDefOf(ty0) orelse return null;
+    // KEEP — §118：f.ptr 的具体类型 *(f.ty) 只有编译器知道（逐字段不同），
+    // 推断返回 null（不出 inlay/hover 类型）；表里的文案只给补全 detail。
+    if (std.mem.eql(u8, b.name, "Field") and std.mem.eql(u8, member, "ptr"))
+        return null;
     for (b.fields) |f| {
         if (std.mem.eql(u8, f.name, member)) return f.ty;
     }

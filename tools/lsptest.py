@@ -2355,9 +2355,11 @@ for _need, _want, _tag in (
     check("inlayHint." + _tag, _tih.get(_ln) == _want, str(_tih))
 
 for _recv, _want, _tag in (
-        ("info.", {"name", "size", "align", "ty", "fieldCount", "fields"},
+        ("info.", {"name", "size", "align", "ty", "fieldCount", "fields",
+                   "statics"},
          "descriptor.typeMembers"),
-        ("info.fields[0].", {"name", "ty", "offset"}, "descriptor.fieldMembers")):
+        ("info.fields[0].", {"name", "ty", "offset", "ptr"},
+         "descriptor.fieldMembers")):
     _rid += 1
     _offt = TYUSE.index("        %s\n" % _recv) + 8 + len(_recv)
     send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/completion", "params": {
