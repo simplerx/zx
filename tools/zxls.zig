@@ -1262,6 +1262,71 @@ fn isPurePath(e0: []const u8) bool {
     return seg_len > 0;
 }
 
+/// 成员访问的接收者起点：从 `.` 往回扫，标识符字符和 `.` 都算，成对的
+/// `( … )` 整段也算——`HashMap(i32).init` 的接收者是 `HashMap(i32)`，
+/// 泛型实例上的方法/关联常量也该能跳（用户 2026-11-11：类型和函数跳不过去）。
+/// 扫到别的字符就停。
+fn memberBaseStart(text: []const u8, dot: usize) usize {
+    var i = dot;
+    while (i > 0) {
+        const c = text[i - 1];
+        if (isIdentChar(c) or c == '.') {
+            i -= 1;
+            continue;
+        }
+        if (c == ')') {
+            var d: usize = 0;
+            var j = i - 1;
+            var found = false;
+            while (true) {
+                if (text[j] == ')') {
+                    d += 1;
+                } else if (text[j] == '(') {
+                    d -= 1;
+                    if (d == 0) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (j == 0) break;
+                j -= 1;
+            }
+            if (!found) return i;
+            i = j;
+            continue;
+        }
+        break;
+    }
+    return i;
+}
+
+/// 去掉尾部的泛型实参：`std.map.HashMap(i32)` → `std.map.HashMap`。
+/// 容器名后的括号只可能是实例化实参（Zx 里函数调用不会出现在类型路径上），
+/// 所以从尾部一段段剥干净就行，多段嵌套 `A.B(C)(D)` 也覆盖。
+fn stripGenericSuffix(e0: []const u8) []const u8 {
+    var e = trimSl(e0);
+    while (e.len > 1 and e[e.len - 1] == ')') {
+        var d: usize = 0;
+        var j = e.len;
+        var found = false;
+        while (j > 0) {
+            j -= 1;
+            if (e[j] == ')') {
+                d += 1;
+            } else if (e[j] == '(') {
+                d -= 1;
+                if (d == 0) {
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if (!found or j == 0) break;
+        e = trimSl(e[0..j]);
+    }
+    return e;
+}
+
 /// `A.B.Cfg{ .x = 1 }` → "A.B.Cfg"（'{' 前的纯点路径）；不是具名字面量返回 null。
 fn literalPathOf(e0: []const u8) ?[]const u8 {
     const e = trimSl(e0);
@@ -2573,9 +2638,10 @@ fn definitionAt(doc: *const Document, line: u32, character: u32) ?[]const u8 {
     //      这里用补全那套逐段解析拿到容器体，再在体里找成员声明
     //      （用户 2026-11-11：类型和函数都跳不过去）。
     if (ws > 0 and text[ws - 1] == '.') {
-        var bs = ws - 1;
-        while (bs > 0 and (isIdentChar(text[bs - 1]) or text[bs - 1] == '.')) bs -= 1;
-        const base = text[bs .. ws - 1];
+        const bs = memberBaseStart(text, ws - 1);
+        // 泛型实例上的成员：`HashMap(i32).init` 的接收者是 `HashMap(i32)`，
+        // 剥掉实例化实参才认得出容器（`std.map.HashMap(i32).init` 以前一律 MISS）。
+        const base = stripGenericSuffix(text[bs .. ws - 1]);
         if (base.len > 0 and isPurePath(base)) {
             var sf = scanFiles(doc, text);
             defer sf.deinit(gpa);

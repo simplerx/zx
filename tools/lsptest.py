@@ -2058,6 +2058,44 @@ for _tag, _needle in (
            and _loc.get("range", {}).get("start", {}).get("line") is not None)
     check("definition." + _tag, _ok, str(_loc)[:200])
 
+# definition：std 里的类型/函数也要跳（泛型实例上的成员、再导出容器里的成员）。
+# `HashMap(i32).init` 的接收者带实例化实参，以前 base 只剩空的，一律 MISS；
+# `std.json.Obj.norm` 走的是 std.zx 的 `pub const json = module("json.zx")`
+# 再导出，名字在全扫描集里撞不出正确文件。
+DEFSTD = """const std = module("std");
+
+const main = fn () i32 {
+    let al = std.heap.page;
+    var m = std.map.HashMap(i32).init(al);
+    let h = std.json.Obj.norm(5);
+    std.println("{} {}", m.count(), h);
+    return 0;
+};
+"""
+defuri = "file:///" + os.path.join(SRC_DIR, "defstd.zx").replace("\\", "/")
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": defuri, "languageId": "zx", "version": 1, "text": DEFSTD}}})
+for _tag, _path, _file in (
+        ("def.genericInstMethod", "std.map.HashMap(i32).init", "map.zx"),
+        ("def.genericInstType", "std.map.HashMap(i32)", "map.zx"),
+        ("def.reexportTypeMember", "std.json.Obj.norm", "json.zx"),
+        ("def.reexportType", "std.json.Obj", "json.zx")):
+    _rid += 1
+    _w = _path.split(".")[-1]                  # 末段，可能是 `init` 或 `HashMap(i32)`
+    if _w.endswith(")"):
+        _w = _w[:_w.rindex("(")]               # 停在容器名上，不停在 `i32` 上
+    _off = DEFSTD.index(_path) + _path.rindex(_w)
+    send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/definition", "params": {
+        "textDocument": {"uri": defuri}, "position": pos(DEFSTD, _off)}})
+    _r, _ = recv_id("defstd", _rid)
+    _loc = (_r or {}).get("result") or {}
+    if isinstance(_loc, list):
+        _loc = _loc[0] if _loc else {}
+    _ok = (isinstance(_loc, dict) and _file in (_loc.get("uri") or "")
+           and _loc.get("range", {}).get("start", {}).get("line") is not None)
+    check("definition." + _tag, _ok, str(_loc)[:200])
+
+
 cov_lines = ['const std = module("std");', "", "pub const main = fn () u8 {"]
 cov_marks = []
 for _mod, _name, _shape, _factory in cov_types:

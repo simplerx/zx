@@ -3536,3 +3536,26 @@ pool）是物理隔离的用户态调度器；组是零设施——spawn 即起�
   （fixture chain3 刻意用 ChainXxx 前缀，避免与既有 fixture 撞名）。
 
 验证：`sh test.sh` 全绿；lsptest 244 项全过。
+
+## 110. 跳转也要认泛型实例与再导出容器（`HashMap(i32).init` / `std.json.Obj.norm`）
+
+**裁定（2026-11-11，接 §109 的"类型和函数不能跳转"）**：跳转解析的接收者
+不能只认"纯点路径"。用户实际写的是 `std.map.HashMap(i32).init(al)`，
+`.` 前一个字符是 `)`，旧的反向扫描（只吃标识符字符和 `.`）立刻停住，
+base 成空串，整条不解析 → 一律 MISS。两处补齐：
+
+1. **`memberBaseStart`**：从 `.` 往回扫时把成对的 `( … )` 整段当作一个整体
+   跳过（括号里是 `i32`、`*Foo`、逗号都无所谓），扫到别的字符才停。
+2. **`stripGenericSuffix`**：拿到 base 后把尾部泛型实参一段段剥掉
+   （`std.map.HashMap(i32)` → `std.map.HashMap`），再交给
+   `resolveContainerPath`。Zx 的类型路径上不会出现函数调用，所以"名字后跟
+   括号"只可能是实例化实参，剥干净是安全的；`f(x).member` 这种值调用剥完
+   得到 `f`（不是容器）→ 返回 null，行为与旧版一致。
+
+再导出一侧 §109 已经修好（`std.json.Obj` 经 `std.zx` 的
+`pub const json = module("json.zx")` 逐段落到真实文件），这里只是把守门补上。
+
+**守门（lsptest 248 项）**：definition.def.genericInstMethod（`init` → map.zx）、
+def.genericInstType（`HashMap` → map.zx）、def.reexportTypeMember
+（`norm` → json.zx）、def.reexportType（`Obj` → json.zx）；
+fixture 是只引用 std 的 `defstd.zx`，不含本地容器，不会串味。
