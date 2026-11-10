@@ -5286,6 +5286,13 @@ static void gen_stmt(Node *n) {
              * 走槽位路径，右值是 if/switch 表达式也能接住。 */
             if (n->op == TOK_ASSIGN && n->a->kind == NK_IDENT &&
                 !strcmp(n->a->name, "_") && !n->a->sym) {
+                /* `_ = <编译期值>;`（`const t: type = info.fields[0].ty;`
+                 * 之后的 `_ = t;`）：右侧根本没有运行期表示，C 里既不该
+                 * 开临时量也不该引用它——以前发成 `void _ds0 = {0};` +
+                 * `_ds0 = t;`，C 报 incomplete type 'void' / undeclared
+                 * identifier（用户 2026-11-11 第 2 张截图）。 */
+                if (n->b->ty && (n->b->ty->kind == TY_TYPE ||
+                                 sema_ty_ct_only(n->b->ty))) return;
                 static int ad;
                 char tmp[32];
                 snprintf(tmp, sizeof tmp, "_ds%d", ad++);

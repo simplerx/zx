@@ -1,0 +1,84 @@
+// reflect.zx —— `@type(x)` 描述符 + 泛型里读取传进来的类型 / 字段 / 值
+//
+// 用户 2026-11-11 第 2 张截图那条线的守门：
+//   const info: Type = @type(T);        ← LSP 行内提示写的就是这个类型名，
+//                                          以前照着敲是 E0401 unknown type 'Type'
+//   info.fields.0.name / .ty / .offset   ← 下标（`[0]` 与 `.0` 等价）
+//   const t: type = info.fields.0.ty;
+//   _ = t;                               ← 编译期绑定：C 里既不开变量也不引用
+//   const k = cap * 2;                   ← 泛型值实参在体里就是编译期常量
+//
+// 读字段要用 `inline for (0..info.fieldCount) i`——展开后 i 是编译期常量，
+// `info.fields[i]` 才折得动（普通 `while` 的 i 是运行时值，const 初始化器报 R1）。
+const std = module("std");
+
+const Point = struct { x: i32, y: i32 };
+const Pair = struct { a: i32, b: i64 };
+
+// 类型值 + 描述符：名字、字段数、大小、对齐、字段名 / 类型 / 偏移
+const describe = fn (T: type) void {
+    const info: Type = @type(T);
+    std.println("{} fields={} size={} align={}",
+                info.name, info.fieldCount, info.size, info.align);
+    inline for (0..info.fieldCount) i {
+        const f: Field = info.fields[i];
+        std.println("  {}: {} @{}", f.name, @type(f.ty).name, f.offset);
+    }
+};
+
+// 泛型工厂：T 在体里既是类型（`@type(T)` / 字段类型），
+// 类型实参写死一个类型值，值实参 cap 在体里当编译期常量用。
+const Slots = fn (T: type, cap: usize) type {
+    return struct {
+        buf: *[cap]T,
+        len: usize,
+
+        pub const cap2 = fn () usize {
+            const k = cap * 2;
+            return k;
+        };
+
+        pub const elemName = fn () []const u8 {
+            return @type(T).name;
+        };
+
+        pub const firstField = fn () []const u8 {
+            const info = @type(T);
+            if (info.fieldCount == 0) { return "<none>"; }
+            const n: []const u8 = info.fields.0.name;
+            return n;
+        };
+    };
+};
+
+pub const main = fn () u8 {
+    describe(Point);
+    describe(Pair);
+
+    const S = Slots(Point, 4);
+    std.println("cap2={} elem={} first={}", S.cap2(), S.elemName(), S.firstField());
+
+    var buf = std.stackAlloc(Point, 4);
+    var s = Slots(Point, 4){ .buf = buf, .len = 0 };
+    s.len = 1;
+    std.println("len={} elemSize={}", s.len, @type(Point).size);
+
+    // 编译期绑定：类型值没有运行期存储
+    const info = @type(Point);
+    const t: type = info.fields.0.ty;
+    _ = t;
+    const name: []const u8 = info.fields.0.name;
+    std.println("last={} first={}", info.fields[1].name, name);
+    return 0;
+};
+
+// expect-output
+// Point fields=2 size=8 align=4
+//   x: i32 @0
+//   y: i32 @4
+// Pair fields=2 size=16 align=8
+//   a: i32 @0
+//   b: i64 @8
+// cap2=8 elem=Point first=x
+// len=1 elemSize=8
+// last=y first=x

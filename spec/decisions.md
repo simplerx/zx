@@ -3740,3 +3740,51 @@ completion.vendorChain.{instMembers,typeMembers}、definition.vendorChain.nested
 fixture 特意放 `TESTDIR/vendor/vendmod.zx`、文档放 `src/venduse.zx`——放同目录
 根本测不出这条断链（同目录会被 scanFiles 扫到）。用改前的 exe 跑这套：
 inlay 两条与 definition 一条必挂，`VdQ.`/`VdP.` 两条本来就通。
+
+## 116. 模块目录跟文档走（vendor / zx.json deps）+ `Type`/`Field` 可标注 + 泛型值实参可读
+
+**裁定（2026-11-11，接第 8 张截图）**：
+
+1. **匿名 struct 实参的字段补全**（`P.P3.f3(0, .{ .a = 0, .b = 0 })`）：
+   `anonParamTy` 只在「当前文档 + 同目录 .zx + 模块绑定文件」里找被调声明，
+   而 `P.P3.f3` 的接收者是**类型值路径**（不是模块绑定），声明在
+   `vendor/test.zx` / deps 目录里 → 一个字段都补不出。两条补法：
+   - 被调带点时按容器路径解析（`containerOfBinding` → `resolveContainerPathLoose`），
+     拿到**容器所在文件的文本**排进待搜集合；
+   - 仍找不到就兜底扫 `modDirsInto` 的模块目录（vendor、deps、工程根，跳过 std，
+     最多 240 个文件）。顺序与编译器 module_load 同一条链。
+   顺带修：`struct{pub a: u32}` 的字段名要剥掉 `pub ` 修饰符（补全 label 只写名字）。
+
+2. **模块搜索目录不能只在 initialize 算一次**。宿主可能只发单个文件（rootUri
+   为 null）或把工作区开在 `src/`，那时工程根的 `vendor/` 与 `zx.json` 的 deps
+   全漏掉。新增 `ensureDocDirs(doc_dir)`：从文档目录往上找最近的 `zx.json`
+   （最多 8 层），把 它的同级 `vendor/`、它自己、它的 `deps` 全部 `addModDir`；
+   `modDirsInto` 每次先调它。`addModDir` 自带去重，重复调用不会撑大表。
+   这是用户说的"就算不写默认也扫 vendor"在 LSP 侧的对齐。
+
+3. **`Type` / `Field` 必须能写出来**。行内提示一直写 `const info: Type = @type(T);`，
+   照着敲却报 E0401 unknown type 'Type'（`std.Type` 也不行）——名字只在
+   `g_std_seeded` 的**值**表里，`base_type` 与 `std_builtin` 都不认。现在两处都补，
+   且 `var`/`let` 的 ct-only 检查仍拦（`const` 放行，它是编译期绑定）。
+   另一处泄漏：`_ = <编译期值>;` 发成 `void _ds0 = {0}; _ds0 = t;`，C 报
+   incomplete type 'void' / undeclared identifier——`_ =` 分支遇到 TY_TYPE 或
+   ct-only 直接不发代码。
+
+4. **泛型值实参在体内读不到**：`const k = cap * 2;` 报 R1。`ct_eval` 的 NK_IDENT
+   对 SK_PARAM 一律拒绝（运行时形参是只读槽位，正确），但泛型实参是 `ct_bind`
+   ——它**没有**运行时存储，值就是编译期常量。条件补上 `&& !sym->ct_bind`。
+
+读字段的写法（文档原来写的 `inline for (info.fields) f` 实现不支持，只有整数
+范围）：`inline for (0..info.fieldCount) i { const f: Field = info.fields[i]; … }`
+——i 是编译期常量，下标才折得动。docs/reference.md 已改。
+
+守门：lsptest `completion.vendorChain.anonArgFields`、`completion.depsChain.*`、
+`inlayHint.depsChain.*`、`definition.depsChain.nestedType`（fixture 在
+`.tmp/lsptest/vendor/` 与 `libs/`，后者就是 zx.json 的 deps 目录）；改前的 exe 上
+两条 anonArgFields 必挂。编译器 `tests/good/reflect.zx`（函数体反射全场景 +
+值泛型 + `_ = t;`）。
+
+**已知遗留（不在本条）**：泛型工厂返回的 struct 里的**静态成员**（`pub const k = cap;`
+以外那些 `@type(T)…` 的）在容器级被引用时仍不物化：`dflt` 节点是定义时的克隆，
+惰性检查发生在 T 的作用域已经弹掉之后，`@type(T)` 折不出值，C 里漏出 `0.name`。
+函数体里写的反射（`const info = @type(T); info.fields[0].name`）是好的。

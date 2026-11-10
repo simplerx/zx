@@ -497,6 +497,8 @@ static void  check_return_paths(Node *fn, Type *ret);
 static bool  stmt_blocks_next(Node *s);     /* 不可达代码：这条之后的下一条还到得了吗 */
 
 /* ---------------- 内建 / 基础类型 ---------------- */
+static Type *sema_type_type(void);
+static Type *sema_type_field_type(void);
 
 static Type *base_type(const char *n) {
     if (!n) return NULL;
@@ -519,6 +521,10 @@ static Type *base_type(const char *n) {
         return NULL;
     }
     if (!strcmp(n, "Allocator")) return sema_allocator_type();
+    /* `@type(x)` 的两个描述符类型：源文件里没有声明，名字是编译器内建的
+     * （和 Allocator 一样）。LSP 的行内提示会写 `: Type` / `: Field`。 */
+    if (!strcmp(n, "Type"))  return sema_type_type();
+    if (!strcmp(n, "Field")) return sema_type_field_type();
     return NULL;
 }
 
@@ -668,6 +674,7 @@ static Value *type_desc_value(Type *t) {
  * `std.println` / `std.file.read` 走的是同一条"模块成员"查找路径。 */
 static Symbol *std_builtin(const char *name) {
     static Symbol print_s, println_s, format_s, heap_s, page_s, file_s, alloc_s;
+    static Symbol type_s, field_s;
     static Symbol salloc_s, halloc_s;
     static Symbol f_read, f_write, f_append, f_exists, f_remove;
     static Symbol io_s, i_openr, i_openw, i_opena, i_read, i_write;
@@ -716,7 +723,19 @@ static Symbol *std_builtin(const char *name) {
         alloc_s.type_val = sema_allocator_type();
 
         /* @type 用到的两个描述符类型也挂在 std 上（`std.Type` / `std.Field`），
-         * 错误信息里点得到名字；它们 ct-only，开不了运行时变量 */
+         * 错误信息里点得到名字；它们 ct-only，开不了运行时变量。
+         * 用户 2026-11-11：LSP 的行内提示写 `const info: Type = @type(T);`，
+         * 照着敲进来却是 E0401 unknown type 'Type'——名字必须真能写出。 */
+        type_s.name = "Type";
+        type_s.kind = SK_CONST;
+        type_s.state = 2;
+        type_s.ty = ty_type();
+        type_s.type_val = sema_type_type();
+        field_s.name = "Field";
+        field_s.kind = SK_CONST;
+        field_s.state = 2;
+        field_s.ty = ty_type();
+        field_s.type_val = sema_type_field_type();
         /* std.file：普通函数调用，C 那边是编译器生成的运行时函数 */
         Type *s8 = ty_slice(ty_u8(), true);
         Type *p1[1] = { s8 };
@@ -890,6 +909,8 @@ static Symbol *std_builtin(const char *name) {
     if (!strcmp(name, "io.read"))    return &i_read;
     if (!strcmp(name, "io.write"))   return &i_write;
     if (!strcmp(name, "Allocator")) return &alloc_s;
+    if (!strcmp(name, "Type"))      return &type_s;
+    if (!strcmp(name, "Field"))     return &field_s;
 
     if (!strcmp(name, "stackAlloc")) return &salloc_s;
     if (!strcmp(name, "heapAlloc"))  return &halloc_s;
@@ -4317,9 +4338,11 @@ static void ensure_raw(Symbol *s) {
     }
 
     Type *ann = d->a ? resolve_type(d->a) : NULL;
-    if (sema_ty_ct_only(ann)) {
+    if (sema_ty_ct_only(ann) && s->kind != SK_CONST) {
         /* Type / Field 只活在编译期：var/let 要给它们开运行时
-         * 存储，没有对应物。要描述符请用 const（值在 ct 里，不占存储）。 */
+         * 存储，没有对应物。要描述符请用 const（值在 ct 里，不占存储）。
+         * `const info: Type = @type(T);` 是**合法**写法（LSP 的行内提示
+         * 就是这么写的），只有 var/let 才拦（用户 2026-11-11）。 */
         err_at(d->line, d->col,
                "`%s` exists only at compile time; bind it with `const` "
                "straight from `@type`", ty_str(ann));
@@ -6519,7 +6542,13 @@ static Value *ct_eval(Node *n) {
             break;
         }
         int k = n->sym->kind;
-        if ((k == SK_VAR || k == SK_PARAM || k == SK_CAPTURE) && g_ct_exec == 0) break;
+        /* SK_PARAM 只在**真的执行编译期代码**时才能读——运行时形参是只读槽位。
+         * 但泛型实参（`cap: usize`、`T: type`）是 ct_bind：它本来就没有运行时
+         * 存储，值就是编译期常量，检查阶段也必须读得到，否则体里
+         * `const k = cap * 2;` 会报 R1（用户 2026-11-11 问的"怎么读取传进来的
+         * 泛型值"就是这个）。 */
+        if ((k == SK_VAR || k == SK_PARAM || k == SK_CAPTURE) && g_ct_exec == 0 &&
+            !n->sym->ct_bind) break;
         v = n->sym->ct;
         break;
     }

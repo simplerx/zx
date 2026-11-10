@@ -2026,7 +2026,12 @@ fn parseAnonTy(ty: []const u8) ?std.ArrayList(AnonField) {
             }
         }
         const cl = colon orelse continue;
-        const nm = trimSl(seg[0..cl]);
+        // `struct{pub a: u32}`（跨文件匿名形参常这么写）：补全的 label
+        // 只能是字段名，`pub ` 是修饰符不是名字。
+        var nm0 = trimSl(seg[0..cl]);
+        if (std.mem.startsWith(u8, nm0, "pub ") or std.mem.startsWith(u8, nm0, "pub\t"))
+            nm0 = trimSl(nm0[3..]);
+        const nm = nm0;
         const t2 = trimSl(seg[cl + 1 ..]);
         if (nm.len == 0 or t2.len == 0) continue;
         out.append(gpa, .{ .name = nm, .ty = t2 }) catch {};
@@ -2288,15 +2293,10 @@ fn addModDir(p: []const u8) void {
     keep = true;
 }
 
-/// initialize 之后调用一次：工程根的 vendor/ 与 zx.json 的 deps
-fn initModuleDirs() void {
-    g_mod_dir_n = 0;
-    const root = root_path orelse return;
-    addModDir(joinPath(root, "vendor"));
-    const cfg = joinPath(root, "zx.json");
-    defer gpa.free(cfg);
-    const txt = readFileSmall(cfg) orelse return;
-    defer gpa.free(txt);
+/// zx.json 的 `"deps"`：模块搜索目录。相对路径按**工程根**拼成绝对路径
+/// （LSP 进程的 cwd 由宿主决定，不能靠相对路径）。`vendor/` 不写也在，
+/// 那是 zx 的规矩（编译器 setup_search_paths 同款）。
+fn appendDepsDirs(root: []const u8, txt: []const u8) void {
     const parsed = std.json.parseFromSlice(std.json.Value, gpa, txt, .{}) catch return;
     defer parsed.deinit();
     if (parsed.value != .object) return;
@@ -2308,9 +2308,50 @@ fn initModuleDirs() void {
     }
 }
 
+/// initialize 之后调用一次：工程根的 vendor/ 与 zx.json 的 deps
+fn initModuleDirs() void {
+    g_mod_dir_n = 0;
+    const root = root_path orelse return;
+    addModDir(joinPath(root, "vendor"));
+    const cfg = joinPath(root, "zx.json");
+    defer gpa.free(cfg);
+    const txt = readFileSmall(cfg) orelse return;
+    defer gpa.free(txt);
+    appendDepsDirs(root, txt);
+}
+
+/// 文档所在目录往上的工程根：就近的 zx.json + 它的 vendor/ + 它的 deps。
+/// 只在 initialize 时按 rootUri 算一次是不够的——宿主可能只发单个文件
+/// （rootUri 为 null），或者把工作区开在 src/ 而不是工程根，那时
+/// `vendor/` 与 deps 全都漏掉：模块能编过，补全/跳转却一律落空。
+/// addModDir 自带去重，重复调用不会把表撑大。
+fn ensureDocDirs(doc_dir: []const u8) void {
+    var dir = doc_dir;
+    var depth: u8 = 0;
+    while (depth < 8) : (depth += 1) {
+        if (dir.len == 0) return;
+        // vendor 不看 zx.json 是否存在：编译器也是"目录在就参与搜索"
+        addModDir(joinPath(dir, "vendor"));
+        const cfg = joinPath(dir, "zx.json");
+        const txt = readFileSmall(cfg);
+        gpa.free(cfg);
+        if (txt) |t| {
+            defer gpa.free(t);
+            addModDir(dupe(dir));
+            appendDepsDirs(dir, t);
+            return;
+        }
+        const up = dirName(dir);
+        if (up.len == 0 or up.len >= dir.len) return;
+        dir = up;
+    }
+}
+
 /// 模块解析目录，顺序：文件所在目录 → 工程根 → vendor/ → deps。
 /// 前两个每次现算（跟着文档走），后两个 initialize 时已定。
 fn modDirsInto(doc_dir: []const u8, out: *std.ArrayList([]const u8)) void {
+    // 文档目录附近的工程根 / vendor / deps：跟着文档补齐（见 ensureDocDirs）
+    ensureDocDirs(doc_dir);
     out.append(gpa, doc_dir) catch return;
     if (root_path) |r| {
         if (!std.mem.eql(u8, r, doc_dir)) out.append(gpa, r) catch return;
@@ -6618,6 +6659,20 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                         if (mm) |m2| {
                             if (resolveModuleFile(doc, m2)) |mp2| mtxt = readFileSmall(mp2);
                         }
+                        // 被调不是模块成员而是**类型值路径**上的函数
+                        //（`const P: type = vt.P1.P2;` 之后 `P.P3.f3(0, .{ … })`）：
+                        // moduleOfBinding 只认模块绑定，这里按容器路径解析，
+                        // 容器体在 vendor / deps 里也拿得到 → 匿名 struct 实参
+                        // 的字段补全不再落空（用户 2026-11-11 第 1 张截图）。
+                        if (mtxt == null and bind.len > 0) {
+                            var cf9 = scanFiles(doc, text);
+                            defer cf9.deinit(gpa);
+                            if (containerOfBinding(cf9.items, doc, text, bind, 0)) |pc9| {
+                                if (pc9.src.len > 0 and !std.mem.eql(u8, pc9.src, text)) mtxt = pc9.src;
+                            } else if (resolveContainerPathLoose(cf9.items, doc, text, bind)) |pc8| {
+                                if (pc8.src.len > 0 and !std.mem.eql(u8, pc8.src, text)) mtxt = pc8.src;
+                            }
+                        }
                     }
                     // 实参序号：'(' 到目标 '{' 之间顶层逗号数
                     var argi: usize = 0;
@@ -6660,7 +6715,42 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                                 if (readFileSmall(fp.items)) |txt| afiles.append(gpa, txt) catch {};
                             }
                         }
-                        if (anonParamTy(afiles.items, fname, argi)) |pty0| {
+                        // 兜底：模块目录（vendor / zx.json deps / 工程根）里
+                        // 找同名函数。`vendor/test.zx` 定义的 `f3` 不在文档
+                        // 目录里，只扫文档目录永远看不到它的形参类型——
+                        // 这与"补全要跟编译器同一条模块搜索链"是同一件事。
+                        var pty_opt: ?[]const u8 = anonParamTy(afiles.items, fname, argi);
+                        if (pty_opt == null) {
+                            var extra: std.ArrayList([]const u8) = .empty;
+                            defer extra.deinit(gpa);
+                            var mdirs: std.ArrayList([]const u8) = .empty;
+                            defer mdirs.deinit(gpa);
+                            modDirsInto(doc_dir, &mdirs);
+                            var nfiles: usize = 0;
+                            for (mdirs.items) |md2| {
+                                if (g_std_dir) |sd2| {
+                                    if (std.mem.eql(u8, md2, sd2)) continue;
+                                }
+                                if (std.mem.eql(u8, md2, doc_dir)) continue;
+                                var d9 = Io.Dir.cwd().openDir(g_io, md2, .{ .iterate = true }) catch continue;
+                                defer d9.close(g_io);
+                                var it9 = d9.iterate();
+                                while (it9.next(g_io) catch null) |e9| {
+                                    if (e9.kind != .file) continue;
+                                    if (!std.mem.endsWith(u8, e9.name, ".zx")) continue;
+                                    if (nfiles >= 240) break;
+                                    nfiles += 1;
+                                    var fp9: std.ArrayList(u8) = .empty;
+                                    defer fp9.deinit(gpa);
+                                    fp9.appendSlice(gpa, md2) catch continue;
+                                    fp9.append(gpa, '/') catch continue;
+                                    fp9.appendSlice(gpa, e9.name) catch continue;
+                                    if (readFileSmall(fp9.items)) |txt9| extra.append(gpa, txt9) catch {};
+                                }
+                            }
+                            if (extra.items.len > 0) pty_opt = anonParamTy(extra.items, fname, argi);
+                        }
+                        if (pty_opt) |pty0| {
                             var pty = pty0;
                             var okc = true;
                             // 右界 lit_brace + 1：lit_brace 是目标 '{' 前的

@@ -2510,6 +2510,96 @@ check("definition.vendorChain.nestedType",
       isinstance(_vloc, dict) and "vendmod.zx" in (_vloc.get("uri") or ""),
       str(_vloc)[:200])
 
+# ------------------------------------------------ 匿名 struct 实参里的字段（模块在 vendor/deps）
+#
+# 用户 2026-11-11 第 1 张截图：`P.P3.f3(0, .{ .a = 0, .b = 0 })` 类型提示有了，
+# 但 `.{ .` 里不出字段。被调的声明在 vendor/deps 的模块文件里，
+# anonParamTy 只在"文档目录 + 当前文件 + 模块绑定文件"里找，于是落空。
+# 两条补法一起上：被调接收者按容器路径解析（containerOfBinding /
+# resolveContainerPathLoose 拿到容器所在文件的文本）+ 兜底扫 modDirsInto
+# 的模块目录（vendor、zx.json 的 deps、工程根）。
+_rid += 1
+_offa = VDSRC.index(".{ .a = 10") + len(".{ .")
+send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/completion", "params": {
+    "textDocument": {"uri": vduri}, "position": pos(VDSRC, _offa)}})
+_r, _ = recv_id("venduse", _rid)
+_laba = sorted({i["label"] for i in ((_r or {}).get("result") or {}).get("items") or []})
+check("completion.vendorChain.anonArgFields", set(_laba) == {"a", "b"}, str(_laba))
+
+# zx.json 的 deps（TESTDIR/zx.json 里写的是 "deps": ["libs"]）：
+# 模块文件完全不在文档目录下，只有 deps 这一条链能把它找回来。
+DPMOD = """pub const DpRoot = struct{
+
+    pub const DpMid = struct {
+        pub const DpLeaf = struct {
+            pub const df3 = fn (i32, struct{pub a: u32, pub b: u32}) i32 {
+                return 0;
+            };
+        };
+    };
+};
+"""
+open(os.path.join(TESTDIR, "libs", "deepmod.zx"), "w", encoding="utf-8").write(DPMOD)
+DPSRC = """const std = module("std");
+const dm = module("deepmod");
+
+const DpP: type = dm.DpRoot.DpMid;
+const DpQ = DpP.DpLeaf;
+_ = DpQ;
+var DpF = DpP.DpLeaf.df3(1, .{ .a = 1, .b = 2 });
+_ = DpF;
+DpQ.
+var DpLit = DpP.DpLeaf.df3(1, .{ .a = 1, .b = 2 });
+_ = DpLit;
+"""
+dpuri = "file:///" + os.path.join(SRC_DIR, "depsuse.zx").replace("\\", "/")
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": dpuri, "languageId": "zx", "version": 1, "text": DPSRC}}})
+_rid += 1
+send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/inlayHint", "params": {
+    "textDocument": {"uri": dpuri},
+    "range": {"start": {"line": 0, "character": 0},
+              "end": {"line": len(DPSRC.split("\n")), "character": 0}}}})
+_r, _ = recv_id("depsuse", _rid)
+_dih = {}
+if _r and _r.get("result"):
+    for _h in _r["result"]:
+        _lbdd = _h.get("label")
+        if isinstance(_lbdd, str):
+            _dih[_h["position"]["line"]] = _lbdd
+check("inlayHint.depsChain.localTypeQ",
+      _dih.get(DPSRC[:DPSRC.index("const DpQ =")].count("\n")) == ": type", str(_dih))
+check("inlayHint.depsChain.callRet",
+      _dih.get(DPSRC[:DPSRC.index("var DpF =")].count("\n")) == ": i32", str(_dih))
+
+_rid += 1
+_offdp = DPSRC.index(".{ .a = 1") + len(".{ .")
+send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/completion", "params": {
+    "textDocument": {"uri": dpuri}, "position": pos(DPSRC, _offdp)}})
+_r, _ = recv_id("depsuse", _rid)
+_labdp = sorted({i["label"] for i in ((_r or {}).get("result") or {}).get("items") or []})
+check("completion.depsChain.anonArgFields", set(_labdp) == {"a", "b"}, str(_labdp))
+
+_rid += 1
+_offdq = DPSRC.index("DpQ.\n") + len("DpQ.")
+send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/completion", "params": {
+    "textDocument": {"uri": dpuri}, "position": pos(DPSRC, _offdq)}})
+_r, _ = recv_id("depsuse", _rid)
+_labq = sorted({i["label"] for i in ((_r or {}).get("result") or {}).get("items") or []})
+check("completion.depsChain.instMembers", "df3" in set(_labq), str(_labq))
+
+_rid += 1
+_dpoff = DPSRC.index("const DpQ = DpP.") + len("const DpQ = DpP.")
+send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/definition", "params": {
+    "textDocument": {"uri": dpuri}, "position": pos(DPSRC, _dpoff)}})
+_r, _ = recv_id("depsuse", _rid)
+_dloc = (_r or {}).get("result") or {}
+if isinstance(_dloc, list):
+    _dloc = _dloc[0] if _dloc else {}
+check("definition.depsChain.nestedType",
+      isinstance(_dloc, dict) and "deepmod.zx" in (_dloc.get("uri") or ""),
+      str(_dloc)[:200])
+
 cov_lines = ['const std = module("std");', "", "pub const main = fn () u8 {"]
 cov_marks = []
 for _mod, _name, _shape, _factory in cov_types:

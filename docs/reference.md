@@ -220,7 +220,7 @@ for (xs) x { … }                                   // 遍历切片
 for (xs, 0..) x, i { … }                           // 带下标
 for (0..n) i { … }                                 // 整数范围（不含 n）
 for (0..n) i { … } else { … }                      // 空范围走 else
-inline for (info.fields) f { … }                   // 编译期展开
+inline for (0..info.fieldCount) i { … }            // 编译期展开（i 是编译期常量）
 
 switch (v) {
     1, 2: …;
@@ -318,13 +318,30 @@ x 是**类型**（`Point`、`i32`、`[]const u8`、泛型 T）或**表达式**�
 | `.fieldCount` | `usize` | 数据字段数 |
 | `.fields[i].name / .ty / .offset` | — | 逐字段：名字 / 类型 / 偏移 |
 
+两个描述符类型名是编译器内建的，可直接拿来标注：`const info: Type = @type(T);`、
+`const f: Field = info.fields[0];`（`var` / `let` 仍然不行——它们没有运行时表示）。
+读字段要在编译期展开里做，`i` 才是常量：
+
+```zx
+const describe = fn (T: type) void {
+    const info: Type = @type(T);
+    inline for (0..info.fieldCount) i {
+        const f: Field = info.fields[i];
+        std.println("{}: {} @{}", f.name, @type(f.ty).name, f.offset);
+    }
+};
+```
+
 `@sizeOf` / `@alignOf` / `@typeName` / `@typeInfo` / `@typeOf` 都是它的历史拼写，
 现报 E0211 并提示替代写法。字段偏移也可现场算：`((usize)&v.f) - ((usize)&v)`。
 
 ```zx
 const ti = @type(Point);
 if (ti.size != 8) { return 1; }
-inline for (@type(Point).fields) f { std.println("{}", f.name); }
+inline for (0..ti.fieldCount) i {
+    const f: Field = ti.fields[i];      // i 是编译期常量，这里才折得动
+    std.println("{}: {}", f.name, @type(f.ty).name);
+}
 ```
 
 ---
