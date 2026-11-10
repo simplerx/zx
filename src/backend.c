@@ -5370,7 +5370,11 @@ static void gen_stmt(Node *n) {
                                  sema_ty_ct_only(n->b->ty))) return;
                 static int ad;
                 char tmp[32];
-                snprintf(tmp, sizeof tmp, "_ds%d", ad++);
+                /* 前缀用 _ig：解构临时（NK_DECL 分支）的 _ds 计数器是独立
+                 * 的，两套计数器同发 _ds0 会撞名 —— `_ = p;` 跟在
+                 * `const {a,b} = t;` 后面就 B1001 redefinition
+                 * （2026-11-11 reference 校对踩中）。 */
+                snprintf(tmp, sizeof tmp, "_ig%d", ad++);
                 line("%s %s = {0};", cty(n->b->ty), tmp);
                 gen_value(n->b, tmp, n->b->ty);
                 return;
