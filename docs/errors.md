@@ -257,9 +257,13 @@ let c: Color = undefined;      // E0401 —— help 会说 `did you mean \`Colou
 <a id="e0404"></a>
 ### E0404 私有成员，或声明位置不合法
 
-**典型消息**：`'secret' is private to module 'lib'; mark it \`pub\` to export it`
+**典型消息**：
+- `'secret' is private to module 'lib'; mark it \`pub\` to export it`
+- `'n' is a private member of \`HashMap\` (declared in std/map.zx); mark it \`pub\` in the container body to expose it`
 
 跨模块访问要对方 `pub`。后面跟的 `note` 会指出它在哪个文件哪一行声明。
+2026-11-11 起容器体成员（字段 / 方法 / 静态成员）同样默认私有：声明在别的文件里、
+又没带 `pub` 的成员，访问即报本码——枚举与 `union(enum)` 的变体是值，恒公开。
 
 <a id="e0405"></a>
 ### E0405 控制流语句放错位置

@@ -79,7 +79,8 @@ struct Node {
      * 只挂在 NK_FOR 上（flag = 是不是 inline）。 */
     Node      **unroll;
     int         nunroll;
-    bool        is_pub;     /* 顶层声明带 pub：模块外可见 */
+    bool        is_pub;     /* 带 pub：模块外可见（顶层声明与容器成员都算） */
+    const char *mod;        /* 声明所在的文件（模块路径）；sema 装载时统一打戳 */
     bool        is_extern;  /* `extern fn …;`：外部 C 函数，没有函数体 */
     /* filled in by sema */
     struct Type   *ty;        /* 表达式的类型（类型值则是 TY_TYPE） */

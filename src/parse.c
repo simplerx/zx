@@ -315,6 +315,10 @@ static Node *parse_type_primary(P *p) {
         /* body: fields, methods, decls */
         expect(p, TOK_LBRACE);
         while (!at(p, TOK_RBRACE) && !at(p, TOK_EOF_)) {
+            /* 成员默认私有（只在声明它的文件里可见），`pub` 才对外——
+             * 和顶层声明同一套规则。 */
+            bool mem_pub = false;
+            if (at(p, TOK_KW_PUB)) { advance(p); mem_pub = true; }
             /* 方法只有一种写法：`const name = fn (…) R { … };`（v0.24）。
              * 解析成带名字的 NK_FN——方法表吃的一直是这个形状，语义层
              * 不用为"两种写法"分叉。 */
@@ -325,15 +329,23 @@ static Node *parse_type_primary(P *p) {
                 advance(p);                      /* '=' */
                 Node *f = parse_fn(p, true);
                 f->name = mname;
+                f->is_pub = mem_pub;
                 expect(p, TOK_SEMI);
                 push(n, f);
                 continue;
             }
             if (at(p, TOK_KW_CONST) || at(p, TOK_KW_LET) || at(p, TOK_KW_VAR)) {
-                push(n, parse_decl(p));
+                Node *d = parse_decl(p);
+                d->is_pub = mem_pub;
+                push(n, d);
                 continue;
             }
-            if (at(p, TOK_KW_FN)) { push(n, parse_fn(p, false)); continue; }
+            if (at(p, TOK_KW_FN)) {
+                Node *f = parse_fn(p, false);
+                f->is_pub = mem_pub;
+                push(n, f);
+                continue;
+            }
             /* 位置取字段名，不取 `struct` 关键字：字段相关的诊断（重名、
              * 默认值类型不对、递归包含）都该指在那一行那一列上。 */
             int fline = cur(p)->line, fcol = cur(p)->col;
@@ -343,6 +355,7 @@ static Node *parse_type_primary(P *p) {
             Node *f = node_new(NK_PARAM, fline, fcol);
             f->name = fname;
             f->a = ty;
+            f->is_pub = mem_pub;
             if (accept(p, TOK_ASSIGN)) f->b = parse_expr(p);
             accept(p, TOK_COMMA);
             push(n, f);
@@ -367,6 +380,8 @@ static Node *parse_type_primary(P *p) {
         }
         expect(p, TOK_LBRACE);
         while (!at(p, TOK_RBRACE) && !at(p, TOK_EOF_)) {
+            bool mem_pub = false;                /* 同 struct：成员默认私有 */
+            if (at(p, TOK_KW_PUB)) { advance(p); mem_pub = true; }
             /* 方法只有一种写法：`const name = fn (…) R { … };`（v0.24）。
              * 解析成带名字的 NK_FN——方法表吃的一直是这个形状，语义层
              * 不用为"两种写法"分叉。 */
@@ -377,15 +392,23 @@ static Node *parse_type_primary(P *p) {
                 advance(p);                      /* '=' */
                 Node *f = parse_fn(p, true);
                 f->name = mname;
+                f->is_pub = mem_pub;
                 expect(p, TOK_SEMI);
                 push(n, f);
                 continue;
             }
             if (at(p, TOK_KW_CONST) || at(p, TOK_KW_LET) || at(p, TOK_KW_VAR)) {
-                push(n, parse_decl(p));
+                Node *d = parse_decl(p);
+                d->is_pub = mem_pub;
+                push(n, d);
                 continue;
             }
-            if (at(p, TOK_KW_FN)) { push(n, parse_fn(p, false)); continue; }
+            if (at(p, TOK_KW_FN)) {
+                Node *f = parse_fn(p, false);
+                f->is_pub = mem_pub;
+                push(n, f);
+                continue;
+            }
             int mline = cur(p)->line, mcol = cur(p)->col;
             const char *mname = take_ident(p);
             expect(p, TOK_COLON);
@@ -393,6 +416,7 @@ static Node *parse_type_primary(P *p) {
             Node *m = node_new(NK_PAIR, mline, mcol);
             m->name = mname;
             m->a = ty;
+            m->is_pub = mem_pub;
             accept(p, TOK_COMMA);
             push(n, m);
         }
@@ -409,7 +433,9 @@ static Node *parse_type_primary(P *p) {
         }
         expect(p, TOK_LBRACE);
         while (!at(p, TOK_RBRACE) && !at(p, TOK_EOF_)) {
-            /* 体也是作用域：方法 / 常量成员和变体混着写 */
+            /* 体也是作用域：方法 / 常量成员和变体混着写；成员默认私有 */
+            bool mem_pub = false;
+            if (at(p, TOK_KW_PUB)) { advance(p); mem_pub = true; }
             /* 方法只有一种写法：`const name = fn (…) R { … };`（v0.24）。
              * 解析成带名字的 NK_FN——方法表吃的一直是这个形状，语义层
              * 不用为"两种写法"分叉。 */
@@ -425,10 +451,17 @@ static Node *parse_type_primary(P *p) {
                 continue;
             }
             if (at(p, TOK_KW_CONST) || at(p, TOK_KW_LET) || at(p, TOK_KW_VAR)) {
-                push(n, parse_decl(p));
+                Node *d = parse_decl(p);
+                d->is_pub = mem_pub;
+                push(n, d);
                 continue;
             }
-            if (at(p, TOK_KW_FN)) { push(n, parse_fn(p, false)); continue; }
+            if (at(p, TOK_KW_FN)) {
+                Node *f = parse_fn(p, false);
+                f->is_pub = mem_pub;
+                push(n, f);
+                continue;
+            }
             Node *m = node_new(NK_PAIR, cur(p)->line, cur(p)->col);
             m->name = take_ident(p);
             if (accept(p, TOK_ASSIGN)) m->a = parse_expr(p);

@@ -40,18 +40,18 @@ pub const task = module("task.zx");
 // 可增长数组。`T` 是元素类型；容量不够时按倍数向分配器要内存、搬过去、释放旧的。
 pub const ArrayList = fn (T: type) type {
     return struct {
-        buf: *T,
-        len: usize,
-        cap: usize,
-        alloc: Allocator,
+        pub buf: *T,
+        pub len: usize,
+        pub cap: usize,
+        pub alloc: Allocator,
 
         // ---- 构造 / 释放 ----
 
-        const init = fn (alloc: Allocator) Self {
+        pub const init = fn (alloc: Allocator) Self {
             return Self{ .buf = undefined, .len = 0, .cap = 0, .alloc = alloc };
         };
 
-        const deinit = fn (self: *Self) void {
+        pub const deinit = fn (self: *Self) void {
             if (self.cap > 0) {
                 self.alloc.free(self.alloc.ctx, (*u8)self.buf, self.cap * @type(T).size);
             }
@@ -62,31 +62,31 @@ pub const ArrayList = fn (T: type) type {
 
         // ---- 取值 ----
 
-        const at = fn (self: *Self, i: usize) ?*T {
+        pub const at = fn (self: *Self, i: usize) ?*T {
             if (i >= self.len) { return null; }
             return self.buf + i;
         };
 
-        const get = fn (self: *Self, i: usize) ?T {
+        pub const get = fn (self: *Self, i: usize) ?T {
             if (i >= self.len) { return null; }
             return (self.buf + i).0;
         };
 
-        const set = fn (self: *Self, i: usize, v: T) bool {
+        pub const set = fn (self: *Self, i: usize, v: T) bool {
             if (i >= self.len) { return false; }
             (self.buf + i).0 = v;
             return true;
         };
 
-        const items = fn (self: *Self) []T { return self.buf[0..self.len]; };
+        pub const items = fn (self: *Self) []T { return self.buf[0..self.len]; };
 
-        const clear = fn (self: *Self) void { self.len = 0; };
+        pub const clear = fn (self: *Self) void { self.len = 0; };
 
         // ---- 增长 ----
 
         // 容量不够就翻倍。搬家用一次 memcpy：T 任意大小，逐元素循环
         // 换成内存原语后这一步从 O(n) 次访存变成一次批量搬运。
-        const reserve = fn (self: *Self, need: usize) bool {
+        pub const reserve = fn (self: *Self, need: usize) bool {
             if (need <= self.cap) { return true; }
 
             var ncap = self.cap;
@@ -110,32 +110,32 @@ pub const ArrayList = fn (T: type) type {
             return false;
         };
 
-        const push = fn (self: *Self, v: T) bool {
+        pub const push = fn (self: *Self, v: T) bool {
             if (!self.reserve(self.len + 1)) { return false; }
             (self.buf + self.len).0 = v;
             self.len = self.len + 1;
             return true;
         };
 
-        const pop = fn (self: *Self) ?T {
+        pub const pop = fn (self: *Self) ?T {
             if (self.len == 0) { return null; }
             self.len = self.len - 1;
             return (self.buf + self.len).0;
         };
 
-        const first = fn (self: *Self) ?T {
+        pub const first = fn (self: *Self) ?T {
             if (self.len == 0) { return null; }
             return (self.buf + 0).0;
         };
 
-        const last = fn (self: *Self) ?T {
+        pub const last = fn (self: *Self) ?T {
             if (self.len == 0) { return null; }
             return (self.buf + self.len - 1).0;
         };
 
         // 在 i 处插一个，后面的整体右移（memmove：同 buffer 内重叠）。
         // i == len 等价于 push。
-        const insertAt = fn (self: *Self, i: usize, v: T) bool {
+        pub const insertAt = fn (self: *Self, i: usize, v: T) bool {
             if (i > self.len) { return false; }
             if (!self.reserve(self.len + 1)) { return false; }
             if (i < self.len) {
@@ -148,7 +148,7 @@ pub const ArrayList = fn (T: type) type {
         };
 
         // 删掉第 i 个，后面的左移。删最后一个等价于 pop。
-        const removeAt = fn (self: *Self, i: usize) bool {
+        pub const removeAt = fn (self: *Self, i: usize) bool {
             if (i >= self.len) { return false; }
             if (i + 1 < self.len) {
                 @memmove((*u8)(self.buf + i), (*u8)(self.buf + i + 1),
@@ -158,7 +158,7 @@ pub const ArrayList = fn (T: type) type {
             return true;
         };
 
-        const reverse = fn (self: *Self) void {
+        pub const reverse = fn (self: *Self) void {
             if (self.len < 2) { return; }
             var i: usize = 0;
             var j = self.len - 1;
@@ -172,7 +172,7 @@ pub const ArrayList = fn (T: type) type {
         };
 
         // 把长度改成 n：变长用 fill 补，变短直接截断（容量不动）。
-        const resize = fn (self: *Self, n: usize, fill: T) bool {
+        pub const resize = fn (self: *Self, n: usize, fill: T) bool {
             if (n > self.len) {
                 if (!self.reserve(n)) { return false; }
                 var k = self.len;
@@ -186,7 +186,7 @@ pub const ArrayList = fn (T: type) type {
         };
 
         // 就地交换两个元素。
-        const swap = fn (self: *Self, i: usize, j: usize) bool {
+        pub const swap = fn (self: *Self, i: usize, j: usize) bool {
             if (i >= self.len || j >= self.len) { return false; }
             let t = (self.buf + i).0;
             (self.buf + i).0 = (self.buf + j).0;
@@ -195,7 +195,7 @@ pub const ArrayList = fn (T: type) type {
         };
 
         // 追加一个切片：一次 memcpy。
-        const append = fn (self: *Self, vs: []const T) bool {
+        pub const append = fn (self: *Self, vs: []const T) bool {
             if (vs.len == 0) { return true; }
             if (!self.reserve(self.len + vs.len)) { return false; }
             @memcpy((*u8)(self.buf + self.len), vs.ptr, vs.len * @type(T).size);
@@ -219,16 +219,16 @@ pub const ArrayList = fn (T: type) type {
 // 一次读一块、按行交付。切出来的行**指向内部缓冲**，下一次 next() 之后失效；
 // 要留住就自己复制。行比缓冲还长时缓冲会翻倍（`grow`），所以不会读一半断掉。
 pub const BufReader = struct {
-    h: usize,
-    buf: *u8,
-    cap: usize,
-    start: usize,     // 已消费到的位置
-    end: usize,       // 缓冲里有效数据的末尾
-    eof: bool,
-    owned: bool,      // 句柄是不是自己开的（deinit 时负责关）
-    alloc: Allocator,
+    pub h: usize,
+    pub buf: *u8,
+    pub cap: usize,
+    pub start: usize,     // 已消费到的位置
+    pub end: usize,       // 缓冲里有效数据的末尾
+    pub eof: bool,
+    pub owned: bool,      // 句柄是不是自己开的（deinit 时负责关）
+    pub alloc: Allocator,
 
-    const init = fn (alloc: Allocator, h: usize, cap: usize) ?Self {
+    pub const init = fn (alloc: Allocator, h: usize, cap: usize) ?Self {
         var n = cap;
         if (n < 16) { n = 16; }
         let raw = alloc.alloc(alloc.ctx, n);
@@ -240,7 +240,7 @@ pub const BufReader = struct {
     };
 
     // 开文件 + 建缓冲，一步到位。路径打不开就返回 null。
-    const open = fn (alloc: Allocator, path: []const u8, cap: usize) ?Self {
+    pub const open = fn (alloc: Allocator, path: []const u8, cap: usize) ?Self {
         if (io.openRead(path)) h {
             if (Self.init(alloc, h, cap)) got {
                 var r = got;
@@ -252,7 +252,7 @@ pub const BufReader = struct {
         return null;
     };
 
-    const deinit = fn (self: *Self) void {
+    pub const deinit = fn (self: *Self) void {
         if (self.owned) { io.close(self.h); }
         self.alloc.free(self.alloc.ctx, self.buf, self.cap);
         self.buf = undefined;
@@ -261,11 +261,11 @@ pub const BufReader = struct {
         self.end = 0;
     };
 
-    const close = fn (self: *Self) void { self.deinit(); };
+    pub const close = fn (self: *Self) void { self.deinit(); };
 
     // 缓冲里的数据用完、又还没到文件尾 → 再要一块。
     // 行跨块时先把残段挪到最前面，腾出空间；整块都不够就翻倍。
-    const fill = fn (self: *Self) bool {
+    pub const fill = fn (self: *Self) bool {
         if (self.start == self.end) {
             /* 缓冲已经全部交付完了：从头再来，别把它当成"残段"挤到前面 */
             self.start = 0;
@@ -284,7 +284,7 @@ pub const BufReader = struct {
         return true;
     };
 
-    const grow = fn (self: *Self) bool {
+    pub const grow = fn (self: *Self) bool {
         let ncap = self.cap * 2;
         let raw = self.alloc.alloc(self.alloc.ctx, ncap);
         if (raw) p {
@@ -298,7 +298,7 @@ pub const BufReader = struct {
     };
 
     // 下一行（去掉行尾的 \n 和 \r）。文件结束且没有残行时返回 null。
-    const next = fn (self: *Self) ?[]const u8 {
+    pub const next = fn (self: *Self) ?[]const u8 {
         while (true) {
             var i = self.start;
             while (i < self.end) {
@@ -322,7 +322,7 @@ pub const BufReader = struct {
     };
 
     // 下一块原始字节（不切行）。适合读二进制。
-    const chunk = fn (self: *Self) ?[]const u8 {
+    pub const chunk = fn (self: *Self) ?[]const u8 {
         while (self.start == self.end) {
             if (self.eof) { return null; }
             if (!self.fill()) { self.eof = true; }
@@ -333,19 +333,19 @@ pub const BufReader = struct {
     };
 
     // 还剩多少字节没消费（当前缓冲里）
-    const buffered = fn (self: *Self) usize { return self.end - self.start; };
+    pub const buffered = fn (self: *Self) usize { return self.end - self.start; };
 };
 
 // 攒够再写。write 超过缓冲大小就直接写出去，不绕道。
 pub const BufWriter = struct {
-    h: usize,
-    buf: *u8,
-    cap: usize,
-    len: usize,
-    owned: bool,
-    alloc: Allocator,
+    pub h: usize,
+    pub buf: *u8,
+    pub cap: usize,
+    pub len: usize,
+    pub owned: bool,
+    pub alloc: Allocator,
 
-    const init = fn (alloc: Allocator, h: usize, cap: usize) ?Self {
+    pub const init = fn (alloc: Allocator, h: usize, cap: usize) ?Self {
         var n = cap;
         if (n < 16) { n = 16; }
         let raw = alloc.alloc(alloc.ctx, n);
@@ -357,7 +357,7 @@ pub const BufWriter = struct {
     };
 
     // 建文件（存在就清空）+ 建缓冲
-    const create = fn (alloc: Allocator, path: []const u8, cap: usize) ?Self {
+    pub const create = fn (alloc: Allocator, path: []const u8, cap: usize) ?Self {
         if (io.openWrite(path)) h {
             if (Self.init(alloc, h, cap)) got {
                 var r = got;
@@ -370,7 +370,7 @@ pub const BufWriter = struct {
     };
 
     // 追加模式：文件已有的内容不动
-    const appendTo = fn (alloc: Allocator, path: []const u8, cap: usize) ?Self {
+    pub const appendTo = fn (alloc: Allocator, path: []const u8, cap: usize) ?Self {
         if (io.openAppend(path)) h {
             if (Self.init(alloc, h, cap)) got {
                 var r = got;
@@ -382,7 +382,7 @@ pub const BufWriter = struct {
         return null;
     };
 
-    const deinit = fn (self: *Self) void {
+    pub const deinit = fn (self: *Self) void {
         if (self.len > 0) { _ = self.flush(); }
         if (self.owned) { io.close(self.h); }
         self.alloc.free(self.alloc.ctx, self.buf, self.cap);
@@ -391,14 +391,14 @@ pub const BufWriter = struct {
         self.len = 0;
     };
 
-    const flush = fn (self: *Self) bool {
+    pub const flush = fn (self: *Self) bool {
         if (self.len == 0) { return true; }
         let want = self.len;
         self.len = 0;
         return io.write(self.h, self.buf[0..want]) == want;
     };
 
-    const write = fn (self: *Self, data: []const u8) bool {
+    pub const write = fn (self: *Self, data: []const u8) bool {
         // 大块直接落盘：占满缓冲再 flush 反而多一次拷贝
         if (data.len >= self.cap) {
             if (!self.flush()) { return false; }
@@ -412,13 +412,13 @@ pub const BufWriter = struct {
         return true;
     };
 
-    const writeByte = fn (self: *Self, c: u8) bool { return self.write(&.{c}); };
+    pub const writeByte = fn (self: *Self, c: u8) bool { return self.write(&.{c}); };
 
     // 一行：内容 + \n
-    const writeLine = fn (self: *Self, s: []const u8) bool {
+    pub const writeLine = fn (self: *Self, s: []const u8) bool {
         if (!self.write(s)) { return false; }
         return self.write(&.{'\n'});
     };
 
-    const pending = fn (self: *Self) usize { return self.len; };
+    pub const pending = fn (self: *Self) usize { return self.len; };
 };

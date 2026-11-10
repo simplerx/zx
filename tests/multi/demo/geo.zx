@@ -1,8 +1,8 @@
 // geo.zx —— 模块里可以导出类型
 pub const Point = struct {
-    x: i32,
-    y: i32,
-    tag: []const u8 = "pt",
+    pub x: i32,
+    pub y: i32,
+    pub tag: []const u8 = "pt",
 };
 
 pub const len2 = fn (p: Point) i32 { return p.x * p.x + p.y * p.y; };

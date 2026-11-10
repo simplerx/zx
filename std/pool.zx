@@ -127,7 +127,7 @@ pub const Pool = struct {
     classes: *Class,  // classCount 个连续的 Class
 
     // 档位表运行期铺出来（线性段 + 2 的幂段）。
-    const init = fn (gpa: Allocator) ?Pool {
+    pub const init = fn (gpa: Allocator) ?Pool {
         if (gpa.alloc(gpa.ctx, classCount * @type(Class).size)) p {
             let cs = (*Class)p;
             var idx: usize = 0;
@@ -195,7 +195,7 @@ pub const Pool = struct {
     };
 
     // 按字节分配。失败返回 null。
-    const alloc = fn (self: *Pool, size: usize) ?*u8 {
+    pub const alloc = fn (self: *Pool, size: usize) ?*u8 {
         let ci = self.classOf(size);
         if (ci == classCount) {
             // 大块：直接向分配器要 [头][负载]，格式与池内块一致
@@ -225,7 +225,7 @@ pub const Pool = struct {
 
     // 释放。返回 false = 拒绝：重复释放、或不像本池的块。
     // 拒绝时不做任何写入——空闲链不会被踩坏。
-    const free = fn (self: *Pool, p: *u8) bool {
+    pub const free = fn (self: *Pool, p: *u8) bool {
         let a = (usize)p;
         if (a < HDR) { return false; }
         let ha = a - HDR;
@@ -246,7 +246,7 @@ pub const Pool = struct {
     };
 
     // 某一档当前在用块数（测试与诊断用）。
-    const used = fn (self: *Pool, size: usize) usize {
+    pub const used = fn (self: *Pool, size: usize) usize {
         let ci = self.classOf(size);
         if (ci == classCount) { return 0; }
         let c = self.classes + ci;

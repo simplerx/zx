@@ -110,6 +110,7 @@ static const DiagRule g_rules[] = {
     { "cannot assign",                    "E0403" },
     { "read-only",                        "E0403" },
     { "is private",                       "E0404" },
+    { "private member",                   "E0404" },
     { "only allowed on file-scope",       "E0404" },
 
     /* 参数个数：比 "needs" 更靠前，`fn takes 2 argument(s)` 要落到这里 */
@@ -371,6 +372,12 @@ static void diag_emit(const char *code, int line, int col, const char *msg) {
         snprintf(g_first_err_msg, sizeof g_first_err_msg, "%s", msg);
     }
     g_error_count++;
+    /* 上限可从环境变量调（ZX_DIAG_MAX=0 表示全打）：迁移期一次看全，
+     * 平时仍然限 30 条免得刷屏。 */
+    {
+        const char *cap = getenv("ZX_DIAG_MAX");
+        if (cap && *cap) g_diag_max_print = atoi(cap) > 0 ? atoi(cap) : 1 << 30;
+    }
     if (g_error_count > g_diag_max_print) {
         g_help_pending = false;
         g_note_pending = false;

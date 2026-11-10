@@ -52,6 +52,7 @@ typedef struct Field {
     uint64_t    offset;    /* 布局时填 */
     bool        has_tag;   /* 枚举变体值 / 带标签联合体的判别值 */
     uint64_t    tag;
+    bool        is_pub;    /* 结构体/联合体/枚举体里带 pub：文件外可见 */
 } Field;
 
 /* 聚合体上的一个方法：名字 + 那个函数本身。函数的第一参数就是接收者。 */
@@ -60,6 +61,7 @@ typedef struct Method {
     Node       *fn;        /* NK_FN */
     Type       *fnty;      /* 它的函数类型 */
     bool        has_self;  /* 第一参数是接收者（`self: Self`）；否则是挂在类型上的普通函数 */
+    bool        is_pub;    /* 容器体里带 pub：文件外可见 */
 } Method;
 
 struct Type {
@@ -92,6 +94,7 @@ struct Type {
 
     Node       *decl;       /* struct/union/enum 的名义身份 */
     const char *name;       /* 显示名，可空 */
+    const char *mod;        /* 声明所在的文件（模块路径）；成员默认只在这个文件内可见 */
     void       *eset;       /* TY_ERRORSET 的错误集（ErrSet*）；TY_ERR 上表示
                              * "这个 !T 只会带这些错误码"（NULL = anyerror） */
 

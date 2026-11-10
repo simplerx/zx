@@ -214,16 +214,16 @@ const parse_float = fn (s: []const u8) f64 {
 // ---- token ----
 
 pub const Tok = struct {
-    kind: Kind,
-    line: u32,
-    col: u32,
-    start: usize,     // 源文本里的字节偏移（raw text = src[start..start+len]）
-    len: usize,
-    int_val: u64,
-    float_val: f64,
-    big: bool,        // 整数超 u64
-    str_off: usize,   // STRING/CHAR：解码字节在 strbuf 里的起点
-    text_len: usize,  // 解码字节数
+    pub kind: Kind,
+    pub line: u32,
+    pub col: u32,
+    pub start: usize,     // 源文本里的字节偏移（raw text = src[start..start+len]）
+    pub len: usize,
+    pub int_val: u64,
+    pub float_val: f64,
+    pub big: bool,        // 整数超 u64
+    pub str_off: usize,   // STRING/CHAR：解码字节在 strbuf 里的起点
+    pub text_len: usize,  // 解码字节数
 };
 
 // ---- 词法器本体 ----
@@ -231,24 +231,24 @@ pub const Tok = struct {
 // 词法诊断：位置 + 一句具体的话。以前只记条数，zxfe 只能打
 // "error[E0101]: lexical error(s)"——用户既不知道在哪，也不知道错在哪。
 pub const LexErr = struct {
-    line: u32,
-    col: u32,
-    code: []const u8,   // E0101 没闭合 / E0102 非法字符或字面量
-    msg: []const u8,
+    pub line: u32,
+    pub col: u32,
+    pub code: []const u8,   // E0101 没闭合 / E0102 非法字符或字面量
+    pub msg: []const u8,
 };
 
 pub const Lexer = struct {
-    src: []const u8,
-    p: usize,          // 当前字节偏移
-    line: u32,
-    col: u32,
-    toks: std.ArrayList(Tok),
-    strbuf: std.ArrayList(u8),
-    al: std.Allocator,
-    n_errors: u32,
-    errs: std.ArrayList(LexErr),
+    pub src: []const u8,
+    pub p: usize,          // 当前字节偏移
+    pub line: u32,
+    pub col: u32,
+    pub toks: std.ArrayList(Tok),
+    pub strbuf: std.ArrayList(u8),
+    pub al: std.Allocator,
+    pub n_errors: u32,
+    pub errs: std.ArrayList(LexErr),
 
-    const init = fn (al: std.Allocator, src: []const u8) Lexer {
+    pub const init = fn (al: std.Allocator, src: []const u8) Lexer {
         // UTF-8 BOM（EF BB BF）：Windows 编辑器常偷偷加上。跳过它，
         // 否则首字符按"非 ASCII 标识符"报 E0102（用户压力测试抓到的）。
         var bom: usize = 0;
@@ -265,7 +265,7 @@ pub const Lexer = struct {
         };
     };
 
-    const deinit = fn (self: *Lexer) void {
+    pub const deinit = fn (self: *Lexer) void {
         self.toks.deinit();
         self.strbuf.deinit();
         self.errs.deinit();
@@ -273,17 +273,17 @@ pub const Lexer = struct {
 
     // ---- 基础游标 ----
 
-    const peek = fn (self: *Lexer) u8 {
+    pub const peek = fn (self: *Lexer) u8 {
         if (self.p >= self.src.len) { return 0; }
         return self.src[self.p];
     };
 
-    const peek2 = fn (self: *Lexer) u8 {
+    pub const peek2 = fn (self: *Lexer) u8 {
         if (self.p + 1 >= self.src.len) { return 0; }
         return self.src[self.p + 1];
     };
 
-    const adv = fn (self: *Lexer) u8 {
+    pub const adv = fn (self: *Lexer) u8 {
         if (self.p >= self.src.len) { return 0; }   // 越界只在坏输入的恢复路径出现
         let c = self.src[self.p];
         self.p = self.p + 1;
@@ -296,20 +296,20 @@ pub const Lexer = struct {
         return c;
     };
 
-    const fail = fn (self: *Lexer, code: []const u8, msg: []const u8) void {
+    pub const fail = fn (self: *Lexer, code: []const u8, msg: []const u8) void {
         self.n_errors = self.n_errors + 1;
         _ = self.errs.push(LexErr{ .line = self.line, .col = self.col, .code = code, .msg = msg });
     };
 
     // 分配失败（不是用户写错）：只计数，不产生诊断——报"内存不够"没用。
-    const oom = fn (self: *Lexer) void {
+    pub const oom = fn (self: *Lexer) void {
         self.n_errors = self.n_errors + 1;
     };
 
     // ---- 发射 ----
     // 列号公式与 C 相同：col 已越过 token，回退 len（token 内不含换行时成立）。
 
-    const emit = fn (self: *Lexer, k: Kind, start: usize) void {
+    pub const emit = fn (self: *Lexer, k: Kind, start: usize) void {
         let len = self.p - start;
         let t = Tok{
             .kind = k, .line = self.line, .col = self.col - (u32)len,
@@ -321,7 +321,7 @@ pub const Lexer = struct {
         if (!ok) { self.oom(); }
     };
 
-    const emit_int = fn (self: *Lexer, start: usize, v: u64, big: bool) void {
+    pub const emit_int = fn (self: *Lexer, start: usize, v: u64, big: bool) void {
         let len = self.p - start;
         let t = Tok{
             .kind = Kind.int, .line = self.line, .col = self.col - (u32)len,
@@ -333,7 +333,7 @@ pub const Lexer = struct {
         if (!ok) { self.oom(); }
     };
 
-    const emit_float = fn (self: *Lexer, start: usize, v: f64) void {
+    pub const emit_float = fn (self: *Lexer, start: usize, v: f64) void {
         let len = self.p - start;
         let t = Tok{
             .kind = Kind.float, .line = self.line, .col = self.col - (u32)len,
@@ -346,7 +346,7 @@ pub const Lexer = struct {
     };
 
     // STRING/CHAR：解码字节已进 strbuf，记下偏移与长度
-    const emit_text = fn (self: *Lexer, k: Kind, start: usize, off: usize) void {
+    pub const emit_text = fn (self: *Lexer, k: Kind, start: usize, off: usize) void {
         let len = self.p - start;
         let t = Tok{
             .kind = k, .line = self.line, .col = self.col - (u32)len,
@@ -359,7 +359,7 @@ pub const Lexer = struct {
     };
 
     // char token：带码点（int_val = char_val，与 C 同）
-    const emit_char = fn (self: *Lexer, k: Kind, start: usize, off: usize) void {
+    pub const emit_char = fn (self: *Lexer, k: Kind, start: usize, off: usize) void {
         let len = self.p - start;
         let t = Tok{
             .kind = k, .line = self.line, .col = self.col - (u32)len,
@@ -373,7 +373,7 @@ pub const Lexer = struct {
 
     // ---- 注释与空白 ----
 
-    const skip_trivia = fn (self: *Lexer) void {
+    pub const skip_trivia = fn (self: *Lexer) void {
         var more = true;
         while (more) {
             let c = self.peek();
@@ -411,7 +411,7 @@ pub const Lexer = struct {
     // 读转义字符（调用方已消费反斜杠），把解码字节追加进 strbuf。
     // 返回写入字节数，出错 -1（与 C 相同：错误时不追加）。
 
-    const decode_escape = fn (self: *Lexer) i32 {
+    pub const decode_escape = fn (self: *Lexer) i32 {
         let e = self.adv();
         if (e == 'n') { _ = self.strbuf.push('\n'); return 1; }
         if (e == 't') { _ = self.strbuf.push('\t'); return 1; }
@@ -457,7 +457,7 @@ pub const Lexer = struct {
     };
 
     // 码点 → UTF-8（1..4 字节），追加进 strbuf
-    const utf8_encode = fn (self: *Lexer, cp: u32) i32 {
+    pub const utf8_encode = fn (self: *Lexer, cp: u32) i32 {
         // 代理区（U+D800..U+DFFF）单独出现不是合法码点，超出 U+10FFFF 更不是
         if (cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) {
             self.fail("E0102", "code point out of range (U+0000..U+10FFFF, surrogates excluded)");
@@ -487,7 +487,7 @@ pub const Lexer = struct {
 
     // ---- 字符串 ----
 
-    const lex_string = fn (self: *Lexer, start: usize) void {
+    pub const lex_string = fn (self: *Lexer, start: usize) void {
         _ = self.adv();                       // 开引号
         let off = self.strbuf.len;
         var closed = false;
@@ -518,7 +518,7 @@ pub const Lexer = struct {
     // 解码 char 码点：strbuf[off..] 里是 1..4 字节 UTF-8（与 C lex.c 的
     // char_val 同规则：单字节取字节，多字节按 UTF-8 拼）。阶段 3 起
     // 序列化 AST 要带 ival，这个值不再能省。
-    const char_cp = fn (self: *Lexer, off: usize) u64 {
+    pub const char_cp = fn (self: *Lexer, off: usize) u64 {
         let s = self.strbuf.items();
         let n = s.len - off;
         if (n == 0) { return 0; }
@@ -538,7 +538,7 @@ pub const Lexer = struct {
         return (u64)(b0);
     };
 
-    const lex_char = fn (self: *Lexer, start: usize) void {
+    pub const lex_char = fn (self: *Lexer, start: usize) void {
         _ = self.adv();                       // 开引号
         let off = self.strbuf.len;
         let c = self.peek();
@@ -585,7 +585,7 @@ pub const Lexer = struct {
 
     // ---- 数字 ----
 
-    const lex_number = fn (self: *Lexer, start: usize) void {
+    pub const lex_number = fn (self: *Lexer, start: usize) void {
         var is_float = false;
         var base: u32 = 10;
 
@@ -707,7 +707,7 @@ pub const Lexer = struct {
 
     // ---- 主分派 ----
 
-    const lex_token = fn (self: *Lexer) void {
+    pub const lex_token = fn (self: *Lexer) void {
         let start = self.p;
         let c = self.adv();
 
@@ -840,7 +840,7 @@ pub const Lexer = struct {
 
     // ---- 主循环 ----
 
-    const run = fn (self: *Lexer) void {
+    pub const run = fn (self: *Lexer) void {
         var done = false;
         while (!done) {
             self.skip_trivia();

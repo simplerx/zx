@@ -30,23 +30,23 @@ const str = module("str.zx");
 // ---- 值 -----------------------------------------------------------------------
 
 pub const Value = union(enum) {
-    nul: u8,               // JSON null（void 载荷构造不了，u8 占位恒 0）
-    boolean: bool,
-    int: i64,
-    float: f64,
-    str: []const u8,
-    arr: *Arr,
-    obj: *Obj,
+    pub nul: u8,               // JSON null（void 载荷构造不了，u8 占位恒 0）
+    pub boolean: bool,
+    pub int: i64,
+    pub float: f64,
+    pub str: []const u8,
+    pub arr: *Arr,
+    pub obj: *Obj,
 };
 
 pub const Arr = struct {
-    items: *Value,
-    len: usize,
-    cap: usize,
-    alloc: Allocator,
+    pub items: *Value,
+    pub len: usize,
+    pub cap: usize,
+    pub alloc: Allocator,
 
     // 末尾追加。扩容按倍数（@memcpy 一次搬家）。
-    const push = fn (self: *Self, v: Value) bool {
+    pub const push = fn (self: *Self, v: Value) bool {
         if (self.len == self.cap) {
             var ncap = self.cap * 2;
             if (ncap < 4) { ncap = 4; }
@@ -73,24 +73,24 @@ pub const Arr = struct {
     };
 
     // 下标访问。越界返回 null。
-    const at = fn (self: *Self, i: usize) ?Value {
+    pub const at = fn (self: *Self, i: usize) ?Value {
         if (i >= self.len) { return null; }
         return (self.items + i).0;
     };
 };
 
 pub const Obj = struct {
-    keys: *[]const u8,     // 每槽一个键切片；空槽看 hashes
-    vals: *Value,
-    hashes: *u64,          // 0 = 空槽（FNV 结果 0 压成 1）
-    n: usize,
-    cap: usize,            // 0 或 2 的幂
-    alloc: Allocator,
+    pub keys: *[]const u8,     // 每槽一个键切片；空槽看 hashes
+    pub vals: *Value,
+    pub hashes: *u64,          // 0 = 空槽（FNV 结果 0 压成 1）
+    pub n: usize,
+    pub cap: usize,            // 0 或 2 的幂
+    pub alloc: Allocator,
 
-    const norm = fn (h: u64) u64 { return if (h == 0) 1 else h; };
+    pub const norm = fn (h: u64) u64 { return if (h == 0) 1 else h; };
 
     // 命中返回下标；没命中返回插入点（第一个空槽）。
-    const slotFor = fn (self: *Self, key: []const u8, h: u64) usize {
+    pub const slotFor = fn (self: *Self, key: []const u8, h: u64) usize {
         let mask = self.cap - 1;
         var i = (usize)h & mask;
         var probes: usize = 0;
@@ -105,7 +105,7 @@ pub const Obj = struct {
     };
 
     // 写入。重复键覆盖（JSON 语义：后者赢）。失败（OOM）返回 false。
-    const put = fn (self: *Self, key: []const u8, v: Value) bool {
+    pub const put = fn (self: *Self, key: []const u8, v: Value) bool {
         if (self.cap == 0) {
             if (!self.grow(8)) { return false; }
         } else if ((self.n + 1) * 4 > self.cap * 3) {
@@ -122,7 +122,7 @@ pub const Obj = struct {
     };
 
     // 查找。没有返回 null。
-    const get = fn (self: *Self, key: []const u8) ?Value {
+    pub const get = fn (self: *Self, key: []const u8) ?Value {
         if (self.cap == 0) { return null; }
         let i = self.slotFor(key, Self.norm(map.fnv1a(key)));
         if ((self.hashes + i).0 != 0) { return (self.vals + i).0; }
@@ -130,10 +130,10 @@ pub const Obj = struct {
     };
 
     // 成员数。
-    const count = fn (self: *Self) usize { return self.n; };
+    pub const count = fn (self: *Self) usize { return self.n; };
 
     // 扩容重排：哈希已缓存，不用重算、不用比键——第一个空槽放下即可。
-    const grow = fn (self: *Self, ncap: usize) bool {
+    pub const grow = fn (self: *Self, ncap: usize) bool {
         let kb = self.alloc.alloc(self.alloc.ctx, ncap * @type([]const u8).size);
         if (kb) k2 {
             let hb = self.alloc.alloc(self.alloc.ctx, ncap * @type(u64).size);

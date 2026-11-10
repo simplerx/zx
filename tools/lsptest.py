@@ -111,7 +111,7 @@ open(os.path.join(TESTDIR, "zx.json"), "w", encoding="utf-8").write(
     '{\n  "name": "lsptest",\n  "main": "src/extuser.zx",\n  "out": "lsptest",\n  "deps": ["libs"]\n}\n')
 open(os.path.join(TESTDIR, "vendor", "ext.zx"), "w", encoding="utf-8").write(
     'pub const VERSION = "1.2.3";\n\npub const hello = fn (n: []const u8) void {\n    n;\n};\n\n'
-    'pub const Cfg = struct {\n    w: i32,\n    h: i32,\n};\n')
+    'pub const Cfg = struct {\n    pub w: i32,\n    pub h: i32,\n};\n')
 open(os.path.join(TESTDIR, "libs", "util.zx"), "w", encoding="utf-8").write(
     'pub const twice = fn (x: i32) i32 {\n    return x * 2;\n};\n')
 EXTUSE = """const ext = module("ext");
@@ -466,8 +466,8 @@ send({"jsonrpc": "2.0", "id": 13, "method": "textDocument/completion", "params":
     "textDocument": {"uri": uri}, "position": pos(MAIN, off)}})
 r, _ = recv_id("completion.groupInst", 13)
 labels = {i["label"] for i in r["result"]["items"]} if r and r.get("result") else set()
-check("completion.groupInst", {"id", "spawn", "wait"} <= labels
-      and not labels & {"coro", "single", "pool"}, str(sorted(labels)))
+check("completion.groupInst", {"spawn", "wait"} <= labels
+      and "id" not in labels and not labels & {"coro", "single", "pool"}, str(sorted(labels)))
 
 # 3f2 同名成员跨容器不串签名（用户 2026-11-10 截图：实例上"显示关联函数"）：
 #   `Task.spawn` 与 `Group.spawn` 同名。t. 的 detail 必须是 Task 的 `?usize` 版，
@@ -1251,13 +1251,13 @@ check("completion.exprSnippet.noDotCtx",
 #  5 模块函数的匿名 struct 参数（含嵌套）补全
 #  6 模块 struct 类型的构造 snippet：`a.C` → Cfg{ .w = ${1:0} … }
 NESTLIB = """pub const Cfg = struct {
-    w: i32,
-    h: i32,
+    pub w: i32,
+    pub h: i32,
 };
 
 pub const Outer = struct {
-    inner: struct { a: i32, b: []const u8 },
-    name: []const u8,
+    pub inner: struct { a: i32, b: []const u8 },
+    pub name: []const u8,
 };
 
 pub const twice = fn (x: i32) i32 {
@@ -1655,7 +1655,10 @@ check("completion.typePath.methodSig",
 mit = std_items(STDUSE.index("    _ = m.put") + len("    _ = m."), 414)
 mlab = {i["label"]: i.get("detail") for i in mit}
 check("completion.instance.hashMap",
-      "get" in mlab and "put" in mlab and (mlab.get("n") or "") == "usize", str(list(mlab))[:200])
+      # 2026-11-11 容器成员可见性：HashMap 的字段（n/hashes/keys/vals/cap）
+      # 默认私有，跨文件实例补全只出 pub 方法。
+      {"get", "put", "count", "capacity"} <= set(mlab)
+      and not ({"n", "hashes", "keys", "vals", "cap"} & set(mlab)), str(list(mlab))[:200])
 off = STDUSE.index("    _ = dt.year;") + len("    _ = dt.")
 dit = std_items(off, 415)
 dlab = {i["label"] for i in dit}
@@ -1722,9 +1725,9 @@ off = STDUSE.index("    std.map.HashMap.") + len("    std.map.HashMap.")
 hit3 = std_items(off, 420)
 h3 = {i["label"]: (i.get("detail"), i.get("insertText")) for i in hit3}
 check("completion.typePath.genericMembers",
-      # 三段路径的泛型容器：类型上只该有静态函数（init 与 norm 都不带
-      # self），get/put/count 都是方法（首参 self），只在实例上出现。
-      set(h3) == {"init", "norm"}
+      # 三段路径的泛型容器：类型上只该有静态函数。init 是 pub 静态；
+      # norm 2026-11-11 起私有（无 pub），类型路径也不再出现。
+      set(h3) == {"init"}
       and h3.get("init", (None, None))[1] == "init(${1:alloc})$0",
       str(sorted(h3))[:240])
 #  6h union(enum) 的三段路径：Value. 出变体（构造骨架走 std.json. 类型项）
@@ -1800,6 +1803,30 @@ def std_public_types():
 
 
 cov_types = std_public_types()
+
+# 8i std.json.Obj 单独守门：容器体大（fields + 6 个方法）、字段全 pub、
+# norm 是唯一无 self 的静态成员。曾出现"整份覆盖率文档里唯独 Obj 双空"的
+# 非确定性回归（2026-11-11 调试），这里用最小文档钉住它。
+OBJTXT = ('const std = module("std");\n\npub const main = fn () u8 {\n'
+          '    var o = std.json.Obj{ };\n    std.json.Obj.\n    o.\n    return 0;\n};\n')
+objuri = "file:///" + os.path.join(SRC_DIR, "objprobe.zx").replace("\\", "/")
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": objuri, "languageId": "zx", "version": 1, "text": OBJTXT}}})
+cov_rid = 890
+for _row, _col, _tag, _want in ((4, 17, "type", ["norm"]), (5, 6, "inst", None)):
+    cov_rid += 1
+    send({"jsonrpc": "2.0", "id": cov_rid, "method": "textDocument/completion", "params": {
+        "textDocument": {"uri": objuri}, "position": {"line": _row, "character": _col}}})
+    _r, _ = recv_id("stdObj", cov_rid)
+    _it = _r["result"]["items"] if _r and _r.get("result") else []
+    _labs = sorted({i["label"] for i in _it})
+    if _tag == "type":
+        check("stdObj.typeStatic", _labs == ["norm"], str(_labs))
+    else:
+        check("stdObj.instMembers",
+              {"keys", "vals", "n", "cap", "alloc", "put", "get", "count"} <= set(_labs),
+              str(_labs)[:200])
+
 cov_lines = ['const std = module("std");', "", "pub const main = fn () u8 {"]
 cov_marks = []
 for _mod, _name, _shape, _factory in cov_types:
@@ -1935,10 +1962,12 @@ check("completion.chain.genericDot",
       and cdot["init"].get("insertText") == "init(${1:alloc})$0"
       and not ({"put", "get", "keys", "vals", "cap", "n"} & set(cdot)),
       str(sorted(cdot))[:220])
-# 字段在实例上（`HS.keys`），类型上取字段是 E0300
+# 字段 2026-11-11 起默认私有（keys/vals/cap/n 都没写 pub），实例补全只出
+# pub 方法；`HS.keys` 在编译器侧是 E0404。
 cinst = {i["label"] for i in chain_items("HS.\n")}
 check("completion.chain.genericInstField",
-      {"keys", "vals", "cap", "n"} <= cinst, str(sorted(cinst))[:220])
+      {"put", "get", "count", "capacity", "deinit"} <= cinst
+      and not ({"keys", "vals", "cap", "n"} & cinst), str(sorted(cinst))[:220])
 
 # 模块函数返回类型（fromUnixMs → DateTime）
 cmod = {i["label"] for i in chain_items("std.time.fromUnixMs(0).\n")}

@@ -87,6 +87,11 @@ extern var g: i32;    // 外部 C 全局变量
   `_` 前缀（`_foo`）**不豁免**。
 - 解构：`const {a, b} = tup;` / `let .{a, b} = t;`，槽位可写 `_` 丢弃。
 - 变量必须先赋值后使用；初始化器指向当前栈帧时编译器做逃逸检查（E0503）。
+- **可见性（2026-11-11 起）**：`pub` 对文件作用域声明与**容器体成员**是同一个语义——
+  容器体里的字段、方法（`const f = fn…`）、静态成员默认**私有**，只在声明它的文件内可见；
+  带 `pub` 才对其它文件开放（编译器报 E0404，补全也不显示）。枚举/`union(enum)` 的
+  变体是值不是成员，恒公开，不要求逐个写 `pub`。函数定义只有 `const F = fn(…) ret {…};`
+  一种写法，没有 `pub fn` 语法——`pub` 是前缀修饰符，不是另一种声明。
 
 ---
 
@@ -262,7 +267,7 @@ std.debug.errName(e)                 // 错误码 → "no"
 ```zx
 const add = fn (a: i32, b: i32) i32 { return a + b; };   // 函数是值
 const apply = fn (f: fn (i32) i32, x: i32) i32 { return f(x); };
-pub const main = fn () u8 { … }          // pub fn 也可直接写
+pub const main = fn () u8 { … }          // pub 控制跨文件导出（见 §2 可见性）
 ```
 
 - 返回 `!T` 的函数每条路径都要 return 或到达 `noreturn`（E0308）。

@@ -157,10 +157,10 @@ pub const join = fn (alloc: Allocator, a: []const u8, b: []const u8) ?[]u8 {
 // ---- 文件元数据 -------------------------------------------------------------
 
 pub const Stat = struct {
-    size: u64,
-    mtime: u64,          // 最后写入时间，Windows FILETIME（100ns，自 1601）
-    isDir: bool,
-    isHidden: bool,
+    pub size: u64,
+    pub mtime: u64,          // 最后写入时间，Windows FILETIME（100ns，自 1601）
+    pub isDir: bool,
+    pub isHidden: bool,
 };
 
 // 查一次文件元数据。路径不存在（或分配失败）返回 null。
@@ -232,14 +232,14 @@ pub const removeDir = fn (alloc: Allocator, path: []const u8) bool {
 // "." 和 ".." 不交付（所有主流 std 的通行约定）。
 
 pub const DirIter = struct {
-    h: usize,
-    buf: *u8,            // 320 字节 FindData 工作区
-    first: bool,         // FindFirst 已经交付了第一条
-    done: bool,
-    alloc: Allocator,    // 只为释放 buf
+    pub h: usize,
+    pub buf: *u8,            // 320 字节 FindData 工作区
+    pub first: bool,         // FindFirst 已经交付了第一条
+    pub done: bool,
+    pub alloc: Allocator,    // 只为释放 buf
 
     // 打开目录。打不开（不存在/是文件/没内存）返回 null。
-    const open = fn (alloc: Allocator, path: []const u8) ?Self {
+    pub const open = fn (alloc: Allocator, path: []const u8) ?Self {
         // 通配 pattern：path + "\\*"（path 末尾已有分隔符就不加）
         let need = path.len + 3;
         let raw = alloc.alloc(alloc.ctx, need);
@@ -268,7 +268,7 @@ pub const DirIter = struct {
     };
 
     // 关闭并归还工作区。重复调用无害（靠句柄哨兵防双重释放）。
-    const close = fn (self: *Self) void {
+    pub const close = fn (self: *Self) void {
         if (self.h != INVALID_HANDLE) {
             _ = FindClose(self.h);
             self.h = INVALID_HANDLE;
@@ -278,7 +278,7 @@ pub const DirIter = struct {
     };
 
     // 下一个条目。没有更多（或已关闭）返回 null。
-    const next = fn (self: *Self) ?[]const u8 {
+    pub const next = fn (self: *Self) ?[]const u8 {
         while (!self.done) {
             if (!self.first) {
                 if (FindNextFileA(self.h, self.buf) == 0) {

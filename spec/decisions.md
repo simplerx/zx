@@ -3458,3 +3458,40 @@ pool）是物理隔离的用户态调度器；组是零设施——spawn 即起�
    fs List.push、json Obj.grow）。不新增 API 面，宁可让用户写三行普通代码。
 
 验证：`sh test.sh` 全绿（含 lsptest 221 项）；reflection.zx 用例改写为新字段名。
+
+## 108. 容器成员默认私有，`pub` 才对外（E0404 扩到成员）
+
+**裁定（2026-11-11，用户拍板）**：
+
+1. **语义**：容器体里声明的成员——字段、方法（`const f = fn…`）、静态成员——
+   默认**私有**，只在声明它的文件内可见；带 `pub` 才对其它文件开放。
+   `pub` 从此对文件作用域声明与容器成员是同一个语义（对齐 Zig）。
+   枚举与 `union(enum)` 的变体是**值**不是可隐藏成员，恒公开，不要求逐个写
+   `pub`（std.json.Value 的 7 个变体不用动）。
+2. **实现**：Node 加 `is_pub`（flg 位 1 已有，自举链免改格式）+ Node.mod
+   （声明所在文件路径戳，sema 装载时 `stamp_mod` 递归打）→ Type.mod →
+   访问点比较 `g_mod->path`，不同文件且没带 pub 就 `deny_member` 报
+   E0404：`'x' is a private member of \`T\` (declared in <文件>); mark it
+   \`pub\` in the container body to expose it`。parse.c / bootstrap/parse.zx
+   （种子+真前端）三个体循环都要吃 `pub` 前缀。泛型单态化 clone_tree
+   整体拷贝，mod 戳随节点走，实例化点不会把 std 的私有成员变本地可见。
+3. **自举**：bin/zxfe.exe 旧版不认容器体里的 pub——先加
+   `ZX_NO_MEMBER_PRIV` 旁路 + 剥离标记重建一次 zxfe，再恢复标记正常构建
+   （旁路已删）。
+4. **LSP**：类型值接收者判定 `isTypeValuedRecv`（declTyOf=="type" / 末位
+   被调是容器或返回 type 的 fn）修"泛型函数返回 type 被当实例"；补全按
+   `memberPubIn` 过滤私有成员（变体除外）。`std.json.Obj.` 曾非确定性
+   双空（调试期现象，最小文档守门 `stdObj.*` 钉住）。
+5. **带私有字段的容器跨文件构造走 pub 构造器**：字面量 `T{…}` 撞
+   E0300 缺字段（缺失检测目前不豁免私有字段，暂不改——std 的 HashMap/
+   BufReader 本来就以 init/open 为构造入口）。
+6. **文档**：reference.md §2 可见性一段、§8 注释勘误（"pub fn 也可直接写"
+   是错的——函数定义只有 `const F = fn(…) ret {…};` 一种，pub 是前缀
+   修饰符）；errors.md E0404 补成员消息。
+7. **守门**：tests/multibad/private-member（字段+方法跨文件 2 条 E0404）；
+   lsptest：groupInst 不含私有 id、hashMap 只剩 pub 方法、
+   typePath.genericMembers 只剩 init（norm 私有）、chain.genericInstField
+   只剩方法、vendor/module fixture 的 Cfg/Outer 字段标 pub、stdObj.type
+   =={norm}、stdObj.inst 含字段+方法全集。
+
+验证：`sh test.sh` 全绿；lsptest 全过。

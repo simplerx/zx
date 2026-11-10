@@ -15,10 +15,10 @@ const Fail = enum(u8) { f = 1 };
 // 记录规则照抄 perr：试探区（spec_depth > 0）里失败是回溯，不是报错。
 
 pub const Err = struct {
-    line: u32,
-    col: u32,
-    code: []const u8,
-    msg: []const u8,
+    pub line: u32,
+    pub col: u32,
+    pub code: []const u8,
+    pub msg: []const u8,
 };
 
 // C tok_kind_name 的镜像（zxc.h TOKEN_KINDS 的可读名，同序同拼写）。
@@ -128,28 +128,28 @@ pub const NK = enum {
 };
 
 pub const Node = struct {
-    kind: NK,
+    pub kind: NK,
     // 位置：C 版 node_new 每个调用点带精确位置（引导 token / lhs /
     // kw 共用等，见 decisions §71）；阶段 4 已逐点对齐——new_at 钉
     // 引导 token，特例处显式覆写，diff_ast.sh 含位置 61/61 全等。
-    line: u32,
-    col: u32,
-    fval: f64,           // float 字面量值；for 的 arity 节点存绑定数
-    name: ?[]const u8,
-    label: ?[]const u8,
-    op: ?lex.Kind,       // bin/un 的运算符；decl 的种类放 op2
-    ival: u64,
-    str: ?[]const u8,    // 字面量文本 / 字符串解码内容
-    flag: bool,
-    is_pub: bool,
-    is_extern: bool,
-    op2: u8,             // decl: 0=const 1=let 2=var；union(enum): 1
-    a: ?*Node,
-    b: ?*Node,
-    c: ?*Node,
-    d: ?*Node,
-    items: std.ArrayList(*Node),
-    al: std.Allocator,
+    pub line: u32,
+    pub col: u32,
+    pub fval: f64,           // float 字面量值；for 的 arity 节点存绑定数
+    pub name: ?[]const u8,
+    pub label: ?[]const u8,
+    pub op: ?lex.Kind,       // bin/un 的运算符；decl 的种类放 op2
+    pub ival: u64,
+    pub str: ?[]const u8,    // 字面量文本 / 字符串解码内容
+    pub flag: bool,
+    pub is_pub: bool,
+    pub is_extern: bool,
+    pub op2: u8,             // decl: 0=const 1=let 2=var；union(enum): 1
+    pub a: ?*Node,
+    pub b: ?*Node,
+    pub c: ?*Node,
+    pub d: ?*Node,
+    pub items: std.ArrayList(*Node),
+    pub al: std.Allocator,
 };
 
 const nk_name = fn (k: NK) []const u8 {
@@ -421,20 +421,20 @@ const bracket_match = fn (al: std.Allocator, toks: []lex.Tok) []usize {
 };
 
 pub const Parser = struct {
-    toks: []lex.Tok,
-    match: []usize,       // 括号配对表（A1）：下标=token 序号，值=配对括号序号，
+    pub toks: []lex.Tok,
+    pub match: []usize,       // 括号配对表（A1）：下标=token 序号，值=配对括号序号，
                           // toks.len = 没有配对。cast 消歧用它做 O(1) 必要条件
                           // 检查，嵌套括号不再付试探 parse_type 的 O(n²)。
-    i: usize,
-    src: []const u8,
-    strbuf: []const u8,   // lex 完成后的解码文本存储区（STRING/CHAR 取这里）
-    al: std.Allocator,
-    spec_depth: u32,
-    cap: ?[]const u8,     // parse_if_arm 的捕获名出参
-    errs: std.ArrayList(Err),   // 语法诊断（试探区里不记录）
-    msgb: std.ArrayList(u8),    // 消息拼装草稿（record 前复制走）
+    pub i: usize,
+    pub src: []const u8,
+    pub strbuf: []const u8,   // lex 完成后的解码文本存储区（STRING/CHAR 取这里）
+    pub al: std.Allocator,
+    pub spec_depth: u32,
+    pub cap: ?[]const u8,     // parse_if_arm 的捕获名出参
+    pub errs: std.ArrayList(Err),   // 语法诊断（试探区里不记录）
+    pub msgb: std.ArrayList(u8),    // 消息拼装草稿（record 前复制走）
 
-    const init = fn (al: std.Allocator, src: []const u8, lx: *lex.Lexer) Parser {
+    pub const init = fn (al: std.Allocator, src: []const u8, lx: *lex.Lexer) Parser {
         return Parser{
             .toks = lx.toks.items(),
             .match = bracket_match(al, lx.toks.items()),
@@ -451,7 +451,7 @@ pub const Parser = struct {
 
     // ---- 诊断 ----
 
-    const pushs = fn (self: *Parser, s: []const u8) void {
+    pub const pushs = fn (self: *Parser, s: []const u8) void {
         var i: usize = 0;
         while (i < s.len) {
             _ = self.msgb.push(s[i]);
@@ -460,7 +460,7 @@ pub const Parser = struct {
     };
 
     // 草稿复制成稳定切片：下一条消息还要用同一块草稿
-    const dup_msg = fn (self: *Parser) []const u8 {
+    pub const dup_msg = fn (self: *Parser) []const u8 {
         let items = self.msgb.items();
         let n = items.len;
         if (self.al.alloc(self.al.ctx, n)) p {
@@ -475,14 +475,14 @@ pub const Parser = struct {
         return items;
     };
 
-    const record = fn (self: *Parser, code: []const u8, msg: []const u8) void {
+    pub const record = fn (self: *Parser, code: []const u8, msg: []const u8) void {
         if (self.spec_depth > 0) { return; }   // 试探区：失败是回溯，不是报错
         let t = self.cur();
         _ = self.errs.push(Err{ .line = t.line, .col = t.col, .code = code, .msg = msg });
     };
 
     // expect 家族共用的 "expected X, found Y"（C parse.c:82/85）
-    const err_expected = fn (self: *Parser, k: lex.Kind) void {
+    pub const err_expected = fn (self: *Parser, k: lex.Kind) void {
         if (self.spec_depth > 0) { return; }
         let t = self.cur();
         let tk = t.kind;
@@ -510,22 +510,22 @@ pub const Parser = struct {
 
     // ---- 游标 ----
 
-    const cur = fn (self: *Parser) lex.Tok {
+    pub const cur = fn (self: *Parser) lex.Tok {
         if (self.i >= self.toks.len) { return self.toks[self.toks.len - 1]; }
         return self.toks[self.i];
     };
 
-    const peek_tok = fn (self: *Parser, k: usize) lex.Tok {
+    pub const peek_tok = fn (self: *Parser, k: usize) lex.Tok {
         let j = self.i + k;
         if (j >= self.toks.len) { return self.toks[self.toks.len - 1]; }
         return self.toks[j];
     };
 
-    const at = fn (self: *Parser, k: lex.Kind) bool {
+    pub const at = fn (self: *Parser, k: lex.Kind) bool {
         return self.cur().kind == k;
     };
 
-    const accept = fn (self: *Parser, k: lex.Kind) bool {
+    pub const accept = fn (self: *Parser, k: lex.Kind) bool {
         if (self.at(k)) {
             self.i = self.i + 1;
             return true;
@@ -533,13 +533,13 @@ pub const Parser = struct {
         return false;
     };
 
-    const advance = fn (self: *Parser) lex.Tok {
+    pub const advance = fn (self: *Parser) lex.Tok {
         let t = self.cur();
         if (self.i + 1 < self.toks.len) { self.i = self.i + 1; }
         return t;
     };
 
-    const expect = fn (self: *Parser, k: lex.Kind) !void {
+    pub const expect = fn (self: *Parser, k: lex.Kind) !void {
         if (self.at(k)) {
             _ = self.advance();
             return;
@@ -548,11 +548,11 @@ pub const Parser = struct {
         return (error)Fail.f;
     };
 
-    const tok_text = fn (self: *Parser, t: lex.Tok) []const u8 {
+    pub const tok_text = fn (self: *Parser, t: lex.Tok) []const u8 {
         return self.src[t.start..t.start + t.len];
     };
 
-    const take_ident = fn (self: *Parser) ![]const u8 {
+    pub const take_ident = fn (self: *Parser) ![]const u8 {
         if (self.at(lex.Kind.ident)) {
             let t = self.advance();
             return self.tok_text(t);
@@ -563,7 +563,7 @@ pub const Parser = struct {
 
     // ---- 节点构造 ----
 
-    const new = fn (self: *Parser, k: NK) *Node {
+    pub const new = fn (self: *Parser, k: NK) *Node {
         let raw = self.al.alloc(self.al.ctx, @type(Node).size);
         if (raw) p {
             let n = (*Node)p;
@@ -594,7 +594,7 @@ pub const Parser = struct {
 
     };
 
-    const push_item = fn (self: *Parser, n: *Node, item: *Node) void {
+    pub const push_item = fn (self: *Parser, n: *Node, item: *Node) void {
         var ok = n.items.push(item);
         if (!ok) {
             std.println("bootstrap: out of memory");
@@ -604,14 +604,14 @@ pub const Parser = struct {
 
     // 阶段 4：C 版 node_new 的位置语义 = 构造点的"引导 token"（先存 t 再消费）。
     // 这里用 new_at 把节点钉到那个 token 上；new() 仍是 cur() 近似，逐点替换。
-    const new_at = fn (self: *Parser, k: NK, t: lex.Tok) *Node {
+    pub const new_at = fn (self: *Parser, k: NK, t: lex.Tok) *Node {
         let n = self.new(k);
         n.line = t.line;
         n.col = t.col;
         return n;
     };
 
-    const type_ident = fn (self: *Parser, name: []const u8, t: lex.Tok) *Node {
+    pub const type_ident = fn (self: *Parser, name: []const u8, t: lex.Tok) *Node {
         let n = self.new_at(NK.t_ident, t);
         n.name = name;
         return n;
@@ -620,14 +620,14 @@ pub const Parser = struct {
     // ---- lookahead 判据 ----
 
     // true/false 在 lex 里是标识符，但它们是字面量不是标签。
-    const is_bool_word = fn (self: *Parser, t: lex.Tok) bool {
+    pub const is_bool_word = fn (self: *Parser, t: lex.Tok) bool {
         if (t.kind != lex.Kind.ident) { return false; }
         let s = self.tok_text(t);
         return std.str.eq(s, "true") || std.str.eq(s, "false");
     };
 
     // 这个 token 能不能作为 switch 模式的开头（模式列表逗号判据）。
-    const starts_pattern = fn (self: *Parser, t: lex.Tok) bool {
+    pub const starts_pattern = fn (self: *Parser, t: lex.Tok) bool {
         if (t.kind == lex.Kind.dot || t.kind == lex.Kind.int ||
             t.kind == lex.Kind.char || t.kind == lex.Kind.minus ||
             t.kind == lex.Kind.lparen) {
@@ -637,7 +637,7 @@ pub const Parser = struct {
     };
 
     // `{` 在 i 处是块（true）还是元组字面量（false）？纯词法判定。
-    const brace_is_block = fn (self: *Parser, i: usize) bool {
+    pub const brace_is_block = fn (self: *Parser, i: usize) bool {
         var depth: i32 = 0;
         var j = i;
         while (j < self.toks.len) {
@@ -664,7 +664,7 @@ pub const Parser = struct {
     };
 
     // `(T)` 之后能接 cast 的 token。
-    const can_follow_cast = fn (self: *Parser, k: lex.Kind) bool {
+    pub const can_follow_cast = fn (self: *Parser, k: lex.Kind) bool {
         return k == lex.Kind.ident || k == lex.Kind.int ||
                k == lex.Kind.float || k == lex.Kind.string ||
                k == lex.Kind.char || k == lex.Kind.lbrace ||
@@ -679,7 +679,7 @@ pub const Parser = struct {
     // ---- 类型 ----
 
     // 试探类型；不是类型就回退按表达式读（联合体标签等编译期常量）。
-    const parse_type_or_const = fn (self: *Parser) !*Node {
+    pub const parse_type_or_const = fn (self: *Parser) !*Node {
         let save = self.i;
         self.spec_depth = self.spec_depth + 1;
         let r = self.parse_type();
@@ -701,7 +701,7 @@ pub const Parser = struct {
         return self.parse_expr();
     };
 
-    const parse_type_primary = fn (self: *Parser) !*Node {
+    pub const parse_type_primary = fn (self: *Parser) !*Node {
         let t = self.cur();
 
         if (t.kind == lex.Kind.ident) {
@@ -824,6 +824,13 @@ pub const Parser = struct {
             // 体：字段、方法、声明
             try self.expect(lex.Kind.lbrace);
             while (!self.at(lex.Kind.rbrace) && !self.at(lex.Kind.eof)) {
+                // 成员默认私有（只在声明它的文件里可见），`pub` 才对外——
+                // 和顶层声明同一套规则。
+                var mem_pub = false;
+                if (self.at(lex.Kind.kw_pub)) {
+                    _ = self.advance();
+                    mem_pub = true;
+                }
                 // 方法只有一种写法：`const name = fn (…) R { … };`
                 if (self.at(lex.Kind.kw_const) && self.peek_tok(1).kind == lex.Kind.ident &&
                     self.peek_tok(2).kind == lex.Kind.assign && self.peek_tok(3).kind == lex.Kind.kw_fn) {
@@ -832,15 +839,18 @@ pub const Parser = struct {
                     _ = self.advance();
                     let f = try self.parse_fn(true);
                     f.name = mname;
+                    f.is_pub = mem_pub;
                     try self.expect(lex.Kind.semi);
                     self.push_item(n, f);
                 } else {
                     if (self.at(lex.Kind.kw_const) || self.at(lex.Kind.kw_let) || self.at(lex.Kind.kw_var)) {
                         let d = try self.parse_decl();
+                        d.is_pub = mem_pub;
                         self.push_item(n, d);
                     } else {
                         if (self.at(lex.Kind.kw_fn)) {
                             let f = try self.parse_fn(false);
+                            f.is_pub = mem_pub;
                             self.push_item(n, f);
                         } else {
                             let ftok = self.cur();
@@ -852,6 +862,7 @@ pub const Parser = struct {
                             let f = self.new_at(NK.param, ftok);
                             f.name = fname;
                             f.a = ty;
+                            f.is_pub = mem_pub;
                             if (self.accept(lex.Kind.assign)) {
                                 f.b = try self.parse_expr();
                             }
@@ -880,6 +891,12 @@ pub const Parser = struct {
             }
             try self.expect(lex.Kind.lbrace);
             while (!self.at(lex.Kind.rbrace) && !self.at(lex.Kind.eof)) {
+                // 体也是作用域：方法 / 常量成员和变体混着写；成员默认私有
+                var mem_pub = false;
+                if (self.at(lex.Kind.kw_pub)) {
+                    _ = self.advance();
+                    mem_pub = true;
+                }
                 if (self.at(lex.Kind.kw_const) && self.peek_tok(1).kind == lex.Kind.ident &&
                     self.peek_tok(2).kind == lex.Kind.assign && self.peek_tok(3).kind == lex.Kind.kw_fn) {
                     _ = self.advance();
@@ -887,15 +904,18 @@ pub const Parser = struct {
                     _ = self.advance();
                     let f = try self.parse_fn(true);
                     f.name = mname;
+                    f.is_pub = mem_pub;
                     try self.expect(lex.Kind.semi);
                     self.push_item(n, f);
                 } else {
                     if (self.at(lex.Kind.kw_const) || self.at(lex.Kind.kw_let) || self.at(lex.Kind.kw_var)) {
                         let d = try self.parse_decl();
+                        d.is_pub = mem_pub;
                         self.push_item(n, d);
                     } else {
                         if (self.at(lex.Kind.kw_fn)) {
                             let f = try self.parse_fn(false);
+                            f.is_pub = mem_pub;
                             self.push_item(n, f);
                         } else {
                             let mline = self.cur();
@@ -906,6 +926,7 @@ pub const Parser = struct {
                             let m = self.new_at(NK.pair, mline);
                             m.name = mname;
                             m.a = ty;
+                            m.is_pub = mem_pub;
                             _ = self.accept(lex.Kind.comma);
                             self.push_item(n, m);
                         }
@@ -925,6 +946,12 @@ pub const Parser = struct {
             }
             try self.expect(lex.Kind.lbrace);
             while (!self.at(lex.Kind.rbrace) && !self.at(lex.Kind.eof)) {
+                // 体也是作用域：方法 / 常量成员和变体混着写；成员默认私有
+                var mem_pub = false;
+                if (self.at(lex.Kind.kw_pub)) {
+                    _ = self.advance();
+                    mem_pub = true;
+                }
                 if (self.at(lex.Kind.kw_const) && self.peek_tok(1).kind == lex.Kind.ident &&
                     self.peek_tok(2).kind == lex.Kind.assign && self.peek_tok(3).kind == lex.Kind.kw_fn) {
                     _ = self.advance();
@@ -932,20 +959,24 @@ pub const Parser = struct {
                     _ = self.advance();
                     let f = try self.parse_fn(true);
                     f.name = mname;
+                    f.is_pub = mem_pub;
                     try self.expect(lex.Kind.semi);
                     self.push_item(n, f);
                 } else {
                     if (self.at(lex.Kind.kw_const) || self.at(lex.Kind.kw_let) || self.at(lex.Kind.kw_var)) {
                         let d = try self.parse_decl();
+                        d.is_pub = mem_pub;
                         self.push_item(n, d);
                     } else {
                         if (self.at(lex.Kind.kw_fn)) {
                             let f = try self.parse_fn(false);
+                            f.is_pub = mem_pub;
                             self.push_item(n, f);
                         } else {
                             let mt = self.cur();
                             let m = self.new_at(NK.pair, mt);
                             m.name = try self.take_ident();
+                            m.is_pub = mem_pub;
                             if (self.accept(lex.Kind.assign)) {
                                 m.a = try self.parse_expr();
                             }
@@ -975,7 +1006,7 @@ pub const Parser = struct {
     };
 
     // 前缀部分：*T / []T / ?T / !T / fn(…) / 各种聚合体
-    const parse_type_prefix = fn (self: *Parser) !*Node {
+    pub const parse_type_prefix = fn (self: *Parser) !*Node {
         let t = self.cur();
 
         if (t.kind == lex.Kind.star) {
@@ -1071,7 +1102,7 @@ pub const Parser = struct {
 
     // E!T：前缀读完再看有没有 `!`——左边是错误集，右边是载荷。
     // `!T`（无集合）走前缀分支，两者共用 NK.err，区别只看 b 有没有值。
-    const parse_type = fn (self: *Parser) !*Node {
+    pub const parse_type = fn (self: *Parser) !*Node {
         let t = try self.parse_type_prefix();
         if (!self.at(lex.Kind.bang)) { return t; }
         let bt = self.cur();
@@ -1085,7 +1116,7 @@ pub const Parser = struct {
     // ---- 表达式 ----
 
     // 优先级：数字越大绑得越紧。orelse 只比赋值高一层。
-    const bin_prec = fn (self: *Parser, k: lex.Kind) u32 {
+    pub const bin_prec = fn (self: *Parser, k: lex.Kind) u32 {
         if (k == lex.Kind.kw_orelse) { return 1; }
         if (k == lex.Kind.oror) { return 2; }
         if (k == lex.Kind.andand) { return 3; }
@@ -1100,14 +1131,14 @@ pub const Parser = struct {
         return 0;
     };
 
-    const is_assign_op = fn (self: *Parser, k: lex.Kind) bool {
+    pub const is_assign_op = fn (self: *Parser, k: lex.Kind) bool {
         return k == lex.Kind.assign || k == lex.Kind.pluseq || k == lex.Kind.minuseq ||
                k == lex.Kind.stareq || k == lex.Kind.slasheq || k == lex.Kind.perceq ||
                k == lex.Kind.ampeq || k == lex.Kind.pipeeq || k == lex.Kind.careteq ||
                k == lex.Kind.shleq || k == lex.Kind.shreq;
     };
 
-    const parse_binary_rest = fn (self: *Parser, lhs0: *Node, min_prec: u32) !*Node {
+    pub const parse_binary_rest = fn (self: *Parser, lhs0: *Node, min_prec: u32) !*Node {
         var lhs = lhs0;
         var go = true;
         var chain: u32 = 0;
@@ -1141,12 +1172,12 @@ pub const Parser = struct {
         return lhs;
     };
 
-    const parse_binary = fn (self: *Parser, min_prec: u32) !*Node {
+    pub const parse_binary = fn (self: *Parser, min_prec: u32) !*Node {
         let u = try self.parse_unary();
         return self.parse_binary_rest(u, min_prec);
     };
 
-    const parse_expr = fn (self: *Parser) !*Node {
+    pub const parse_expr = fn (self: *Parser) !*Node {
         let lhs = try self.parse_binary(1);
         if (self.is_assign_op(self.cur().kind)) {
             let k = self.cur().kind;
@@ -1164,13 +1195,13 @@ pub const Parser = struct {
     };
 
     // 只有这些形状后面才可能是调用（控制流表达式不可调用）。
-    const callable_shape = fn (self: *Parser, n: *Node) bool {
+    pub const callable_shape = fn (self: *Parser, n: *Node) bool {
         return n.kind == NK.id || n.kind == NK.t_ident || n.kind == NK.field ||
                n.kind == NK.index || n.kind == NK.call || n.kind == NK.cast ||
                n.kind == NK.builtin || n.kind == NK.module_;
     };
 
-    const parse_postfix = fn (self: *Parser, base0: *Node) !*Node {
+    pub const parse_postfix = fn (self: *Parser, base0: *Node) !*Node {
         var base = base0;
         var go = true;
         while (go) {
@@ -1305,7 +1336,7 @@ pub const Parser = struct {
     };
 
     // `{ … }` 表达式位置：元组字面量或块
-    const parse_brace_expr = fn (self: *Parser) !*Node {
+    pub const parse_brace_expr = fn (self: *Parser) !*Node {
         let t = self.cur();
         if (self.brace_is_block(self.i)) { return self.parse_block(); }
 
@@ -1328,7 +1359,7 @@ pub const Parser = struct {
     };
 
     // `.{ … }` —— 永远是字面量
-    const parse_dot_brace = fn (self: *Parser) !*Node {
+    pub const parse_dot_brace = fn (self: *Parser) !*Node {
         let t = self.advance();
         var is_struct = false;
         if (self.at(lex.Kind.dot) && self.peek_tok(1).kind == lex.Kind.ident &&
@@ -1373,7 +1404,7 @@ pub const Parser = struct {
         return n;
     };
 
-    const parse_unary = fn (self: *Parser) !*Node {
+    pub const parse_unary = fn (self: *Parser) !*Node {
         let t = self.cur();
         if (t.kind == lex.Kind.amp) {
             _ = self.advance();
@@ -1408,7 +1439,7 @@ pub const Parser = struct {
         return self.parse_postfix(prim);
     };
 
-    const parse_primary = fn (self: *Parser) !*Node {
+    pub const parse_primary = fn (self: *Parser) !*Node {
         let t = self.cur();
 
         if (t.kind == lex.Kind.int) {
@@ -1620,7 +1651,7 @@ pub const Parser = struct {
 
     // ---- 语句 ----
 
-    const parse_decl = fn (self: *Parser) !*Node {
+    pub const parse_decl = fn (self: *Parser) !*Node {
         let t = self.advance();
         let n = self.new_at(NK.decl, t);
         if (t.kind == lex.Kind.kw_var) {
@@ -1666,7 +1697,7 @@ pub const Parser = struct {
         return n;
     };
 
-    const parse_fn = fn (self: *Parser, allow_name: bool) !*Node {
+    pub const parse_fn = fn (self: *Parser, allow_name: bool) !*Node {
         let t = self.advance();
         let n = self.new_at(NK.fn_, t);
         if (self.at(lex.Kind.ident) && self.peek_tok(1).kind == lex.Kind.lparen) {
@@ -1705,7 +1736,7 @@ pub const Parser = struct {
     };
 
     // 语句关键字：捕获名后面一定是漏了块（报错路径，好文件不触发）。
-    const starts_stmt_kw = fn (self: *Parser, k: lex.Kind) bool {
+    pub const starts_stmt_kw = fn (self: *Parser, k: lex.Kind) bool {
         return k == lex.Kind.kw_if || k == lex.Kind.kw_while || k == lex.Kind.kw_for ||
                k == lex.Kind.kw_switch || k == lex.Kind.kw_return || k == lex.Kind.kw_continue ||
                k == lex.Kind.kw_defer || k == lex.Kind.kw_errdefer ||
@@ -1714,20 +1745,20 @@ pub const Parser = struct {
     };
 
     // 单条语句就能当 if 臂的关键字（M19 语法糖）。
-    const arm_stmt_only = fn (self: *Parser, k: lex.Kind) bool {
+    pub const arm_stmt_only = fn (self: *Parser, k: lex.Kind) bool {
         return k == lex.Kind.kw_return || k == lex.Kind.kw_continue ||
                k == lex.Kind.kw_defer || k == lex.Kind.kw_errdefer;
     };
 
     // 能开始一个值、且不是二元运算符的 token。
-    const starts_value = fn (self: *Parser, k: lex.Kind) bool {
+    pub const starts_value = fn (self: *Parser, k: lex.Kind) bool {
         return k == lex.Kind.int || k == lex.Kind.float || k == lex.Kind.char ||
                k == lex.Kind.string || k == lex.Kind.ident || k == lex.Kind.kw_null ||
                k == lex.Kind.kw_undefined;
     };
 
     // 只算真正的二元运算符（`.`/`(`/`[` 是后缀，不算）。
-    const starts_binop = fn (self: *Parser, k: lex.Kind) bool {
+    pub const starts_binop = fn (self: *Parser, k: lex.Kind) bool {
         return k == lex.Kind.star || k == lex.Kind.slash || k == lex.Kind.percent ||
                k == lex.Kind.plus || k == lex.Kind.minus ||
                k == lex.Kind.lt || k == lex.Kind.le || k == lex.Kind.gt ||
@@ -1738,7 +1769,7 @@ pub const Parser = struct {
     };
 
     // 捕获名后面紧跟这些 token：臂到此结束，值只能是捕获值本身（M50 的糖）。
-    const ends_arm_here = fn (self: *Parser, k: lex.Kind) bool {
+    pub const ends_arm_here = fn (self: *Parser, k: lex.Kind) bool {
         return k == lex.Kind.semi || k == lex.Kind.comma ||
                k == lex.Kind.rparen || k == lex.Kind.rbrace ||
                k == lex.Kind.rbracket || k == lex.Kind.kw_else;
@@ -1746,7 +1777,7 @@ pub const Parser = struct {
 
     // 一个 if 臂。捕获名放 self.cap 出参。
     // implicit_ok 只在真值臂上为真：else 臂的裸名字一直是普通表达式。
-    const parse_if_arm = fn (self: *Parser, implicit_ok: bool) !*Node {
+    pub const parse_if_arm = fn (self: *Parser, implicit_ok: bool) !*Node {
         if (self.at(lex.Kind.ident) && self.peek_tok(1).kind == lex.Kind.colon) {
             // `lbl:` 后面跟什么决定它是标签还是收割，臂位置也得照着分：
             //   构造（if/while/for/switch）→ 带标签的构造
@@ -1827,7 +1858,7 @@ pub const Parser = struct {
         return self.parse_expr();
     };
 
-    const parse_if = fn (self: *Parser, label: ?[]const u8) !*Node {
+    pub const parse_if = fn (self: *Parser, label: ?[]const u8) !*Node {
         // cap 是共享出参：嵌套 if（在臂块内）会重写它，
         // 先存下外层未读的值，臂读回后恢复，模拟 C 的栈上局部出参。
         let saved_cap = self.cap;
@@ -1890,7 +1921,7 @@ pub const Parser = struct {
         return n;
     };
 
-    const parse_while = fn (self: *Parser, label: ?[]const u8) !*Node {
+    pub const parse_while = fn (self: *Parser, label: ?[]const u8) !*Node {
         let t = self.advance();
         let n = self.new_at(NK.while_, t);
         n.label = label;
@@ -1916,7 +1947,7 @@ pub const Parser = struct {
         return n;
     };
 
-    const parse_for = fn (self: *Parser, label: ?[]const u8, allow_nobind: bool) !*Node {
+    pub const parse_for = fn (self: *Parser, label: ?[]const u8, allow_nobind: bool) !*Node {
         let t = self.advance();
         let n = self.new_at(NK.for_, t);
         n.label = label;
@@ -1999,7 +2030,7 @@ pub const Parser = struct {
         return n;
     };
 
-    const parse_switch = fn (self: *Parser, label: ?[]const u8) !*Node {
+    pub const parse_switch = fn (self: *Parser, label: ?[]const u8) !*Node {
         let t = self.advance();
         let n = self.new_at(NK.switch_, t);
         n.label = label;
@@ -2098,7 +2129,7 @@ pub const Parser = struct {
         return n;
     };
 
-    const parse_construct = fn (self: *Parser, label: ?[]const u8) !*Node {
+    pub const parse_construct = fn (self: *Parser, label: ?[]const u8) !*Node {
         let k = self.cur().kind;
         if (k == lex.Kind.kw_if) { return self.parse_if(label); }
         if (k == lex.Kind.kw_while) { return self.parse_while(label); }
@@ -2113,7 +2144,7 @@ pub const Parser = struct {
     };
 
     // yield 语句：tag: expr;   或   tag: {tuple};
-    const parse_yield = fn (self: *Parser) !*Node {
+    pub const parse_yield = fn (self: *Parser) !*Node {
         let t = self.cur();
         let tag = try self.take_ident();
         try self.expect(lex.Kind.colon);
@@ -2132,7 +2163,7 @@ pub const Parser = struct {
     // 不吃 extern 关键字：fn → extern fn、var → extern var、
     // const Name = struct/union → extern struct/union。其余拒绝。
     // `pub` 允许（绑定模块的 extern 就是它的公开 API），直接透传。
-    const parse_extern_item = fn (self: *Parser) !*Node {
+    pub const parse_extern_item = fn (self: *Parser) !*Node {
         let t = self.cur();
         if (t.kind == lex.Kind.kw_pub) {
             _ = self.advance();
@@ -2165,7 +2196,7 @@ pub const Parser = struct {
         return (error)Fail.f;
     };
 
-    const parse_stmt = fn (self: *Parser) !*Node {
+    pub const parse_stmt = fn (self: *Parser) !*Node {
         let t = self.cur();
 
         if (t.kind == lex.Kind.kw_pub) {
@@ -2298,7 +2329,7 @@ pub const Parser = struct {
         return e;
     };
 
-    const parse_block = fn (self: *Parser) !*Node {
+    pub const parse_block = fn (self: *Parser) !*Node {
         let t = self.cur();
         try self.expect(lex.Kind.lbrace);
         let n = self.new_at(NK.block, t);
@@ -2312,7 +2343,7 @@ pub const Parser = struct {
         return n;
     };
 
-    const parse_program = fn (self: *Parser) !*Node {
+    pub const parse_program = fn (self: *Parser) !*Node {
         // 递归下降对深括号不设防：先在 token 层挡（同 src/parse.c）
         if (brackets_too_deep(self.toks)) {
             self.record("E0202", "brackets nest too deeply (over 256 levels); split the expression or flatten the block");

@@ -2520,6 +2520,27 @@ fn declStmtAt(text: []const u8, c: usize, kw: []const u8, name: []const u8) ?[]c
 /// 实例上冒出个关联函数（用户 2026-11-10 报的正是这个）。
 ///
 /// 只认容器体**顶层**（相对深度 1）的声明：嵌套 struct 的同名成员不算。
+/// 容器体里这个名字的声明带没带 `pub`。补全要跟编译器一样严：成员默认
+/// 私有（只在声明它的文件里可见），别的文件里不该把它们摆出来。
+/// 找不到声明就返回 true（宁可多提示，也不要凭猜测把成员藏掉）。
+fn memberPubIn(body: []const u8, name: []const u8) bool {
+    var it = std.mem.splitScalar(u8, body, '\n');
+    while (it.next()) |raw| {
+        var line = std.mem.trimStart(u8, raw, " \t");
+        const is_pub = std.mem.startsWith(u8, line, "pub ");
+        if (is_pub) line = std.mem.trimStart(u8, line[4..], " \t");
+        if (std.mem.startsWith(u8, line, "const ")) line = std.mem.trimStart(u8, line[6..], " \t");
+        if (std.mem.startsWith(u8, line, "let ")) line = std.mem.trimStart(u8, line[4..], " \t");
+        if (std.mem.startsWith(u8, line, "var ")) line = std.mem.trimStart(u8, line[4..], " \t");
+        if (!std.mem.startsWith(u8, line, name)) continue;
+        var k = name.len;
+        while (k < line.len and (line[k] == ' ' or line[k] == '\t')) k += 1;
+        if (k < line.len and (line[k] == ':' or line[k] == '='))
+            return is_pub;
+    }
+    return true;
+}
+
 fn findMemberStmt(body: []const u8, name: []const u8) ?[]const u8 {
     const kws = [_][]const u8{ "const ", "let ", "var ", "fn " };
     var depth: usize = 0;
@@ -5346,6 +5367,110 @@ fn recvOptionalTy(text: []const u8, doc: *const Document, recv: []const u8) ?[]c
     return t;
 }
 
+/// 调用表达式的末位被调名（`std.map.HashMap(V: i32)` → `HashMap`，
+/// `a.b.make(x)` → `make`）。不是"整条表达式就是一个调用"时返回 null。
+fn finalCalleeOf(expr: []const u8) ?[]const u8 {
+    const e = trimSl(expr);
+    if (e.len == 0 or e[e.len - 1] != ')') return null;
+    const lp = finalCallOpen(e) orelse return null;
+    const callee = trimSl(e[recvExprStart(e, lp)..lp]);
+    if (callee.len == 0) return null;
+    var last = callee;
+    if (std.mem.lastIndexOfScalar(u8, callee, '.')) |d| last = trimSl(callee[d + 1 ..]);
+    if (last.len == 0 or !isIdentChar(last[0])) return null;
+    return last;
+}
+
+/// `const F = fn (…) type { return X…; };` 的返回表达式（X…）。
+/// 泛型工厂返回类型时，成员集合在 X… 里，不在名字上。
+fn fnRetExprOf(text: []const u8, name: []const u8) ?[]const u8 {
+    const st = findDeclStmt(text, name) orelse return null;
+    const lp = std.mem.indexOfScalar(u8, st, '(') orelse return null;
+    var d: usize = 0;
+    var rp = lp;
+    while (rp < st.len) : (rp += 1) {
+        if (st[rp] == '(') d += 1;
+        if (st[rp] == ')') {
+            d -= 1;
+            if (d == 0) break;
+        }
+    }
+    if (rp >= st.len) return null;
+    const lb = std.mem.indexOfScalarPos(u8, st, rp, '{') orelse return null;
+    d = 0;
+    var rb = lb;
+    while (rb < st.len) : (rb += 1) {
+        if (st[rb] == '{') d += 1;
+        if (st[rb] == '}') {
+            d -= 1;
+            if (d == 0) break;
+        }
+    }
+    if (rb >= st.len) return null;
+    const body = st[lb + 1 .. rb];
+    const rk = std.mem.indexOf(u8, body, "return ") orelse return null;
+    const rest = trimSl(body[rk + 7 ..]);
+    var e: usize = 0;
+    var dep: usize = 0;
+    var in_str = false;
+    while (e < rest.len) : (e += 1) {
+        const ch = rest[e];
+        if (in_str) {
+            if (ch == '\\') { e += 1; continue; }
+            if (ch == '"') in_str = false;
+            continue;
+        }
+        if (ch == '"') { in_str = true; continue; }
+        if (ch == '(' or ch == '[' or ch == '{') dep += 1;
+        if (ch == ')' or ch == ']' or ch == '}') { if (dep > 0) dep -= 1; }
+        if (ch == ';' and dep == 0) break;
+    }
+    const out = trimSl(rest[0..e]);
+    return if (out.len == 0) null else out;
+}
+
+/// 接收者是不是**类型值**而不是实例：`const HS: type = HashMap(V: i32);`、
+/// `const V = ArrayList(i32);`、`const T = Make(i32)`（Make 返回 type）、
+/// 以及它们的别名链。类型值上只有静态成员——判错就会把字段和方法全
+/// 摆出来（用户 2026-11-10 截图：`HS.` 弹出 alloc/cap/hashes/…）。
+fn isTypeValuedRecv(files: []const []const u8, text: []const u8, name: []const u8, depth: u8) bool {
+    if (depth > 4 or name.len == 0) return false;
+    const st = findDeclStmt(text, name) orelse return false;
+    if (declTyOf(st)) |dt| {
+        if (std.mem.eql(u8, trimSl(dt), "type")) return true;
+    }
+    const init = declInitOf(st) orelse return false;
+    const e = trimSl(init);
+    if (e.len == 0) return false;
+    // 裸别名：const A = B;
+    var j: usize = 0;
+    while (j < e.len and isIdentChar(e[j])) j += 1;
+    if (j == e.len) return isTypeValuedRecv(files, text, e, depth + 1);
+    const last = finalCalleeOf(e) orelse return false;
+    if (isContainerIn(files, last) or genericBodyOf(files, last) != null) return true;
+    if (findDeclStmt(text, last)) |fst| {
+        const sg = sigOfStmt(fst);
+        if (sg.is_fn and std.mem.eql(u8, trimSl(sg.ret), "type")) return true;
+    }
+    return false;
+}
+
+/// 类型值背后的容器：`HS` → HashMap、`T2` → Make 体里 return 的容器。
+fn typeValuedContainer(files: []const []const u8, text: []const u8, name: []const u8, depth: u8) ?[]const u8 {
+    if (depth > 4 or name.len == 0) return null;
+    const st = findDeclStmt(text, name) orelse return null;
+    const init = declInitOf(st) orelse return null;
+    const e = trimSl(init);
+    if (e.len == 0) return null;
+    var j: usize = 0;
+    while (j < e.len and isIdentChar(e[j])) j += 1;
+    if (j == e.len) return typeValuedContainer(files, text, e, depth + 1);
+    const last = finalCalleeOf(e) orelse return null;
+    if (isContainerIn(files, last) or genericBodyOf(files, last) != null) return last;
+    if (fnRetExprOf(text, last)) |ret| return inferContainer(files, text, ret, depth + 1);
+    return null;
+}
+
 fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
     const text = doc.text;
     const off = posToOffset(text, line, character);
@@ -5827,6 +5952,11 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                     // 不是模块/类型名——按实例变量处理：推断类型再补容器成员
                     //（let v = Obj.init(...) → v. 出 Obj 的字段与方法）
                     decls.clearRetainingCapacity();
+                    // KEEP — 接收者本身可能是**类型值**（用户 2026-11-10 截图）：
+                    // `const HS: type = std.map.HashMap(V: i32); HS.` 是"类型上
+                    // 只有静态成员"，不是实例——此前按初始化式推出 HashMap 就当
+                    // 实例，alloc/cap/hashes/n/vals 和全部方法一起弹出来。
+                    const recv_type = isTypeValuedRecv(files.items, text, container, 0);
                     // KEEP: vendor/deps 容器实例（var c = vp.Cfg{…}）——
                     // inferContainer 对绑定名打头的初始化一律 null，先走模块
                     // 解析补齐（2026-11-08：vendor struct 也要查）。
@@ -5849,10 +5979,26 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                             if (containerMembersAny(files.items, ty, &decls)) |ctxt| {
                                 handled = decls.items.len > 0;
                                 if (handled) {
-                                    recv_kind = .instance;
+                                    recv_kind = if (recv_type) .ty else .instance;
                                     mem_txt = ctxt;
                                     markContainerFns(ctxt, &decls);
                                     owner = ty;
+                                }
+                            }
+                        }
+                    }
+                    // 类型值但 inferContainer 认不出容器（泛型工厂：`const T2 =
+                    // Make(i32)`，Make 的返回类型是 type，容器在它 return 的
+                    // 表达式里）——按类型成员出，绝不退回实例。
+                    if (!handled and recv_type) {
+                        if (typeValuedContainer(files.items, text, container, 0)) |cty| {
+                            if (containerMembersAny(files.items, cty, &decls)) |ctxt| {
+                                handled = decls.items.len > 0;
+                                if (handled) {
+                                    recv_kind = .ty;
+                                    mem_txt = ctxt;
+                                    markContainerFns(ctxt, &decls);
+                                    owner = cty;
                                 }
                             }
                         }
@@ -5889,7 +6035,7 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                                 if (containerMembersAny(files.items, ty, &decls)) |ctxt| {
                                     handled = decls.items.len > 0;
                                     if (handled) {
-                                        recv_kind = .instance;
+                                        recv_kind = if (recv_type) .ty else .instance;
                                         mem_txt = ctxt;
                                         markContainerFns(ctxt, &decls);
                                         owner = ty;
@@ -5973,6 +6119,19 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                         }
                         break :blk2 findDeclStmt(src, dcl.name);
                     };
+                    // 成员来自别的文件（std/模块）时，非 `pub` 的一律不出：
+                    // 编译器那边是 E0404，补全不能比它宽松。
+                    // 变体（enum / union(enum)）不是可隐藏的成员：它们是值，
+                    // 类型能写出来就说明变体集合是公开的，不要求逐个写 pub。
+                    if (dcl.kind != .variant) {
+                        if (mem_txt) |mt| {
+                            if (!std.mem.eql(u8, mt, text)) {
+                                if (mem_body) |b| {
+                                    if (!memberPubIn(b, dcl.name)) continue;
+                                }
+                            }
+                        }
+                    }
                     const cinit: ?[]const u8 = if (stmt) |st| containerInitOf(st) else null;
                     // KEEP —— 类型 / 实例命名空间分离（用户 2026-11-10：
                     // "Task 命名空间污染了"）。补全不能比编译器宽松：

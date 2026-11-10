@@ -80,7 +80,7 @@ const bumpFree = fn (_: ?*u8, _: *u8, _: usize) void {
 
 pub const ArenaAllocator = struct {
     // 造一个 arena 分配器。状态本身从 backing 里出。
-    const init = fn (backing: Allocator) ?Allocator {
+    pub const init = fn (backing: Allocator) ?Allocator {
         let sb = backing.alloc(backing.ctx, @type(State).size);
         if (sb) q {
             let st = (*State)q;
@@ -92,7 +92,7 @@ pub const ArenaAllocator = struct {
 
     // 帧重置：保留已开的块，只把 bump 指针归零。游戏主循环一帧一
     // reset，峰值内存恒定，块永不还给系统。
-    const reset = fn (a: Allocator) void {
+    pub const reset = fn (a: Allocator) void {
         if (a.ctx) c {
             let st = (*State)c;
             var h = st.0.head;
@@ -108,7 +108,7 @@ pub const ArenaAllocator = struct {
     };
 
     // 总清算：所有块 + 状态本身。
-    const deinit = fn (a: Allocator) void {
+    pub const deinit = fn (a: Allocator) void {
         if (a.ctx) c {
             let st = (*State)c;
             var h = st.0.head;

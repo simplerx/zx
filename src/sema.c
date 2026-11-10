@@ -210,6 +210,10 @@ bool g_ct_soft_div;
  * 残留，于是 `s[i]` 会用「新实参 + 旧下标」折出越界。那不是用户代码的错，
  * 真正的执行（ct_run，绑定齐全）紧随其后。这期间越界软失败即可。 */
 static bool g_ct_soft_bounds;
+/* 成员可见性（容器体里默认私有、pub 才对外）：装载时打戳 + 访问点检查。
+ * 定义在模块加载那一节，用在 check_field 里，先声明。 */
+static void stamp_mod(Node *n, const char *path);
+static bool deny_member(Node *n, Type *owner, bool is_pub, const char *name);
 /* 一个 Comptime 栈帧：返回值 / 收割都靠它往上冒 */
 typedef struct { int kind; Value *val; const char *label; } CtFlow;
 static CtFlow g_ct_flow;
@@ -1554,6 +1558,7 @@ static void collect_methods(Node *n, Type *agg, const char *what) {
             m0->fn   = it;
             m0->fnty = ft;
             m0->has_self = false;
+            m0->is_pub = it->is_pub;
             schedule_body(it);
             continue;
         }
@@ -1581,6 +1586,7 @@ static void collect_methods(Node *n, Type *agg, const char *what) {
         m->fn   = it;
         m->fnty = ft;
         m->has_self = true;
+        m->is_pub = it->is_pub;
         schedule_body(it);
     }
 }
@@ -1652,6 +1658,9 @@ static bool check_c_able(Node *at, Type *t, const char *fname) {
 
 static Type *resolve_struct_body(Node *n, Type *agg, bool is_union) {
     if (agg->fields) return agg;          /* 已解析 */
+    /* 成员默认只在本文件可见：把声明文件记在类型上（声明处的模块先由
+     * sema 打戳进 Node.mod，泛型单态化克隆 AST 时一并带过来）。 */
+    agg->mod = n->mod;
 
     /* extern struct / extern union（FFI）：镜像外部 C 结构体的布局。
      * 只允许"数据"——方法、静态成员、字段默认值都不进布局，一律拒绝。 */
@@ -1773,6 +1782,7 @@ static Type *resolve_struct_body(Node *n, Type *agg, bool is_union) {
             fs[k].is_static = true;
             fs[k].is_var = it->op == 2;
             fs[k].dflt = it->b;
+            fs[k].is_pub = it->is_pub;
             it->index = k;
             k++;
             continue;
@@ -1795,6 +1805,7 @@ static Type *resolve_struct_body(Node *n, Type *agg, bool is_union) {
             ef->ty = tag_ty;
             ef->has_tag = true;
             ef->tag = (uint64_t)vidx;
+            ef->is_pub = true;
             vidx++;
         } else if (is_union && it->a && it->a->kind == NK_TUPLE_TYPE && it->a->nitems == 2) {
             Node *t0 = it->a->items[0];
@@ -1815,6 +1826,7 @@ static Type *resolve_struct_body(Node *n, Type *agg, bool is_union) {
         fs[k].name = fname;
         fs[k].ty = ft;
         fs[k].dflt = it->b;
+        fs[k].is_pub = sugar ? true : it->is_pub;   /* union(enum) 变体是值，恒公开 */
         k++;
         /* 默认值按字段类型检查 */
         if (it->b) {
@@ -1853,6 +1865,7 @@ static Type *resolve_struct_body(Node *n, Type *agg, bool is_union) {
 
 static Type *resolve_enum_body(Node *n, Type *e) {
     if (e->fields) return e;
+    e->mod = n->mod;
     e->elem = n->a ? resolve_type(n->a) : ty_int(32, false);   /* 底层，默认 u32 */
 
     /* 枚举体也是作用域：变体之外还能写 `const` 和 `fn`（方法）。 */
@@ -1906,6 +1919,7 @@ static Type *resolve_enum_body(Node *n, Type *e) {
         f->name = m->name;
         f->ty = e;
         f->has_tag = true;
+        f->is_pub = true;      /* 变体是值，不是可隐藏的内部成员 */
         if (m->a) {
             IntV v = ev_int(m->a);
             if (!v.ok) { BAD(m->a, "enum value must be a compile-time integer"); f->tag = next; }
@@ -1927,6 +1941,7 @@ static Type *resolve_enum_body(Node *n, Type *e) {
         f->is_static = true;
         f->is_var = it->op == 2;
         f->dflt = it->b;
+        f->is_pub = it->is_pub;
         ensure(it->sym);
         f->ty = (it->sym && it->sym->ty) ? it->sym->ty : ty_invalid();
     }
@@ -2717,13 +2732,17 @@ static Type *check_field(Node *n) {
                     return type_of(n, m->ty ? m->ty : ty_invalid());
                 }
                 Method *mth = ty_method(tv, n->name);
-                if (mth) { n->inst = mth->fn; n->flag = mth->has_self; return type_of(n, mth->fnty); }
+                if (mth) {
+                    if (deny_member(n, tv, mth->is_pub, n->name)) return type_of(n, ty_invalid());
+                    n->inst = mth->fn; n->flag = mth->has_self; return type_of(n, mth->fnty);
+                }
                 {
                     const char *sug = suggest_member(n->name, tv);
                     if (sug) diag_help("did you mean `%s`?", sug);
                 }
                 return BAD(n, "`%s` has no member '%s'", ty_str(tv), n->name);
             }
+            if (deny_member(n, tv, f->is_pub, n->name)) return type_of(n, ty_invalid());
             if (tv->kind == TY_ENUM && !f->is_static) return type_of(n, tv);
             if (!f->is_static)
                 return BAD(n, "'%s' is an instance field; construct a value first", n->name);
@@ -2781,13 +2800,17 @@ static Type *check_field(Node *n) {
         Field *f = ty_field(e, n->name);
         if (!f) {
             Method *m = ty_method(e, n->name);
-            if (m) { n->inst = m->fn; n->flag = m->has_self; return type_of(n, m->fnty); }
+            if (m) {
+                if (deny_member(n, e, m->is_pub, n->name)) return type_of(n, ty_invalid());
+                n->inst = m->fn; n->flag = m->has_self; return type_of(n, m->fnty);
+            }
             {
                 const char *sug = suggest_member(n->name, e);
                 if (sug) diag_help("did you mean `%s`?", sug);
             }
             return BAD(n, "`%s` has no member '%s'", ty_str(e), n->name);
         }
+        if (deny_member(n, e, f->is_pub, n->name)) return type_of(n, ty_invalid());
         if (f->is_static) return static_member_ty(n, f);
         return type_of(n, f->ty);
     }
@@ -2815,13 +2838,17 @@ static Type *check_field(Node *n) {
         Field *f = ty_field(bt, n->name);
         if (!f) {
             Method *m = ty_method(bt, n->name);
-            if (m) { n->inst = m->fn; n->flag = m->has_self; return type_of(n, m->fnty); }
+            if (m) {
+                if (deny_member(n, bt, m->is_pub, n->name)) return type_of(n, ty_invalid());
+                n->inst = m->fn; n->flag = m->has_self; return type_of(n, m->fnty);
+            }
             {
                 const char *sug = suggest_member(n->name, bt);
                 if (sug) diag_help("did you mean `%s`?", sug);
             }
             return BAD(n, "`%s` has no field '%s'", ty_str(bt), n->name);
         }
+        if (deny_member(n, bt, f->is_pub, n->name)) return type_of(n, ty_invalid());
         /* 编译期聚合值里的 type 字段（std.Field.ty）：字段值本身就是
          * 一个类型，把它折出来挂到 type_val 上，这个表达式才能当类型用。 */
         if (f->ty && f->ty->kind == TY_TYPE) {
@@ -2846,9 +2873,13 @@ static Type *check_field(Node *n) {
         Field *f = ty_field(bt, n->name);
         if (!f) {
             Method *m = ty_method(bt, n->name);
-            if (m) { n->inst = m->fn; n->flag = m->has_self; return type_of(n, m->fnty); }
+            if (m) {
+                if (deny_member(n, bt, m->is_pub, n->name)) return type_of(n, ty_invalid());
+                n->inst = m->fn; n->flag = m->has_self; return type_of(n, m->fnty);
+            }
             return BAD(n, "`%s` has no member '%s'", ty_str(bt), n->name);
         }
+        if (deny_member(n, bt, f->is_pub, n->name)) return type_of(n, ty_invalid());
         if (f->is_static) return static_member_ty(n, f);
         return type_of(n, f->ty);
     }
@@ -2857,9 +2888,15 @@ static Type *check_field(Node *n) {
         if (!n->name)
             return BAD(n, "an enum value has no `.N` field; cast it to an integer instead");
         Field *f = ty_static_member(bt, n->name);      /* 枚举体的 const 成员 */
-        if (f) return type_of(n, f->ty);
+        if (f) {
+            if (deny_member(n, bt, f->is_pub, n->name)) return type_of(n, ty_invalid());
+            return type_of(n, f->ty);
+        }
         Method *m = ty_method(bt, n->name);
-        if (m) { n->inst = m->fn; n->flag = m->has_self; return type_of(n, m->fnty); }
+        if (m) {
+            if (deny_member(n, bt, m->is_pub, n->name)) return type_of(n, ty_invalid());
+            n->inst = m->fn; n->flag = m->has_self; return type_of(n, m->fnty);
+        }
         return BAD(n, "`%s` has no member '%s'", ty_str(bt), n->name);
     }
 
@@ -3415,6 +3452,12 @@ static Type *check_lit_fields(Node *n, Type *t) {
                 continue;
             }
             seen[idx] = true;
+            /* 字面量也是在"构造别人的类型"：私有字段照样拦（同一条可见性
+             * 规则，别让 `.field = …` 成为绕过私有检查的后门）。 */
+            if (deny_member(p, t, t->fields[idx].is_pub, p->name)) {
+                check_expr(p->a, NULL);
+                continue;
+            }
             /* 同一个字段写两遍：后者静默盖掉前者（`S{ .a = 1, .a = 2 }` 给 2），
              * 十有八九是复制粘贴错的——这种"能编过、结果是另一个值"的错误
              * 必须报出来，别等运行时才发现。 */
@@ -4582,6 +4625,7 @@ static Module *module_load_full(const char *full_in, int line, int col) {
     diag_first_error_reset();
     fe_last_error_reset();
     m->root = fe_parse_file(m->path);
+    if (m->root) stamp_mod(m->root, m->path);
     if (!m->root) {
         /* 这条诊断属于导入方：位置是 module(...) 调用点，源码片段也得取
          * 导入方那一行。之前 g_srcpath 还停在子模块上，于是行号是父文件的、
@@ -4635,6 +4679,40 @@ static Module *module_load_full(const char *full_in, int line, int col) {
     g_mod = save_m;
     m->loading = false;
     return m;
+}
+
+/* ---------------- 容器成员的可见性 ---------------- */
+
+/* 每个模块的 AST 装载后就打上"这条声明属于哪个文件"的戳。容器体里的成员
+ * 默认只在本文件可见（pub 才对外），判断靠这个戳；泛型单态化克隆 AST 时
+ * clone_tree 是整体拷贝，戳跟着一起过去——实例化点不会把 std 的私有成员
+ * 变成"本地可见"。 */
+static void stamp_mod(Node *n, const char *path) {
+    if (!n) return;
+    n->mod = path;
+    stamp_mod(n->a, path);
+    stamp_mod(n->b, path);
+    stamp_mod(n->c, path);
+    stamp_mod(n->d, path);
+    for (int i = 0; i < n->nitems; i++) stamp_mod(n->items[i], path);
+    for (int i = 0; i < n->nunroll; i++) stamp_mod(n->unroll[i], path);
+}
+
+/* 这个成员在当前文件里看不见吗？（声明在别的文件里、自己又没带 pub） */
+static bool member_hidden(Type *owner, bool is_pub) {
+    if (is_pub || !owner || !owner->mod) return false;
+    if (!g_mod || !g_mod->path) return false;
+    return strcmp(owner->mod, g_mod->path) != 0;
+}
+
+/* 看不见就报一条，返回 true（调用点据此收手）。 */
+static bool deny_member(Node *n, Type *owner, bool is_pub, const char *name) {
+    if (!member_hidden(owner, is_pub)) return false;
+    err_at(n->line, n->col,
+           "'%s' is a private member of `%s` (declared in %s); "
+           "mark it `pub` in the container body to expose it",
+           name ? name : "?", ty_str(owner), owner->mod);
+    return true;
 }
 
 /* ---------------- 标准库源码（std/） ---------------- */
@@ -5870,6 +5948,7 @@ void sema_check(Node *root) {
     g_nmods = 0;
     g_npending = 0;
     g_std_mod = NULL;
+    stamp_mod(root, g_srcpath);
     g_cmods = 8;
     g_mods = calloc((size_t)g_cmods, sizeof(Module *));
     g_mods[g_nmods++] = m0;
@@ -7145,7 +7224,10 @@ static void name_type_from_call(Node *call, Type *result) {
     if (!result || result->name) return;
     Buf b;
     buf_init(&b);
-    if ((call->a->kind == NK_IDENT || call->a->kind == NK_TYPE_IDENT) && call->a->name)
+    /* `std.ArrayList(i32)` 的被调是点路径（NK_FIELD）：以前只认裸名字，
+     * 实例名就退化成 `fn(i32)`——诊断和 @type(T).name 里都看得见。 */
+    if ((call->a->kind == NK_IDENT || call->a->kind == NK_TYPE_IDENT ||
+         call->a->kind == NK_FIELD) && call->a->name)
         buf_puts(&b, call->a->name);
     else buf_puts(&b, "fn");
     buf_puts(&b, "(");

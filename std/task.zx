@@ -33,58 +33,58 @@ pub const Group = struct {
     id: usize,
 
     // 起线程失败（句柄耗尽/内存不足）返回 false，计数不残留。
-    const spawn = fn (self: *const Self, f: fn (usize) !usize, ctx: usize) bool {
+    pub const spawn = fn (self: *const Self, f: fn (usize) !usize, ctx: usize) bool {
         return zx_tg_spawn(self.id, f, ctx) == 1;
     };
 
-    const wait = fn (self: *const Self) void {
+    pub const wait = fn (self: *const Self) void {
         zx_tg_wait(self.id);
     };
 };
 
 pub const Task = struct {
-    id: usize,
+    pub id: usize,
 
     // ---- 构造：三种物理形态 ----
 
-    const coro = fn () Self {
+    pub const coro = fn () Self {
         return Self{ .id = zx_task_new(0, 0) };
     };
 
-    const single = fn () Self {
+    pub const single = fn () Self {
         return Self{ .id = zx_task_new(1, 0) };
     };
 
-    const pool = fn (n: usize) Self {
+    pub const pool = fn (n: usize) Self {
         return Self{ .id = zx_task_new(2, n) };
     };
 
     // 任务函数是 fn (usize) !usize，只能带一个 usize 进来；把实例 id
     // 当 ctx 传进去，任务里用 fromId 还原，就能在任务内 send/recv/await。
-    const fromId = fn (id: usize) Self {
+    pub const fromId = fn (id: usize) Self {
         return Self{ .id = id };
     };
 
     // ---- 任务 ----
 
-    const spawn = fn (self: *const Self, f: fn (usize) !usize, ctx: usize) ?usize {
+    pub const spawn = fn (self: *const Self, f: fn (usize) !usize, ctx: usize) ?usize {
         return zx_task_spawn(self.id, f, ctx);
     };
 
-    const await = fn (self: *const Self, h: usize) !usize {
+    pub const await = fn (self: *const Self, h: usize) !usize {
         return zx_task_await(self.id, h);
     };
 
     // 等本实例名下全部任务完成。纯屏障：结果仍用 await(h) 逐个取。
-    const awaitAll = fn (self: *const Self) !void {
+    pub const awaitAll = fn (self: *const Self) !void {
         return zx_task_await_all(self.id);
     };
 
-    const cancel = fn (self: *const Self, h: usize) void {
+    pub const cancel = fn (self: *const Self, h: usize) void {
         zx_task_cancel(self.id, h);
     };
 
-    const yield = fn (self: *const Self) void {
+    pub const yield = fn (self: *const Self) void {
         zx_task_yield(self.id);
     };
 
@@ -93,11 +93,11 @@ pub const Task = struct {
     // send/recv 在任务内真停靠（配对直接握手），根上下文是非阻塞的
     // 协作式操作：没有对手就返回 would_block。
 
-    const send = fn (self: *const Self, v: usize) !void {
+    pub const send = fn (self: *const Self, v: usize) !void {
         return zx_task_send(self.id, v);
     };
 
-    const recv = fn (self: *const Self) !usize {
+    pub const recv = fn (self: *const Self) !usize {
         return zx_task_recv(self.id);
     };
 
@@ -105,13 +105,13 @@ pub const Task = struct {
         return zx_task_try_send(self.id, v);
     };
 
-    const tryRecv = fn (self: *const Self) !usize {
+    pub const tryRecv = fn (self: *const Self) !usize {
         return zx_task_try_recv(self.id);
     };
 
     // ---- 生命周期 ----
 
-    const close = fn (self: *const Self) void {
+    pub const close = fn (self: *const Self) void {
         zx_task_close(self.id);
     };
 
@@ -121,7 +121,7 @@ pub const Task = struct {
     // 组是「零设施的内核调度」——不建线程池、不建队列、不锁任何东西。
     // 适合即发即忘的批量工作；要结果、要取消、要通道就用实例。
 
-    const group = fn () Group {
+    pub const group = fn () Group {
         return Group{ .id = zx_tg_new() };
     };
 };

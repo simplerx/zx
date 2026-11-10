@@ -1,0 +1,19 @@
+// hp / secret 没写 pub：只在 mod.zx 内可见（字段与方法同一个语义）。
+// 变体/枚举不在此列——它们是值，恒公开。
+pub const Pair = struct {
+    pub a: i32,
+    pub b: i32,
+    hp: i32,
+
+    pub const make = fn (a: i32, b: i32) Self {
+        return Self{ .a = a, .b = b, .hp = 0 };
+    };
+
+    pub const add = fn (self: *Self, v: i32) i32 {
+        return self.a + self.b + v;
+    };
+
+    const secret = fn (self: *Self) i32 {
+        return self.hp;
+    };
+};

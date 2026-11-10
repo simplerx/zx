@@ -39,12 +39,12 @@ pub const HashMap = fn (V: type) type {
 
         // ---- 构造 / 释放 ----
 
-        const init = fn (alloc: Allocator) Self {
+        pub const init = fn (alloc: Allocator) Self {
             return Self{ .keys = undefined, .hashes = undefined, .vals = undefined,
                          .n = 0, .cap = 0, .alloc = alloc };
         };
 
-        const deinit = fn (self: *Self) void {
+        pub const deinit = fn (self: *Self) void {
             if (self.cap > 0) {
                 self.alloc.free(self.alloc.ctx, (*u8)self.keys, self.cap * @type([]const u8).size);
                 self.alloc.free(self.alloc.ctx, (*u8)self.hashes, self.cap * @type(u64).size);
@@ -59,8 +59,8 @@ pub const HashMap = fn (V: type) type {
 
         // ---- 规模 ----
 
-        const count = fn (self: *Self) usize { return self.n; };
-        const capacity = fn (self: *Self) usize { return self.cap; };
+        pub const count = fn (self: *Self) usize { return self.n; };
+        pub const capacity = fn (self: *Self) usize { return self.cap; };
         const empty = fn (self: *Self) bool { return self.n == 0; };
 
         // ---- 查找 ----
@@ -84,7 +84,7 @@ pub const HashMap = fn (V: type) type {
         // FNV 结果可能是 0，而 0 是"空槽"哨兵——压成 1。
         const norm = fn (h: u64) u64 { return if (h == 0) 1 else h; };
 
-        const get = fn (self: *Self, key: []const u8) ?V {
+        pub const get = fn (self: *Self, key: []const u8) ?V {
             if (self.cap == 0) { return null; }
             let i = self.slotFor(key, Self.norm(fnv1a(key)));
             if ((self.hashes + i).0 != 0) { return (self.vals + i).0; }
@@ -107,7 +107,7 @@ pub const HashMap = fn (V: type) type {
 
         // ---- 写入 ----
 
-        const put = fn (self: *Self, key: []const u8, val: V) bool {
+        pub const put = fn (self: *Self, key: []const u8, val: V) bool {
             if (self.cap == 0 || (self.n + 1) * 4 > self.cap * 3) {
                 if (!self.grow()) { return false; }
             }
@@ -147,12 +147,12 @@ pub const HashMap = fn (V: type) type {
         // ---- 遍历 ----
 
         // 槽下标从 0 到 capacity()-1；空槽返回 null，跳过即可。
-        const keyAt = fn (self: *Self, i: usize) ?[]const u8 {
+        pub const keyAt = fn (self: *Self, i: usize) ?[]const u8 {
             if (i >= self.cap || (self.hashes + i).0 == 0) { return null; }
             return (self.keys + i).0;
         };
 
-        const valueAt = fn (self: *Self, i: usize) ?V {
+        pub const valueAt = fn (self: *Self, i: usize) ?V {
             if (i >= self.cap || (self.hashes + i).0 == 0) { return null; }
             return (self.vals + i).0;
         };
