@@ -1385,6 +1385,51 @@ off = NESTUSE.index("    a.Cfg{.\n") + len("    a.Cfg{.")
 cl = {i["label"] for i in nest_items(off, 305)}
 check("completion.module.literalFields", {"w", "h"} <= cl, str(sorted(cl)))
 
+# 6c` 容器体的 pub 成员不是模块成员（2026-11-10 同一处：`std.` 混进整屏
+# 方法）。项目模块走同一条 topLevelDecls，一起守——`m.` 只该出 Box/make。
+LEAKLIB = """pub const Box = struct {
+    pub n: usize,
+    pub const put = fn (self: *Self, v: i32) bool {
+        self.n = (usize)v;
+        return true;
+    };
+    pub const get = fn (self: *Self) i32 { return (i32)self.n; };
+};
+
+pub const make = fn () Box {
+    return Box{ .n = 0 };
+};
+"""
+open(os.path.join(SRC_DIR, "leaklib.zx"), "w", encoding="utf-8").write(LEAKLIB)
+LEAKUSE = """const m = module("leaklib.zx");
+
+pub const main = fn () i32 {
+    let b = m.make();
+    m.
+    b.
+    return 0;
+};
+"""
+leakuri = "file:///" + os.path.join(SRC_DIR, "leakuse.zx").replace("\\", "/")
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": leakuri, "languageId": "zx", "version": 1, "text": LEAKUSE}}})
+
+
+def leak_items(off, rid):
+    send({"jsonrpc": "2.0", "id": rid, "method": "textDocument/completion", "params": {
+        "textDocument": {"uri": leakuri}, "position": pos(LEAKUSE, off)}})
+    r, _ = recv_id("leak", rid)
+    return {i["label"] for i in r["result"]["items"]} if r and r.get("result") else set()
+
+
+_ml = leak_items(LEAKUSE.index("    m.\n") + len("    m."), 3060)
+check("completion.module.noMemberLeak",
+      {"Box", "make"} <= _ml and not ({"put", "get", "n", "Box.put", "make.get"} & _ml),
+      str(sorted(_ml))[:240])
+_bl = leak_items(LEAKUSE.index("    b.\n") + len("    b."), 3061)
+check("completion.module.instMembers",
+      {"n", "put", "get"} <= _bl and not ({"make", "Box"} & _bl), str(sorted(_bl))[:240])
+
 # 3 模块实例嵌套：v.inner. 与 hover v.inner.a
 off = NESTUSE.index("v.inner.a") + len("v.inner.")
 il = {i["label"] for i in nest_items(off, 306)}
@@ -1629,7 +1674,16 @@ top_lab2 = [i["label"] for i in top_items]
 top_d = {i["label"]: (i.get("kind"), i.get("detail"), i.get("insertText")) for i in top_items}
 check("completion.stdTop.noAliasPhantom",
       not ({"HashMap", "Pool", "ArenaAllocator", "Task"} & set(top_lab2)),
-      str(sorted(set(top_lab2)))[:240])
+      str(sorted(set(top_lab2))[:240]))
+# KEEP — 容器体里的成员不是模块成员（2026-11-10 用户截图：`std.` 一弹混进
+# ArrayList/BufReader 的整屏方法）。topLevelDecls 必须跟花括号深度；给容器
+# 成员加 `pub` 之后凭行首关键字猜声明就会把 push/flush/… 全收进来。
+check("completion.stdTop.noMemberLeak",
+      not ({"push", "pop", "append", "appendTo", "flush", "fill", "writeByte",
+            "insertAt", "removeAt", "reserve", "resize", "reverse", "clear",
+            "close", "create", "open", "read", "write", "next", "at", "get",
+            "put", "count", "reset", "deinit", "buffered"} & set(top_lab2)),
+      str(sorted(set(top_lab2)))[:300])
 #  6b 句柄类型（BufReader/BufWriter）：`std.` 这一层只出类型项；
 #     `open`/`create` 这些下一层成员在 `std.BufReader.`（6c）里，
 #     不再上浮成 `BufReader.open`（用户 2026-11-09 第 12 条）。

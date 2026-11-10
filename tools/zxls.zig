@@ -506,10 +506,64 @@ fn readFieldTy(src: []const u8, from: usize) []const u8 {
 /// var/type，于是 `zxc include` 生成的 vendor 绑定和手写的 gl 模块都补不出
 /// 成员、hover 也没签名。块本身 `extern "C" {` 剩 `"C" {` 不命中任何前缀；
 /// 文件根的 `pub extern var X: T;`（cbind 生成器写法）也一起收下。
+/// 一行代码对花括号深度的净影响：跳过 `//` 行注释、`/* */` 块注释、
+/// `"…"` 与 `'…'` 字面量里的括号。
+fn lineBraceDelta(line: []const u8, in_block: *bool) i32 {
+    var d: i32 = 0;
+    var i: usize = 0;
+    while (i < line.len) : (i += 1) {
+        const c = line[i];
+        if (in_block.*) {
+            if (c == '*' and i + 1 < line.len and line[i + 1] == '/') {
+                in_block.* = false;
+                i += 1;
+            }
+            continue;
+        }
+        if (c == '/' and i + 1 < line.len) {
+            if (line[i + 1] == '/') return d;
+            if (line[i + 1] == '*') {
+                in_block.* = true;
+                i += 1;
+                continue;
+            }
+        }
+        if (c == '"' or c == '\'') {
+            const q = c;
+            i += 1;
+            while (i < line.len) : (i += 1) {
+                if (line[i] == '\\') {
+                    i += 1;
+                    continue;
+                }
+                if (line[i] == q) break;
+            }
+            continue;
+        }
+        if (c == '{') d += 1;
+        if (c == '}') d -= 1;
+    }
+    return d;
+}
+
 fn topLevelDecls(text: []const u8, out: *std.ArrayList(Decl), pub_only: bool) void {
+    // KEEP — 必须跟花括号深度：容器体里的成员不是模块成员。2026-11-10 给
+    // 容器成员加 `pub` 之后，纯行扫描把 `pub const push = fn…` 当成 std 顶层
+    // 声明，`std.` 一弹就混进 ArrayList/BufReader 的整屏方法（用户截图）。
+    var depth: i32 = 0;
+    // 顶层 `extern "C" { … }` 块是**透明作用域**：块里的 `pub fn glClear(…)`
+    // 仍是模块成员（cbind 生成物/手写绑定都长这样）。记下块内所在的深度。
+    var top_depth: i32 = 0;
+    var in_block = false;
     var it = std.mem.splitScalar(u8, text, '\n');
     while (it.next()) |line_raw| {
         var rest = std.mem.trim(u8, line_raw, " \t\r");
+        const at_top = depth == top_depth and !in_block;
+        depth += lineBraceDelta(line_raw, &in_block);
+        if (at_top and std.mem.startsWith(u8, rest, "extern") and
+            std.mem.indexOfScalar(u8, rest, '{') != null) top_depth = depth;
+        if (depth <= 0) top_depth = 0;
+        if (!at_top) continue;
         if (rest.len == 0 or rest[0] == '/' or rest[0] == '@' or rest[0] == '}') continue;
         var is_pub = false;
         if (std.mem.startsWith(u8, rest, "pub ")) {
