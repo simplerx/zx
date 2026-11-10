@@ -3903,3 +3903,54 @@ xexpr 空）：
 验证：@type(T)/@type(左值) 两形态、struct/enum、const/var、`.0` 读/写、
 裸 ptr 传 *T 形参、泛型容器特化（Gc(i32) 的 statics 值不串）全部通过。
 守门：tests/good/reflect-ptr.zx 追加 6 行场景 + 期望输出。
+
+
+### §119 局部 fn 绑定调用 + enum/union 提示补全（03:xx，用户 2026-11-11）
+
+**（1）函数体内的局部 fn 绑定调用**（§118 遗留线清账）：
+`const F = fn (x: i32) i32 { … }; F(41)` 写在函数体里，后端发
+`ZxFn… F = 0; F(41)`——空指针调用必炸（顶层 const fn 正常）。根因：顶层
+fn 绑定由"顶层扫描"发成 C 函数（backend.c `it->b->kind == NK_FN`），函数
+体里的局部绑定走 `gen_decl_inner`，fn 字面量节点没有对应发射分支，砸进
+表达式发射器（E0300 / 槽 = 0）。
+
+修复（C 没有嵌套函数，两段式）：
+1. `gen_fn` 开头预扫函数体（`gen_local_fns`，递归 a/b/c/items/unroll）：
+   遇到 `NK_DECL && b->kind == NK_FN` 就先 `gen_fn(fn, "<cname>_impl",
+   false, false)` 发成本单元 static 函数（局部绑定的 sym_cname 是
+   name_line_col 形态，加 `_impl` 不撞名），**该声明节点不往 b 里走**
+   ——子树由这次 gen_fn 接管，重复走会发两份定义（C 重定义）。
+2. `gen_decl_inner` 补 NK_FN 分支：函数指针槽初始化成 `<cname>_impl`
+   （函数到指针的隐式转换）。泛型/无体 fn 字面量保底发 0。
+3. 递归天然覆盖：局部 fn 体里再有局部 fn、方法体（g_itab 路径同样过
+   gen_fn）里的局部 fn。
+
+守门：tests/good/local-fn.zx（平铺 / 嵌套 / 方法体内三场景，expect-output
+"83 105 10"）。
+
+**（2）enum / union(enum) 的提示与补全**（用户："enum, union,
+union(enum) 也都是可以有静态成员和方法、关联函数的，zxls 不要遗漏"）：
+语言事实——enum 体 = 变体（`red,` / `green = 5,` 显式值）+ const/var
+静态成员 + 方法（首参 self）+ 关联函数；union(enum) 体 = 载荷变体
+（`name: T`）+ 同上的成员。
+
+zxls 的洞：`extractBraceMembers` 在 is_enum 时把体里**所有**成员都标成
+`.variant`——方法没有 is_fn（markContainerFns 只认 .value）→ 没调用骨架、
+签名 detail 出不来；静态常量显示成 EnumMember。修复：回扫（跳空白/注释/
+const/pub 的那趟）记 `had_decl`（扫掉过 `const`/`var` 声明前缀就升格
+.value；`pub` 前缀不算——union(enum) 变体可以带 pub）。坑：`if (kind) |kd|`
+是**值拷贝**，升格必须写回 `kd.*`（改 `|*kd|` 指针捕获），否则追加 Decl
+用的还是旧值。
+
+实例命名空间的另一半洞：`const c = EuColor.green;` 的 `c.` 一个成员都出
+不来——inferContainer 对 `Enum.variant` 点路径落空（末段不是容器）。
+补 `variantOwnerOf`：nsegs==2 且首段是容器、末段是该容器体里的 .variant
+→ 返回容器名（绑定类型 = 容器）。只认 enum/union(enum)；struct/普通
+union 的点路径没有"类型.变体"形态，宁缺毋滥。
+
+命名空间语义与 struct 完全一致（RecvKind 三分原样生效）：
+`EuColor.` = 变体 + 静态常量 + 关联函数（self 方法不出）；`c.` = 变体 +
+静态常量 + 方法（detail 带 self、有调用骨架；关联函数不出）。
+守门：lsptest completion.enum.{typeMembers,instMembers,methodSelfDetail,
+assocSnippet} + completion.unionenum.{typeMembers,instMembers} +
+hover.enum.instanceMethod（fixture 刻意含显式值变体与 const/var 混排）。

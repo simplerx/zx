@@ -5064,6 +5064,19 @@ void backend_ex(Buf *b, Node *e) { ex(b, e); }
  * ====================================================================== */
 
 /* 声明一个局部变量（数组类型 → C 数组，指针类型 → C 指针） */
+static bool fn_is_generic(Node *fn);
+
+/* 局部 fn 绑定（const F = fn (…) ret { … }; 写在函数体里）的 C 函数名：
+ * 绑定符号的 C 名 + "_impl"。局部绑定的 sym_cname 是 name_line_col 形态
+ * （F_4_5），加后缀不会和任何用户名字撞车。 */
+static char *localfn_impl_name(Node *d) {
+    const char *cn = sym_cname(d);
+    size_t n = strlen(cn ? cn : "anon");
+    char *s = malloc(n + 8);
+    snprintf(s, n + 8, "%s_impl", cn ? cn : "anon");
+    return s;
+}
+
 static void gen_decl_inner(Node *d) {
     Type *t = d->ty;
     if (!t || t->kind == TY_INVALID) return;
@@ -5143,6 +5156,20 @@ static void gen_decl_inner(Node *d) {
     if (is_ctl(d->b)) {
         line("%s %s = {0};", cty(t), cn);
         gen_value(d->b, cn, t);
+        return;
+    }
+    /* 局部 fn 绑定：fn 字面量已由 gen_fn 的预扫发成同单元的 static C 函数
+     * （gen_local_fns），这里把函数指针槽初始化成它的地址。没有这一步，
+     * fn 字面量节点会砸进表达式发射器，槽发成 0——调用即空指针。 */
+    if (d->b->kind == NK_FN) {
+        Node *lfn = d->b;
+        if (lfn->b && !fn_is_generic(lfn)) {
+            char *inm = localfn_impl_name(d);
+            line("%s %s = %s;", cty(t), cn, inm);
+            free(inm);
+        } else {
+            line("%s %s = 0;", cty(t), cn);
+        }
         return;
     }
     line("%s %s = %s;", cty(t), cn, cxs(d->b, t));
@@ -5898,6 +5925,30 @@ static void gen_switch(Node *n, const char *slot, Type *slot_ty) {
 
 static void gen_fn(Node *fn, const char *name, bool is_main, bool exported);
 
+/* 预扫函数体：把里面的局部 fn 绑定先发成同单元的 static C 函数。
+ * C 没有嵌套函数，函数定义不能落在函数体中间；原型进 g_bproto、
+ * 体进 g_bbody，发射顺序无所谓，最终 C 文件里原型永远在前面。
+ * 递归：局部 fn 的体里还能再有局部 fn（gen_fn 内部会再调本函数）。
+ * fn 字面量声明节点不往 b 里走——那棵子树由这次 gen_fn 接管，重复
+ * 走会发两份函数定义（C 重定义错误）。 */
+static void gen_local_fns(Node *n) {
+    if (!n) return;
+    if (n->kind == NK_DECL && n->b && n->b->kind == NK_FN) {
+        Node *lfn = n->b;
+        if (lfn->b && !fn_is_generic(lfn)) {
+            char *nm = localfn_impl_name(n);
+            gen_fn(lfn, nm, false, false);
+            free(nm);
+        }
+        return;
+    }
+    gen_local_fns(n->a);
+    gen_local_fns(n->b);
+    gen_local_fns(n->c);
+    for (int i = 0; i < n->nitems; i++) gen_local_fns(n->items[i]);
+    for (int i = 0; i < n->nunroll; i++) gen_local_fns(n->unroll[i]);
+}
+
 /* 跨模块可见的函数原型（不带 static），最后进共享头文件 */
 static Buf  g_bpub;
 /* 每个模块的延迟初始化函数名，main 里依次调用 */
@@ -5976,6 +6027,10 @@ static void gen_fn(Node *fn, const char *name, bool is_main, bool exported) {
     buf_putc(&sig, ')');
 
     bline(exported ? &g_bpub : &g_bproto, "%s;", sig.data);
+
+    /* 函数体内的局部 fn 绑定：先把它们发成同单元的 static 函数，
+     * gen_decl_inner 再把局部槽初始化成函数地址（见 gen_local_fns）。 */
+    gen_local_fns(fn->b);
 
     g_out = &g_bbody;
     if (is_main && g_need_proc) {

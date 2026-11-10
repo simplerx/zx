@@ -2146,11 +2146,12 @@ fn extractBraceMembers(text: []const u8, is_enum: bool, out: *std.ArrayList(Decl
             if (!is_enum and k < text.len and text[k] == '=') kind = .value;
             if (is_enum and k < text.len and (text[k] == ',' or text[k] == '}' or text[k] == '=' or text[k] == ':'))
                 kind = .variant;
-            if (kind) |kd| {
+            if (kind) |*kd| {
                 // 前一个有效字符须是块起点/逗号/换行，避免收进类型里的 ident；
                 // 回扫跳空白、整行 // 注释，以及 const / pub const 前缀（方法声明）。
                 var b = i;
                 var skipped = true;
+                var had_decl = false;
                 while (skipped) {
                     skipped = false;
                     while (b > 1) {
@@ -2181,17 +2182,30 @@ fn extractBraceMembers(text: []const u8, is_enum: bool, out: *std.ArrayList(Decl
                     if (b >= 5 and std.mem.eql(u8, text[b - 5 .. b], "const")) {
                         b -= 5;
                         skipped = true;
+                        had_decl = true;
+                    } else if (b >= 3 and std.mem.eql(u8, text[b - 3 .. b], "var")) {
+                        b -= 3;
+                        skipped = true;
+                        had_decl = true;
                     } else if (b >= 3 and std.mem.eql(u8, text[b - 3 .. b], "pub")) {
                         b -= 3;
                         skipped = true;
                     }
                 }
+                // enum / union(enum) 体内区分变体与成员声明：`const`/`var`
+                // 前缀的是静态成员（方法 / 关联函数 / 关联常量 / 静态变量），
+                // 回扫扫掉过声明前缀就升格成 .value——markContainerFns 只认
+                // .value 标 is_fn，不升格的话 enum 方法没有调用骨架、签名
+                // detail 也出不来（用户 2026-11-11：enum/union 也有静态成员
+                // 和方法，补全不许漏）。变体（`red,` / `green = 5,` /
+                // `nul: u8,`）保持 .variant。
+                if (is_enum and had_decl) kd.* = .value;
                 const prev: u8 = if (b >= 2) text[b - 1] else '{';
                 if (prev == '{' or prev == ',' or prev == '\n' or prev == ';') {
                     // 字段顺手记下声明类型：补全时 detail 显示 `i32` 而不是容器名
                     var ty: []const u8 = "";
-                    if (kd == .field and k < text.len and text[k] == ':') ty = readFieldTy(text, k + 1);
-                    out.append(gpa, .{ .name = text[i..j], .kind = kd, .ty = ty }) catch {};
+                    if (kd.* == .field and k < text.len and text[k] == ':') ty = readFieldTy(text, k + 1);
+                    out.append(gpa, .{ .name = text[i..j], .kind = kd.*, .ty = ty }) catch {};
                 }
             }
             i = j - 1;
@@ -4689,6 +4703,21 @@ fn isContainerIn(files: []const []const u8, base: []const u8) bool {
 ///   `let x = y` / `let x = Obj.init(…)` / `let x = f(…)`（别名链递归）
 /// 包装（`?` `!` `&` `*` `[]T` `[n]T`）先剥掉；方法的 `Self` 返回映射回
 /// 接收者容器。识别不了返回 null。
+/// `EuColor.green`：末段是单段容器的**变体**（enum 值 / union(enum) 值）
+/// ——绑定的类型就是那个容器。只认 enum/union(enum)（is_enum）；struct /
+/// 普通 union 的点路径没有"类型.变体"形态，宁缺毋滥。
+fn variantOwnerOf(files: []const []const u8, owner: []const u8, last: []const u8) ?[]const u8 {
+    if (!isContainerIn(files, owner)) return null;
+    const hit = findContainerBody(files, owner) orelse return null;
+    if (!hit.is_enum) return null;
+    var ds: std.ArrayList(Decl) = .empty;
+    extractBraceMembers(hit.body, true, &ds);
+    for (ds.items) |d| {
+        if (d.kind == .variant and std.mem.eql(u8, d.name, last)) return owner;
+    }
+    return null;
+}
+
 fn inferContainer(files: []const []const u8, text: []const u8, expr: []const u8, depth: u8) ?[]const u8 {
     if (depth > 6) return null;
     var e = trimSl(expr);
@@ -4770,6 +4799,13 @@ fn inferContainer(files: []const []const u8, text: []const u8, expr: []const u8,
     if (tail_end >= e.len or e[tail_end] != '(') {
         // `std.mod.Type` / `Type` 裸引用：末段是容器就是它
         if (isContainerIn(files, last) or genericBodyOf(files, last) != null) return last;
+        // `EuColor.green` / `Flag.off`：末段是前面容器的**变体**（enum 值 /
+        // union(enum) 值）——绑定的类型就是那个容器。此前变体初始化没人认，
+        // `const c = EuColor.green;` 的 `c.` 一个成员都补不出来
+        //（用户 2026-11-11：enum/union 也要全套提示与补全）。
+        if (nsegs == 2) {
+            if (variantOwnerOf(files, segs[0], last)) |owner| return owner;
+        }
         return null;
     }
     // 末段后跟 '('：先按方法调用（接收者 = 去掉末段的路径），再按泛型

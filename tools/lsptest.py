@@ -2677,6 +2677,97 @@ _r, _ = recv_id("genparam_quiet", _rid)
 _labgpq = sorted({i["label"] for i in ((_r or {}).get("result") or {}).get("items") or []})
 check("completion.genparam.noCallSite", _labgpq == [], str(_labgpq))
 
+# ------------------------------------------------- enum/union 静态成员与方法
+# enum / union(enum) 体里同样有静态成员（const/var）、方法（首参 self）与
+# 关联函数（用户 2026-11-11：补全不许漏）。以前 extractBraceMembers 把
+# enum 体里的所有成员都标成 .variant，方法没有 is_fn → 没骨架没签名，
+# 命名空间过滤也失效。命名空间语义与 struct 完全一致：
+#   `EuColor.`  变体 + 静态常量 + 关联函数（self 方法不出）
+#   `c.`        变体 + 静态常量 + 方法（关联函数不出）
+EUSRC = """const EuColor = enum {
+    red, green = 5, blue,
+
+    const FIRST = EuColor.red;
+    const COUNT = 3;
+
+    const name = fn (self: Self) []const u8 {
+        return switch (self) {
+            .red: "red";
+            .green: "green";
+            .blue: "blue";
+        };
+    };
+
+    const count = fn () i32 { return EuColor.COUNT; };
+};
+
+const EuShape = union(enum) {
+    circle: f64,
+    rect: { f64, f64 },
+
+    const describe = fn (self: *const Self) []const u8 {
+        switch (self.tag) {
+            .circle: { return "circle"; };
+            .rect: { return "rect"; };
+        }
+    };
+};
+
+pub const main = fn () u8 {
+    const c = EuColor.green;
+    const s = EuShape{ .circle = 2.0 };
+    EuColor.
+    c.
+    EuShape.
+    s.
+    const cn = c.name();
+    return 0;
+};
+"""
+euuri = "file:///" + os.path.join(SRC_DIR, "enumunion.zx").replace("\\", "/")
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": euuri, "languageId": "zx", "version": 1, "text": EUSRC}}})
+
+for _anchor, _want, _tag in (
+        ("    EuColor.\n", {"FIRST", "COUNT", "count", "red", "green", "blue"},
+         "enum.typeMembers"),
+        ("    c.\n", {"FIRST", "COUNT", "name", "red", "green", "blue"},
+         "enum.instMembers"),
+        ("    EuShape.\n", {"circle", "rect"}, "unionenum.typeMembers"),
+        ("    s.\n", {"circle", "rect", "describe"}, "unionenum.instMembers")):
+    _rid += 1
+    _off = EUSRC.index(_anchor) + len(_anchor) - 1
+    send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/completion", "params": {
+        "textDocument": {"uri": euuri}, "position": pos(EUSRC, _off)}})
+    _r, _ = recv_id("enumunion", _rid)
+    _labeu = sorted({i["label"] for i in ((_r or {}).get("result") or {}).get("items") or []})
+    check("completion." + _tag, set(_labeu) == _want, str(_labeu))
+
+# 实例方法的 detail 必须带 self（与 struct 同一条红线：不带 self 就会被
+# 当成关联函数——用户 2026-11-10 两次截图的污染判定标准）
+_rid += 1
+_euoff = EUSRC.index("    c.\n") + len("    c.")
+send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/completion", "params": {
+    "textDocument": {"uri": euuri}, "position": pos(EUSRC, _euoff)}})
+_r, _ = recv_id("enumunion", _rid)
+_euby = {i["label"]: i for i in ((_r or {}).get("result") or {}).get("items") or []}
+check("completion.enum.methodSelfDetail",
+      "self" in (_euby.get("name", {}).get("detail") or ""),
+      str(_euby.get("name", {}).get("detail")))
+# 关联函数也有调用骨架（is_fn 升格后 memberCallSnippet 才会跑）
+check("completion.enum.assocSnippet",
+      _euby.get("name", {}).get("insertText") == "name()$0",
+      str(_euby.get("name", {}).get("insertText")))
+
+# hover：enum 实例方法 c.name → 签名卡
+_rid += 1
+_euoff = EUSRC.index("c.name();") + len("c.")
+send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/hover", "params": {
+    "textDocument": {"uri": euuri}, "position": pos(EUSRC, _euoff)}})
+_r, _ = recv_id("enumunion", _rid)
+_euhv = ((_r or {}).get("result") or {}).get("contents", {}).get("value", "")
+check("hover.enum.instanceMethod", "name" in _euhv and "self" in _euhv, _euhv[:120])
+
 cov_lines = ['const std = module("std");', "", "pub const main = fn () u8 {"]
 cov_marks = []
 for _mod, _name, _shape, _factory in cov_types:

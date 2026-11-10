@@ -1,0 +1,38 @@
+// 局部 fn 绑定（函数体内的 `const F = fn (…) ret { … };`）必须能调用。
+//
+// 曾经的 bug：顶层 fn 绑定由"顶层扫描"发成 C 函数，函数体里的局部绑定
+// 没人管——fn 字面量节点砸进表达式发射器，局部槽发成 0，`F(41)` 是空
+// 指针调用必炸。现在 gen_fn 预扫函数体，把局部 fn 绑定先发成本单元的
+// static C 函数（名字 = 绑定符号 C 名 + "_impl"），gen_decl_inner 再把
+// 函数指针槽初始化成它的地址。嵌套（局部 fn 里再有局部 fn）与方法体内
+// 的局部 fn 同样覆盖。
+const std = module("std");
+
+const add = fn (x: i32, y: i32) i32 { return x + y; };
+
+const P = struct {
+    v: i32,
+    pub const run = fn (self: *P) i32 {
+        const g = fn (x: i32) i32 { return x + 100; };
+        return g(self.v);
+    };
+};
+
+const main = fn () u8 {
+    const twice = fn (x: i32) i32 { return x * 2; };
+    const a = twice(41);
+    const b = add(a, 1);
+
+    var p = P{ .v = 5 };
+
+    const outer = fn (n: i32) i32 {
+        const square = fn (x: i32) i32 { return x * x; };
+        return square(n) + 1;
+    };
+
+    std.println("{} {} {}", b, p.run(), outer(3));
+    return 0;
+};
+
+// expect-output
+// 83 105 10
