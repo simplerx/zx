@@ -1177,6 +1177,15 @@ fn resolveMemberPath(files: []const []const u8, doc: *const Document,
     } else if (genericBodyOf(files, segs[0])) |gb| {
         cur = gb;
         owner = segs[0];
+    } else if (isTypeValuedRecv(files, doc, text, segs[0], 0)) {
+        // 类型值绑定的首段（`const P: type = t.P1.P2;` 的 P）：P 不是容器
+        // 声明，findContainerBody 按名字找不到，`P.P3.f3(…)` 的返回类型也就
+        // 推不出（`var f = P.P3.f3(…);` 没有行内提示）。容器沿初值路径取，
+        // 体可以在 vendor / 模块文件里。只对类型值开放——实例变量仍走
+        // instanceContainerTy，避免把实例当类型。
+        const pc = containerOfBinding(files, doc, text, segs[0], 0) orelse return null;
+        cur = pc.body;
+        owner = pc.name;
     } else return null;
 
     var at: usize = 1;
@@ -2567,6 +2576,19 @@ fn pathOfSrcText(doc: *const Document, src: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, src, doc.text)) return doc.path;
     const doc_dir = dirName(doc.path);
     if (scanDirForText(doc_dir, src)) |p| return p;
+    // 模块目录（vendor / zx.json deps / 工程根）：`t.P1.P2` 这种类型的声明
+    // 在 vendor/test.zx 里，只扫文档目录永远定位不到 → 跳转落到 doc.path
+    // 配一个乱算出来的行号（用户 2026-11-11：`P.P3` 跳到自己的 `const pp`
+    // 那一行）。目录顺序与 modDirsInto 一致。
+    if (root_path) |r| {
+        if (!std.mem.eql(u8, r, doc_dir)) {
+            if (scanDirForText(r, src)) |p| return p;
+        }
+    }
+    for (g_mod_dirs[0..g_mod_dir_n]) |md| {
+        if (std.mem.eql(u8, md, doc_dir)) continue;
+        if (scanDirForText(md, src)) |p| return p;
+    }
     if (g_std_dir) |sd| {
         if (scanDirForText(sd, src)) |p| return p;
     }
@@ -3759,6 +3781,20 @@ fn inferExprType(text: []const u8, doc: *const Document, expr: []const u8, depth
             // 类型值接收者（`const P = t.p1.P2T;` 之后的 `P.P3T`）：容器是
             // 它背后的那个类型；成员本身还是类型就写 `type`，是字段出字段类型。
             if (isTypeValuedRecv(sf.items, doc, text, base, 0)) {
+                // 容器体优先走 containerOfBinding：它沿绑定的**初值路径**逐段
+                // 解析，体可以在扫描集之外的文件里（`const P: type = t.P1.P2;`
+                // 的 P2 在 vendor/test.zx，scanFiles 只扫文档目录 + std，
+                // findContainerBody 必然落空 → `const pp = P.P3;` 没有 `: type`、
+                // `P.P3.f3(…)` 也推不出返回类型）。用户 2026-11-11 第 7 张截图。
+                if (containerOfBinding(sf.items, doc, text, base, 0)) |pc| {
+                    if (memberIsTypeDecl(sf.items, pc.body, member)) return "type";
+                    if (fieldTypeIn(pc.body, member)) |t| return t;
+                    if (findDeclStmt(pc.body, member)) |st3| {
+                        const sg3 = sigOfStmt(st3);
+                        if (sg3.is_fn and sg3.ret.len > 0) return sg3.ret;
+                    }
+                    return null;
+                }
                 if (typeValuedContainer(sf.items, doc, text, base, 0)) |tc| {
                     if (findContainerBody(sf.items, tc)) |ch| {
                         if (memberIsTypeDecl(sf.items, ch.body, member)) return "type";
@@ -6836,6 +6872,7 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                     // `let x = A.B.Cfg{…}`）：逐段解析到那一层容器。以前
                     // inferContainer 把 `A.B.Cfg{…}` 折成末段 "Cfg"，撞上
                     // 顶层同名容器——字段变别人的、第三层直接空列表。
+
                     if (instancePathContainer(files.items, doc, text, container)) |pc| {
                         extractBraceMembers(pc.body, pc.is_enum, &decls);
                         handled = decls.items.len > 0;

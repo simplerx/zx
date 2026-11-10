@@ -2429,6 +2429,87 @@ check("definition.looseChain.nestedType",
       isinstance(_lloc, dict) and "losemod.zx" in (_lloc.get("uri") or ""),
       str(_lloc)[:200])
 
+# ---------------------------------------------------------- vendor 模块里的嵌套类型
+#
+# 用户 2026-11-11 第 7 张截图（真实工程：src/main.zx 里 `const t = module("test")`，
+# 模块文件在 vendor/test.zx）：
+#   const P: type = t.P1.P2;   →  P 有 : type，但 `const pp = P.P3;` 什么都没有
+# 根因：scanFiles 只扫**文档目录 + std**，vendor 里的容器体不在扫描集里，于是
+#   findContainerBody("P2") 落空 → inferExprType 的"类型值接收者"分支返回 null
+#   （没有 : type）、resolveMemberPath 首段 P 找不到容器（`P.P3.f3(…)` 推不出
+#   返回类型，`var f` 没有 : i32）、definition 拿不到声明文件（跳到本文件的行）。
+# 修法：三条链统一改走 containerOfBinding（沿初值路径逐段解析，体在哪个文件都行）
+# + pathOfSrcText 也搜 vendor/deps 目录。fixture 放 TESTDIR/vendor/，文档放 src/，
+# 与真实工程一致——放同目录是测不出这条断链的。前缀 Vd* 避免与别的 fixture 撞名。
+VDMOD = """pub const VdP1 = struct{
+
+    pub const VdP2 = struct {
+        name: i32,
+        pub const VdP3 = struct {
+            name: i32,
+            pub const vf3 = fn (i32, struct{pub a: u32, pub b: u32}) i32 {
+                return 0;
+            };
+        };
+    };
+};
+"""
+os.makedirs(os.path.join(TESTDIR, "vendor"), exist_ok=True)
+open(os.path.join(TESTDIR, "vendor", "vendmod.zx"), "w", encoding="utf-8").write(VDMOD)
+VDSRC = """const std = module("std");
+const vt = module("vendmod");
+
+const VdP: type = vt.VdP1.VdP2;
+const VdQ = VdP.VdP3;
+_ = VdQ;
+var VdF = VdP.VdP3.vf3(10, .{ .a = 10, .b = 10 });
+_ = VdF;
+VdQ.
+VdP.
+"""
+vduri = "file:///" + os.path.join(SRC_DIR, "venduse.zx").replace("\\", "/")
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": vduri, "languageId": "zx", "version": 1, "text": VDSRC}}})
+_rid += 1
+send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/inlayHint", "params": {
+    "textDocument": {"uri": vduri},
+    "range": {"start": {"line": 0, "character": 0},
+              "end": {"line": len(VDSRC.split("\n")), "character": 0}}}})
+_r, _ = recv_id("venduse", _rid)
+_vih = {}
+if _r and _r.get("result"):
+    for _h in _r["result"]:
+        _lbv = _h.get("label")
+        if isinstance(_lbv, str):
+            _vih[_h["position"]["line"]] = _lbv
+check("inlayHint.vendorChain.localTypeQ",
+      _vih.get(VDSRC[:VDSRC.index("const VdQ =")].count("\n")) == ": type", str(_vih))
+check("inlayHint.vendorChain.callRet",
+      _vih.get(VDSRC[:VDSRC.index("var VdF =")].count("\n")) == ": i32", str(_vih))
+
+for _recv, _want, _tag in (
+        ("VdQ.", {"vf3"}, "vendorChain.instMembers"),
+        ("VdP.", {"VdP3"}, "vendorChain.typeMembers")):
+    _rid += 1
+    _offv = VDSRC.index("%s\n" % _recv) + len(_recv)
+    send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/completion", "params": {
+        "textDocument": {"uri": vduri}, "position": pos(VDSRC, _offv)}})
+    _r, _ = recv_id("venduse", _rid)
+    _labv = sorted({i["label"] for i in ((_r or {}).get("result") or {}).get("items") or []})
+    check("completion." + _tag, set(_labv) == _want, str(_labv))
+
+_rid += 1
+_voff = VDSRC.index("const VdQ = VdP.") + len("const VdQ = VdP.")
+send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/definition", "params": {
+    "textDocument": {"uri": vduri}, "position": pos(VDSRC, _voff)}})
+_r, _ = recv_id("venduse", _rid)
+_vloc = (_r or {}).get("result") or {}
+if isinstance(_vloc, list):
+    _vloc = _vloc[0] if _vloc else {}
+check("definition.vendorChain.nestedType",
+      isinstance(_vloc, dict) and "vendmod.zx" in (_vloc.get("uri") or ""),
+      str(_vloc)[:200])
+
 cov_lines = ['const std = module("std");', "", "pub const main = fn () u8 {"]
 cov_marks = []
 for _mod, _name, _shape, _factory in cov_types:

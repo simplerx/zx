@@ -3701,3 +3701,42 @@ definition.looseChain.nestedType（fixture `losemod.zx` + `loseuse.zx`，`t` 故
 `ensure_type` 后能发出定义，但静态成员的初值 ct 已被泛型体的 `ct_clear` 洗掉，
 C 里会漏出 `info.size` 这种 Zx 源码形态——真要修得给 Field 加 comptime 值槽
 （sema 折值时写入，backend 直接发字面量），是独立一条线。
+
+## 115. 模块文件在 vendor/deps 里时，类型值链的体要在扫描集之外取
+
+**裁定（2026-11-11，用户第 7 张截图：真实工程 `src/main.zx` + `vendor/test.zx`）**：
+
+`const t = module("test");` 之后
+
+```zx
+const P: type = t.P1.P2;   // P 有 : type
+const pp = P.P3;           // 没有 : type        ← 报障
+var f = P.P3.f3(10, .{…}); // 没有 : i32
+// P3 点击跳到自己这一行，不是 vendor/test.zx
+```
+
+根因不在末段，而在 `scanFiles` 只扫**文档目录 + std**：`t.P1.P2` 的 `P2` 体在
+`vendor/test.zx` 里，`findContainerBody(sf, "P2")` 必然落空。三条链各自断在这里：
+
+1. `inferExprType` 的“类型值接收者”分支先 `typeValuedContainer` 拿名字、再
+   `findContainerBody` 拿体——名字有了（P2）、体没有 → 返回 null，`const pp`
+   没有 `: type`。改成**先走 `containerOfBinding`**：它沿绑定的初值路径逐段解析，
+   带的是目标文件的真实文本，体在哪个文件都行；`typeValuedContainer` 降为退路。
+2. `resolveMemberPath` 的首段只认“模块绑定 / std / 顶层容器 / 泛型容器”，类型值
+   绑定（`P`）四条都不命中 → `P.P3.f3(…)` 推不出返回类型，`var f` 没有 `: i32`。
+   新增一支：首段是 `isTypeValuedRecv` 时容器走 `containerOfBinding`。只对类型值
+   开放，实例变量仍走 `instanceContainerTy`（否则实例会被当类型，方法全被过滤）。
+3. `pathOfSrcText` 只在文档目录与 std 目录里按内容找文件——vendor 里的文本
+   定位不到，退回 `doc.path` 再用“体指针减文件指针”算行号，于是 `P3` 跳到
+   本文件 `const pp` 那一行（用户看到的“跳转还是不对”）。改成也搜工程根与
+   `modDirsInto` 的模块目录（vendor + zx.json deps）。
+
+顺带确认（不是 bug，别“修”）：模块文件里的**私有成员从补全里过滤**是对的。
+`vendor/test.zx` 的 `P3.name: i32` 没写 `pub`，跨文件访问是 E0404，所以
+`P.P3.` 只出 `pub const f3`、`var lit = t.PubCfg{…}; lit.` 只出 pub 字段。
+
+守门（lsptest 278 项）：inlayHint.vendorChain.{localTypeQ,callRet}、
+completion.vendorChain.{instMembers,typeMembers}、definition.vendorChain.nestedType。
+fixture 特意放 `TESTDIR/vendor/vendmod.zx`、文档放 `src/venduse.zx`——放同目录
+根本测不出这条断链（同目录会被 scanFiles 扫到）。用改前的 exe 跑这套：
+inlay 两条与 definition 一条必挂，`VdQ.`/`VdP.` 两条本来就通。
