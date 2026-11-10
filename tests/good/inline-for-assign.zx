@@ -1,0 +1,42 @@
+// 守门：inline for 体里给**函数局部 var** 赋 `@type(T)` 描述符字段值。
+//
+// 背景（2026-11-11）：ct 折叠函数调用时 clone_tree 会把整个 fn 体克隆一份，
+// 旧实现浅拷贝了 FOR 节点的 unroll 指针与 nunroll——克隆体重新展开时
+// realloc 挪块，源节点的 unroll 数组悬垂，后端预扫描读到已释放内存段错误。
+// 修复：clone_tree 重置 unroll/nunroll（克隆体不带展开结果）。
+// 踩中形态：`inline for` 体里给局部 var 赋 `@type(T).size` / `d.fields[i].offset`。
+const std = module("std");
+
+const Point = struct { x: i32, y: i32 };
+
+// 形态一：直接赋描述符字段（usize = ct int）
+const size_sum = fn () i32 {
+    const d = @type(Point);
+    var off: u64 = 0;
+    inline for (0..2) i { off = d.fields[i].offset; }
+    return (i32)off + (i32)d.size;
+};
+
+// 形态二：累加字段访问右值
+const off_sum = fn () i32 {
+    const d = @type(Point);
+    var off: u64 = 0;
+    inline for (0..2) i { off = off + d.fields[i].offset; }
+    return (i32)off;
+};
+
+// 形态三：let 中间绑定再累加
+const via_let = fn () i32 {
+    const d = @type(Point);
+    var acc: u64 = 0;
+    inline for (0..2) i {
+        const v = d.fields[i].offset;
+        acc = acc + v;
+    }
+    return (i32)acc;
+};
+
+const main = fn () u8 {
+    std.println("{} {} {}", size_sum(), off_sum(), via_let());
+    return 0;
+};

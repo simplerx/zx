@@ -6259,6 +6259,12 @@ static Node *clone_tree(Node *n) {
     *c = *n;
     c->ty = NULL; c->type_val = NULL; c->ct = NULL; c->sym = NULL;
     c->body_checked = false;
+    /* inline for 的展开结果不随克隆走：unroll 数组是源节点私有的，
+     * 浅拷贝指针 + nunroll 会让克隆体在重新展开时 realloc 挪块，
+     * 源节点的 unroll 立刻悬垂（后端扫 unroll 读已释放内存 → 段错误。
+     * 2026-11-11：ct 折叠函数调用克隆整个 fn 体时踩中——
+     * `inline for` 体里给局部 var 赋 `@type(T).size` 就必崩）。 */
+    c->unroll = NULL; c->nunroll = 0;
     c->a = clone_tree(n->a);
     c->b = clone_tree(n->b);
     c->c = clone_tree(n->c);
