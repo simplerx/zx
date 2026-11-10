@@ -3627,3 +3627,33 @@ completion.modChain.{typeValueMembers,typeValueMembersQ,modulePath}、
 definition.modChain.member；fixture `modchain.zx`（模块侧，`Mc*` 前缀）+
 `moduse.zx`（使用侧）。已知未做：模块**顶层**别名常量当接收者的成员补全
 （`pub const Alias = Root.P1.P2;` 之后 `Alias.` 仍为空，std 里没有这种写法）。
+
+## 113. 显式 `: type` 标注的绑定链 + 成员跳转优先 + 无名形参占位放类型
+
+**裁定（2026-11-11，接 §112 用户第 5 张截图）**：三个问题，根因各不同。
+
+1. **`const P: type = t.P1.P2;` 之后 `P.P3` 全断**。标注本身是字符串 `"type"`，
+   而三处都把"标注"当容器路径：
+   - `instancePathContainer`：`declTyOf` 有值就不再读初始式，于是路径变成
+     `"type"`，单段解析必然落空 —— `P.` 补不出任何成员（用户看到的结果是空
+     列表，只有全文标识符兜底）。改为：标注是 `type`（或不是纯路径）时**回退
+     到初始式**；`declTyOf` 只在真有类型名时才优先。
+   - `containerOfBinding` 早已跳过 `"type"` 标注（§111），所以多段路径
+     （`P.P3.`）是通的——这也解释了"第一行 P 有 type，后面的就没了"为什么
+     只在单段处最明显。
+2. **`P.P3.f3` 的 `f3` 跳不过去**：`definitionAt` 第 1 步 `findDeclLine(word)`
+   排在成员解析前面，而 `const f3 = …` 就在同一文件里，于是跳到自己的 const
+   行。抽出 `definitionOfMember`（模块路径 + 容器路径两路，§109/§110 的逻辑）
+   并把它提到第 0.5 步：只要是 `base.member` 形态，**先**按成员解析，本文件
+   同名声明不能抢。`P3` / `Root` 以前能跳是因为本文件没有同名声明，所以这个
+   缺陷只在最后一段暴露，看起来像"t 是 module 的锅"。
+3. **函数骨架"只留占位没有文字"**（§111 的回归）：上一版为了避免截断把无名
+   形参改成空占位 `${1}`。现在占位里放**类型**：`${1:i32}`；匿名聚合写
+   `.{ }`（实参真正的样子），`}` 走 `escapeSnippet` 转义，解析后正好是 `. { }`，
+   不会再提前关掉 tabstop。`paramName` 的"无名"判据不变。
+
+守门（lsptest 264 项）：inlayHint.explicitType.localTypeQ、
+completion.explicitType.{members,membersL2}、definition.explicitType.fnInModule
+（fixture `xtmod.zx` + `xtuse.zx`，`Xt*` 前缀；补全点写成独立的 `XtP.XtP3.` 行，
+文本里没有尾点就触发不了点补全）；snippet.paramChain.unnamedParams 的期望值
+更新为 `f3(${1:i32}, ${2:.{ \}})$0`。

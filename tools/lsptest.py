@@ -2150,8 +2150,11 @@ _pitems = ((_r or {}).get("result") or {}).get("items") or []
 _pby = {i["label"]: i for i in _pitems}
 check("completion.paramChain.localTypeValue",
       set(_pby) == {"f3", "g"}, str(sorted(_pby)))
+# 无名形参不是空占位：占位里放类型（`i32`），匿名聚合写成 `.{ }`，
+# `}` 走 escapeSnippet 转义 —— 不转义会提前关闭 tabstop，插入变半截
+# （用户 2026-11-11：先"struct{a"截断，再"只留占位没文字"，两头都踩过）。
 check("snippet.paramChain.unnamedParams",
-      _pby.get("f3", {}).get("insertText") == "f3(${1}, ${2})$0",
+      _pby.get("f3", {}).get("insertText") == "f3(${1:i32}, ${2:.{ \}})$0",
       str(_pby.get("f3", {}).get("insertText")))
 check("snippet.paramChain.namedParam",
       _pby.get("g", {}).get("insertText") == "g(${1:n})$0",
@@ -2236,6 +2239,77 @@ if isinstance(_mloc, list):
 check("definition.modChain.member",
       isinstance(_mloc, dict) and "modchain.zx" in (_mloc.get("uri") or ""),
       str(_mloc)[:200])
+
+# 显式 `: type` 标注的类型值绑定：`const XtP: type = xt.XtRoot.XtP1.XtP2;`
+# 标注本身是 "type"，不是容器路径。三处都得看**初始式**而不是标注：
+#   - instancePathContainer 单段解析（`XtP.` 补成员，以前空列表）
+#   - inferExprType 点路径（`const XtQ = XtP.XtP3;` 的 `: type`）
+#   - definitionOfMember：`XtP.XtP3.xf3` 的 `xf3` 不能被本文件同名 const 抢
+#     （用户 2026-11-11：`t` 是 module，函数跳不过去）。
+XTMOD = """pub const XtRoot = struct {
+    pub const XtP1 = struct {
+        pub const XtP2 = struct {
+            pub const XtP3 = struct {
+                pub const xf3 = fn (i32, struct{a:u32,b:u32}) i32 { return 1; };
+                pub const xg = fn (n: i32) i32 { return n; };
+            };
+        };
+    };
+};
+"""
+open(os.path.join(SRC_DIR, "xtmod.zx"), "w", encoding="utf-8").write(XTMOD)
+XTUSE = """const std = module("std");
+const xt = module("xtmod");
+
+const xtUse = fn () i32 {
+    const XtP: type = xt.XtRoot.XtP1.XtP2;
+    const XtQ = XtP.XtP3;
+    XtP.
+    XtP.XtP3.
+    const XtF = XtP.XtP3.xf3(1, .{ .a = 2, .b = 3 });
+    return XtQ.xg(1) + XtF;
+};
+"""
+xturi = "file:///" + os.path.join(SRC_DIR, "xtuse.zx").replace("\\", "/")
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": xturi, "languageId": "zx", "version": 1, "text": XTUSE}}})
+_lineXtQ = XTUSE[:XTUSE.index("const XtQ =")].count("\n")
+_rid += 1
+send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/inlayHint", "params": {
+    "textDocument": {"uri": xturi},
+    "range": {"start": {"line": 0, "character": 0},
+              "end": {"line": len(XTUSE.split("\n")), "character": 0}}}})
+_r, _ = recv_id("xtuse", _rid)
+_xih = {}
+if _r and _r.get("result"):
+    for _h in _r["result"]:
+        _lbx = _h.get("label")
+        if isinstance(_lbx, str):
+            _xih[_h["position"]["line"]] = _lbx
+check("inlayHint.explicitType.localTypeQ", _xih.get(_lineXtQ) == ": type", str(_xih))
+
+for _recv, _want, _tag in (
+        ("XtP.", {"XtP3"}, "explicitType.members"),
+        ("XtP.XtP3.", {"xf3", "xg"}, "explicitType.membersL2")):
+    _rid += 1
+    _offx = XTUSE.index("    %s\n" % _recv) + len("    ") + len(_recv)
+    send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/completion", "params": {
+        "textDocument": {"uri": xturi}, "position": pos(XTUSE, _offx)}})
+    _r, _ = recv_id("xtuse", _rid)
+    _labsx = sorted({i["label"] for i in ((_r or {}).get("result") or {}).get("items") or []})
+    check("completion." + _tag, set(_labsx) == _want, str(_labsx))
+
+_rid += 1
+_xoff = XTUSE.index("xf3(1") + 1
+send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/definition", "params": {
+    "textDocument": {"uri": xturi}, "position": pos(XTUSE, _xoff)}})
+_r, _ = recv_id("xtuse", _rid)
+_xloc = (_r or {}).get("result") or {}
+if isinstance(_xloc, list):
+    _xloc = _xloc[0] if _xloc else {}
+check("definition.explicitType.fnInModule",
+      isinstance(_xloc, dict) and "xtmod.zx" in (_xloc.get("uri") or ""),
+      str(_xloc)[:200])
 
 cov_lines = ['const std = module("std");', "", "pub const main = fn () u8 {"]
 cov_marks = []

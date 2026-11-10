@@ -1344,10 +1344,17 @@ fn instancePathContainer(files: []const []const u8, doc: *const Document,
     var te: ?[]const u8 = null;
     if (declTyOf(st)) |dt| {
         const t = trimSl(dt);
-        if (isPurePath(t)) te = t;
-    } else if (declInitOf(st)) |ini| {
-        const t = trimSl(ini);
-        if (isPurePath(t)) te = t else if (literalPathOf(ini)) |lp| te = lp;
+        // 显式 `: type` 标注只说明"这是类型值"，容器本体在初始式里
+        // （`const P: type = t.Root.P1.P2;`）。照抄标注拿到的是 "type"，
+        // 单段路径立刻落空 → `P.` 一个成员都补不出来（用户 2026-11-11
+        // 截图：第一行 P 有 `: type`，紧跟的 `P.P3` 就断了）。
+        if (isPurePath(t) and !std.mem.eql(u8, t, "type")) te = t;
+    }
+    if (te == null) {
+        if (declInitOf(st)) |ini| {
+            const t = trimSl(ini);
+            if (isPurePath(t) and !std.mem.eql(u8, t, "type")) te = t else if (literalPathOf(ini)) |lp| te = lp;
+        }
     }
     const path = te orelse return null;
     if (std.mem.indexOfScalar(u8, path, '.') == null) return null;
@@ -2647,6 +2654,45 @@ fn moduleMemberTy(files: []const []const u8, doc: *const Document,
     return null;
 }
 
+/// `base.member` 的跳转：base 先按模块路径 / 容器路径逐段解析，再在目标文件
+/// 或容器体里找成员声明（方法、嵌套类型、字段、枚举变体）。
+///
+/// 必须能**独立调用**：调用点在"本文件同名声明"之前。`P.P3.f3` 里的 `f3`
+/// 会和 `const f3 = …` 同名，先查本文件就跳到自己的 const 行，而不是模块里的
+/// 声明（用户 2026-11-11：`t` 是 module 时"跳转还是没有"）。
+fn definitionOfMember(doc: *const Document, text: []const u8,
+                      word: []const u8, ws: usize) ?[]const u8 {
+    if (ws == 0 or text[ws - 1] != '.') return null;
+    const bs = memberBaseStart(text, ws - 1);
+    // 泛型实例上的成员：`HashMap(i32).init` 的接收者是 `HashMap(i32)`，
+    // 剥掉实例化实参才认得出容器（`std.map.HashMap(i32).init` 以前一律 MISS）。
+    const base = stripGenericSuffix(text[bs .. ws - 1]);
+    if (base.len == 0) return null;
+
+    // 模块路径（`std.task.Task`、`m.Root.P1`）：沿 std 门面 / 模块绑定的
+    // 再导出逐段落到真实源文件，再找顶层声明。
+    if (qualModulePath(doc, text, base)) |p| {
+        if (aliasModuleFile(doc, p, word)) |ap2| return makeLocation(pathToUri(ap2), 0, 0, 0);
+        if (readFileSmall(p)) |t| {
+            if (findDeclLine(t, word)) |loc|
+                return makeLocation(pathToUri(p), loc.line, loc.col, loc.col + @as(u32, @intCast(word.len)));
+        }
+    }
+    if (!isPurePath(base)) return null;
+
+    // 容器路径（实例链 / 限定类型路径 / 类型值别名 / 模块里的容器）：逐段
+    // 解析拿到容器体，再在体里找成员声明。
+    var sf = scanFiles(doc, text);
+    defer sf.deinit(gpa);
+    const pc = resolveContainerPath(sf.items, doc, text, base) orelse return null;
+    const boff = memberDeclOffset(pc.body, word) orelse return null;
+    const base_off = @intFromPtr(pc.body.ptr) - @intFromPtr(pc.src.ptr);
+    const lc = offsetToLineCol(pc.src, base_off + boff);
+    const p2 = pathOfSrcText(doc, pc.src) orelse doc.path;
+    return makeLocation(pathToUri(p2), lc.line, lc.character,
+                        lc.character + @as(u32, @intCast(word.len)));
+}
+
 fn definitionAt(doc: *const Document, line: u32, character: u32) ?[]const u8 {
     const text = doc.text;
     const off = posToOffset(text, line, character);
@@ -2664,62 +2710,20 @@ fn definitionAt(doc: *const Document, line: u32, character: u32) ?[]const u8 {
     const word = text[ws..we];
     if (word.len == 0) return null;
 
+    // 0.5) 成员访问 `base.member`：**先**按成员解析，本文件里的同名声明不抢。
+    //      `P.P3.f3` 的 `f3` 与 `const f3 = …` 同名，先查本文件就会跳到自己的
+    //      const 行（用户 2026-11-11：`t` 是 module，函数跳不过去）。
+    if (definitionOfMember(doc, text, word, ws)) |loc| return loc;
+
     // 1) 当前文档声明
     if (findDeclLine(text, word)) |loc|
         return makeLocation(doc.uri, loc.line, loc.col, loc.col + @as(u32, @intCast(word.len)));
-
-    // 1.5) <module>.<member>：光标停在成员上 → 模块文件的顶层声明。
-    //      路径可以是多段（std.task / std.map.HashMap 的 base），沿 std 门面
-    //      的 pub const x = module("x.zx") 逐段解析到真实源文件
-    //      （用户 2026-11-10：std.task.Task 跳不过去）。
-    if (ws > 0 and text[ws - 1] == '.') {
-        var bs = ws - 1;
-        while (bs > 0 and (isIdentChar(text[bs - 1]) or text[bs - 1] == '.')) bs -= 1;
-        const base = text[bs .. ws - 1];
-        if (base.len > 0) {
-            if (qualModulePath(doc, text, base)) |p| {
-                // `std.task` 这类再导出：直接落到被再导出的文件，
-                // 别停在 std.zx 的 `pub const task = module("task.zx")` 上
-                if (aliasModuleFile(doc, p, word)) |ap2| {
-                    return makeLocation(pathToUri(ap2), 0, 0, 0);
-                }
-                if (readFileSmall(p)) |t| {
-                    if (findDeclLine(t, word)) |loc|
-                        return makeLocation(pathToUri(p), loc.line, loc.col, loc.col + @as(u32, @intCast(word.len)));
-                }
-            }
-        }
-    }
 
     // 2) 模块绑定名 / std → 模块文件
     var m = moduleOfBinding(text, word);
     if (m == null and std.mem.eql(u8, word, "std")) m = "std";
     if (m) |mm| {
         if (resolveModuleFile(doc, mm)) |p| return makeLocation(pathToUri(p), 0, 0, 0);
-    }
-
-    // 2.5) <容器路径>.<成员>：接收者是实例链 / 限定类型路径 / 类型值别名
-    //      （`t.p1.P2T`、`P.P3T`、`m.A.B.C.mk`）。上面的 1.5 只认模块路径，
-    //      这里用补全那套逐段解析拿到容器体，再在体里找成员声明
-    //      （用户 2026-11-11：类型和函数都跳不过去）。
-    if (ws > 0 and text[ws - 1] == '.') {
-        const bs = memberBaseStart(text, ws - 1);
-        // 泛型实例上的成员：`HashMap(i32).init` 的接收者是 `HashMap(i32)`，
-        // 剥掉实例化实参才认得出容器（`std.map.HashMap(i32).init` 以前一律 MISS）。
-        const base = stripGenericSuffix(text[bs .. ws - 1]);
-        if (base.len > 0 and isPurePath(base)) {
-            var sf = scanFiles(doc, text);
-            defer sf.deinit(gpa);
-            if (resolveContainerPath(sf.items, doc, text, base)) |pc| {
-                if (memberDeclOffset(pc.body, word)) |boff| {
-                    const base_off = @intFromPtr(pc.body.ptr) - @intFromPtr(pc.src.ptr);
-                    const lc = offsetToLineCol(pc.src, base_off + boff);
-                    const p2 = pathOfSrcText(doc, pc.src) orelse doc.path;
-                    return makeLocation(pathToUri(p2), lc.line, lc.character,
-                                        lc.character + @as(u32, @intCast(word.len)));
-                }
-            }
-        }
     }
 
     // 3) 兄弟文件的顶层声明（同目录 + worktree 根）
@@ -4854,6 +4858,22 @@ fn paramName(p: []const u8) []const u8 {
     return head;
 }
 
+/// 无名形参的占位文本：没有名字就放**类型**，用户 Tab 过去一眼知道该填什么。
+/// 匿名聚合（`struct{a:u32,b:u32}`）写成 `.{ }`——那才是实参真正的样子，
+/// 把整段 struct 体塞进占位只会糊一屏。
+/// 用户 2026-11-11：上一版为了不截断改成了空占位，结果是"只留了占位，没有文字"。
+fn paramPlaceholderText(p: []const u8) []const u8 {
+    const nm = trimSl(p);
+    const ty = blk: {
+        const c = std.mem.indexOfScalar(u8, nm, ':') orelse break :blk nm;
+        // 有名字 → ':' 之后是类型；没名字 → 第一个 ':' 在类型体里，整段是类型
+        if (paramName(p).len > 0) break :blk trimSl(nm[c + 1 ..]);
+        break :blk nm;
+    };
+    if (std.mem.indexOfScalar(u8, ty, '{') != null) return ".{ }";
+    return ty;
+}
+
 /// 片段（snippet）里的字面量转义：`\` `$` `}` 都是语法字符，出现在文本里
 /// 必须加反斜杠。占位默认值里塞类型串时离不开这一步——`${2:struct{a}}`
 /// 的 `}` 会提前关闭占位符，插入结果被截在 `struct{a`。
@@ -5677,9 +5697,12 @@ fn memberCallSnippet(list: *Json, seen: *std.StringHashMapUnmanaged(void),
         if (!first) ins.appendSlice(gpa, ", ") catch return false;
         first = false;
         if (nm.len == 0) {
-            // 无名形参（`fn (i32, struct{a:u32,b:u32})`）：留空占位让 Tab 跳过去。
-            // 拿整段形参当默认值会让 `}` 提前关掉占位符，插入变成半截类型。
-            ins.print(gpa, "${{{d}}}", .{tab}) catch return false;
+            // 无名形参（`fn (i32, struct{a:u32,b:u32})`）：占位放类型，让 Tab
+            // 过去时看得见该填什么。必须 escapeSnippet——`}` 会提前关掉占位符，
+            // 插入就成了半截类型（用户 2026-11-11 截图 `f3(i32, struct{a)`）。
+            ins.print(gpa, "${{{d}:", .{tab}) catch return false;
+            escapeSnippet(&ins, paramPlaceholderText(p0));
+            ins.append(gpa, '}') catch return false;
         } else {
             ins.print(gpa, "${{{d}:", .{tab}) catch return false;
             escapeSnippet(&ins, nm);
@@ -5783,7 +5806,10 @@ fn addCallSnippet(list: *Json, seen: *std.StringHashMapUnmanaged(void),
         if (!first) ins.appendSlice(gpa, ", ") catch return;
         first = false;
         if (nm.len == 0) {
-            ins.print(gpa, "${{{d}}}", .{tab}) catch return;   // 无名形参：留空占位
+            // 无名形参：占位放类型（同 addCallSnippet）
+            ins.print(gpa, "${{{d}:", .{tab}) catch return;
+            escapeSnippet(&ins, paramPlaceholderText(p0));
+            ins.append(gpa, '}') catch return;
         } else {
             ins.print(gpa, "${{{d}:", .{tab}) catch return;
             escapeSnippet(&ins, nm);
