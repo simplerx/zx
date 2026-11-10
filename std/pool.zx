@@ -162,7 +162,7 @@ pub const Pool = struct {
 
     // 整池归还：沿档位 → 槽区链逐批 free。在用的块也一并还给系统，
     // 调用方要保证此后不再解引用任何从这里拿出去的指针。
-    const deinit = fn (self: *Pool) void {
+    pub const deinit = fn (self: *Pool) void {
         for (0..classCount) i {
             let c = self.classes + i;
             var r = c.region;

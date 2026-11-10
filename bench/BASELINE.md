@@ -67,3 +67,10 @@ ArrayList push/append/insertAt + HashMap put/get（含扩容），五个负载�
 
 记录新基线：改完之后把表格数字更新成新的，并注明提交号。
 自编译耗时作为主指标等自举（M-自举）之后再加进这张表。
+
+## 2026-11-11 复测（压测后）
+
+- 编译器同 v0.58 链路 + 压测修复（commit 05e1ad7），zig cc -O2 不变。
+- 8/8 校验和一致：fib 15 / mandel 153 / mmat 91-102 / str 3 / json 88 / cont 76 / pool 221-234 / poolraw 285（net ms）。
+- mmat/pool 比基线 +5~13%：毛值稳定（130-134/261-265），总量波动来自扣基线的 31ms 项 + 同机 Zed/LSP 负载；这两项本就是内存带宽型，判定为环境噪声而非回退（codegen 无相关改动）。
+- bench/pool.zx 改用 pub deinit（容器可见性规则上线后 std/pool.zx 漏标 pub，已修）。
