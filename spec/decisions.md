@@ -3870,3 +3870,36 @@ expect-output）、tests/bad/reflect-ptr-tydesc.zx（E0306）。
 **遗留（独立线）**：函数体内 `const F = fn(…){…}; F(x)` 的局部 fn 绑定调用，
 后端发 `ZxFn… F = 0; F(x)`——空指针调用必炸（顶层 const fn 没问题）。
 调用点应解析到 fn 节点直接调，与反射无关，待用户点头再修。
+
+
+### §118 续（02:3x，用户二次拍板）：statics[i].ptr 两种形态都有
+
+用户指出"ptr 恒空"不对——ptr 有值应该看 @type 传的是类型还是表达式，并问
+能否优雅合一。答案：**能，而且比"相反"更干净，不用使用者担责**——
+
+**规则：ptr 有值 ⇔ 编译器知道它指到哪/值是什么**：
+- `fields[i].ptr`：需要实例存储 → 只有 `@type(左值)` 才有；
+- `statics[i].ptr`：**根本不需要实例**——后端把静态成员全部物化成 C 全局
+  （var/const 都有存储，backend.c "静态成员：结构体体里声明的 var / const，
+  全程序一份"），所以它是 `&全局` 的真指针，`@type(T)` 与 `@type(左值)`
+  **两种形态都有**。const 成员 `*const T`、var 成员 `*T`。
+
+实现（Value 加 `Type *xt` 槽；statics 的 ptr：xt=容器、off=成员下标、
+xexpr 空）：
+1. `check_field` 的 f.ptr 分支：xexpr 有 → 实例字段 ptr（原路径）；
+   xt 有 → statics ptr（节点挂 type_val/ival，b=NULL）。
+2. **`.0` 解引用在检查期改写成 `T.<成员>`**（case TY_PTR 的 `!n->name &&
+   n->ival==0` 分支）：合成 NK_IDENT 基节点（ty=ty_type、type_val=容器，
+   **没有 sym**——不能重入 check_field，按名字现查会串），n->name=成员名；
+   const 挂 n->ct（§117 值槽）后端发字面量，var 走 type_val 分支发全局
+   符号。读写、取址与直接写 `Cnt.count` 完全同路径。
+3. 后端补 bare-ptr 分支（is_fldptr && !b && type_val）：发 `(&ZxS1_lim)`。
+4. **修了 §118 的一个漏**：enum 的静态成员在 `t->statics` 不在 `t->fields`
+   （ty.h："结构体的在 fields 里（is_static），枚举的在 statics 里"），
+   上一版 statics 切片只扫 fields，枚举体的 const/var 成员没收到。
+5. `const p = s.ptr;` 被 R1 拦是**对的**（地址不是编译期常量，与实例字段
+   指针一致）——用 `let`。
+
+验证：@type(T)/@type(左值) 两形态、struct/enum、const/var、`.0` 读/写、
+裸 ptr 传 *T 形参、泛型容器特化（Gc(i32) 的 statics 值不串）全部通过。
+守门：tests/good/reflect-ptr.zx 追加 6 行场景 + 期望输出。

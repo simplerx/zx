@@ -4431,6 +4431,24 @@ static void ex(Buf *b, Node *n) {
             buf_printf(b, ") + %llu))", (unsigned long long)n->ival);
             return;
         }
+        /* §118 续：statics 的 ptr 裸用（没跟 .0）——静态成员全被物化成
+         * C 全局，这就是 (&全局) 的真指针；const 成员的 *const 由 ctype
+         * 表达。`.0` 已在检查期改写成 T.<成员>，走不到这里。 */
+        if (n->ty && n->ty->kind == TY_PTR && n->ty->is_fldptr && !n->b &&
+            n->type_val) {
+            Type *ct3 = n->type_val;
+            Field *sf = ct3->kind == TY_ENUM
+                      ? (n->ival < (uint64_t)ct3->nstatics ? &ct3->statics[n->ival] : NULL)
+                      : (n->ival < (uint64_t)ct3->nfields ? &ct3->fields[n->ival] : NULL);
+            if (sf && sf->name) {
+                Buf sn2; buf_init(&sn2);
+                tn(&sn2, ct3);
+                buf_printf(b, "(&%s_", sn2.data);
+                cname(b, sf->name);
+                buf_putc(b, ')');
+                return;
+            }
+        }
         /* 编译期数量 / 大小 */
         if (bt && n->name) {
             /* 聚合体自己有同名字段时，**字段优先**：`.size` 对数组/元组是

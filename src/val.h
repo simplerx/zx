@@ -41,6 +41,12 @@ struct Value {
     Node       *xexpr;     /* §118 ptr 槽：基址表达式（&inst 的节点克隆）。
                             * ptr 是运行期地址，折不成编译期常量——ct 折值
                             * 遇到它返回 NULL（R1），发码时后端现拼。 */
+    Type       *xt;        /* §118 续（用户二次拍板）：statics 的 ptr 槽——
+                            * 容器类型（xexpr 为空时生效）。后端把静态成员全部
+                            * 物化成 C 全局，所以这就是 &全局 的真指针，不需要
+                            * 实例；off 是成员在 fields（struct/union）或
+                            * statics（enum）数组里的下标，`.0` 在检查期改写
+                            * 成 T.<成员>。 */
     bool        neg;       /* V_INT：负数，ival 是绝对值 */
     bool        big;       /* V_INT：超出 u64，值在 {hi, ival}（绝对值的 128 位表示） */
     uint64_t    hi;        /* V_INT：绝对值的高 64 位（big 时有效） */

@@ -4462,7 +4462,7 @@ const builtin_ty_table = [_]BuiltinTyDef{
         .{ .name = "name", .ty = "[]const u8" },
         .{ .name = "ty", .ty = "type" },
         .{ .name = "offset", .ty = "usize" },
-        .{ .name = "ptr", .ty = "字段值指针：f.ptr.0 取值，@type(左值) 才有" },
+        .{ .name = "ptr", .ty = "指针：fields 的 ptr 指向实例字段（@type(左值) 才有）；statics 的 ptr 指向静态成员全局（两种形态都有），f.ptr.0 取值" },
     } },
 };
 

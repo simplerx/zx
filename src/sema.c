@@ -687,19 +687,24 @@ static Value *type_desc_value(Type *t, Node *inst) {
     sv->nitems = nf;
     v->items[5] = sv;
 
-    /* statics（§118 续，用户 2026-11-11："@type(T) 还应该有静态成员的切片"）：
-     * 容器（struct/union/enum）里所有 is_static 且不是类型成员的声明——
-     * const 常量、var 静态、fn 都算。元素与 fields 同一个 Field 描述符：
-     * name / ty 有意义；offset 填 0（静态成员不在实例布局里）；ptr 恒空
-     * （静态成员没有逐实例存储，取值走容器名限定，不走这里）。 */
+    /* statics（§118 续，用户 2026-11-11："@type(T) 还应该有静态成员的切片"；
+     * 二次拍板：ptr 两种形态都有——它不依赖实例）。范围：struct/union 的
+     * is_static 非 类型 成员在 fields 里，enum 的在 statics 里（ty.h：
+     * "结构体的在 fields 里（is_static），枚举的在 statics 里"——上一版
+     * 只扫 fields，枚举体的 const 成员漏收）。每个元素都带 ptr：后端把
+     * 静态成员全部物化成 C 全局（var/const 都有存储），所以 ptr 就是
+     * &全局 的真指针——const 成员 *const T，var 成员 *T。 */
     int ns = 0;
-    if (t->kind == TY_STRUCT || t->kind == TY_UNION || t->kind == TY_ENUM)
+    if (t->kind == TY_STRUCT || t->kind == TY_UNION)
         for (int i = 0; i < t->nfields; i++)
             if (t->fields[i].is_static &&
                 !(t->fields[i].ty && t->fields[i].ty->kind == TY_TYPE)) ns++;
+    if (t->kind == TY_ENUM)
+        for (int i = 0; i < t->nstatics; i++)
+            if (!(t->statics[i].ty && t->statics[i].ty->kind == TY_TYPE)) ns++;
     Value *sarr = val_agg(ty_slice(fit, true), ns);
     int sk = 0;
-    if (ns)
+    if (t->kind == TY_STRUCT || t->kind == TY_UNION)
         for (int i = 0; i < t->nfields; i++) {
             if (t->fields[i].is_static &&
                 !(t->fields[i].ty && t->fields[i].ty->kind == TY_TYPE)) {
@@ -707,9 +712,27 @@ static Value *type_desc_value(Type *t, Node *inst) {
                 fv->items[0] = val_str(t->fields[i].name, (int)strlen(t->fields[i].name));
                 fv->items[1] = val_type(t->fields[i].ty);
                 fv->items[2] = val_int(ty_usize(), 0, false);
-                fv->items[3] = NULL;
+                Value *pv = val_undef(ty_ptr(t->fields[i].ty,
+                                             !t->fields[i].is_var, false, 0));
+                pv->xt = t;
+                pv->off = (uint64_t)i;
+                fv->items[3] = pv;
                 sarr->items[sk++] = fv;
             }
+        }
+    if (t->kind == TY_ENUM)
+        for (int i = 0; i < t->nstatics; i++) {
+            if (t->statics[i].ty && t->statics[i].ty->kind == TY_TYPE) continue;
+            Value *fv = val_agg(fit, 4);
+            fv->items[0] = val_str(t->statics[i].name, (int)strlen(t->statics[i].name));
+            fv->items[1] = val_type(t->statics[i].ty);
+            fv->items[2] = val_int(ty_usize(), 0, false);
+            Value *pv = val_undef(ty_ptr(t->statics[i].ty,
+                                         !t->statics[i].is_var, false, 0));
+            pv->xt = t;
+            pv->off = (uint64_t)i;
+            fv->items[3] = pv;
+            sarr->items[sk++] = fv;
         }
     Value *ssv = val_ptr(ty_slice(fit, true), sarr, 0);
     ssv->nitems = ns;
@@ -2753,6 +2776,20 @@ static Type *check_field(Node *n) {
             return BAD(n, "`.ptr` needs a descriptor from `@type(lvalue)`; "
                           "`@type(SomeType)` has no instance to point into");
         Value *pv = fv->items[3];
+        /* statics 的 ptr 槽（§118 续二次拍板）：xt=容器、off=成员下标、
+         * xexpr 空——不依赖实例，@type(T) 与 @type(左值) 两种形态都有。
+         * 节点挂 type_val/ival，`.0` 解引用在 TY_PTR 分支改写成 T.<成员>。 */
+        if (!pv->xexpr && pv->xt) {
+            n->type_val = pv->xt;
+            n->ival = pv->off;
+            n->b = NULL;
+            Type *pt = ty_ptr(pv->ty->elem, pv->ty->is_const, false, 0);
+            pt->is_fldptr = true;
+            return type_of(n, pt);
+        }
+        if (!pv->xexpr)
+            return BAD(n, "`.ptr` needs a descriptor from `@type(lvalue)`; "
+                          "`@type(SomeType)` has no instance to point into");
         n->b = clone_tree(pv->xexpr);
         n->ival = pv->off;
         Type *pt = ty_ptr(pv->ty->elem, !lvalue_mutable(n->b), false, 0);
@@ -2892,6 +2929,33 @@ static Type *check_field(Node *n) {
             }
             if (n->ival != 0)
                 return BAD(n, "a bare pointer only has `.0` (dereference); use [] for indexing");
+            /* §118 续：statics 的 ptr（b==NULL、type_val=容器、ival=成员下标）
+             * 的 `.0` 在这里改写成 `T.<成员>`——const 折字面量（§117 值槽），
+             * var 发全局引用；读写、取址与直接写 `Cnt.count` 同一条路。
+             * 不能重入 check_field：合成基节点没有 sym，按名字现查会串。 */
+            if (bt->is_fldptr && !base->b && base->type_val) {
+                Type *ct2 = base->type_val;
+                uint64_t mi = base->ival;
+                Field *sf = ct2->kind == TY_ENUM
+                          ? (mi < (uint64_t)ct2->nstatics ? &ct2->statics[mi] : NULL)
+                          : (mi < (uint64_t)ct2->nfields ? &ct2->fields[mi] : NULL);
+                if (!sf || !sf->name)
+                    return BAD(n, "internal: bad statics ptr slot");
+                Node *tb = node_new(NK_IDENT, n->line, n->col);
+                tb->ty = ty_type();
+                tb->type_val = ct2;
+                n->a = tb;
+                n->name = sf->name;
+                n->ival = 0;
+                if (deny_member(n, ct2, sf->is_pub, sf->name))
+                    return type_of(n, ty_invalid());
+                if (!sf->is_var && sf->dflt) {
+                    Value *cv = sf->ct ? sf->ct : ct_eval_probe(sf->dflt);
+                    if (cv && sf->ty) cv = val_cast(sf->ty, cv);
+                    if (cv && cv->kind != V_UNDEF) n->ct = cv;
+                }
+                return type_of(n, sf->ty);
+            }
             return type_of(n, e);
         }
         /* `.` 自动穿透一层 */

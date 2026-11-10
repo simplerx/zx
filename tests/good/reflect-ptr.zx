@@ -25,6 +25,17 @@ const P3 = struct {
 
 const Color = enum { red, green };
 
+const Cnt = struct {
+    hits: i32,
+    pub const lim = 100;
+    pub var count: i32 = 0;
+};
+
+// §118 续（用户二次拍板）：statics[i].ptr 不依赖实例——后端把静态成员全部
+// 物化成 C 全局，两种形态都是 &全局 的真指针。`.0` 取值（const 折字面量，
+// var 读写全局）；裸 ptr 能传 *T 形参。@type(T) 与 @type(左值) 都有。
+const bumpS = fn (p: *i32) void { p.0 = p.0 + 1; };
+
 const bump = fn (p: *i32) void { p.0 = p.0 + 1; };
 
 // 不知道字段名，遍历拿到所有字段的值（i32/i64 混合）
@@ -73,6 +84,20 @@ pub const main = fn () u8 {
     std.println("Color statics:");
     dumpStatics(Color);
 
+    // §118 续：statics[i].ptr —— @type(T) 形态（无实例）也能取值
+    const ci = @type(Cnt);
+    std.println("lim={} count={}", ci.statics[0].ptr.0, ci.statics[1].ptr.0);
+    ci.statics[1].ptr.0 = 9;                    // var 静态可写
+    std.println("count={} (expect 9)", Cnt.count);
+    bumpS(ci.statics[1].ptr);                   // 裸 ptr 传 *T 形参
+    std.println("count={} (expect 10)", Cnt.count);
+    let p = ci.statics[0].ptr;                  // const 静态：&全局 真指针
+    std.println("via-ptr={} (expect 100)", p.0);
+    // @type(左值) 形态：statics.ptr 同样在（不与 fields.ptr 互斥）
+    var c2 = Cnt{ .hits = 3 };
+    const c2i = @type(c2);
+    std.println("hits={} lim={}", c2i.fields[0].ptr.0, c2i.statics[0].ptr.0);
+
     return 0;
 };
 
@@ -90,3 +115,8 @@ pub const main = fn () u8 {
 //   static tag : i32
 //   static label : *const [2]u8
 // Color statics:
+// lim=100 count=0
+// count=9 (expect 9)
+// count=10 (expect 10)
+// via-ptr=100 (expect 100)
+// hits=3 lim=100
