@@ -2096,6 +2096,67 @@ for _tag, _path, _file in (
     check("definition." + _tag, _ok, str(_loc)[:200])
 
 
+# 形参 + 链式 base：`const P = t.PcP1.PcP2;`（t 是 *T 形参）也要提示 `: type`。
+# 守两件事：containerOfBinding 认形参（findDeclStmt 够不着，靠 name: Type 形状扫），
+# inferExprType 把链式 base（`t.PcP1`）当容器路径解。缺任一条，
+# `const P = t.P1.P2;` 就一个字提示都没有（用户 2026-11-11 截图 1）。
+PCHAIN = """const std = module("std");
+
+const PcT = struct {
+    pub const PcP1 = struct {
+        pub const PcP2 = struct {
+            pub const PcP3 = struct {
+                pub const f3 = fn (i32, struct{a:u32,b:u32}) i32 { return 1; };
+                pub const g = fn (n: i32) i32 { return n; };
+            };
+        };
+    };
+};
+
+const pcUse = fn (t: *PcT) i32 {
+    const P = t.PcP1.PcP2;
+    const Pp = P.PcP3;
+    return Pp.f3(1, .{ .a = 2, .b = 3 }) + Pp.g(1);
+};
+"""
+pcuri = "file:///" + os.path.join(SRC_DIR, "paramchain.zx").replace("\\", "/")
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": pcuri, "languageId": "zx", "version": 1, "text": PCHAIN}}})
+_lineP = PCHAIN[:PCHAIN.index("const P = t.PcP1")].count("\n")
+_linePp = PCHAIN[:PCHAIN.index("const Pp = P.PcP3")].count("\n")
+_rid += 1
+send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/inlayHint", "params": {
+    "textDocument": {"uri": pcuri},
+    "range": {"start": {"line": 0, "character": 0},
+              "end": {"line": len(PCHAIN.split("\n")), "character": 0}}}})
+_r, _ = recv_id("paramchain", _rid)
+_pih = {}
+if _r and _r.get("result"):
+    for _h in _r["result"]:
+        _lbl = _h.get("label")
+        _txt = _lbl if isinstance(_lbl, str) else (
+            _lbl.get("value", "") + "".join(x.get("value", "") for x in _lbl.get("labelParts", []) if isinstance(x, dict)))
+        _pih[_h["position"]["line"]] = _txt
+check("inlayHint.paramChain.localTypeP", _pih.get(_lineP) == ": type", str(_pih))
+check("inlayHint.paramChain.localTypePp", _pih.get(_linePp) == ": type", str(_pih))
+
+# `Pp.` 的成员 + 无名形参的骨架插入文本
+_rid += 1
+_pfoff = PCHAIN.index("Pp.f3") + len("Pp.")
+send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/completion", "params": {
+    "textDocument": {"uri": pcuri}, "position": pos(PCHAIN, _pfoff)}})
+_r, _ = recv_id("paramchain", _rid)
+_pitems = ((_r or {}).get("result") or {}).get("items") or []
+_pby = {i["label"]: i for i in _pitems}
+check("completion.paramChain.localTypeValue",
+      set(_pby) == {"f3", "g"}, str(sorted(_pby)))
+check("snippet.paramChain.unnamedParams",
+      _pby.get("f3", {}).get("insertText") == "f3(${1}, ${2})$0",
+      str(_pby.get("f3", {}).get("insertText")))
+check("snippet.paramChain.namedParam",
+      _pby.get("g", {}).get("insertText") == "g(${1:n})$0",
+      str(_pby.get("g", {}).get("insertText")))
+
 cov_lines = ['const std = module("std");', "", "pub const main = fn () u8 {"]
 cov_marks = []
 for _mod, _name, _shape, _factory in cov_types:

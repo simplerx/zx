@@ -3559,3 +3559,30 @@ base 成空串，整条不解析 → 一律 MISS。两处补齐：
 def.genericInstType（`HashMap` → map.zx）、def.reexportTypeMember
 （`norm` → json.zx）、def.reexportType（`Obj` → json.zx）；
 fixture 是只引用 std 的 `defstd.zx`，不含本地容器，不会串味。
+
+## 111. 函数体里的类型值绑定 + 无名形参的骨架（`const P = t.P1.P2;`）
+
+**裁定（2026-11-11，用户三张截图）**：
+
+1. **`const P = t.P1.P2;` 没有 `: type`**。两个洞叠在一起：
+   - `containerOfBinding` 只认 `const/let/var` 声明，`t` 是**形参**（`t: *PcT`），
+     `findDeclStmt` 够不着 → 整条链断在第一个标识符。补 `namedTypeNear` 兜底
+     （`name: Type` 形状扫）+ `stripPtrPrefix`（`*T` / `*const T` / `**T` → `T`）。
+   - `inferExprType` 的点路径分支只认"绑定名是类型值"（`isTypeValuedRecv`），
+     base 是**链式子表达式**（`t.PcP1`）时认不出。补一条：base 是纯点路径且
+     不是模块路径（`std.` / 模块绑定）时，把它交给 `resolveContainerPath`
+     当容器解，成员是类型就 `type`、是字段就字段类型、是函数就返回类型。
+2. **`P.` 补不出成员**：`resolveContainerPathD` 起点段原来是"先按名字找容器，
+   找不到才看绑定"。同目录有同名容器（测试 fixture 尤其容易撞）就把用户的
+   绑定顶掉。改成**绑定优先、容器兜底**（仍只对多段路径开放）。
+3. **Tab 补出来半截 `struct{a`**：`paramName` 按第一个 `:` 切名字，
+   无名形参 `struct{a:u32,b:u32}` 被切成 `struct{a`，占位符成了
+   `${2:struct{a`。判据改为"'=' 之前必须是纯标识符"，无名形参返回空；
+   骨架改成**空占位** `${1}`（Tab 能跳过去，不塞半个类型）。
+   顺带补 `escapeSnippet`（`\` `$` `}` 转义）——以后真往占位里放类型串也不会
+   被 `}` 提前关掉。`appendParamHints` 也因此不再给无名形参插 `i32: ` 这种假名字。
+
+守门（lsptest 253 项）：inlayHint.paramChain.{localTypeP,localTypePp}、
+completion.paramChain.localTypeValue、snippet.paramChain.{unnamedParams,namedParam}；
+fixture `paramchain.zx`（`Pc*` 前缀，形参 `t: *PcT`，两级嵌套类型 + 一个无名形参
+函数 + 一个有名字形参函数）。

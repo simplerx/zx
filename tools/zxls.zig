@@ -1397,7 +1397,16 @@ fn resolveContainerPath(files: []const []const u8, doc: *const Document,
 fn containerOfBinding(files: []const []const u8, doc: *const Document,
                       text: []const u8, name: []const u8, depth: u8) ?PathContainer {
     if (depth > 6 or name.len == 0) return null;
-    const st = findDeclStmt(text, name) orelse return null;
+    const st = findDeclStmt(text, name) orelse {
+        // 形参 / 字段不是 const 声明（`t: *T` 里的 `t`），findDeclStmt 够不着，
+        // 靠 `name: Type` 形状扫兜住。少了这条，函数体里
+        // `const P = t.P1.P2;` 的 P 就成不了类型值：`Pp = P.P3` 不提示
+        // `: type`，`P.` 补出来的是全文标识符（用户 2026-11-11 截图 1/2）。
+        const pt = namedTypeNear(text, name, text.len) orelse return null;
+        const t = stripPtrPrefix(trimSl(pt));
+        if (!isPurePath(t)) return null;
+        return resolveContainerPathD(files, doc, text, t, depth + 1);
+    };
     if (declTyOf(st)) |dt| {
         const t = trimSl(dt);
         if (!std.mem.eql(u8, t, "type") and isPurePath(t) and
@@ -1458,23 +1467,26 @@ fn resolveContainerPathD(files: []const []const u8, doc: *const Document,
     var hit: ?ContainerHit = null;
     var name: []const u8 = "";
     if (at == 0) {
-        // 起点：当前文档 / 扫描集里的容器（单段 `A.` 也走这里）
-        if (findContainerBody(files, segs[0])) |h| {
-            hit = h;
-            src = containerSrcOf(files, segs[0]) orelse text;
-        } else if (genericBodyOf(files, segs[0])) |gb| {
-            hit = .{ .body = gb, .is_enum = false };
-            src = containerSrcOf(files, segs[0]) orelse text;
-        } else if (n > 1) {
-            // 实例链 / 类型值绑定当起点：`t.p1.Inner`、`P.P3T`。
-            // 只对多段路径开放——单段名字的实例补全走 instanceContainerTy，
-            // 这里放进来会让"按名字在全扫描集里找容器"的老毛病回来
-            //（同目录下的 fixture 互相串味）。
+        // 起点：**先看本文档里的绑定**（`const P = t.P1.P2;` 的 P），再看容器声明。
+        // 顺序不能反：先按名字找容器，同目录里恰好有个同名容器（测试 fixture
+        // 尤其容易撞）就会把用户的绑定顶掉，`P.` 直接补不出成员。
+        // 只对多段路径开放——单段名字的实例补全走 instanceContainerTy，
+        // 这里放进来会让"按名字在全扫描集里找容器"的老毛病回来。
+        if (n > 1) {
             if (containerOfBinding(files, doc, text, segs[0], depth + 1)) |pc| {
                 hit = .{ .body = pc.body, .is_enum = pc.is_enum };
                 src = pc.src;
                 name = pc.name;
                 at = 1;
+            }
+        }
+        if (hit == null) {
+            if (findContainerBody(files, segs[0])) |h| {
+                hit = h;
+                src = containerSrcOf(files, segs[0]) orelse text;
+            } else if (genericBodyOf(files, segs[0])) |gb| {
+                hit = .{ .body = gb, .is_enum = false };
+                src = containerSrcOf(files, segs[0]) orelse text;
             }
         }
         if (name.len == 0) name = segs[0];
@@ -1669,6 +1681,24 @@ fn namedTypeNear(text: []const u8, name: []const u8, off: usize) ?[]const u8 {
         if (c < off) prev = ty;
     }
     return prev orelse first;
+}
+
+/// 去掉类型前的指针与修饰：`*T` / `*const T` / `*var T` / `**T` → `T`。
+/// 形参几乎都写成 `t: *T`（实例方法还有 `*const Self`），解析容器前必须剥掉，
+/// 否则 `isPurePath` 直接判否、整条链断在第一个标识符上。
+fn stripPtrPrefix(e0: []const u8) []const u8 {
+    var e = trimSl(e0);
+    var guard: usize = 0;
+    while (guard < 4) : (guard += 1) {
+        if (e.len == 0 or e[0] != '*') break;
+        e = trimSl(e[1..]);
+        if (std.mem.startsWith(u8, e, "const ")) {
+            e = trimSl(e["const ".len..]);
+        } else if (std.mem.startsWith(u8, e, "var ")) {
+            e = trimSl(e["var ".len..]);
+        }
+    }
+    return e;
 }
 
 /// 方法体内的 self → 容器体：扫全文的容器声明（const X = struct/union {…}），
@@ -3598,6 +3628,27 @@ fn inferExprType(text: []const u8, doc: *const Document, expr: []const u8, depth
                 }
                 return null;
             }
+            // 接收者是**链式子表达式**时也落到容器：`t.P1`（实例上取类型成员）、
+            // `t.P1.P2`（再取一层）。isTypeValuedRecv 只覆盖"绑定名 → 类型值"，
+            // base 是 `t.P1` 这种链就认不出，`const P = t.P1.P2;` 整条推不出类型、
+            // 也就没有 `: type`（用户 2026-11-11 截图 1）。模块路径（std./绑定名.）
+            // 归上面的分支和 `instanceContainerTy`，这里不掺和。
+            if (isPurePath(base)) {
+                const seg0_end = std.mem.indexOfScalar(u8, base, '.') orelse base.len;
+                const seg0 = base[0..seg0_end];
+                const is_mod_path = std.mem.eql(u8, seg0, "std") or
+                    moduleOfBinding(text, seg0) != null;
+                if (!is_mod_path) {
+                    if (resolveContainerPath(sf.items, doc, text, base)) |pc| {
+                        if (memberIsTypeDecl(sf.items, pc.body, member)) return "type";
+                        if (fieldTypeIn(pc.body, member)) |t| return t;
+                        if (findDeclStmt(pc.body, member)) |stmt| {
+                            const sig = sigOfStmt(stmt);
+                            if (sig.is_fn and sig.ret.len > 0) return sig.ret;
+                        }
+                    }
+                }
+            }
             // 实例成员 → 容器体里的字段类型 / 方法返回类型
             if (instanceContainerTy(sf.items, text, base)) |ty| {
                 if (findContainerBody(sf.items, ty)) |ch| {
@@ -4740,9 +4791,29 @@ fn argAlreadyNamed(seg: []const u8) bool {
 /// 模块函数（std.x / mod.fn）、实例方法与容器限定调用。
 /// 形参串 `name: ty` → 名字。
 fn paramName(p: []const u8) []const u8 {
-    var nm = trimSl(p);
-    if (std.mem.indexOfScalar(u8, nm, ':')) |c| nm = trimSl(nm[0..c]);
-    return nm;
+    const nm = trimSl(p);
+    // 无名形参（`fn (i32, struct{a:u32,b:u32}) i32`）里第一个 ':' 属于类型本身，
+    // 不能当名字分隔。判据：'=' 之前那段必须是纯标识符。
+    // 旧实现直接按第一个 ':' 切，`struct{a:u32,b:u32}` 变成 `struct{a`，
+    // Tab 补出来的骨架就是半截类型（用户 2026-11-11 截图：
+    // `P.P3.f3(i32, struct{a)`）。
+    const c = std.mem.indexOfScalar(u8, nm, ':') orelse return "";
+    const head = trimSl(nm[0..c]);
+    if (head.len == 0) return "";
+    for (head) |ch| {
+        if (!isIdentChar(ch)) return "";
+    }
+    return head;
+}
+
+/// 片段（snippet）里的字面量转义：`\` `$` `}` 都是语法字符，出现在文本里
+/// 必须加反斜杠。占位默认值里塞类型串时离不开这一步——`${2:struct{a}}`
+/// 的 `}` 会提前关闭占位符，插入结果被截在 `struct{a`。
+fn escapeSnippet(sb: *std.ArrayList(u8), txt: []const u8) void {
+    for (txt) |ch| {
+        if (ch == '\\' or ch == '$' or ch == '}') sb.append(gpa, '\\') catch return;
+        sb.append(gpa, ch) catch return;
+    }
 }
 
 /// 形参串 `name: struct{…}` → 匿名结构体类型串；不是匿名 struct 返回 null。
@@ -5554,11 +5625,18 @@ fn memberCallSnippet(list: *Json, seen: *std.StringHashMapUnmanaged(void),
     for (sig.params, 0..) |p0, pi| {
         if (self_first and pi == 0) continue;
         const nm = paramName(p0);
-        if (nm.len == 0) continue;
         if (tab > 6) break;
         if (!first) ins.appendSlice(gpa, ", ") catch return false;
         first = false;
-        ins.print(gpa, "${{{d}:{s}}}", .{ tab, nm }) catch return false;
+        if (nm.len == 0) {
+            // 无名形参（`fn (i32, struct{a:u32,b:u32})`）：留空占位让 Tab 跳过去。
+            // 拿整段形参当默认值会让 `}` 提前关掉占位符，插入变成半截类型。
+            ins.print(gpa, "${{{d}}}", .{tab}) catch return false;
+        } else {
+            ins.print(gpa, "${{{d}:", .{tab}) catch return false;
+            escapeSnippet(&ins, nm);
+            ins.append(gpa, '}') catch return false;
+        }
         tab += 1;
     }
     ins.appendSlice(gpa, ")$0") catch return false;
@@ -5650,15 +5728,19 @@ fn addCallSnippet(list: *Json, seen: *std.StringHashMapUnmanaged(void),
     var first = true;
     var tab: usize = 1;
     for (sig.params) |p0| {
-        var nm = trimSl(p0);
-        if (std.mem.indexOfScalar(u8, nm, ':')) |c| nm = trimSl(nm[0..c]);
-        if (nm.len == 0) continue;
+        const nm = paramName(p0);
         // 首参 self 是实例方法：`o.bump()` 走点补全，顶层不列调用骨架
         if (tab == 1 and std.mem.eql(u8, nm, "self")) return;
         if (tab > 6) break;
         if (!first) ins.appendSlice(gpa, ", ") catch return;
         first = false;
-        ins.print(gpa, "${{{d}:{s}}}", .{ tab, nm }) catch return;
+        if (nm.len == 0) {
+            ins.print(gpa, "${{{d}}}", .{tab}) catch return;   // 无名形参：留空占位
+        } else {
+            ins.print(gpa, "${{{d}:", .{tab}) catch return;
+            escapeSnippet(&ins, nm);
+            ins.append(gpa, '}') catch return;
+        }
         tab += 1;
     }
     ins.appendSlice(gpa, ")$0") catch return;
