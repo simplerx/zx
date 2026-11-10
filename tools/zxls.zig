@@ -1052,7 +1052,7 @@ fn scanFiles(doc: *const Document, text: []const u8) std.ArrayList([]const u8) {
     var it = d.iterate();
     while (it.next(g_io) catch null) |entry| {
         if (budget == 0) break;
-        if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".zx")) continue;
+        if (entry.kind != .file or std.mem.startsWith(u8, entry.name, ".zxls-") or !std.mem.endsWith(u8, entry.name, ".zx")) continue;
         if (std.mem.eql(u8, entry.name, self_name)) continue;
         var fp: std.ArrayList(u8) = .empty;
         defer fp.deinit(gpa);
@@ -1078,7 +1078,7 @@ fn scanFiles(doc: *const Document, text: []const u8) std.ArrayList([]const u8) {
         var sit = sd_d.iterate();
         while (sit.next(g_io) catch null) |entry| {
             if (budget == 0) break;
-            if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".zx")) continue;
+            if (entry.kind != .file or std.mem.startsWith(u8, entry.name, ".zxls-") or !std.mem.endsWith(u8, entry.name, ".zx")) continue;
             var fp: std.ArrayList(u8) = .empty;
             defer fp.deinit(gpa);
             fp.appendSlice(gpa, sd) catch continue;
@@ -1720,7 +1720,7 @@ fn callSiteArgTy(files: []const []const u8, doc: *const Document,
         defer d9.close(g_io);
         var it9 = d9.iterate();
         while (it9.next(g_io) catch null) |e9| {
-            if (e9.kind != .file or !std.mem.endsWith(u8, e9.name, ".zx")) continue;
+            if (e9.kind != .file or std.mem.startsWith(u8, e9.name, ".zxls-") or !std.mem.endsWith(u8, e9.name, ".zx")) continue;
             if (nfiles >= 240) return null;
             nfiles += 1;
             var fp9: std.ArrayList(u8) = .empty;
@@ -2729,7 +2729,7 @@ fn moduleDecls(doc_dir: []const u8, mod: []const u8, out: *std.ArrayList(Decl)) 
         var it = dir.iterate();
         while (it.next(g_io) catch null) |entry| {
             if (entry.kind != .file) continue;
-            if (!std.mem.endsWith(u8, entry.name, ".zx")) continue;
+            if (std.mem.startsWith(u8, entry.name, ".zxls-") or !std.mem.endsWith(u8, entry.name, ".zx")) continue;
             var fp: std.ArrayList(u8) = .empty;
             defer fp.deinit(gpa);
             fp.appendSlice(gpa, path.items) catch continue;
@@ -2964,7 +2964,7 @@ fn scanDirForText(dir_path: []const u8, src: []const u8) ?[]const u8 {
     defer d.close(g_io);
     var it = d.iterate();
     while (it.next(g_io) catch null) |entry| {
-        if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".zx")) continue;
+        if (entry.kind != .file or std.mem.startsWith(u8, entry.name, ".zxls-") or !std.mem.endsWith(u8, entry.name, ".zx")) continue;
         var fp: std.ArrayList(u8) = .empty;
         defer fp.deinit(gpa);
         fp.appendSlice(gpa, dir_path) catch continue;
@@ -3199,7 +3199,7 @@ fn definitionAt(doc: *const Document, line: u32, character: u32) ?[]const u8 {
         defer dir.close(g_io);
         var it = dir.iterate();
         while (it.next(g_io) catch null) |entry| {
-            if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".zx")) continue;
+            if (entry.kind != .file or std.mem.startsWith(u8, entry.name, ".zxls-") or !std.mem.endsWith(u8, entry.name, ".zx")) continue;
             if (std.mem.eql(u8, entry.name, self_name)) continue;
             var fp: std.ArrayList(u8) = .empty;
             defer fp.deinit(gpa);
@@ -3422,7 +3422,7 @@ fn referencesAt(doc: *const Document, line: u32, character: u32, include_decl: b
         defer dir.close(g_io);
         var it = dir.iterate();
         while (it.next(g_io) catch null) |entry| {
-            if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".zx")) continue;
+            if (entry.kind != .file or std.mem.startsWith(u8, entry.name, ".zxls-") or !std.mem.endsWith(u8, entry.name, ".zx")) continue;
             if (std.mem.eql(u8, entry.name, self_name)) continue;
             var fp: std.ArrayList(u8) = .empty;
             defer fp.deinit(gpa);
@@ -6556,7 +6556,7 @@ fn addImportModules(list: *Json, seen: *std.StringHashMapUnmanaged(void),
         defer dir.close(g_io);
         var it = dir.iterate();
         while (it.next(g_io) catch null) |entry| {
-            if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".zx")) continue;
+            if (entry.kind != .file or std.mem.startsWith(u8, entry.name, ".zxls-") or !std.mem.endsWith(u8, entry.name, ".zx")) continue;
             const stem = entry.name[0 .. entry.name.len - 3];
             if (std.mem.eql(u8, stem, "std")) continue;
             if (std.mem.startsWith(u8, stem, prefix) and
@@ -7082,7 +7082,7 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                             defer dd.close(g_io);
                             var ait = dd.iterate();
                             while (ait.next(g_io) catch null) |entry| {
-                                if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".zx")) continue;
+                                if (entry.kind != .file or std.mem.startsWith(u8, entry.name, ".zxls-") or !std.mem.endsWith(u8, entry.name, ".zx")) continue;
                                 if (std.mem.eql(u8, entry.name, baseName(doc.path))) continue;
                                 var fp: std.ArrayList(u8) = .empty;
                                 defer fp.deinit(gpa);
