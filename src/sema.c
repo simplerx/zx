@@ -131,6 +131,7 @@ struct Symbol {
     bool        ct_bind;   /* 泛型的编译期实参：没有 C 变量，值直接内联 */
     bool        in_fn;     /* 声明在函数体里：它的槽位在当前栈帧上 */
     bool        fn_local;  /* hoist 时确认是函数块内的绑定：块内先声明后使用要报 */
+    bool        is_top;    /* 文件顶层声明：后端把它发成 C 全局变量，初始值镜像归它管 */
     bool        used;      /* 被读过或写过一次；没碰过的局部绑定要报（M66） */
     struct Symbol *locals_next;  /* 本函数体的局部登记链（见 local_track） */
     bool        stack_val; /* 它的值指向当前栈帧（逃逸检查用，见 addr_frame） */
@@ -231,6 +232,8 @@ bool sema_sym_is_extern(Symbol *s) {
     if (!s || !s->decl || !s->decl->is_extern) return false;
     return s->decl->kind == NK_FN || s->decl->kind == NK_DECL;
 }
+Node *sema_sym_decl(Symbol *s) { return s ? s->decl : NULL; }
+bool sema_sym_in_fn(Symbol *s) { return s ? s->in_fn : false; }
 bool sema_sym_has_storage(Symbol *s) { return !(s && s->ct_bind); }
 Value *sema_sym_ct(Symbol *s) { return s ? s->ct : NULL; }
 
@@ -4332,6 +4335,7 @@ static void hoist(Scope *sc, Node *blk) {
                 判文件作用域要看 sc->is_module，否则模块顶层的 extern var 会被误判成局部。 */
                 s->in_fn = (!sc->is_module && g_fn_depth > 0);
                 s->fn_local = s->in_fn;
+                s->is_top = file_scope; /* 只有文件根作用域才是真全局；comptime 块内的局部槽位不算 */
                 it->sym = s;
                 if (!sc->is_module) local_track(s, it->line, it->col);
                 /* 泛型 lambda（`const L = fn (T: type) type { … }`）也要知道自己
@@ -6379,8 +6383,22 @@ static Value *ct_field(Node *n) {
 }
 
 /* 编译期写回：var 的槽位就是 Symbol.ct，聚合元素就地改 */
+/* 编译期求值不许写**全局** var 的存储（!in_fn）：全局是运行时槽位，
+ * 编译期写入的变异会烙进 C 初始值镜像（压测 s05 首次暴露：orelse 位置的
+ * 调用被探测折叠，defer 对全局数组的写入变成全局初始值，运行时带着脏
+ * 数据启动；数组再小一点还会假报编译期越界 E0300）。局部槽位照旧——
+ * ct_run 的循环计数全靠它。 */
+static bool ct_store_global(Node *lhs) {
+    while (lhs && (lhs->kind == NK_INDEX || lhs->kind == NK_FIELD)) lhs = lhs->a;
+    /* 只拒顶层 var（真全局槽位）。不能用 !in_fn：文件级 comptime 块（const T = build: { var t = ...; }）的
+     * 局部槽位 in_fn 也是 false，建表全靠 ct_store 写，拒了它表就全是 0（comptime.zx / generic.zx）。 */
+    return lhs && lhs->kind == NK_IDENT && lhs->sym &&
+           lhs->sym->is_top && lhs->sym->kind == SK_VAR;
+}
+
 static bool ct_store(Node *lhs, Value *v) {
     if (!lhs || !v) return false;
+    if (ct_store_global(lhs)) return false;
     if (lhs->kind == NK_IDENT) {
         if (!lhs->sym || lhs->sym->kind != SK_VAR) return false;
         lhs->sym->ct = v;

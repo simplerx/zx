@@ -860,6 +860,8 @@ static int  g_nlabs;
 static int  g_labid;
 
 static void gen_stmt(Node *n);
+static bool fn_is_generic(Node *fn);
+static char *localfn_impl_name(Node *d);
 static void gen_value(Node *n, const char *slot, Type *slot_ty);
 static void gen_if_value(Node *n, const char *slot, Type *slot_ty);
 static void gen_loop_value(Node *n, const char *slot, Type *slot_ty);
@@ -4395,6 +4397,22 @@ static void ex(Buf *b, Node *n) {
             return;
         }
         if (cv && cv->kind == V_BOOL)  { buf_puts(b, cv->bval ? "true" : "false"); return; }
+        /* 局部 fn 绑定的引用（当值传 / 被调用）：C 层函数是 <cname>_impl
+         * （gen_local_fns 发的），不是变量槽。词法上内层函数能看到外层
+         * 函数的局部绑定，C 层是两个独立函数——变量槽跨不过去，直接
+         * 引用会变成"未声明函数"的隐式声明（s09 压测首次暴露）。 */
+        {
+            Node *dn = (n->sym && sema_sym_in_fn(n->sym))
+                     ? sema_sym_decl(n->sym) : NULL;
+            if (dn && dn->kind == NK_DECL && dn->b && dn->b->kind == NK_FN &&
+                dn->b->b && !fn_is_generic(dn->b->b)) {
+                char *inm = localfn_impl_name(dn);
+                need_by_cname(inm);
+                buf_puts(b, inm);
+                free(inm);
+                return;
+            }
+        }
         need_by_cname(sym_cname(n));
         emit_sym_name(b, n);
         return;

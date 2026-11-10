@@ -334,15 +334,25 @@ fn logLine(msg: []const u8) void {
     // 写到 exe 同目录（绝对路径），不依赖宿主给的 cwd
     const path = std.fmt.allocPrint(gpa, "{s}/zxls-lsp.log", .{exeDir()}) catch return;
     defer gpa.free(path);
+    // 排查挂死：每行带毫秒时间戳（本地 UTC+8）
+    const now_ns = Io.Clock.now(.real, g_io).nanoseconds;
+    const ms: u64 = @intCast(@divFloor(@rem(now_ns, std.time.ns_per_s), std.time.ns_per_ms));
+    var secs: u64 = @intCast(@divFloor(now_ns, std.time.ns_per_s));
+    secs = secs % (24 * 3600) + 8 * 3600; // UTC+8
+    if (secs >= 24 * 3600) secs -= 24 * 3600;
+    var stamped: [560]u8 = undefined;
+    const line = std.fmt.bufPrint(&stamped, "{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3} {s}", .{
+        @as(u64, secs / 3600), @as(u64, (secs / 60) % 60), @as(u64, secs % 60), ms, msg,
+    }) catch msg;
     if (Io.Dir.cwd().openFile(g_io, path, .{ .mode = .read_write })) |f| {
         defer f.close(g_io);
         const end = f.length(g_io) catch return;
-        f.writePositionalAll(g_io, msg, end) catch return;
-        f.writePositionalAll(g_io, "\n", end + msg.len) catch return;
+        f.writePositionalAll(g_io, line, end) catch return;
+        f.writePositionalAll(g_io, "\n", end + line.len) catch return;
     } else |_| {
         var buf: std.ArrayList(u8) = .empty;
         defer buf.deinit(gpa);
-        buf.appendSlice(gpa, msg) catch return;
+        buf.appendSlice(gpa, line) catch return;
         buf.append(gpa, '\n') catch return;
         Io.Dir.cwd().writeFile(g_io, .{ .sub_path = path, .data = buf.items }) catch {};
     }
@@ -1031,10 +1041,17 @@ fn scanFiles(doc: *const Document, text: []const u8) std.ArrayList([]const u8) {
     files.append(gpa, text) catch {};
     const doc_dir = dirName(doc.path);
     const self_name = baseName(doc.path);
+    // 预算：补全/hover 每次都重扫目录。目录里混进大文件（2MB 级生成文件、
+    // 影子副本）时全量读会把一次补全拖到 20 秒级（压测 2026-11-11）。
+    // 单文件 1MiB 上限 + 总量 8MiB 预算，超了就跳过/收手——补全质量
+    // 只依赖正常体量的源码文件。
+    const per_file_max: u64 = 1 * 1024 * 1024;
+    var budget: u64 = 8 * 1024 * 1024;
     var d = Io.Dir.cwd().openDir(g_io, doc_dir, .{ .iterate = true }) catch return files;
     defer d.close(g_io);
     var it = d.iterate();
     while (it.next(g_io) catch null) |entry| {
+        if (budget == 0) break;
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".zx")) continue;
         if (std.mem.eql(u8, entry.name, self_name)) continue;
         var fp: std.ArrayList(u8) = .empty;
@@ -1042,7 +1059,16 @@ fn scanFiles(doc: *const Document, text: []const u8) std.ArrayList([]const u8) {
         fp.appendSlice(gpa, doc_dir) catch continue;
         fp.append(gpa, '/') catch continue;
         fp.appendSlice(gpa, entry.name) catch continue;
-        if (readFileSmall(fp.items)) |txt| files.append(gpa, txt) catch {};
+        const st = Io.Dir.cwd().statFile(g_io, fp.items, .{}) catch continue;
+        if (st.size > per_file_max) continue;
+        if (st.size > budget) {
+            budget = 0;
+            continue;
+        }
+        if (readFileSmall(fp.items)) |txt| {
+            budget -= @intCast(txt.len);
+            files.append(gpa, txt) catch {};
+        }
     }
     // std 目录：仓库外工程里 std.Task 的成员定义在 <exe>/../std/task.zx，
     // 文档目录永远扫不到（findStdDir 对齐编译器 find_std_path）。
@@ -1051,13 +1077,23 @@ fn scanFiles(doc: *const Document, text: []const u8) std.ArrayList([]const u8) {
         defer sd_d.close(g_io);
         var sit = sd_d.iterate();
         while (sit.next(g_io) catch null) |entry| {
+            if (budget == 0) break;
             if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".zx")) continue;
             var fp: std.ArrayList(u8) = .empty;
             defer fp.deinit(gpa);
             fp.appendSlice(gpa, sd) catch continue;
             fp.append(gpa, '/') catch continue;
             fp.appendSlice(gpa, entry.name) catch continue;
-            if (readFileSmall(fp.items)) |txt| files.append(gpa, txt) catch {};
+            const st = Io.Dir.cwd().statFile(g_io, fp.items, .{}) catch continue;
+            if (st.size > per_file_max) continue;
+            if (st.size > budget) {
+                budget = 0;
+                continue;
+            }
+            if (readFileSmall(fp.items)) |txt| {
+                budget -= @intCast(txt.len);
+                files.append(gpa, txt) catch {};
+            }
         }
     }
     return files;
@@ -2934,6 +2970,11 @@ fn scanDirForText(dir_path: []const u8, src: []const u8) ?[]const u8 {
         fp.appendSlice(gpa, dir_path) catch continue;
         fp.append(gpa, '/') catch continue;
         fp.appendSlice(gpa, entry.name) catch continue;
+        // 大小预筛：内容相等必然大小相等。先 stat 再读——目录里有大文件
+        // （2MB 级的生成文件、影子副本）时，逐个 readFileSmall 全量读 +
+        // 比对会把一次补全拖到 10 秒级（压测 2026-11-11：12.9s/次）。
+        const st = Io.Dir.cwd().statFile(g_io, fp.items, .{}) catch continue;
+        if (st.size != src.len) continue;
         const txt = readFileSmall(fp.items) orelse continue;
         // dupe：fp 的 defer deinit 在 return 时就会释放缓冲区
         if (std.mem.eql(u8, txt, src)) return dupe(fp.items);
@@ -6727,6 +6768,12 @@ fn typeValuedContainer(files: []const []const u8, doc: *const Document,
 }
 
 fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
+    const t0 = Io.Clock.now(.real, g_io).nanoseconds;
+    defer {
+        const dt = Io.Clock.now(.real, g_io).nanoseconds - t0;
+        var lb: [128]u8 = undefined;
+        logLine(std.fmt.bufPrint(&lb, "PROBE completeAt {d}ms path={s}", .{ @divFloor(dt, std.time.ns_per_ms), doc.path }) catch "PROBE");
+    }
     const text = doc.text;
     const off = posToOffset(text, line, character);
     const full_prefix = identBefore(text, off);

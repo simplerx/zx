@@ -108,6 +108,11 @@ Node *parse_program(Lexer *lx);
 const char *sema_sym_cname(struct Symbol *s);
 /* 这个符号是 `extern fn` 声明的外部 C 函数吗？（名字原样发，不转义） */
 bool sema_sym_is_extern(struct Symbol *s);
+/* 符号指向的声明节点（NK_DECL / NK_FN / NULL）。局部 fn 绑定引用要
+ * 用它判断"这是函数体里的 fn 字面量绑定"——C 层函数名带 _impl 后缀。 */
+Node *sema_sym_decl(struct Symbol *s);
+/* 符号声明在函数体里吗（它的槽位在栈帧上） */
+bool sema_sym_in_fn(struct Symbol *s);
 /* 模块表：0 是入口文件 */
 int   sema_module_count(void);
 Node *sema_module_root(int i);
