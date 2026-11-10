@@ -2311,6 +2311,124 @@ check("definition.explicitType.fnInModule",
       isinstance(_xloc, dict) and "xtmod.zx" in (_xloc.get("uri") or ""),
       str(_xloc)[:200])
 
+# ---------------------------------------------------------------- @type 描述符
+#
+# 用户 2026-11-11 第 2 张截图：`const info = @type(T); info.` 一个成员都不出。
+# 编译器内建类型（Allocator / Type / Field）在源文件里没有声明，
+# 成员表只能硬编码（builtin_ty_table，与 src/sema.c 的 sema_type_type /
+# sema_type_field_type 逐字段对齐）。三条链路缺一不可：
+#   inferExprType 先认 `@type(`——落到"调用"分支会当普通函数、返回 null
+#   builtinTyMembers 出 Type/Field 的字段（补全）
+#   builtinFieldTy 供 `info.fields` / `info.fields[0]` 继续推（inlay）
+TYUSE = """const std = module("std");
+
+const TyMake = fn (T: type) type {
+    return struct{
+        const info = @type(T);
+        const tField = info.fields[0];
+        const tCount = info.fieldCount;
+        info.
+        info.fields[0].
+    };
+};
+"""
+tyuri = "file:///" + os.path.join(SRC_DIR, "typeuse.zx").replace("\\", "/")
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": tyuri, "languageId": "zx", "version": 1, "text": TYUSE}}})
+_rid += 1
+send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/inlayHint", "params": {
+    "textDocument": {"uri": tyuri},
+    "range": {"start": {"line": 0, "character": 0},
+              "end": {"line": len(TYUSE.split("\n")), "character": 0}}}})
+_r, _ = recv_id("typeuse", _rid)
+_tih = {}
+if _r and _r.get("result"):
+    for _h in _r["result"]:
+        _lbx = _h.get("label")
+        if isinstance(_lbx, str):
+            _tih[_h["position"]["line"]] = _lbx
+for _need, _want, _tag in (
+        ("const info = @type", ": Type", "descriptor.infoType"),
+        ("const tField = ", ": Field", "descriptor.fieldElem"),
+        ("const tCount = ", ": usize", "descriptor.fieldCount")):
+    _ln = TYUSE[:TYUSE.index(_need)].count("\n")
+    check("inlayHint." + _tag, _tih.get(_ln) == _want, str(_tih))
+
+for _recv, _want, _tag in (
+        ("info.", {"name", "size", "align", "ty", "fieldCount", "fields"},
+         "descriptor.typeMembers"),
+        ("info.fields[0].", {"name", "ty", "offset"}, "descriptor.fieldMembers")):
+    _rid += 1
+    _offt = TYUSE.index("        %s\n" % _recv) + 8 + len(_recv)
+    send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/completion", "params": {
+        "textDocument": {"uri": tyuri}, "position": pos(TYUSE, _offt)}})
+    _r, _ = recv_id("typeuse", _rid)
+    _labt = sorted({i["label"] for i in ((_r or {}).get("result") or {}).get("items") or []})
+    check("completion." + _tag, set(_labt) == _want, str(_labt))
+
+# 类型值链的**源头**解析不到（`t` 不是模块绑定、模块文件不在扫描集里）：
+# `resolveContainerPathLoose` 从末段往前退（`LsP1.LsP2` → `LsP2`），
+# 否则 `const LsQ = LsP.LsP3;` 没有 `: type`、`LsQ.`/`LsP.` 空列表、
+# `LsP.LsP3` 跳不过去（用户 2026-11-11 第 1 张截图："还是一样的；跳转也没有好"）。
+LOSEMOD = """pub const LsP1 = struct {
+    pub const LsP2 = struct {
+        pub const LsP3 = struct {
+            pub const lf3 = fn (n: i32) i32 { return n; };
+            pub const lg3 = fn (n: i32) i32 { return n; };
+        };
+    };
+};
+"""
+open(os.path.join(SRC_DIR, "losemod.zx"), "w", encoding="utf-8").write(LOSEMOD)
+LOSESRC = """const std = module("std");
+
+const LsP: type = t.LsP1.LsP2;
+const LsQ = LsP.LsP3;
+LsQ.
+LsP.
+const LsF = LsP.LsP3.lf3(1);
+"""
+loseuri = "file:///" + os.path.join(SRC_DIR, "loseuse.zx").replace("\\", "/")
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": loseuri, "languageId": "zx", "version": 1, "text": LOSESRC}}})
+_rid += 1
+send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/inlayHint", "params": {
+    "textDocument": {"uri": loseuri},
+    "range": {"start": {"line": 0, "character": 0},
+              "end": {"line": len(LOSESRC.split("\n")), "character": 0}}}})
+_r, _ = recv_id("loseuse", _rid)
+_lih = {}
+if _r and _r.get("result"):
+    for _h in _r["result"]:
+        _lbx = _h.get("label")
+        if isinstance(_lbx, str):
+            _lih[_h["position"]["line"]] = _lbx
+_lineLsQ = LOSESRC[:LOSESRC.index("const LsQ =")].count("\n")
+check("inlayHint.looseChain.localTypeQ", _lih.get(_lineLsQ) == ": type", str(_lih))
+
+for _recv, _want, _tag in (
+        ("LsQ.", {"lf3", "lg3"}, "looseChain.instMembers"),
+        ("LsP.", {"LsP3"}, "looseChain.typeMembers")):
+    _rid += 1
+    _offl = LOSESRC.index("%s\n" % _recv) + len(_recv)
+    send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/completion", "params": {
+        "textDocument": {"uri": loseuri}, "position": pos(LOSESRC, _offl)}})
+    _r, _ = recv_id("loseuse", _rid)
+    _labl = sorted({i["label"] for i in ((_r or {}).get("result") or {}).get("items") or []})
+    check("completion." + _tag, set(_labl) == _want, str(_labl))
+
+_rid += 1
+_loff = LOSESRC.index("const LsQ = LsP.LsP3") + len("const LsQ = LsP.")
+send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/definition", "params": {
+    "textDocument": {"uri": loseuri}, "position": pos(LOSESRC, _loff)}})
+_r, _ = recv_id("loseuse", _rid)
+_lloc = (_r or {}).get("result") or {}
+if isinstance(_lloc, list):
+    _lloc = _lloc[0] if _lloc else {}
+check("definition.looseChain.nestedType",
+      isinstance(_lloc, dict) and "losemod.zx" in (_lloc.get("uri") or ""),
+      str(_lloc)[:200])
+
 cov_lines = ['const std = module("std");', "", "pub const main = fn () u8 {"]
 cov_marks = []
 for _mod, _name, _shape, _factory in cov_types:

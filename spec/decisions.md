@@ -3657,3 +3657,47 @@ completion.explicitType.{members,membersL2}、definition.explicitType.fnInModule
 （fixture `xtmod.zx` + `xtuse.zx`，`Xt*` 前缀；补全点写成独立的 `XtP.XtP3.` 行，
 文本里没有尾点就触发不了点补全）；snippet.paramChain.unnamedParams 的期望值
 更新为 `f3(${1:i32}, ${2:.{ \}})$0`。
+
+## 114. `@type(x)` 描述符的成员链 + 类型值链源头解析不到时的末段退路
+
+**裁定（2026-11-11，接 §113 用户两张截图）**：
+
+1. **`const info = @type(T); info.` 空列表**。`Type` / `Field` 是编译器合成的
+   描述符（src/sema.c 的 sema_type_type / sema_type_field_type），源文件里没有
+   声明文本，`containerMembersAny` 必然落空；而 `inferExprType` 把 `@type(T)`
+   当普通调用，查不到返回类型就返回 null。三处一起补：
+   - `inferExprType` 在**调用分支之前**认 `@type(` → `Type`，`@type(x).size`
+     按内建表取字段类型；
+   - `builtin_ty_table` 收进 Allocator / Type / Field 三张表（顺序与 sema 一致），
+     `builtinTyMembers` 出补全项，`builtinFieldTy` 供 `.fields` / `.fields[0]`
+     继续推（`[]Field` → 下标 → `Field`）；
+   - 内建字段表放在用户容器之后查：真有个叫 Type 的容器时以声明为准。
+   于是 `info.` 出 name/size/align/ty/fieldCount/fields，`info.fields[0].` 出
+   name/ty/offset，`const info = @type(T)` 提示 `: Type`。
+
+2. **`const pp = P.P3;` 还是没有 `: type`、跳转也 MISS**。根因大多不在末段，
+   而在**链的源头**：`t` 解析不到（模块文件不在扫描集、t 是别处模块里的形参）
+   时 `resolveContainerPath("t.P1.P2")` 整条落空，`typeValuedContainer` 返回
+   null，后面所有判断一起塌。新增 `resolveContainerPathLoose`：严格路径失败后
+   把开头的段一段段丢掉再试（`t.P1.P2` → `P1.P2` → `P2`），最后一档按末段
+   名字在全部文件里找容器。只用在「接收者已确定是类型值」的几处
+   （containerOfBinding / typeValuedContainer / definitionOfMember + inferExprType
+   的点路径分支），严格路径能解析时绝不走它，避免同名嵌套容器串味。
+   坑：退路里拼后缀用了临时 Buf，`resolveContainerPath` 返回的 `.name` 指向那块
+   内存，deinit 后是悬垂指针——调用方拿到的容器名是回收后的字节，
+   `findContainerBody` 必然落空。改成直接用末段 segs[n-1]（本来就指向调用方的
+   路径），不分配。
+
+守门（lsptest 273 项）：inlayHint.descriptor.{infoType,fieldElem,fieldCount}、
+completion.descriptor.{typeMembers,fieldMembers}（fixture `typeuse.zx`）；
+inlayHint.looseChain.localTypeQ、completion.looseChain.{instMembers,typeMembers}、
+definition.looseChain.nestedType（fixture `losemod.zx` + `loseuse.zx`，`t` 故意
+不声明，模拟源头解析不到；`Ls*` 前缀避免与别的 fixture 撞名）。
+
+**已知遗留（不在本条范围）**：泛型工厂返回的匿名 struct 里的**静态成员**
+（`fn (T: type) type { return struct{ pub const k = 7; }; }` → `Make(Point).k`）
+现在编不过：`Make(Point)` 只被用来取常量时没人 `ensure_type` 那个类型，
+结构体定义与静态成员都不进 C，报 B1001 undeclared `ZxS5_k`。在 backend 里补
+`ensure_type` 后能发出定义，但静态成员的初值 ct 已被泛型体的 `ct_clear` 洗掉，
+C 里会漏出 `info.size` 这种 Zx 源码形态——真要修得给 Field 加 comptime 值槽
+（sema 折值时写入，backend 直接发字面量），是独立一条线。

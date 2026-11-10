@@ -1426,6 +1426,9 @@ fn containerOfBinding(files: []const []const u8, doc: *const Document,
     if (init.len > 0) {
         if (isPurePath(init) and std.mem.indexOfScalar(u8, init, '.') != null) {
             if (resolveContainerPathD(files, doc, text, init, depth + 1)) |pc| return pc;
+            // 退路：链的源头解析不到（`t` 的模块文件不在扫描集里）时按末段
+            // 名字找容器——否则 `const P: type = t.P1.P2;` 的 P 连容器都没有。
+            if (resolveContainerPathLoose(files, doc, text, init)) |pc| return pc;
         }
         if (literalPathOf(init)) |lp| {
             if (resolveContainerPathD(files, doc, text, lp, depth + 1)) |pc| return pc;
@@ -1583,6 +1586,62 @@ fn resolveContainerPathD(files: []const []const u8, doc: *const Document,
         name = seg;
     }
     return .{ .body = cur, .src = src, .name = name, .is_enum = is_enum };
+}
+
+
+/// 严格路径解析失败时的退路：把开头的段一段段丢掉再试，最后按**末段名字**
+/// 在全部文件里找容器（`t.P1.P2` → `P1.P2` → `P2`）。
+///
+/// 只在"接收者已确定是类型值"时用（标注写了 `type`、初值是容器路径）：那时
+/// 末段名字必定是容器名，解析不到多半是链的**源头**断了——模块文件没进扫描
+/// 集、`t` 是别处模块里的形参等。用户 2026-11-11：`const P: type = t.P1.P2;`
+/// 之后 `const pp = P.P3;` 既不提示 `: type`、`pp.` 没有成员、`P.P3` 也跳不
+/// 过去（探针里同一段代码能过，说明差在链源头）。
+/// 代价：极少数同名嵌套容器会被第一个同名的抢走——所以只做最后一步，严格
+/// 路径能解析时绝不走这里。
+fn resolveContainerPathLoose(files: []const []const u8, doc: *const Document,
+                             text: []const u8, path: []const u8) ?PathContainer {
+    if (resolveContainerPath(files, doc, text, path)) |pc| return pc;
+    if (!isPurePath(path)) return null;
+    var segs: [10][]const u8 = undefined;
+    const n = splitPathSegs(path, &segs);
+    if (n < 2) return null;
+    var k: usize = 1;
+    while (k < n) : (k += 1) {
+        var buf: std.ArrayList(u8) = .empty;
+        var si = k;
+        while (si < n) : (si += 1) {
+            if (si > k) buf.append(gpa, '.') catch break;
+            buf.appendSlice(gpa, segs[si]) catch break;
+        }
+        const suffix = buf.items;
+        if (suffix.len > 0) {
+            if (resolveContainerPath(files, doc, text, suffix)) |pc| {
+                // pc.name 指向上面的 suffix 缓冲，随 buf 一起释放——不能直接
+                // 返回，否则调用方拿到的容器名是回收后的字节，
+                // `findContainerBody` 必然落空（这里踩过一次：打印出乱码、
+                // `pp` 就是没有 `: type`）。容器名本来就是**末段**，而 segs
+                // 指向调用方的 path，直接用它，不做分配。
+                const last_seg = segs[n - 1];
+                buf.deinit(gpa);
+                return .{ .body = pc.body, .src = pc.src, .name = last_seg, .is_enum = pc.is_enum };
+            }
+        }
+        if (n - k == 1) {
+            const nm = segs[n - 1];
+            const src = containerSrcOf(files, nm) orelse text;
+            if (findContainerBody(files, nm)) |h| {
+                buf.deinit(gpa);
+                return .{ .body = h.body, .src = src, .name = nm, .is_enum = h.is_enum };
+            }
+            if (genericBodyOf(files, nm)) |gb| {
+                buf.deinit(gpa);
+                return .{ .body = gb, .src = src, .name = nm, .is_enum = false };
+            }
+        }
+        buf.deinit(gpa);
+    }
+    return null;
 }
 
 
@@ -2684,7 +2743,12 @@ fn definitionOfMember(doc: *const Document, text: []const u8,
     // 解析拿到容器体，再在体里找成员声明。
     var sf = scanFiles(doc, text);
     defer sf.deinit(gpa);
-    const pc = resolveContainerPath(sf.items, doc, text, base) orelse return null;
+    const pc = resolveContainerPath(sf.items, doc, text, base) orelse
+        // `const P: type = t.P1.P2;` 之后的 `P.P3`：base 就是绑定名 P，
+        // 容器在它的初值路径上（containerOfBinding 内部还有末段退路）。
+        containerOfBinding(sf.items, doc, text, base, 0) orelse
+        // base 本身是链（`t.P1.P2.P3`）而源头解析不到：末段退路。
+        resolveContainerPathLoose(sf.items, doc, text, base) orelse return null;
     const boff = memberDeclOffset(pc.body, word) orelse return null;
     const base_off = @intFromPtr(pc.body.ptr) - @intFromPtr(pc.src.ptr);
     const lc = offsetToLineCol(pc.src, base_off + boff);
@@ -3382,6 +3446,31 @@ fn inferExprType(text: []const u8, doc: *const Document, expr: []const u8, depth
     const e = trimSl(expr);
     if (e.len == 0) return null;
     if (std.mem.startsWith(u8, e, "module(")) return null;
+    // `@type(x)` 是编译器内建描述符（src/sema.c 的 sema_type_type），值是
+    // `Type`；`@type(x).fields` 之类按内建字段表取。没有声明文本可查，所以
+    // 必须在下面"调用"分支之前拦住——那边会把 @type 当普通函数、查不到
+    // 返回类型就返回 null，于是 `const info = …` 没有 `: Type`、`info.` 空列表
+    //（用户 2026-11-11 第 2 张截图）。
+    if (std.mem.startsWith(u8, e, "@type(")) {
+        var i: usize = 6;
+        var d: usize = 0;
+        var rb: ?usize = null;
+        while (i < e.len) : (i += 1) {
+            if (e[i] == '(') d += 1;
+            if (e[i] == ')') {
+                if (d == 0) {
+                    rb = i;
+                    break;
+                }
+                d -= 1;
+            }
+        }
+        const close = rb orelse return null;
+        const rest = trimSl(e[close + 1 ..]);
+        if (rest.len == 0) return "Type";
+        if (rest[0] != '.') return null;
+        return builtinFieldTy("Type", trimSl(rest[1..]));
+    }
     // 编译器 seed 的分配器值：sema 里 page_s.ty = sema_allocator_type()。
     // 不特判的话 `var b = std.heap.page; b.` 会被当成类型名 page 而落空。
     if (std.mem.eql(u8, e, "std.heap.page")) return "Allocator";
@@ -3692,7 +3781,8 @@ fn inferExprType(text: []const u8, doc: *const Document, expr: []const u8, depth
                 if (moduleTextOf(doc, text, base)) |mt| {
                     if (moduleMemberTy(sf.items, doc, mt, member)) |t| return t;
                 }
-                if (resolveContainerPath(sf.items, doc, text, base)) |pc| {
+                if (resolveContainerPath(sf.items, doc, text, base) orelse
+                    resolveContainerPathLoose(sf.items, doc, text, base)) |pc| {
                     if (memberIsTypeDecl(sf.items, pc.body, member)) return "type";
                     if (fieldTypeIn(pc.body, member)) |t| return t;
                     if (findDeclStmt(pc.body, member)) |stmt| {
@@ -3730,6 +3820,11 @@ fn inferExprType(text: []const u8, doc: *const Document, expr: []const u8, depth
                             }
                         }
                     }
+                    // 内建类型（`@type(x)` 描述符 / Allocator）：`info.fields`、
+                    // `arena.ctx` 没有声明文本可查，字段表在编译器里
+                    //（用户 2026-11-11 第 2 张截图：`info.` 空列表）。
+                    // 放在用户容器之后：真有个叫 Type 的容器时以声明为准。
+                    if (builtinFieldTy(bt, member)) |t| return t;
                 }
             }
             // 形参是内联 struct（info: struct{a:i32,b:u32}）：现场解析字段
@@ -3968,24 +4063,70 @@ fn containerNameOf(ty0: []const u8) []const u8 {
 
 // ---------------------------------------------------------------- 内建类型
 //
-// KEEP —— 编译器内建类型在源文件里没有声明（Allocator 由 sema 的
-// sema_allocator_type 合成），std/ 目录里查不到它的 struct 体，点补全只能
-// 按编译器定义硬编码。用户 2026-11-10：`var arena: ?Allocator` 解包后
-// `arena.?.` 一个成员都不出。这份表与 src/sema.c 的 sema_allocator_type
-// 逐字段对齐——改那边要同步改这里。
+// KEEP —— 编译器内建类型在源文件里没有声明，std/ 目录里也查不到 struct 体，
+// 点补全/推断只能按编译器定义硬编码。三个都是：
+//   Allocator  sema_allocator_type()    合成
+//   Type       sema_type_type()         `@type(x)` 的描述符
+//   Field      sema_type_field_type()   Type.fields 的元素
+// 用户 2026-11-10：`var arena: ?Allocator` 解包后 `arena.?.` 一个成员都不出。
+// 用户 2026-11-11：`const info = @type(T); info.` 空列表——`@type` 的返回值
+// 没有声明文本，全靠这张表。改 src/sema.c 的字段要同步改这里。
+
+const BuiltinFieldDef = struct { name: []const u8, ty: []const u8 };
+const BuiltinTyDef = struct { name: []const u8, fields: []const BuiltinFieldDef };
+
+const builtin_ty_table = [_]BuiltinTyDef{
+    // 顺序同 sema_allocator_type：ctx / alloc / free
+    .{ .name = "Allocator", .fields = &.{
+        .{ .name = "ctx", .ty = "?*u8" },
+        .{ .name = "alloc", .ty = "fn (?*u8, usize) ?*u8" },
+        .{ .name = "free", .ty = "fn (?*u8, *u8, usize) void" },
+    } },
+    // Type  = { name, size, align, ty, fieldCount, fields: []Field }
+    .{ .name = "Type", .fields = &.{
+        .{ .name = "name", .ty = "[]const u8" },
+        .{ .name = "size", .ty = "usize" },
+        .{ .name = "align", .ty = "usize" },
+        .{ .name = "ty", .ty = "type" },
+        .{ .name = "fieldCount", .ty = "usize" },
+        .{ .name = "fields", .ty = "[]Field" },
+    } },
+    // Field = { name, ty, offset }（字段叫 ty，type 是关键字）
+    .{ .name = "Field", .fields = &.{
+        .{ .name = "name", .ty = "[]const u8" },
+        .{ .name = "ty", .ty = "type" },
+        .{ .name = "offset", .ty = "usize" },
+    } },
+};
+
+fn builtinTyDefOf(ty0: []const u8) ?BuiltinTyDef {
+    const cn = containerNameOf(ty0);
+    if (cn.len == 0) return null;
+    for (builtin_ty_table) |b| {
+        if (std.mem.eql(u8, b.name, cn)) return b;
+    }
+    return null;
+}
 
 fn isBuiltinTy(ty0: []const u8) bool {
-    return std.mem.eql(u8, containerNameOf(ty0), "Allocator");
+    return builtinTyDefOf(ty0) != null;
+}
+
+/// 内建类型的字段类型：`Type` + `fields` → "[]Field"。推断
+/// `const n = info.fieldCount` / `info.fields[0].offset` 用它。
+fn builtinFieldTy(ty0: []const u8, member: []const u8) ?[]const u8 {
+    const b = builtinTyDefOf(ty0) orelse return null;
+    for (b.fields) |f| {
+        if (std.mem.eql(u8, f.name, member)) return f.ty;
+    }
+    return null;
 }
 
 fn builtinTyMembers(ty0: []const u8, out: *std.ArrayList(Decl)) bool {
-    if (!std.mem.eql(u8, containerNameOf(ty0), "Allocator")) return false;
-    // 顺序同 sema_allocator_type：ctx / alloc / free
-    out.append(gpa, .{ .name = "ctx", .kind = .field, .ty = "?*u8" }) catch {};
-    out.append(gpa, .{ .name = "alloc", .kind = .field,
-                       .ty = "fn (?*u8, usize) ?*u8" }) catch {};
-    out.append(gpa, .{ .name = "free", .kind = .field,
-                       .ty = "fn (?*u8, *u8, usize) void" }) catch {};
+    const b = builtinTyDefOf(ty0) orelse return false;
+    for (b.fields) |f| {
+        out.append(gpa, .{ .name = f.name, .kind = .field, .ty = f.ty }) catch {};
+    }
     return true;
 }
 
@@ -6168,6 +6309,9 @@ fn typeValuedContainer(files: []const []const u8, doc: *const Document,
     if (j == e.len) return typeValuedContainer(files, doc, text, e, depth + 1);
     if (isPurePath(e)) {
         if (resolveContainerPath(files, doc, text, e)) |pc| return pc.name;
+        // 退路：`const P: type = t.P1.P2;` 里 t 解析不到时按末段名字找 P2，
+        // 否则 `const pp = P.P3;` 推不出 `type`、`P.` 也没有成员。
+        if (resolveContainerPathLoose(files, doc, text, e)) |pc| return pc.name;
     }
     const last = finalCalleeOf(e) orelse return null;
     if (isContainerIn(files, last) or genericBodyOf(files, last) != null) return last;
