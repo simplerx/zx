@@ -281,6 +281,17 @@ static Symbol *scope_find_here(Scope *sc, const char *name) {
 }
 
 static Symbol *scope_add(Scope *sc, const char *name, int kind) {
+    /* `_` 是丢弃占位，不是名字：不进作用域——读不到（lookup 找不到就按
+     * void 处理，正好是 `_ = expr;` 要的语义），也永远不会重名，同一作用域
+     * 里写几次都行。符号还是给一个：调用方要往上面挂 ty/used 这些状态。 */
+    if (name && !strcmp(name, "_")) {
+        Symbol *s = calloc(1, sizeof(Symbol));
+        if (!s) return NULL;
+        s->name = name;
+        s->kind = kind;
+        s->index = -1;
+        return s;
+    }
     if (scope_find_here(sc, name)) return NULL;   /* 重复声明 */
     Symbol *s = calloc(1, sizeof(Symbol));
     s->name = name;
@@ -314,8 +325,9 @@ static void local_track(Symbol *s, int line, int col) {
  * 为什么强制而不是警告：Zx 编到 C，未使用的局部变量在 C 里只是 warning，
  * 而用户看不到 C；更实际的是"声明了从没用过"几乎总是写漏了一半——
  * 打算用、结果没接上，或者名字拼错（拼错的地方是 E0401，但只写不读的
- * 拼错就完全静默）。要求写成 `_x` 是把意图显式化：`_` 开头就是"我知道
- * 它没被用"。 */
+ * 拼错就完全静默）。不用的值只有一种写法：裸 `_`（`let _ = f();` 或
+ * `_ = f();`）。`_foo` 这种"加前缀求豁免"的旧写法已删除——它让"我确实
+ * 不用"和"我拼错了"长得一模一样，正是这条检查要防的东西。 */
 static void check_unused(Symbol *head, int errs_before) {
     /* å½æ°ä½éå·²ç»æ¥è¿éå°±ä¸åé®"ææ²¡ææ²¡ç¨è¿çåé"ï¼
      * éè¯¯æ¢å¤ä¸è¿æ¡å¤æ­å¤åæ¯åè±¡ï¼è¡¨è¾¾å¼åºéâ
@@ -323,7 +335,7 @@ static void check_unused(Symbol *head, int errs_before) {
      * èä¸è¿ç§åªé³ä¼çä½çæ­£çæ ¹å ãä¿®å®ééç¼ï¼å®èªç¶ä¼åºç°ã */
     if (g_error_count != errs_before) return;
     for (Symbol *s = head; s; s = s->locals_next) {
-        if (s->used || !s->name || s->name[0] == '_') continue;
+        if (s->used || !s->name || !strcmp(s->name, "_")) continue;
         /* `self` 是方法接收者的惯用名：不用它的方法也得写出来（位置决定签名），
          * 叫人改成 `_self` 只会让方法看起来像函数。 */
         if (!strcmp(s->name, "self")) continue;
@@ -331,7 +343,7 @@ static void check_unused(Symbol *head, int errs_before) {
         const char *what = s->kind == SK_PARAM   ? "parameter"
                          : s->kind == SK_CAPTURE ? "binding"
                          :                         "variable";
-        diag_help("if you don't need it, write `_%s` or `_`", s->name);
+        diag_help("if you don't need it, bind it as `_`");
         err_at(s->decl_line, s->decl_col, "unused %s '%s'", what, s->name);
     }
 }

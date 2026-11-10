@@ -1,17 +1,18 @@
-// 未使用的局部绑定要报，`_` 开头的名字豁免。
+// 未使用的局部绑定要报；`_` 开头不再豁免，只有裸 `_` 是丢弃写法。
 // 这是 error 而不是 warning：Zx 编到 C，未使用变量在 C 里只是一条 warning，
 // 而用户看不到 C。
 //
-// expect-count: 2
-// expect-code: E0410 E0410
+// expect-count: 3
+// expect-code: E0410 E0410 E0410
 // expect: unused variable 'tmp'
+// expect: unused variable '_ignored'
 // expect: unused parameter 'ctx'
 
 const helper = fn (ctx: i32) i32 { return 1; };
 
 const main = fn () u8 {
     var tmp = 5;
-    let _ignored = 6;          // `_` 开头：免检
+    let _ignored = 6;          // `_` 前缀不豁免：它就是普通变量
     _ = helper(0);
     return 0;
 };

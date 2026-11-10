@@ -7,14 +7,14 @@ const std = module("std");
 var pool: *[256]u8 = undefined;
 var used: usize = 0;
 
-const bump = fn (_ctx: ?*u8, n: usize) ?*u8 {
+const bump = fn (_: ?*u8, n: usize) ?*u8 {
     if (used + n > pool.len) { return null; }
     let p = pool[0..].ptr + used;
     used = used + n;
     return p;
 };
 
-const noop = fn (_ctx: ?*u8, _p: *u8, _n: usize) void { };
+const noop = fn (_: ?*u8, _: *u8, _: usize) void { };
 
 const main = fn () i32 {
     let al = std.heap.page;

@@ -91,7 +91,7 @@ const pushs = fn (out: *std.ArrayList(u8), s: []const u8) void {
 };
 
 // 可选字符串字段：null 记 "-"
-const push_optstr = fn (_al: std.Allocator, out: *std.ArrayList(u8), o: ?[]const u8) void {
+const push_optstr = fn (_: std.Allocator, out: *std.ArrayList(u8), o: ?[]const u8) void {
     if (o) s {
         pushs(out, " ");
         push_esc(out, s);

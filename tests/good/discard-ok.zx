@@ -1,10 +1,17 @@
 // E0411 的合法路径：void 调用、赋值接收、`_ =` 显式丢弃（M26）、
 // 方法调用返回值同样要接。全部编过并跑出 EXPECTED。
 //
+// 丢弃只有一种写法：裸 `_`。同一作用域写多次、同一参数表写多个都合法
+// （`_` 不是名字、不进作用域，C 侧发独立哑名）；`_foo` 不豁免，见
+// tests/bad/unused-local.zx。
+//
 // expect: EXPECTED 48
 
 const add = fn (a: i32, b: i32) i32 { return a + b; };
-const log = fn (_msg: []const u8) void {};
+const log = fn (_: []const u8) void {};
+
+// 多个丢弃形参：C 里发成 _p0/_p1，不会重定义
+const mix = fn (_: i32, _: i32, used: i32) i32 { return used; };
 
 const Counter = struct {
     n: i32,
@@ -17,10 +24,13 @@ const Counter = struct {
 const main = fn () u8 {
     log("ok");                 // void：直接当语句
     _ = add(1, 2);             // 显式丢弃
+    let _ = add(5, 6);         // 声明式丢弃：求值副作用，不落槽位
+    let _ = add(7, 8);         // 同一函数里再来一次
     var x: i32 = 0;
     x = add(3, 4);             // 赋值接收
     var c = Counter{ .n = 40 };
     x = x + c.bump();          // 方法返回值参与运算
+    x = x + mix(0, 0, 0);      // 丢弃形参不参与签名调用规则
     std.println("EXPECTED {d}", x);
     return 0;
 };

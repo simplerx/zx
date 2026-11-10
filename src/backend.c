@@ -713,6 +713,17 @@ static char *cnames(const char *s) {
     return b.data;
 }
 
+/* `_` 是丢弃占位、不进作用域，但 C 里还得有名字承载初值的副作用。
+ * 每次绑定给一个独立的哑名：同一函数里写两次 `let _ = …` 才不会
+ * 撞成 C 重定义（名字不会被任何引用点用到）。 */
+static char *ignored_cname(void) {
+    static int n;
+    char *s = (char *)malloc(24);
+    if (!s) return NULL;
+    snprintf(s, 24, "_ignored_%d", n++);
+    return s;
+}
+
 /* ======================================================================
  *  泛型实例：每个实例都是独立的一份函数，名字沿用声明名 + 序号
  * ====================================================================== */
@@ -5056,7 +5067,7 @@ static void gen_decl_inner(Node *d) {
     }
 
     const char *nm = sym_cname(d);
-    char *cn = cnames(nm);
+    char *cn = (nm && !strcmp(nm, "_")) ? ignored_cname() : cnames(nm);
 
     bool is_var = (d->op == 2);
 
@@ -5142,7 +5153,9 @@ static void gen_stmt(Node *n) {
                 Node *id = n->c->items[i];
                 Type *ft = (tt && tt->kind == TY_TUPLE && i < tt->nfields)
                            ? tt->fields[i].ty : ty_i32();
-                line("%s %s = %s.f%d;", cty(ft), cnames(id->name), tmp, i);
+                const char *dn2 = (id->name && !strcmp(id->name, "_"))
+                                      ? ignored_cname() : cnames(id->name);
+                line("%s %s = %s.f%d;", cty(ft), dn2, tmp, i);
             }
             return;
         }
@@ -5535,7 +5548,9 @@ static void gen_if_body(Node *n, const char *slot, Type *slot_ty) {
                 /* else 捕获只属于 `!T`（`?T` + else 捕获已被 sema 拒掉）。
                  * is_opt 分支只是防御：tag 是 bool。 */
                 Type *et = is_err ? ty_error() : ty_bool();
-                line("%s %s = %s.tag;", cty(et), cnames(n->d->name), tmp);
+                const char *cpt = (n->d->name && !strcmp(n->d->name, "_"))
+                                      ? ignored_cname() : cnames(n->d->name);
+                line("%s %s = %s.tag;", cty(et), cpt, tmp);
             }
             gen_arm(n->c, slot, slot_ty);
             cscope_pop();
@@ -5882,7 +5897,7 @@ static void gen_params(Buf *b, Node *fn, bool is_main) {
         Type *pt = (ft && i < ft->nparams) ? ft->params[i] : pm->ty;
         ctype(b, pt);
         buf_putc(b, ' ');
-        if (pm->kind == NK_PARAM && pm->name) cname(b, pm->name);
+        if (pm->kind == NK_PARAM && pm->name && strcmp(pm->name, "_")) cname(b, pm->name);
         else buf_printf(b, "_p%d", i);
     }
 }
@@ -6184,7 +6199,8 @@ static void gen_global(Node *d, bool exported) {
         return;
     }
 
-    char *cn = cnames(sym_cname(d));
+    const char *gnm = sym_cname(d);
+    char *cn = (gnm && !strcmp(gnm, "_")) ? ignored_cname() : cnames(gnm);
     if (exported) {                     /* 别的单元要能链到：extern 声明进头文件 */
         Buf e; buf_init(&e);
         buf_puts(&e, "extern ");
@@ -6316,7 +6332,8 @@ static void emit_init_fn(int mi) {
     for (int i = 0; i < g_nlate; i++) {
         Node *d = g_late[i];
         Type *t = d->ty;
-        char *cn = cnames(sym_cname(d));
+        const char *lnm = sym_cname(d);
+        char *cn = (lnm && !strcmp(lnm, "_")) ? ignored_cname() : cnames(lnm);
         if (is_ctl(d->b)) gen_value(d->b, cn, t);
         else              line("%s = %s;", cn, cxs(d->b, t));
     }

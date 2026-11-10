@@ -9,14 +9,14 @@ const Node = struct { value: i32, next: ?*Node };
 var pool: *[128]u8 = undefined;
 var used: usize = 0;
 
-const bump = fn (_ctx: ?*u8, n: usize) ?*u8 {
+const bump = fn (_: ?*u8, n: usize) ?*u8 {
     if (used + n > pool.len) { return null; }
     let p = pool[0..].ptr + used;
     used = used + n;
     return p;
 };
 
-const noop = fn (_ctx: ?*u8, _p: *u8, _n: usize) void { };
+const noop = fn (_: ?*u8, _: *u8, _: usize) void { };
 
 // 分配器可以当普通参数传下去
 const render = fn (a: Allocator, n: i32) ![]u8 {
