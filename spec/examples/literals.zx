@@ -36,7 +36,7 @@ const numsSize = nums.size;        // 12，comptime
 
 // 内存占用的差别：这是"值"和"指针"的根本区别
 const pairBytes = 16;                      // pair: {i32, i32} = 16 字节
-const numsBytes = @sizeOf(*const [3]i32);   // 8 —— 只有一个地址
+const numsBytes = @type(*const [3]i32).size;   // 8 —— 只有一个地址
 
 const main = fn () u8 {
     // ---------- 元素访问：同一套语法 ----------

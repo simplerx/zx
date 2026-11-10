@@ -1551,6 +1551,42 @@ check("hover.std.ctExposed",
 check("hover.stdModuleAlias",
       "module `task.zx`" in std_hover("_ = std.task;", "task", 510),
       std_hover("_ = std.task;", "task", 510))
+
+
+def std_def(anchor, within, rid):
+    """光标停在 within 词尾 → definition 返回的目标（uri + 行文本）。"""
+    a = STDUSE.index(anchor)
+    off = a + STDUSE[a:].index(within) + len(within)
+    send({"jsonrpc": "2.0", "id": rid, "method": "textDocument/definition", "params": {
+        "textDocument": {"uri": stduri}, "position": pos(STDUSE, off)}})
+    r, _ = recv_id("definition", rid)
+    loc = (r or {}).get("result")
+    uri, ln = "", -1
+    if isinstance(loc, dict):
+        uri, ln = loc.get("uri", ""), loc["range"]["start"]["line"]
+    elif isinstance(loc, list) and loc:
+        uri, ln = loc[0].get("uri", ""), loc[0]["range"]["start"]["line"]
+    body = ""
+    if uri.startswith("file:///"):
+        try:
+            with open(uri[len("file:///"):], encoding="utf-8") as f:
+                body = f.read().split("\n")[ln]
+        except OSError:
+            pass
+    return uri, body
+
+
+# 2026-11-10 用户：std 再导出的库跳不到源码。std.task.Task 要落进
+# std/task.zx 的 `pub const Task = struct {`，std.map.HashMap 落 map.zx。
+u, body = std_def("let g = std.task.Task.single();", "Task", 520)
+check("definition.stdReexport.task",
+      u.replace("\\", "/").endswith("std/task.zx") and "Task" in body, f"{u} {body!r}"[:240])
+u, body = std_def("var m = std.map.HashMap(i32).init(std.heap.page);", "HashMap", 521)
+check("definition.stdReexport.map",
+      u.replace("\\", "/").endswith("std/map.zx") and "HashMap" in body, f"{u} {body!r}"[:240])
+u, body = std_def("_ = std.task;", "task", 522)
+check("definition.stdReexport.alias",
+      u.replace("\\", "/").endswith("std/task.zx"), f"{u}"[:240])
 # 5 泛型容器 hover 贴真实 struct 体（2026-11-09：std 全部类型都要有类型提示，
 # 泛型不能只出一行 `X(T: type) type` 签名）
 check("hover.generic.facadeDefinition",

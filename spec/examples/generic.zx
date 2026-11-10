@@ -72,7 +72,7 @@ const TABLE_SUM = sum: {
 
 // ---------- 泛型 + 编译期分支：按 T 的大小选实现 ----------
 const zero = fn (T: type) T {
-    if (@sizeOf(T) > 8) {
+    if (@type(T).size > 8) {
         @compileError("zero() 只支持 <= 8 字节的类型");
     }
     return (T)0;

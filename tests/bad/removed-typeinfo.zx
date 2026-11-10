@@ -1,6 +1,0 @@
-// expect: exists only at compile time
-// TypeInfo 描述符只活在编译期：var/let 要给它开运行时存储，没有对应物。
-const main = fn () u8 {
-    var info = @typeInfo(i32);
-    return 0;
-};

@@ -1039,16 +1039,25 @@ static Node *parse_primary(P *p) {
     case TOK_AT: {
         advance(p);
         Node *n = node_new(NK_BUILTIN, t->line, t->col);
-        n->name = take_ident(p);
+        /* `@type` 的 type 在词法上是关键字（`X: type` 用），`@` 后面这
+         * 一处必须当普通标识符收——否则最常用的内建反而写不出来。 */
+        if (at(p, TOK_KW_TYPE)) {
+            advance(p);
+            n->name = "type";
+        } else {
+            n->name = take_ident(p);
+        }
 
-        /* 语法只有两种形状：@sizeOf/@alignOf/@typeName 先收类型，
-         * @memcpy/@memmove/@memset/@typeInfo 先收表达式——@typeInfo 的
-         * 实参类型与表达式都收（类型在表达式位置也是合法的值），
-         * 表达式按值解析，`@typeInfo(y)` 里的 y 才不会被打成"不是类型"。
-         * （1.2.0 删掉了 @typeOf/@field/@*Cast 这批，转换统一写 `(T)value`。） */
+        /* 语法只有两种形状：@type 与 @memcpy/@memmove/@memset 先收表达式，
+         * 其余收类型——@type 的实参类型与表达式都收（类型在表达式位置也
+         * 是合法的值），按表达式解析，`@type(p.x)` 里的 p.x 才不会被打成
+         * "不是类型"。类型写法 `[]const u8` / `*T` 在表达式位置同样合法，
+         * 由 parse_prefix 的"类型是值"分支接住。
+         * （1.2.0 删掉 @typeOf/@field/@*Cast 这批，转换统一写 `(T)value`；
+         *   1.2.2 反射全收敛到 @type。） */
         bool value_first = n->name &&
             (!strcmp(n->name, "memcpy") || !strcmp(n->name, "memmove") ||
-             !strcmp(n->name, "memset") || !strcmp(n->name, "typeInfo"));
+             !strcmp(n->name, "memset") || !strcmp(n->name, "type"));
         expect(p, TOK_LPAREN);
         if (!at(p, TOK_RPAREN)) {
             int ai = 0;

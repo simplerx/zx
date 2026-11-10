@@ -1,6 +1,6 @@
 // 类型转换直接接内建调用（v0.29）：`(T)@builtin(...)` 不再要求外面包一层括号。
 // can_follow_cast 认 `@`——它永远不是中缀运算符，cast 后继集加它零歧义。
-// 以前必须写 `((u16)@sizeOf(u8))`，struct 字面量字段位尤其别扭。
+// 以前必须写 `((u16)@type(u8).size)`，struct 字面量字段位尤其别扭。
 // expect-exit: 0
 // expect-output
 // 8 1
@@ -10,9 +10,9 @@ const std = module("std");
 const N = struct { a: usize, b: u16 };
 
 const main = fn () u8 {
-    let x: u16 = (u16)@sizeOf(u8);
-    std.println("{} {}", @sizeOf(usize), x);
-    var n = N{ .a = @sizeOf(usize), .b = (u16)@sizeOf(u8) };
+    let x: u16 = (u16)@type(u8).size;
+    std.println("{} {}", @type(usize).size, x);
+    var n = N{ .a = @type(usize).size, .b = (u16)@type(u8).size };
     std.println("{} {}", n.a, n.b);
     return 0;
 };

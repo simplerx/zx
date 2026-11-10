@@ -46,9 +46,9 @@ pub const HashMap = fn (V: type) type {
 
         const deinit = fn (self: *Self) void {
             if (self.cap > 0) {
-                self.alloc.free(self.alloc.ctx, (*u8)self.keys, self.cap * @sizeOf([]const u8));
-                self.alloc.free(self.alloc.ctx, (*u8)self.hashes, self.cap * @sizeOf(u64));
-                self.alloc.free(self.alloc.ctx, (*u8)self.vals, self.cap * @sizeOf(V));
+                self.alloc.free(self.alloc.ctx, (*u8)self.keys, self.cap * @type([]const u8).size);
+                self.alloc.free(self.alloc.ctx, (*u8)self.hashes, self.cap * @type(u64).size);
+                self.alloc.free(self.alloc.ctx, (*u8)self.vals, self.cap * @type(V).size);
             }
             self.keys = undefined;
             self.hashes = undefined;
@@ -139,7 +139,7 @@ pub const HashMap = fn (V: type) type {
 
         const clear = fn (self: *Self) void {
             if (self.cap > 0) {
-                @memset((*u8)self.hashes, 0, self.cap * @sizeOf(u64));
+                @memset((*u8)self.hashes, 0, self.cap * @type(u64).size);
             }
             self.n = 0;
         };
@@ -161,13 +161,13 @@ pub const HashMap = fn (V: type) type {
 
         const grow = fn (self: *Self) bool {
             let ncap: usize = if (self.cap == 0) 8 else self.cap * 2;
-            let hsz = ncap * @sizeOf(u64);
+            let hsz = ncap * @type(u64).size;
             let nh = self.alloc.alloc(self.alloc.ctx, hsz);
             if (nh) nhp {
-                let kb = ncap * @sizeOf([]const u8);
+                let kb = ncap * @type([]const u8).size;
                 let nk = self.alloc.alloc(self.alloc.ctx, kb);
                 if (nk) nkp {
-                    let vb = ncap * @sizeOf(V);
+                    let vb = ncap * @type(V).size;
                     let nv = self.alloc.alloc(self.alloc.ctx, vb);
                     if (nv) nvp {
                         let nhashes = (*u64)nhp;
@@ -195,9 +195,9 @@ pub const HashMap = fn (V: type) type {
                         }
 
                         if (self.cap > 0) {
-                            self.alloc.free(self.alloc.ctx, (*u8)self.keys, self.cap * @sizeOf([]const u8));
-                            self.alloc.free(self.alloc.ctx, (*u8)self.hashes, self.cap * @sizeOf(u64));
-                            self.alloc.free(self.alloc.ctx, (*u8)self.vals, self.cap * @sizeOf(V));
+                            self.alloc.free(self.alloc.ctx, (*u8)self.keys, self.cap * @type([]const u8).size);
+                            self.alloc.free(self.alloc.ctx, (*u8)self.hashes, self.cap * @type(u64).size);
+                            self.alloc.free(self.alloc.ctx, (*u8)self.vals, self.cap * @type(V).size);
                         }
                         self.keys = nkeys;
                         self.hashes = nhashes;

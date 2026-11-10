@@ -103,19 +103,20 @@ const r = blk: {
 
 **典型消息**：`@intCast was removed: type conversion is written \`(T)value\``
 
-1.2.0 把内建砍到九个；1.2.1 反射收敛成一个 `@typeInfo(x)`（x 可以是类型
-也可以是表达式），描述符 `TypeInfo{.ty, .name, .bytes, .align,
-.fieldCount, .fields[i]{.name, .ty, .offset}}` 全是编译期值。现在共十个：
+1.2.0 把内建砍到九个；1.2.1 反射收敛成一个 `@type(x)`（x 可以是类型
+也可以是表达式），1.2.2 把 `@sizeOf` / `@alignOf` / `@typeName` 也并了进去——
+描述符 `Type{.name, .size, .align, .ty, .fieldCount,
+.fields[i]{.name, .ty, .offset}}` 全是编译期值。现在共七个：
 
-`@sizeOf` / `@alignOf` / `@typeName` / `@typeInfo` / `@memcpy` /
-`@memmove` / `@memset` / `@link` / `@compileError` / `@trap`。
+`@type` / `@memcpy` / `@memmove` / `@memset` / `@link` / `@compileError` / `@trap`。
 
 | 老写法 | 换成 |
 | --- | --- |
 | `@intCast(T, v)` `@ptrCast` `@bitCast` `@as` | `(T)v` |
-| `@typeOf(x)` | `@typeInfo(x).ty` |
-| `@hasField(T, "f")` | 遍历 `@typeInfo(T).fields` 比名字 |
-| `@fieldName/@fieldType/@offsetOf(T, …)` | `@typeInfo(T).fields[i].name / .ty / .offset` |
+| `@typeOf(x)` | `@type(x).ty` |
+| `@sizeOf(T)` `@alignOf(T)` `@typeName(T)` `@typeInfo(x)` | `@type(x).size / .align / .name` |
+| `@hasField(T, "f")` | 遍历 `@type(T).fields` 比名字 |
+| `@fieldName/@fieldType/@offsetOf(T, …)` | `@type(T).fields[i].name / .ty / .offset` |
 | `@field(v, "f")` | 无动态成员访问；字段写死为 `v.f` |
 | `@embedFile("p")` | 自己用 `std.fs` 读，或写成字面量 |
 | `@file()` `@line()` `@col()` `@fnName()` | 已移除；位置只由 `std.debug` 自动注入 |
@@ -390,7 +391,7 @@ let y = x.?;            // E0506 —— 编译期就知道必然失败
 
 ```zx
 const check = fn (comptime T: type) void {
-    if (@sizeOf(T) == 0) @compileError("zero-sized types not supported");
+    if (@type(T).size == 0) @compileError("zero-sized types not supported");
 };
 ```
 

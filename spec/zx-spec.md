@@ -142,7 +142,7 @@ R10 的动机很简单：这些行为一旦发布就改不动了。趁现在只�
 
 | # | 改动 | 影响 |
 |---|---|---|
-| 33 | **`fields` 元表**：`@typeInfo(T).fields` 是编译期切片 `[]std.FieldInfo`（`FieldInfo = { name, ty }`，字段叫 `ty` 因为 `type` 是关键字），`inline for` 直接遍历；TypeInfo / FieldInfo 是**纯编译期类型**——声明成变量或参数直接报错。**`std.process`**：`args() [][]const u8`（不含 argv[0]）、`getEnv(name) ?[]const u8`、`setEnv(name, value) bool`、`exit(code) noreturn`。类型语法支持点路径（`std.map.HashMap` 直接写） | §13、§13.1、§14.1 |
+| 33 | **`fields` 元表**：`@type(T).fields` 是编译期切片 `[]std.FieldInfo`（`FieldInfo = { name, ty }`，字段叫 `ty` 因为 `type` 是关键字），`inline for` 直接遍历；TypeInfo / FieldInfo 是**纯编译期类型**——声明成变量或参数直接报错。**`std.process`**：`args() [][]const u8`（不含 argv[0]）、`getEnv(name) ?[]const u8`、`setEnv(name, value) bool`、`exit(code) noreturn`。类型语法支持点路径（`std.map.HashMap` 直接写） | §13、§13.1、§14.1 |
 
 ## v0.9 → v0.10 的改动
 
@@ -310,7 +310,6 @@ defer  errdefer  struct  union  enum  error  pub  extern  orelse  try
 | `union{…}` | 联合体 | 最大成员（带标签再 + 标签） | |
 | `?T` | 空值联合体 | `1 + pad + sizeof T` | §5 |
 | `!T` | 错误联合体 | `2 + pad + sizeof T` | §5 |
-| 0 | **内建收敛到九个**（v1.2.0）：`@sizeOf` `@alignOf` `@typeName` `@memcpy` `@memmove` `@memset` `@link` `@compileError` `@trap`；转换只有 `(T)v`；反射只有名字/大小/对齐；`@typeInfo`/`@field*`/`@*Cast`/`@typeOf`/`@offsetOf`/`@embedFile`/位置内建全部删除（报 E0211） | §14 |
 | `fn(P…) R` | 函数 | 8 | const 指针 |
 | `comptime_int` `comptime_float` | 字面量类型 | — | 不可写出 |
 | `noreturn` | 不返回 | 0 | |
@@ -354,7 +353,7 @@ let y = p.0;       // 2
 | `*T` | 8 | 无（用了报错） | 无，只能靠约定 |
 | `[]T` | 16 | 运行时值 | 运行时边界检查 |
 
-所以"数组是指针"说的是**表示**：传参不复制、`@sizeOf(*[1000]i32) == 8`、`arr.0` 就是解引用。而"N 在类型里"说的是**类型**：它让编译器能区分长度，也让 `.len` 有地方来。
+所以"数组是指针"说的是**表示**：传参不复制、`@type(*[1000]i32).size == 8`、`arr.0` 就是解引用。而"N 在类型里"说的是**类型**：它让编译器能区分长度，也让 `.len` 有地方来。
 
 **互相转换**（R7 免拷贝提升 + 1 个显式转换）：
 
@@ -388,18 +387,18 @@ const Buffer = fn (T: type, n: usize) type {
 | 字段 | 含义 | 类型 |
 |---|---|---|
 | `.len` | **元素个数** | `usize` |
-| `.size` | **字节数**（`len × @sizeOf(T)`） | `usize` |
+| `.size` | **字节数**（`len × @type(T).size`） | `usize` |
 
 | 容器 | `.len` | `.size` |
 |---|---|---|
 | 数组 `*[N]T` | **N，编译期常量** | **N×sizeof(T)，编译期常量** |
 | 指针 `*T` | 编译错误：改用 `*[N]T` 或 `[]T` | 同左 |
-| 切片 `[]T` | 运行时 `usize` | 运行时 `len × @sizeOf(T)` |
+| 切片 `[]T` | 运行时 `usize` | 运行时 `len × @type(T).size` |
 | 元组 `{A,B,C}` | 字段数，编译期 | 总字节数，编译期 |
 
 它们是**编译器字段**，不是内存里的成员：`&.{0,1,2}` 只占 8 字节，`.len` 在编译期就被换成常量 3。
 
-**聚合体自己有同名字段时，字段优先**（v0.23）：`struct { size: i32 }` 的 `s.size` 就是那个字段，不是字节数；要类型大小写 `@sizeOf(T)`。这条不是可选的实现细节——类型检查、常量折叠、代码生成三处必须用同一条规则，否则 `s.size` 会静默变成 `sizeof(s)`（编译过、答案是 8）。
+**聚合体自己有同名字段时，字段优先**（v0.23）：`struct { size: i32 }` 的 `s.size` 就是那个字段，不是字节数；要类型大小写 `@type(T).size`。这条不是可选的实现细节——类型检查、常量折叠、代码生成三处必须用同一条规则，否则 `s.size` 会静默变成 `sizeof(s)`（编译过、答案是 8）。
 
 ```zx
 var array = &.{0, 1, 2};             // *[3]i32
@@ -1192,7 +1191,7 @@ const f = fn (n: usize) !usize {
 
 ### R8 数量在类型里，但表示仍是地址
 
-`*[N]T` 是**独立类型**：`*[3]i32` 与 `*[4]i32` 不同型，与 `*i32` 也不同型。但三者表示相同（8 字节地址），`@sizeOf` 都是 8，传参都不复制。
+`*[N]T` 是**独立类型**：`*[3]i32` 与 `*[4]i32` 不同型，与 `*i32` 也不同型。但三者表示相同（8 字节地址），`@type(T).size` 都是 8，传参都不复制。
 
 | 操作 | 允许？ |
 |---|---|
@@ -1441,7 +1440,7 @@ inline for (0..len)          { … }        // 无绑定的纯重复
 - `inline for` **不是循环**：语义层按序列的编译期长度把循环体克隆 N 份，每份把绑定
   换成对应的编译期常量。发出来的代码和手写 N 遍一模一样，运行时没有任何循环。
 - 序列必须是**编译期长度**：`0..3`（两端都是编译期整数）或 `const N = 8;` 这样的
-  编译期常量；运行时长度直接报错。（`@typeInfo(T).fieldCount` 那类反射入口 1.2.0 已删。）
+  编译期常量；运行时长度直接报错。（`@type(T).fieldCount` 那类反射入口 1.2.0 已删。）
 - 循环变量（绑定）是**编译期常量**：可以当数组长度用（`var buf: *[i + 1]u8`）、
   可以传给要求 `type` 或编译期字符串的内建。
 - 每份展开是一个独立的块作用域：里面的 `let` / `var` 不会跨份撞名。
@@ -1450,8 +1449,8 @@ inline for (0..len)          { … }        // 无绑定的纯重复
 - 和泛型一样靠**克隆**实现：每一份都有自己的节点副本，编译期执行的中间值不会
   泄漏到别的份。
 
-用途是配合 `@typeInfo`：`fieldCount` 有多少，`inline for` 就展开多少份，配合
-`@fieldName` / `@fieldType` / `@field` 逐个字段访问——见 §14.1 的例子。
+用途是配合 `@type`：`.fieldCount` 有多少，`inline for` 就展开多少份，配合
+`.fields[i]` 逐个字段访问——见 §14.1 的例子。
 
 ### 8.4 switch
 
@@ -1795,7 +1794,7 @@ const push = fn (T: type, l: *List(T), v: T) void {
 `Buffer(u8, 4)` 和 `Buffer(u8, 8)` 是两个不同的类型，各自的 `data` 是 `*[4]u8` 和 `*[8]u8`——长度写错在编译期就报错，不会到运行时才越界。
 
 - 可以带非类型参数，只要编译期可算。
-- 不做 trait / 约束；需要约束时用编译期 `if` + `@typeInfo` 自检，报错在实例化点。
+- 不做 trait / 约束；需要约束时用编译期 `if` + `@type(T)` 自检，报错在实例化点。
 - 每次实例化生成独立代码。
 
 ### 10.1 实例名来自构造式
@@ -2191,13 +2190,11 @@ if (std.BufReader.open(al, "big.txt", 4096)) r0 {
 
 ## 14. 内建（`@` 前缀，不可重定义）
 
-**只有九个**（1.2.0 收敛；`docs/manual.md` §7 是面向使用者的版本）：
+**只有七个**（1.2.0 收敛到九个，1.2.2 反射再收敛到一个 `@type`）：
 
 | 内建 | 签名 | 用途 |
 |---|---|---|
-| `@sizeOf(T)` | `fn(type) usize` | 字节大小 |
-| `@alignOf(T)` | `fn(type) usize` | 对齐 |
-| `@typeName(T)` | `fn(type) []const u8` | 类型名（编译期常量） |
+| `@type(x)` | `fn(type\|expr) Type` | 编译期描述符：`.size` / `.align` / `.name` / `.ty` / `.fieldCount` / `.fields[i]{.name,.ty,.offset}` |
 | `@memcpy(d, s, n)` | `fn(ptr\|slice, ptr\|slice, usize) void` | 批量复制（不重叠） |
 | `@memmove(d, s, n)` | 同上 | 批量复制（可重叠） |
 | `@memset(d, byte, n)` | `fn(ptr\|slice, int, usize) void` | 批量填充 |
@@ -2208,9 +2205,10 @@ if (std.BufReader.open(al, "big.txt", 4096)) r0 {
 **类型转换只有一种写法：`(T) v`。** 没有 `@ptrCast` / `@bitCast` / `@intCast` /
 `@as`——指针互转、按位重解释、窄化扩宽、整数与浮点，全走同一张 `castable` 表。
 
-**反射只有三个**：`@typeName` / `@sizeOf` / `@alignOf`。没有 `@typeInfo`，
-因此也没有字段遍历（`@fieldName` / `@fieldType` / `@field` / `@hasField` 一并
-删除）；字段偏移用 `((usize)&v.f) - ((usize)&v)` 现场算。
+**反射只有一个**：`@type(x)`。x 是类型就给那个类型，是表达式就取它的类型
+（`@typeOf` 并了进来）；`@sizeOf` / `@alignOf` / `@typeName` 都是它的字段。
+字段遍历走 `.fields`，字段偏移是 `@type(T).fields[i].offset`
+（或 `((usize)&v.f) - ((usize)&v)` 现场算）。
 没有源码位置内建（`@file` / `@line` / `@col` / `@fnName`）：位置只在
 `std.debug.panic` / `std.debug.assert` 的调用点由编译器注入。
 
@@ -2221,8 +2219,9 @@ if (std.BufReader.open(al, "big.txt", 4096)) r0 {
 | 老内建 | 替代 |
 |---|---|
 | `@intCast(T,v)` `@ptrCast` `@bitCast` `@as` | `(T)v` |
-| `@typeOf(x)` | `T: type` 形参 |
-| `@typeInfo` `@fieldName` `@fieldType` `@hasField` `@field` | `@typeName` / `@sizeOf` / `@alignOf` + 直写字段 |
+| `@typeOf(x)` | `@type(x).ty` |
+| `@sizeOf/@alignOf/@typeName/@typeInfo` | `@type(T).size / .align / .name` |
+| `@fieldName` `@fieldType` `@hasField` `@field` | 遍历 `@type(T).fields` |
 | `@offsetOf(T,"f")` | 地址相减 |
 | `@embedFile("p")` | `std.fs` 读文件，或字面量 |
 | `@file` `@line` `@col` `@fnName` | 编译器在 std.debug 调用点注入 |
@@ -2237,7 +2236,7 @@ if (std.BufReader.open(al, "big.txt", 4096)) r0 {
 | 数组 | **纯指针** `*[N]T`，数量进类型但表示是 8 字节 | `T[N]` 值类型 | `[N]T` 值 / `*[N]T` 指针 |
 | 数组字面量 | `&.{1, 2, 3}` | `(int[]){1,2,3}` | `&.{1, 2, 3}` |
 | 元素访问 | `.0`（编译期）/ `[i]`（运行时） | `a[0]` | `a[0]` |
-| 长度 | `.len` / `.size`（编译器字段，`*[N]T` 上是编译期常量） | 手算 | `a.len` / `@sizeOf` |
+| 长度 | `.len` / `.size`（编译器字段，`*[N]T` 上是编译期常量） | 手算 | `a.len` / `@type(T).size` |
 | `for` | 切片 + 整数范围，多绑定 `for (xs, 0..) x, i` | `for(i=0;…)` | `for (xs, 0..) \|x\|, \|i\|` |
 | 块的值 | **只来自收割 `tag: v;`**（带标签的块），默认 `{}` | 语句 | 末尾表达式即值 |
 | 标签跳出 | `tag: { … }` + 收割 `tag: v;` | `goto` | `tag: { … }` + `break :blk v` |

@@ -36,10 +36,10 @@ const add10 = fn (x: i32) i32 { return x + 10; };
 
 const main = fn () u8 {
     // 布局断言（与 C 编译器的自然布局一致）
-    if (@sizeOf(Buf8) != 20) { return 1; }
-    if (@sizeOf(IV) != 4) { return 3; }
-    if (@sizeOf(Nested) != 24) { return 4; }
-    if (@sizeOf(Handler) != 16) { return 6; }
+    if (@type(Buf8).size != 20) { return 1; }
+    if (@type(IV).size != 4) { return 3; }
+    if (@type(Nested).size != 24) { return 4; }
+    if (@type(Handler).size != 16) { return 6; }
 
     var b: Buf8 = undefined;
     // 字段偏移没有 @offsetOf 了：拿真实地址相减，效果一样
@@ -65,7 +65,7 @@ const main = fn () u8 {
     GetLocalTime(&st);
     if (st.wYear < 2026) { return 10; }
 
-    std.println("exstruct ok: {} {} {}", @sizeOf(Buf8), @sizeOf(IV), h.cb(32));
+    std.println("exstruct ok: {} {} {}", @type(Buf8).size, @type(IV).size, h.cb(32));
     return 0;
 };
 

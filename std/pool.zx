@@ -20,7 +20,7 @@
 //     var p = std.pool.Pool.init(std.heap.page);
 //     let q = p.alloc(64);              // ?*u8
 //     if (q) b { p.free(b); }           // false = 拒绝（已释放/非法块）
-//     let n = p.create(Node);           // ?*Node，按 @sizeOf(Node) 归档
+//     let n = p.create(Node);           // ?*Node，按 @type(Node).size 归档
 
 // 块状态：LIVE=在用，FREED=在空闲链上，EXTERNAL=绕过池的大块。
 const F_LIVE: u32 = 1;
@@ -96,7 +96,7 @@ const classGrow = fn (c: *Class, gpa: Allocator) bool {
     let bytes = n * c.slotSize;
 
     if (gpa.alloc(gpa.ctx, bytes)) base {
-        if (gpa.alloc(gpa.ctx, @sizeOf(Region))) rraw {
+        if (gpa.alloc(gpa.ctx, @type(Region).size)) rraw {
             let r = (*Region)rraw;
             r.next = c.region;
             r.base = base;
@@ -128,7 +128,7 @@ pub const Pool = struct {
 
     // 档位表运行期铺出来（线性段 + 2 的幂段）。
     const init = fn (gpa: Allocator) ?Pool {
-        if (gpa.alloc(gpa.ctx, classCount * @sizeOf(Class))) p {
+        if (gpa.alloc(gpa.ctx, classCount * @type(Class).size)) p {
             let cs = (*Class)p;
             var idx: usize = 0;
             var s: usize = 16;
@@ -171,14 +171,14 @@ pub const Pool = struct {
                 if (r) rr {
                     let nxt = rr.next;
                     self.gpa.free(self.gpa.ctx, rr.base, rr.bytes);
-                    self.gpa.free(self.gpa.ctx, (*u8)rr, @sizeOf(Region));
+                    self.gpa.free(self.gpa.ctx, (*u8)rr, @type(Region).size);
                     r = nxt;
                 } else {
                     running = false;
                 }
             }
         }
-        self.gpa.free(self.gpa.ctx, (*u8)self.classes, classCount * @sizeOf(Class));
+        self.gpa.free(self.gpa.ctx, (*u8)self.classes, classCount * @type(Class).size);
         self.classes = undefined;
     };
 

@@ -65,7 +65,7 @@ const main = fn () u8 {
     //    这里写错任何一个偏移，ChoosePixelFormat 要么失败要么选出错的格式。
     let dc = gdi.GetDC(hwnd);
     if (dc == (*u8)(0)) { std.println("GetDC failed"); return 3; }
-    let pfd_size: u16 = (u16)(@sizeOf(gdi.PixelFormatDescriptor));
+    let pfd_size: u16 = (u16)(@type(gdi.PixelFormatDescriptor).size);
     var pfd = gdi.PixelFormatDescriptor{
         .nSize = pfd_size,
         .nVersion = 1,

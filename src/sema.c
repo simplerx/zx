@@ -82,7 +82,7 @@ static const char *suggest_member(const char *bad, Type *t) {
  * 漂移的代价只是"少一条建议"，不会出错，别为它建机制。 */
 static const char *suggest_std_member(const char *ns, const char *bad) {
     static const char *const std_top[] = { "print", "println", "format", "heap",
-        "file", "io", "Allocator", "TypeKind", "TypeInfo", "FieldInfo",
+        "file", "io", "Allocator", "Type", "Field",
         "stackAlloc", "heapAlloc", "process", NULL };
     static const char *const io_m[] = { "read", "write", "openRead", "openWrite",
         "openAppend", "seek", "tell", "close", "flush", "stdin", "stdout",
@@ -473,6 +473,7 @@ static Type *check_expr(Node *n, Type *expect);
 static Type *check_expr_raw(Node *n, Type *expect);
 static Value *fold(Node *n);
 static void ct_clear(Node *n);      /* 在下面，ct 机器那一节 */
+static void ct_clear_stmts(Node *n);
 static Value *ct_eval(Node *n);
 static Type *instantiate_type(Node *n);
 static void  name_type_from_call(Node *call, Type *result);
@@ -553,26 +554,30 @@ Type *sema_allocator_type(void) {
     return t;
 }
 
-/* ---------------- @typeInfo 的两种描述符 ----------------
+/* ---------------- @type 的两种描述符 ----------------
  *
- * TypeInfo  = { ty, name, bytes, align, fieldCount, fields: []FieldInfo }
- * FieldInfo = { name, ty, offset }
+ * Type  = { name, size, align, ty, fieldCount, fields: []Field }
+ * Field = { name, ty, offset }
  *
- * 只此一个内建（2026-11-10 用户拍板：反射合并成一个，别一大把函数）。
- * 两个类型都只当"身份证"用，不进任何作用域；@typeInfo 返回的值全部是
- * 编译期值——FieldInfo.offset 让 @offsetOf 不再需要单独的内建，
- * TypeInfo.ty 让 @typeOf 不再需要单独的内建。
- * x 既可以是类型（@typeInfo(Point)）也可以是表达式（@typeInfo(p.x)），
- * 二合一走同一条路。 */
-static Type *sema_fieldinfo_type(void) {
+ * 只此一个内建（2026-11-10 用户拍板两次：先把 @sizeOf/@alignOf/@typeName
+ * 并进来，再把 @typeInfo 也并进来——反射就剩 `@type(x)` 一个名字）。
+ * 为什么要并：这三个答案编译器本来就知道，分成三个以 `@` 打头的关键字
+ * 逼人背名字；`@type(T).size` 读起来就是"T 这个类型的大小"。
+ *
+ * 两个类型都只当"身份证"用，不进任何作用域；@type 返回的值全部是
+ * 编译期值——Field.offset 让 @offsetOf 不再需要单独的内建，
+ * Type.ty 让 @typeOf 不再需要单独的内建。
+ * x 既可以是类型（@type(Point)、@type([]const u8)）也可以是表达式
+ * （@type(p.x)），二合一走同一条路。 */
+static Type *sema_type_field_type(void) {
     static Type *t;
     if (t) return t;
     static Node id;
     memset(&id, 0, sizeof id);
     id.kind = NK_STRUCT_TYPE;
-    id.name = "FieldInfo";
+    id.name = "Field";
 
-    t = ty_agg(TY_STRUCT, &id, "FieldInfo");
+    t = ty_agg(TY_STRUCT, &id, "Field");
     if (!t->fields) {
         /* 字段叫 `ty` 而不是 `type`：`type` 是关键字，当不了字段名。 */
         t->nfields = 3;
@@ -584,52 +589,52 @@ static Type *sema_fieldinfo_type(void) {
     return t;
 }
 
-static Type *sema_typeinfo_type(void) {
+static Type *sema_type_type(void) {
     static Type *t;
     if (t) return t;
     static Node id;
     memset(&id, 0, sizeof id);
     id.kind = NK_STRUCT_TYPE;
-    id.name = "TypeInfo";
+    id.name = "Type";
 
-    t = ty_agg(TY_STRUCT, &id, "TypeInfo");
+    t = ty_agg(TY_STRUCT, &id, "Type");
     if (!t->fields) {
         t->nfields = 6;
         t->fields = calloc(6, sizeof(Field));
-        t->fields[0].name = "ty";         t->fields[0].ty = ty_type();
-        t->fields[1].name = "name";       t->fields[1].ty = ty_slice(ty_u8(), true);
-        t->fields[2].name = "bytes";      t->fields[2].ty = ty_usize();
-        t->fields[3].name = "align";      t->fields[3].ty = ty_usize();
+        t->fields[0].name = "name";       t->fields[0].ty = ty_slice(ty_u8(), true);
+        t->fields[1].name = "size";       t->fields[1].ty = ty_usize();
+        t->fields[2].name = "align";      t->fields[2].ty = ty_usize();
+        t->fields[3].name = "ty";         t->fields[3].ty = ty_type();
         t->fields[4].name = "fieldCount"; t->fields[4].ty = ty_usize();
-        t->fields[5].name = "fields";     t->fields[5].ty = ty_slice(sema_fieldinfo_type(), true);
+        t->fields[5].name = "fields";     t->fields[5].ty = ty_slice(sema_type_field_type(), true);
     }
     return t;
 }
 
-/* TypeInfo / FieldInfo 只活在编译期：任何想把它们变成运行时存储的写法
+/* Type / Field 只活在编译期：任何想把它们变成运行时存储的写法
  * （var/let 声明、函数形参）都在这里报错。const 绑定不受影响——那正是
  * 它的用法。（ast.h 里的声明保留：后端将来物化声明时也用它跳过。） */
 bool sema_ty_ct_only(Type *t) {
     if (!t) return false;
-    if (t == sema_typeinfo_type() || t == sema_fieldinfo_type()) return true;
+    if (t == sema_type_type() || t == sema_type_field_type()) return true;
     if (t->kind == TY_SLICE || t->kind == TY_PTR || t->kind == TY_OPT)
         return sema_ty_ct_only(t->elem);
     return false;
 }
 
-/* @typeInfo(x) 的值：6 个字段全是编译期值。fields 是"切片视图"：
+/* @type(x) 的值：6 个字段全是编译期值。fields 是"切片视图"：
  * V_PTR 指向一块 V_AGG 数组值，nitems 记长度——`.len` / 下标 / 切片
  * 在 ct_eval 里都走 ct_view_len / ct_index 那条路。
  * fields 只装数据字段（关联常量/嵌套类型这些静态成员不是实例布局，
  * offset 对它们没有意义）。 */
-static Value *typeinfo_value(Type *t) {
-    Value *v = val_agg(sema_typeinfo_type(), 6);
+static Value *type_desc_value(Type *t) {
+    Value *v = val_agg(sema_type_type(), 6);
     int sz = ty_size(t);
     int al = ty_align(t);
-    v->items[0] = val_type(t);
-    v->items[1] = val_str(ty_str(t), (int)strlen(ty_str(t)));
-    v->items[2] = val_int(ty_usize(), (uint64_t)(sz < 0 ? 0 : sz), false);
-    v->items[3] = val_int(ty_usize(), (uint64_t)(al < 0 ? 1 : al), false);
+    v->items[0] = val_str(ty_str(t), (int)strlen(ty_str(t)));
+    v->items[1] = val_int(ty_usize(), (uint64_t)(sz < 0 ? 0 : sz), false);
+    v->items[2] = val_int(ty_usize(), (uint64_t)(al < 0 ? 1 : al), false);
+    v->items[3] = val_type(t);
     bool has_fields = t->kind == TY_STRUCT || t->kind == TY_UNION;
     int nf = 0;
     if (has_fields)
@@ -637,7 +642,7 @@ static Value *typeinfo_value(Type *t) {
             if (!t->fields[i].is_static) nf++;
     v->items[4] = val_int(ty_usize(), (uint64_t)nf, false);
 
-    Type *fit = sema_fieldinfo_type();
+    Type *fit = sema_type_field_type();
     Value *arr = val_agg(ty_slice(fit, true), nf);
     int k = 0;
     if (has_fields)
@@ -706,8 +711,8 @@ static Symbol *std_builtin(const char *name) {
         alloc_s.ty = ty_type();
         alloc_s.type_val = sema_allocator_type();
 
-        /* @typeInfo 用到的两个类型也挂在 std 上，于是 `std.TypeKind.struct_`
-         * 和 `var i: std.TypeInfo` 都写得出来 */
+        /* @type 用到的两个描述符类型也挂在 std 上（`std.Type` / `std.Field`），
+         * 错误信息里点得到名字；它们 ct-only，开不了运行时变量 */
         /* std.file：普通函数调用，C 那边是编译器生成的运行时函数 */
         Type *s8 = ty_slice(ty_u8(), true);
         Type *p1[1] = { s8 };
@@ -923,7 +928,7 @@ static Symbol *std_builtin(const char *name) {
 /* 挂进 std 模块作用域的那些名字（std.zx 自己的声明另外由 hoist 加进来） */
 static const char *g_std_seeded[] = {
     "print", "println", "format", "heap", "file", "io", "Allocator",
-    "TypeKind", "TypeInfo", "FieldInfo", "stackAlloc", "heapAlloc", "process",
+    "Type", "Field", "stackAlloc", "heapAlloc", "process",
     "debug", "atomic", NULL
 };
 
@@ -1128,13 +1133,8 @@ static IntV ev_int(Node *n) {
     }
 
     case NK_BUILTIN: {
-        if (!n->name) return noint();
-        if (!strcmp(n->name, "sizeOf") || !strcmp(n->name, "alignOf")) {
-            if (n->nitems < 1) return noint();
-            Type *t = resolve_type(n->items[0]);
-            int sz = !strcmp(n->name, "sizeOf") ? ty_size(t) : ty_align(t);
-            return sz < 0 ? noint() : intv((uint64_t)sz);
-        }
+        /* 1.2.2 起没有"直接给出整数"的内建了：`@type(T).size` 走 NK_FIELD，
+         * check_expr 已经把值折进 n->ct。 */
         return noint();
     }
 
@@ -1372,7 +1372,7 @@ static Type *resolve_type(Node *n) {
             return s->type_val;
         }
         ensure(s);
-        n->sym = s;   /* 点路径（std.TypeInfo）的成员查找靠它进命名空间分支 */
+        n->sym = s;   /* 点路径（std.heap.page）的成员查找靠它进命名空间分支 */
         if (s->ty && s->ty->kind == TY_TYPE) {
             n->ty = ty_type();
             n->type_val = s->type_val ? s->type_val : ty_invalid();
@@ -2549,7 +2549,12 @@ static Type *check_cast(Node *n) {
     if ((from->kind == TY_COMPTIME_INT || from->kind == TY_COMPTIME_FLOAT) &&
         (ty_is_int(to) || ty_is_float(to) || to->kind == TY_ENUM)) {
         n->b->ty = to;                     /* 字面量直接定型 */
-        n->b->ct = NULL;
+        /* 字面量的值在 ival/fval 上，ct 清掉无所谓；但折过值的字段访问
+         * （`(u16)@type(u8).size`）只有 ct 记得值——清了后端只会发出
+         * 0 再挂个 `.size`，C 直接报 "invalid suffix on floating constant"。
+         * 用户 2026-11-10 报的就是这一条。 */
+        if (n->b->kind == NK_INT || n->b->kind == NK_FLOAT || n->b->kind == NK_STR)
+            n->b->ct = NULL;
         from = to;
     }
     if (!castable(from, to))
@@ -2817,7 +2822,7 @@ static Type *check_field(Node *n) {
             }
             return BAD(n, "`%s` has no field '%s'", ty_str(bt), n->name);
         }
-        /* 编译期聚合值里的 type 字段（std.FieldInfo.ty）：字段值本身就是
+        /* 编译期聚合值里的 type 字段（std.Field.ty）：字段值本身就是
          * 一个类型，把它折出来挂到 type_val 上，这个表达式才能当类型用。 */
         if (f->ty && f->ty->kind == TY_TYPE) {
             n->ty = ty_type();
@@ -3482,22 +3487,25 @@ static Type *check_builtin(Node *n, Type *expect) {
     (void)expect;
     const char *nm = n->name ? n->name : "";
 
-    if (!strcmp(nm, "sizeOf") || !strcmp(nm, "alignOf")) {
-        if (n->nitems < 1) return BAD(n, "@%s needs a type", nm);
-        Type *t = resolve_type(n->items[0]);
-        int sz = !strcmp(nm, "sizeOf") ? ty_size(t) : ty_align(t);
-        if (sz < 0)
-            return BAD(n, "@%s of `%s` is not known at compile time", nm, ty_str(t));
-        n->ival = (uint64_t)sz;
-        return type_of(n, ty_usize());
-    }
-
-    if (!strcmp(nm, "typeName")) {
-        if (n->nitems < 1) return BAD(n, "@typeName needs a type");
-        Type *t = resolve_type(n->items[0]);
-        n->str = ty_str(t);         /* 编译期就定下来 */
-        n->str_len = (int)strlen(n->str);
-        return type_of(n, ty_slice(ty_u8(), true));
+    if (!strcmp(nm, "type")) {
+        /* 唯一的内建：@type(x) → 编译期描述符
+         *   { .name, .size, .align, .ty, .fieldCount, .fields }
+         * x 是类型时就是那个类型，是表达式时取它的类型（原 @typeOf）。
+         * `@type(T).size/.align/.name` 顶替了 @sizeOf/@alignOf/@typeName
+         * 三个老内建（1.2.2 合并，见下面 gone[] 的提示）。 */
+        if (n->nitems < 1) return BAD(n, "@type needs a type or an expression");
+        Type *t = check_expr(n->items[0], NULL);
+        if (t && t->kind == TY_TYPE) {
+            /* 类型实参：取类型值本身。`Point`、`i32`、`[]const u8`、
+             * 泛型实参 T 都走这。 */
+            t = n->items[0]->type_val;
+            if (!t && n->items[0]->sym) t = n->items[0]->sym->type_val;
+        }
+        if (!t || t->kind == TY_INVALID)
+            return BAD(n, "@type: the type is not known at compile time");
+        n->type_val = t;        /* ct_clear 之后 ct_eval 里可以重建 */
+        n->ct = type_desc_value(t);
+        return type_of(n, sema_type_type());
     }
 
     if (!strcmp(nm, "compileError")) {
@@ -3546,40 +3554,25 @@ static Type *check_builtin(Node *n, Type *expect) {
         return type_of(n, ty_void());
     }
 
-    /* 反射：只此一个内建（2026-11-10 用户拍板——合并成一个，简洁）。
-     * x 可以是类型也可以是表达式，@typeOf 就不必存在了；字段的名字 /
-     * 类型 / 偏移都在 fields 里，@hasField / @fieldName / @fieldType /
-     * @offsetOf 也不必存在。返回值全部是编译期值。 */
-    if (!strcmp(nm, "typeInfo")) {
-        if (n->nitems < 1) return BAD(n, "@typeInfo needs a type or an expression");
-        Type *t = check_expr(n->items[0], NULL);
-        if (t && t->kind == TY_TYPE) {
-            /* 类型实参：取类型值本身。`Point`、`i32`、泛型实参 T 都走这。 */
-            t = n->items[0]->type_val;
-            if (!t && n->items[0]->sym) t = n->items[0]->sym->type_val;
-        }
-        if (!t || t->kind == TY_INVALID)
-            return BAD(n, "@typeInfo: the type is not known at compile time");
-        n->type_val = t;        /* ct_clear 之后 ct_eval 里可以重建 */
-        n->ct = typeinfo_value(t);
-        return type_of(n, sema_typeinfo_type());
-    }
-
-    /* 1.2.0 曾把这批砍到只剩 9 个内建；反射收敛成一个 @typeInfo。
-     * 老代码里残留的其它名字给一条能照着改的提示，而不是含糊的
-     * "unknown builtin"。 */
+    /* 1.2.0 把这批砍到只剩 9 个内建；1.2.2 反射全部收敛成一个 @type，
+     * @sizeOf/@alignOf/@typeName 也并了进去。老代码里残留的名字给一条
+     * 能照着改的提示，而不是含糊的 "unknown builtin"。 */
     {
         static const struct { const char *name, *hint; } gone[] = {
             { "as",       "type conversion is written `(T)value`" },
             { "intCast",  "type conversion is written `(T)value`" },
             { "ptrCast",  "type conversion is written `(T)value`" },
             { "bitCast",  "type conversion is written `(T)value`" },
-            { "typeOf",   "use @typeInfo(x) -- its `.ty` is the type" },
-            { "hasField", "use @typeInfo(T) and look through `.fields`" },
-            { "fieldCount","use @typeInfo(T).fieldCount" },
-            { "fieldType","use @typeInfo(T).fields[i].ty" },
-            { "fieldName","use @typeInfo(T).fields[i].name" },
-            { "offsetOf", "use @typeInfo(T).fields[i].offset" },
+            { "sizeOf",   "use @type(T).size" },
+            { "alignOf",  "use @type(T).align" },
+            { "typeName", "use @type(T).name" },
+            { "typeInfo", "use @type(x) -- same descriptor, shorter name" },
+            { "typeOf",   "use @type(x) -- its `.ty` is the type" },
+            { "hasField", "use @type(T) and look through `.fields`" },
+            { "fieldCount","use @type(T).fieldCount" },
+            { "fieldType","use @type(T).fields[i].ty" },
+            { "fieldName","use @type(T).fields[i].name" },
+            { "offsetOf", "use @type(T).fields[i].offset" },
             { "field",    "reflection has no dynamic member access; use `v.name`" },
             { "embedFile","embed the bytes yourself (a literal or std.fs)" },
             { "file",     "source-location builtins are gone" },
@@ -4260,11 +4253,11 @@ static void ensure_raw(Symbol *s) {
 
     Type *ann = d->a ? resolve_type(d->a) : NULL;
     if (sema_ty_ct_only(ann)) {
-        /* TypeInfo / FieldInfo 只活在编译期：var/let 要给它们开运行时
+        /* Type / Field 只活在编译期：var/let 要给它们开运行时
          * 存储，没有对应物。要描述符请用 const（值在 ct 里，不占存储）。 */
         err_at(d->line, d->col,
                "`%s` exists only at compile time; bind it with `const` "
-               "straight from `@typeInfo`", ty_str(ann));
+               "straight from `@type`", ty_str(ann));
         return;
     }
     Type *init = d->b ? check_expr(d->b, ann) : NULL;
@@ -4325,12 +4318,12 @@ static void ensure_raw(Symbol *s) {
         s->ty = ty_invalid();
     }
 
-    /* ct-only 类型从初始化器推断进来也一样拦：var info = @typeInfo(i32);
-     * 要给 TypeInfo 开运行时存储，没有对应物。const 绑定放行。 */
+    /* ct-only 类型从初始化器推断进来也一样拦：var info = @type(i32);
+     * 要给 Type 开运行时存储，没有对应物。const 绑定放行。 */
     if (s->kind != SK_CONST && s->ty && sema_ty_ct_only(s->ty)) {
         err_at(d->line, d->col,
                "`%s` exists only at compile time; bind it with `const` "
-               "straight from `@typeInfo`", ty_str(s->ty));
+               "straight from `@type`", ty_str(s->ty));
         s->ty = ty_invalid();
         s->state = 2;
         d->ty = s->ty;
@@ -4371,12 +4364,17 @@ static void ensure_raw(Symbol *s) {
         s->ct = fold(d->b);
         /* 语句形初始化器（带标签的循环 / 块）会被编译期执行，执行把
          * 最后一轮的中间值烙在真实节点上（`a*b == 6` 在 yield 那轮被
-         * 烙成 true）。s->ct 已经拿到最终值，把子树的烙印擦掉，只留
-         * 根上的——顶层 const 的静态物化要读 d->b->ct。 */
+         * 烙成 true）。s->ct 已经拿到最终值，把这些**语句子树**里的烙印
+         * 擦掉，只留根上的——顶层 const 的静态物化要读 d->b->ct。
+         *
+         * 只擦语句子树：普通表达式（字面量、`@type(T).size` 这种折过值的
+         * 字段访问）的折叠结果就是最终值，擦掉等于把值弄丢——后端会发出
+         * `0.size`，C 直接报 "invalid suffix on floating constant"
+         * （用户 2026-11-10 报的 @type 那个 bug 就是这个）。 */
         if (s->ct) {
-            ct_clear(d->b->a); ct_clear(d->b->b);
-            ct_clear(d->b->c); ct_clear(d->b->d);
-            for (int i = 0; i < d->b->nitems; i++) ct_clear(d->b->items[i]);
+            ct_clear_stmts(d->b->a); ct_clear_stmts(d->b->b);
+            ct_clear_stmts(d->b->c); ct_clear_stmts(d->b->d);
+            for (int i = 0; i < d->b->nitems; i++) ct_clear_stmts(d->b->items[i]);
         }
     }
 
@@ -5948,6 +5946,23 @@ static Value  *ct_call(Node *n);
 
 static CtFlow ct_normal(void) { CtFlow f = { CT_NORMAL, NULL, NULL }; return f; }
 
+/* 只清"会执行语句"的子树：块 / if / while / for / switch 里可能烙着
+ * 某一轮的中间值；普通表达式的折叠结果就是最终值，不能清。 */
+static void ct_clear_stmts(Node *n) {
+    if (!n) return;
+    switch (n->kind) {
+    case NK_BLOCK: case NK_IF: case NK_WHILE: case NK_FOR: case NK_SWITCH:
+    case NK_DECL: case NK_RETURN: case NK_CONTINUE: case NK_YIELD:
+    case NK_DEFER: case NK_ERRDEFER:
+        ct_clear(n);
+        return;
+    default: break;
+    }
+    ct_clear_stmts(n->a); ct_clear_stmts(n->b);
+    ct_clear_stmts(n->c); ct_clear_stmts(n->d);
+    for (int i = 0; i < n->nitems; i++) ct_clear_stmts(n->items[i]);
+}
+
 /* 循环体每跑一轮都要把上一轮的折叠结果清掉，否则第二轮会直接返回旧值 */
 static void ct_clear(Node *n) {
     if (!n) return;
@@ -6526,7 +6541,7 @@ static Value *ct_eval(Node *n) {
     case NK_FIELD:
         /* std.heap.page 这种"命名空间里的常量"：值就在符号上 */
         if (n->sym && n->sym->kind == SK_CONST) { ensure(n->sym); v = n->sym->ct; break; }
-        /* 枚举变体：Color.green / std.TypeKind.struct_。check_field 不设
+        /* 枚举变体：Color.green。check_field 不设
          * n->ct，这里按类型值上的变体表求值——泛型里 `info.kind == .struct_`
          * 要靠它折成常量 bool，后端才剪得动分支。 */
         if (n->a && n->a->ty && n->a->ty->kind == TY_TYPE && n->name) {
@@ -6561,14 +6576,10 @@ static Value *ct_eval(Node *n) {
 
     case NK_BUILTIN: {
         const char *nm = n->name ? n->name : "";
-        if (!strcmp(nm, "sizeOf") || !strcmp(nm, "alignOf")) {
-            v = val_int(ty_usize(), n->ival, false);
-        } else if (!strcmp(nm, "typeInfo")) {
+        if (!strcmp(nm, "type")) {
             /* ct_clear 会把 n->ct 洗掉（泛型体每次执行前都清）：
              * type_val 上留着类型，这里重建描述符。 */
-            v = n->ct ? n->ct : (n->type_val ? typeinfo_value(n->type_val) : NULL);
-        } else if (!strcmp(nm, "typeName") && n->str) {
-            v = val_str(n->str, n->str_len);
+            v = n->ct ? n->ct : (n->type_val ? type_desc_value(n->type_val) : NULL);
         } else if (!strcmp(nm, "compileError")) {
             if (!n->flag) {            /* 折叠可能重试，只报一次 */
                 n->flag = true;

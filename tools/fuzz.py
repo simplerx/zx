@@ -145,7 +145,7 @@ def pathological():
        b"const main = fn () u8 {\n    var b = Box(Box(Box(Box(Box(i32))))){ .v = undefined };\n"
        b"    return 0;\n};"))
     w(("many-instantiations",
-       b"const Box = fn (T: type) type { return struct { v: T, n: @sizeOf(T) };\n};\n" +
+       b"const Box = fn (T: type) type { return struct { v: T, n: @type(T).size };\n};\n" +
        b"".join(b"const B%d = Box(i%d);\n" % (i, i + 1) for i in range(200)) +
        b"const main = fn () u8 { return 0; };"))
     return cases

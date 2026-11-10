@@ -102,7 +102,7 @@ const main = fn () u8 {
 
     // 布局：?i32 是 4 字节 payload + 1 字节 tag（+3 对齐）
     var m: ?i32 = 42;
-    std.println("payload = {}, size = {}", peekPayload(&m), @sizeOf(?i32));
+    std.println("payload = {}, size = {}", peekPayload(&m), @type(?i32).size);
 
     return 0;
 };

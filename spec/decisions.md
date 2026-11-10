@@ -5,8 +5,9 @@
 >
 > **1.2.0 的推翻记录**：内建从二十多个收敛到九个（见 `zx-spec.md` §14）。
 > 本文里提到 `@typeInfo` / `@typeOf` / `@field*` / `@hasField` / `@offsetOf` /
-> `@intCast` 等内建的地方都是**当时的裁定**，现已作废；转换统一写 `(T)v`，
-> 反射只剩 `@typeName` / `@sizeOf` / `@alignOf`。
+> `@intCast` / `@sizeOf` / `@alignOf` / `@typeName` 的地方都是**当时的裁定**，
+> 现已作废；转换统一写 `(T)v`，反射只剩一个 `@type(x)`
+> （`.size` / `.align` / `.name` / `.ty` / `.fieldCount` / `.fields`）。
 
 ---
 
@@ -95,7 +96,7 @@ p.f      ≡ p.0.f    自动穿透一层
 | 字段 | 含义 |
 |---|---|
 | `.len` | 元素个数 |
-| `.size` | 字节数（`len × @sizeOf(T)`） |
+| `.size` | 字节数（`len × @type(T).size`） |
 | `.ptr` | 仅切片：`s.ptr` 是 `*T`（数组丢数量直接隐式转换，不需要 `.ptr`） |
 
 长度已知时（`*[N]T`、`&.{…}`、元组）**两者都是编译期常量，运行时没有任何读取动作**。切片 `[]T` 的 `.len` 是运行时值（切片真的存了它）。
@@ -1013,7 +1014,7 @@ prog_<stem>.c    每个模块一份
 
 ## 42. `@typeInfo` 的形状：宁可少四个字段，也别让 `.size` 截胡
 
-`@typeInfo(T)` 返回的是**编译期值**，五个字段：
+`@type(T)` 返回的是**编译期值**，五个字段：
 
 ```
 TypeInfo { kind: TypeKind, name: []const u8, bytes: usize, align: usize, fieldCount: usize }
@@ -1021,9 +1022,9 @@ TypeInfo { kind: TypeKind, name: []const u8, bytes: usize, align: usize, fieldCo
 
 三处非显然的决定：
 
-1. **`bytes` 不叫 `size`。** `.size` 是语言自己的编译期字段（`len × @sizeOf(elem)`，§3），
+1. **`bytes` 不叫 `size`。** `.size` 是语言自己的编译期字段（`len × @type(elem).size`，§3），
    `ct_field()` 遇到 `.size` 会先算"容器有多大"再考虑字段。第一版叫 `size`，
-   `@typeInfo(i32).size` 直接返回 48（`TypeInfo` 自己的大小）——不是 bug，是规则撞车。
+   `@type(i32).size` 直接返回 48（`TypeInfo` 自己的大小）——不是 bug，是规则撞车。
    字段名让路，比改核心规则便宜。
 2. **`kind` 是枚举，不是字符串。** 字符串在编译期只能比较"是不是同一段字面量"，
    想 `switch` 就得走 `std.str.eq`，而编译期不能执行 Zx 函数。枚举是整数，
@@ -1039,11 +1040,11 @@ TypeInfo { kind: TypeKind, name: []const u8, bytes: usize, align: usize, fieldCo
   `std.zx` 解析完、所有函数体都排好队之后才并进 std 作用域的——于是 `std.zx` 自己的函数体
   一个内建都看不见（以前没人用到，所以没暴露）。现在模块作用域标 `is_module`，快照直接引用
   同一个 Scope，后加的名字立刻可见。
-- **`@typeName(@typeOf(x))` 打印出 `type`。** 后端取的是 `items[0]->ty`（外层那个 `@typeOf`
+- **`@type(@typeOf(x)).name` 打印出 `type`。** 后端取的是 `items[0]->ty`（外层那个 `@typeOf`
   节点的类型，永远是 `type`），而不是语义层算好的 `n->str`。改成优先用 `n->str`。
 
 另外后端多了一条通用规则：**折叠过的标量按字面量发**（`ex()` 里对 `NK_FIELD` 先看 `n->ct`）。
-否则 `@typeInfo(T).align` 会被发成"读一块全零描述符的字段"，静静地得到 0。
+否则 `@type(T).align` 会被发成"读一块全零描述符的字段"，静静地得到 0。
 
 ## 43. inline for：展开的是克隆，不是循环
 
@@ -1129,7 +1130,7 @@ TypeInfo { kind: TypeKind, name: []const u8, bytes: usize, align: usize, fieldCo
 走 `ct_view_len` / `ct_index` 那条既有路径，不用新机制。元素是
 `std.FieldInfo = struct { name, ty }`：字段叫 `ty` 而不是 `type`，因为 `type`
 是关键字当不了字段名。`f.ty` 在 `check_field` 的 TY_STRUCT 分支里把折叠出的
-`V_TYPE` 挂到节点的 `type_val` 上——这样 `@typeName(f.ty)`、`eql(f.ty, x, y)`
+`V_TYPE` 挂到节点的 `type_val` 上——这样 `@type(f.ty).name`、`eql(f.ty, x, y)`
 这类"字段值当类型用"直接成立。
 
 **TypeInfo / FieldInfo 是纯编译期类型（§45.1）。** FieldInfo 里装着一个 `type`
@@ -1137,12 +1138,12 @@ TypeInfo { kind: TypeKind, name: []const u8, bytes: usize, align: usize, fieldCo
 
 - 语义层：`var x: std.TypeInfo` / `x: std.FieldInfo`（含切片/指针/可选包裹）
   在局部声明、全局声明、参数三处直接报错——引用它们就用
-  `const info = @typeInfo(T)`，让值折进常量；
+  `const info = @type(T)`，让值折进常量；
 - 后端：万一有没折干净的引用（比如 `switch (info.kind)` 折了条件没折 case
   标签），跳过物化但仍给字段类型发 typedef（TypeKind 枚举），免得 C 报
   undeclared。
 
-**`@typeName(f.ty)` 的投机解析坑。** `@` 内建的实参走投机类型解析
+**`@type(f.ty).name` 的投机解析坑。** `@` 内建的实参走投机类型解析
 （`@intCast(T, x)` 需要），`f.ty` 会被吃成 `TYPE_IDENT(f).ty`，而 `f` 是值——
 报 "'f' is not a type"。修法在 `check_field`：base 是 TYPE_IDENT 且查到的符号
 不是类型时，把节点还原成普通 IDENT 再走值检查。顺带修了类型语法的点路径
@@ -1784,7 +1785,7 @@ const read_head = fn (p: []const u8) !i32 {
 **编译过、答案是 8**。这类错比编不过严重得多——它是这一轮唯一一个靠"给自己的
 测试用例起个正常字段名"才撞出来的 bug。
 
-规则统一成一句：**聚合体自己有同名字段时，字段优先**。要类型大小写 `@sizeOf(T)`。
+规则统一成一句：**聚合体自己有同名字段时，字段优先**。要类型大小写 `@type(T).size`。
 三处一起改（`check_field` / `ct_field` / `ex` + `is_const_init`），规格 §3.3 同步。
 
 不选"禁止这三个名字"的理由：它把一个**三处不一致的实现 bug** 变成**一条语言限制**，
@@ -2391,7 +2392,7 @@ save/restore 保护里：
 `ct_eval` 折不出值会把 `g_ct_stuck` 置 1——本意是同一次求值里兄弟节
 点别再白算，但裸调没有恢复，标志就永远挂着：之后**整个编译**的常量
 求值全部短路。症状组合非常迷惑——inline for 展开成空块（计数对、体
-为空）、`@typeName(f.ty)` 返回 `<error>`、fields 反射全哑、而普通运
+为空）、`@type(f.ty).name` 返回 `<error>`、fields 反射全哑、而普通运
 行期代码一切正常。旧代码的错误构造全写 `(error)Enum.x`（能折叠成功，
 无泄漏），json.zx 的 `let e = ...fail(...); return (error)e;` 模式
 （操作数是运行期 let）第一个踩中——先被误诊为"println 第 5 实参丢
@@ -3046,7 +3047,7 @@ switch 侧从 `;` `}` 取代 `,` `}`（if 侧不变）。
 每轮只修第一条报错，否则并列逗号会被级联误伤；② 编译器列号按**字节**算，
 Python 按**码点**算——`'中'` 一出现列号就错位，脚本必须按字节操作。
 
-**同批顺手修**：`can_follow_cast` 认 `@`——`(T)@sizeOf(...)` 不再要求外面
+**同批顺手修**：`can_follow_cast` 认 `@`——`(T)@type(...).size` 不再要求外面
 多包一层括号。`@` 永远不是中缀运算符，加入 cast 后继集零歧义。
 
 回归：`passed 251, failed 0`（全部既有用例迁移后语义不变）。
@@ -3424,3 +3425,36 @@ pool）是物理隔离的用户态调度器；组是零设施——spawn 即起�
 
 验证：tests/good/task_group.zx（4 任务 × 100 次原子加，wait 后 400 精确，
 三连跑稳定）；全量回归通过。
+
+---
+
+## 107. 1.2.2：反射只剩一个 `@type(x)`；std 精简守则重申
+
+**裁定（2026-11-10，用户两次拍板）**：
+
+1. `@sizeOf` / `@alignOf` / `@typeName` / `@typeInfo` 四个反射内建合并成一个
+   `@type(x)`。x 是类型就给那个类型，是表达式就取它的类型（`@typeOf` 并入）。
+   描述符从
+   `TypeInfo{.ty, .name, .bytes, .align, .fieldCount, .fields}`
+   改名为 `Type{.name, .size, .align, .ty, .fieldCount, .fields}`
+   ——`bytes` 改叫 `size`，三个最常用属性排最前。内建总数 9 → 7。
+   老名字 E0211 给替代写法（`@type(T).size / .align / .name`）。
+2. 为什么：三个答案编译器本来就知道，`@type(T).size` 读起来就是
+   "T 这个类型的大小"，不必背三个 `@` 关键字。代价是调用点长一点
+   （std 里 `@sizeOf(T)` → `@type(T).size`，105 处迁移，机械替换）。
+3. 顺带修了潜伏的代码生成 bug：**结构体字面量字段里的折值字段访问会发错 C**。
+   `check_decl` 折完初始化器后用 `ct_clear` 擦子树烙印，把
+   `N{ .a = @type(usize).size }` 里字段节点的编译期值也擦掉了，后端发出
+   `0.size`，C 报 "invalid suffix on floating constant"。修复：擦烙印只擦
+   **语句子树**（块/if/while/for/switch），普通表达式的折叠结果就是最终值，
+   不能擦（`ct_clear_stmts`）。
+4. LSP：`std.task.Task` 这类**再导出模块的成员**此前跳不到源码。新增
+   `qualModulePath` / `aliasModuleFile`：沿 `pub const x = module("x.zx")`
+   逐段解析到真实文件；`std.task` 本身也直接落 `task.zx`，不停在门面声明上。
+   守门：lsptest `definition.stdReexport.{task,map,alias}`。
+5. std 精简守则（重申既有约定，本轮执行）：别名不做（类型只走一条真实路径）；
+   分配器恒为第一参；不分配的函数返回指向原串的切片；逐字节循环一律换成
+   `@memcpy`/`@memmove`/`@memset`（本轮：BufWriter.write、BufReader.fill/grow、
+   fs List.push、json Obj.grow）。不新增 API 面，宁可让用户写三行普通代码。
+
+验证：`sh test.sh` 全绿（含 lsptest 221 项）；reflection.zx 用例改写为新字段名。

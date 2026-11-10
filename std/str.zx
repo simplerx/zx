@@ -158,7 +158,7 @@ const countOf = fn (s: []const u8, sep: []const u8) usize {
 // sep 为空时整串作为唯一一段返回（不是"每个字节切一刀"）。
 pub const split = fn (alloc: Allocator, s: []const u8, sep: []const u8) ?[][]const u8 {
     let n = countOf(s, sep);
-    let raw = alloc.alloc(alloc.ctx, n * @sizeOf([]const u8));
+    let raw = alloc.alloc(alloc.ctx, n * @type([]const u8).size);
     if (raw) p {
         let slots = ((*[]const u8)p)[0..n];
         var k: usize = 0;
@@ -182,5 +182,5 @@ pub const split = fn (alloc: Allocator, s: []const u8, sep: []const u8) ?[][]con
 
 // 释放 split 的结果
 pub const freeSplit = fn (alloc: Allocator, parts: [][]const u8) void {
-    alloc.free(alloc.ctx, (*u8)parts.ptr, parts.len * @sizeOf([]const u8));
+    alloc.free(alloc.ctx, (*u8)parts.ptr, parts.len * @type([]const u8).size);
 };

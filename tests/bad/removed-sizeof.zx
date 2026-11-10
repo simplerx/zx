@@ -1,0 +1,5 @@
+// expect: @sizeOf was removed: use @type(T).size
+// @sizeOf/@alignOf/@typeName 并进了 @type（1.2.2）：属性变成字段。
+const main = fn () u8 {
+    return (u8)@sizeOf(i32);
+};

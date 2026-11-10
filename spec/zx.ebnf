@@ -159,7 +159,7 @@ primary     = INT | FLOAT | CHAR | STRING
             | brace_expr                               (* {…}：块 或 元组 *)
             | dot_brace                                (* .{…}：强制字面量 *)
             | typed_lit                                (* Person{ .f = e } *)
-            | builtin                                  (* @sizeOf(T) *)
+            | builtin                                  (* @type(T).size *)
             | module_call                              (* module("std") *)
             | labeled_expr                             (* tag: { … } / tag: for … *)
             | ctrl_expr ;
@@ -268,7 +268,7 @@ return_expr = "return" [ expr ] ";" ;        (* 函数体不用标签，离开�
 
 (* ---------------- 内建 ---------------- *)
 
-builtin     = "@" IDENT [ "(" [ args ] ")" ] ;         (* @sizeOf, @typeInfo … *)
+builtin     = "@" IDENT [ "(" [ args ] ")" ] ;         (* @type, @memcpy, @trap … *)
 (* @memcpy / @memmove / @memset（v0.25）：三个实参全是运行时值——
    (dest, src, bytes) 或 (dest, byte, bytes)，没有类型参数；
    dest / src 是指针或切片，返回 void。 *)

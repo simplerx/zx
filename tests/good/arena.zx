@@ -25,7 +25,7 @@ const render = fn (a: Allocator, n: i32) ![]u8 {
 
 // 在 arena 上造一个节点：把字节地址当成 *Node 用
 const push = fn (head: ?*Node, v: i32) ?*Node {
-    let mem = bump(null, 16);                 // @sizeOf(Node) == 16
+    let mem = bump(null, 16);                 // @type(Node).size == 16
     if (mem) raw {
         let node = (*Node)raw;
         node.value = v;

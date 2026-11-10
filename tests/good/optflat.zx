@@ -19,8 +19,8 @@ const Node = struct {
 };
 
 const main = fn () u8 {
-    std.println("size-of-opt-ptr={}", @sizeOf(?*i32));   // 原带标签是 16
-    std.println("size-of-node={}", @sizeOf(Node));       // 8 + 4 + 补 4 = 16
+    std.println("size-of-opt-ptr={}", @type(?*i32).size);   // 原带标签是 16
+    std.println("size-of-node={}", @type(Node).size);       // 8 + 4 + 补 4 = 16
 
     var b = Node{ .val = 2, .next = null };
     var a = Node{ .val = 1, .next = &b };

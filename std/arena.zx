@@ -81,7 +81,7 @@ const bumpFree = fn (_: ?*u8, _: *u8, _: usize) void {
 pub const ArenaAllocator = struct {
     // 造一个 arena 分配器。状态本身从 backing 里出。
     const init = fn (backing: Allocator) ?Allocator {
-        let sb = backing.alloc(backing.ctx, @sizeOf(State));
+        let sb = backing.alloc(backing.ctx, @type(State).size);
         if (sb) q {
             let st = (*State)q;
             st.0 = State{ .backing = backing, .head = null, .nblocks = 0 };
@@ -121,7 +121,7 @@ pub const ArenaAllocator = struct {
                 }
                 i = i + 1;
             }
-            st.0.backing.free(st.0.backing.ctx, (*u8)st, @sizeOf(State));
+            st.0.backing.free(st.0.backing.ctx, (*u8)st, @type(State).size);
         }
     };
 };

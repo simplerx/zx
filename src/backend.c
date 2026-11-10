@@ -1385,23 +1385,11 @@ static bool is_assign_op(int k) {
 static void ex_builtin(Buf *b, Node *n) {
     const char *nm = n->name ? n->name : "";
 
-    if (!strcmp(nm, "sizeOf") || !strcmp(nm, "alignOf")) {
-        /* sema 已经把结果算好放在 ival 里（它是编译期值，不是运行时 sizeof） */
-        buf_printf(b, "((size_t)%llu)", (unsigned long long)n->ival);
-        return;
-    }
-    if (!strcmp(nm, "typeName")) {
-        /* sema 已经把名字算进 n->str 了（@typeName(@typeOf(x)) 这种套娃
-         * 只能靠它——取 items[0]->ty 会拿到外层那个 `type`） */
-        const char *p = n->str;
-        int len = n->str_len;
-        if (!p && n->nitems && n->items[0]->ty) { p = ty_str(n->items[0]->ty); }
-        if (!p) { ensure_type(ty_slice(ty_u8(), true)); buf_puts(b, "((ZxSlice_u8){0})"); return; }
-        if (len <= 0) len = (int)strlen(p);
-        ensure_type(ty_slice(ty_u8(), true));
-        Buf s; buf_init(&s);
-        cstr(&s, p, len);
-        buf_printf(b, "((ZxSlice_u8){(uint8_t*)%s, %d})", s.data, len);
+    /* 反射统一走 @type(x)：它的值全是编译期值（.size/.align/.name/…），
+     * 任何取字段的写法在 sema 已经折成字面量，走到这里的只可能是把整块
+     * 描述符当值用的残留——那本来就该在 sema 被 ct_only 拦下。 */
+    if (!strcmp(nm, "type")) {
+        buf_puts(b, "0");
         return;
     }
     if (!strcmp(nm, "trap") || !strcmp(nm, "panic")) {
@@ -4291,7 +4279,7 @@ static void emit_i128_runtime(void) {
 
 /* 折叠过的标量：直接把编译期值写成字面量。
  *
- * `@typeInfo(T).align` 这类表达式在语义层已经算出值了，但它在 C 里长得像
+ * `@type(T).align` 这类表达式在语义层已经算出值了，但它在 C 里长得像
  * "读一块全零描述符的字段"——照结构访问发出去会得到 0。谁折算了就用谁的结果。 */
 static bool ex_ct_scalar(Buf *b, Node *n) {
     Value *v = n->ct;
@@ -5051,9 +5039,8 @@ static void gen_decl_inner(Node *d) {
     if (!t || t->kind == TY_INVALID) return;
     /* 类型值（const P = Pair(i32);）只在编译期存在，C 里没有对应的东西 */
     if (t->kind == TY_TYPE) return;
-    /* std.TypeInfo / std.FieldInfo 只在编译期存在：这些"声明"是编译期
-     * 绑定，所有使用点在语义层都折成字面量了，C 里不该有它们。
-     * 但字段类型（TypeKind 枚举之类）可能被没折干净的 switch 引用，照发。 */
+    /* std.Type / std.Field 只在编译期存在：这些"声明"是编译期绑定，
+     * 所有使用点在语义层都折成字面量了，C 里不该有它们。 */
     if (sema_ty_ct_only(t)) return;
     /* 别名（const heap = std.heap;）也是个编译期名字：它没有自己的存储，
      * 引用处直接落到被指向的那份上 */
@@ -6155,7 +6142,7 @@ static void gen_global(Node *d, bool exported) {
     Type *t = d->ty;
     if (!t || t->kind == TY_INVALID || t->kind == TY_TYPE) return;
     if (t->kind == TY_VOID) return;      /* `const x = { 42; }` 没有运行时表示 */
-    /* TypeInfo / FieldInfo 描述符只活在编译期：使用点全部折成字面量，
+    /* Type / Field 描述符只活在编译期：使用点全部折成字面量，
      * 全局里不物化（跟 gen_decl_inner 同一条规则）。 */
     if (sema_ty_ct_only(t)) return;
 

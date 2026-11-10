@@ -40,7 +40,7 @@ const run = fn (pp: *std.pool.Pool) u8 {
     } else { return 1; }
 
     // ④ 按大小分配再当结构体用（方法不能带类型参数，类型转型交给调用方）
-    let n = pp.alloc(@sizeOf(Node));
+    let n = pp.alloc(@type(Node).size);
     if (n) nv {
         let nd = (*Node)nv;
         nd.value = 42;

@@ -564,7 +564,7 @@ pub const Parser = struct {
     // ---- 节点构造 ----
 
     const new = fn (self: *Parser, k: NK) *Node {
-        let raw = self.al.alloc(self.al.ctx, @sizeOf(Node));
+        let raw = self.al.alloc(self.al.ctx, @type(Node).size);
         if (raw) p {
             let n = (*Node)p;
             n.kind = k;
@@ -1571,13 +1571,20 @@ pub const Parser = struct {
         if (t.kind == lex.Kind.at) {
             _ = self.advance();
             let n = self.new_at(NK.builtin, t);
-            n.name = try self.take_ident();
-            // @typeInfo/@memcpy/@memmove/@memset 收表达式；其余收类型。
-            // @typeInfo 的实参类型与表达式都收（类型在表达式位置也是值），
-            // 按表达式解析，`@typeInfo(y)` 里的 y 才不会被打成"不是类型"。
+            // `@type` 的 type 在词法上是关键字（`X: type` 用），@ 后面这
+            // 一处必须当普通标识符收——否则最常用的内建反而写不出来。
+            if (self.at(lex.Kind.kw_type)) {
+                _ = self.advance();
+                n.name = "type";
+            } else {
+                n.name = try self.take_ident();
+            }
+            // @type/@memcpy/@memmove/@memset 收表达式；其余收类型。
+            // @type 的实参类型与表达式都收（类型在表达式位置也是值），
+            // 按表达式解析，`@type(p.x)` 里的 p.x 才不会被打成"不是类型"。
             let nm = n.name orelse "";
             var value_first = false;
-            if (std.str.eq(nm, "typeInfo")) { value_first = true; }
+            if (std.str.eq(nm, "type")) { value_first = true; }
             if (std.str.eq(nm, "memcpy")) { value_first = true; }
             if (std.str.eq(nm, "memmove")) { value_first = true; }
             if (std.str.eq(nm, "memset")) { value_first = true; }

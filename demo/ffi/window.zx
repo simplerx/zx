@@ -139,7 +139,7 @@ const main = fn () u8 {
 
     // PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER
     var pfd = gdi.PixelFormatDescriptor{
-        .nSize = (u16)(@sizeOf(gdi.PixelFormatDescriptor)),
+        .nSize = (u16)(@type(gdi.PixelFormatDescriptor).size),
         .nVersion = 1,
         .dwFlags = 0x04 | 0x20 | 0x01,
         .iPixelType = 0,                     // PFD_TYPE_RGBA

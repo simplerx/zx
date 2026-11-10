@@ -1,8 +1,8 @@
-// reflection.zx —— 反射收敛成一个 @typeInfo（2026-11-10 用户拍板）
+// reflection.zx —— 反射只有一个内建 @type（2026-11-10 用户拍板）
 //
-// @typeInfo(x)：x 是类型或表达式都行（@typeOf 并了进来）。描述符
-// TypeInfo{.ty,.name,.bytes,.align,.fieldCount,.fields[i]{.name,.ty,.offset}}
-// 全部是编译期值，只许 const 绑定。字段偏移在 FieldInfo.offset 里。
+// @type(x)：x 是类型或表达式都行（@typeOf 并了进来）。描述符
+// Type{.name,.size,.align,.ty,.fieldCount,.fields[i]{.name,.ty,.offset}}
+// 全部是编译期值，只许 const 绑定。@sizeOf/@alignOf/@typeName 都是它的字段。
 const std = module("std");
 
 const Point = struct {
@@ -13,8 +13,8 @@ const Point = struct {
 
 // 泛型体里用描述符：ct_clear 之后 ct_eval 靠 type_val 重建
 const sizeOfT = fn (T: type) usize {
-    const ti = @typeInfo(T);
-    return ti.bytes;
+    const ti = @type(T);
+    return ti.size;
 };
 
 // 编译期类型分派：T 的比较在 specialize 时折成常量，死分支不检查、
@@ -27,13 +27,13 @@ const dispatch = fn (T: type, x: T) T {
 
 const main = fn () u8 {
     // ---- 类型实参与表达式实参二合一 ----
-    const tp = @typeInfo(Point);
+    const tp = @type(Point);
     if (tp.ty != Point) { return 1; }
     var y: i32 = 1;
-    if (@typeInfo(y).ty != i32) { return 2; }
+    if (@type(y).ty != i32) { return 2; }
 
     // ---- 标量四样 ----
-    if (tp.bytes != 8 || tp.align != 4) { return 3; }
+    if (tp.size != 8 || tp.align != 4) { return 3; }
     if (tp.fieldCount != 2) { return 4; }
 
     // ---- 字段：名字 / 类型 / 偏移 ----
@@ -41,7 +41,7 @@ const main = fn () u8 {
     const f1 = tp.fields[1];
     if (f0.name[0] != 'x' || f1.name[0] != 'y') { return 5; }
     if (f0.ty != i32 || f1.ty != i32) { return 6; }
-    if (f1.offset != @sizeOf(i32)) { return 7; }
+    if (f1.offset != @type(i32).size) { return 7; }
 
     // ---- 泛型实例化 ----
     if (sizeOfT(Point) != 8) { return 8; }
@@ -52,6 +52,6 @@ const main = fn () u8 {
     let d2 = dispatch(f64, 1.5);
     if (d2 != 3.0) { return 10; }
 
-    std.println("typeInfo ok: {} {} {} {}", tp.name[0], tp.fieldCount, f1.offset, sizeOfT(Point));
+    std.println("type ok: {} {} {} {}", tp.name[0], tp.fieldCount, f1.offset, sizeOfT(Point));
     return 0;
 };

@@ -50,14 +50,14 @@ pub const Arr = struct {
         if (self.len == self.cap) {
             var ncap = self.cap * 2;
             if (ncap < 4) { ncap = 4; }
-            let raw = self.alloc.alloc(self.alloc.ctx, ncap * @sizeOf(Value));
+            let raw = self.alloc.alloc(self.alloc.ctx, ncap * @type(Value).size);
             if (raw) r {
                 let dst = (*Value)r;
                 if (self.len > 0) {
-                    @memcpy((*u8)dst, (*u8)self.items, self.len * @sizeOf(Value));
+                    @memcpy((*u8)dst, (*u8)self.items, self.len * @type(Value).size);
                 }
                 if (self.cap > 0) {
-                    self.alloc.free(self.alloc.ctx, (*u8)self.items, self.cap * @sizeOf(Value));
+                    self.alloc.free(self.alloc.ctx, (*u8)self.items, self.cap * @type(Value).size);
                 }
                 self.items = dst;
                 self.cap = ncap;
@@ -134,17 +134,16 @@ pub const Obj = struct {
 
     // 扩容重排：哈希已缓存，不用重算、不用比键——第一个空槽放下即可。
     const grow = fn (self: *Self, ncap: usize) bool {
-        let kb = self.alloc.alloc(self.alloc.ctx, ncap * @sizeOf([]const u8));
+        let kb = self.alloc.alloc(self.alloc.ctx, ncap * @type([]const u8).size);
         if (kb) k2 {
-            let hb = self.alloc.alloc(self.alloc.ctx, ncap * @sizeOf(u64));
+            let hb = self.alloc.alloc(self.alloc.ctx, ncap * @type(u64).size);
             if (hb) h2 {
-                let vb = self.alloc.alloc(self.alloc.ctx, ncap * @sizeOf(Value));
+                let vb = self.alloc.alloc(self.alloc.ctx, ncap * @type(Value).size);
                 if (vb) v2 {
                     let nk = (*[]const u8)k2;
                     let nh = (*u64)h2;
                     let nv = (*Value)v2;
-                    var j: usize = 0;
-                    while (j < ncap) { (nh + j).0 = 0; j = j + 1; }
+                    @memset((*u8)nh, 0, ncap * @type(u64).size);
                     let mask = ncap - 1;
                     var i: usize = 0;
                     while (i < self.cap) {
@@ -159,9 +158,9 @@ pub const Obj = struct {
                         i = i + 1;
                     }
                     if (self.cap > 0) {
-                        self.alloc.free(self.alloc.ctx, (*u8)self.keys, self.cap * @sizeOf([]const u8));
-                        self.alloc.free(self.alloc.ctx, (*u8)self.hashes, self.cap * @sizeOf(u64));
-                        self.alloc.free(self.alloc.ctx, (*u8)self.vals, self.cap * @sizeOf(Value));
+                        self.alloc.free(self.alloc.ctx, (*u8)self.keys, self.cap * @type([]const u8).size);
+                        self.alloc.free(self.alloc.ctx, (*u8)self.hashes, self.cap * @type(u64).size);
+                        self.alloc.free(self.alloc.ctx, (*u8)self.vals, self.cap * @type(Value).size);
                     }
                     self.keys = nk;
                     self.hashes = nh;
@@ -169,9 +168,9 @@ pub const Obj = struct {
                     self.cap = ncap;
                     return true;
                 }
-                self.alloc.free(self.alloc.ctx, (*u8)h2, ncap * @sizeOf(u64));
+                self.alloc.free(self.alloc.ctx, (*u8)h2, ncap * @type(u64).size);
             }
-            self.alloc.free(self.alloc.ctx, (*u8)k2, ncap * @sizeOf([]const u8));
+            self.alloc.free(self.alloc.ctx, (*u8)k2, ncap * @type([]const u8).size);
         }
         return false;
     };
@@ -307,7 +306,7 @@ const Parser = struct {
 
     const arrValue = fn (self: *Self, d: u32) !Value {
         _ = self.adv();                                  // 吃 '['
-        let raw = self.alloc.alloc(self.alloc.ctx, @sizeOf(Arr));
+        let raw = self.alloc.alloc(self.alloc.ctx, @type(Arr).size);
         if (raw) rb {
             let a = (*Arr)rb;
             a.items = undefined;
@@ -346,7 +345,7 @@ const Parser = struct {
 
     const objValue = fn (self: *Self, d: u32) !Value {
         _ = self.adv();                                  // 吃 '{'
-        let raw = self.alloc.alloc(self.alloc.ctx, @sizeOf(Obj));
+        let raw = self.alloc.alloc(self.alloc.ctx, @type(Obj).size);
         if (raw) rb {
             let o = (*Obj)rb;
             o.keys = undefined;

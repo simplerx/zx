@@ -5,7 +5,7 @@
 //     解析 stderr 的 `path:line:col: error[CODE]: msg` 行 → publishDiagnostics。
 //     直接复用自举前端（zxfe），诊断与编译器 100% 同源。
 //   - 补全：
-//       `@` 前缀      → 顶层内建（@sizeOf/@typeName/@typeInfo/… 共十个）
+//       `@` 前缀      → 顶层内建（@type/@memcpy/@trap/… 共七个）
 //       `X.`          → std 内建命名空间 / module 绑定的顶层 pub 声明 /
 //                       容器（struct/union/enum）的成员与方法（含实例推断：
 //                       `let v = Obj.init(...)` 后 `v.` 出 Obj 的成员）
@@ -291,10 +291,10 @@ fn stdBuiltinDoc(path: []const u8) ?StdBuiltin {
     return null;
 }
 
-/// 1.2.1 反射收敛成一个 @typeInfo：TypeInfo/FieldInfo 描述符仍只在编译期
-/// 存在，不许进 std. 补全列表（去污染）。
+/// 1.2.2 反射只剩一个 @type：Type/Field 描述符仍只在编译期存在，
+/// 不许进 std. 补全列表（去污染）。
 fn isCtBuiltin(name: []const u8) bool {
-    const ct = [_][]const u8{ "TypeKind", "TypeInfo", "FieldInfo" };
+    const ct = [_][]const u8{ "Type", "Field" };
     for (ct) |c| {
         if (std.mem.eql(u8, name, c)) return true;
     }
@@ -309,13 +309,10 @@ const std_seeded = [_][]const u8{
 
 const BuiltinDoc = struct { name: []const u8, detail: []const u8 };
 
-// @ 内建（与 src/sema.c check_builtin() 逐字对齐，1.2.1 反射收敛成
-// 一个 @typeInfo）：类型转换统一写 `(T)value`；描述符全在编译期。
+// @ 内建（与 src/sema.c check_builtin() 逐字对齐，1.2.2 反射只剩 @type）：
+// 类型转换统一写 `(T)value`；描述符全在编译期。
 const builtin_docs = [_]BuiltinDoc{
-    .{ .name = "sizeOf", .detail = "@sizeOf(T) 类型大小（字节）" },
-    .{ .name = "alignOf", .detail = "@alignOf(T) 类型对齐" },
-    .{ .name = "typeName", .detail = "@typeName(T) 类型名字符串" },
-    .{ .name = "typeInfo", .detail = "@typeInfo(x) 编译期描述符：.ty/.name/.bytes/.align/.fieldCount/.fields[i]{.name,.ty,.offset}" },
+    .{ .name = "type", .detail = "@type(x) 编译期描述符：.name/.size/.align/.ty/.fieldCount/.fields[i]{.name,.ty,.offset}" },
     .{ .name = "memcpy", .detail = "@memcpy(dest, src, count) 内存复制" },
     .{ .name = "memmove", .detail = "@memmove(dest, src, count) 内存移动" },
     .{ .name = "memset", .detail = "@memset(dest, fill, count) 内存填充" },
@@ -325,8 +322,7 @@ const builtin_docs = [_]BuiltinDoc{
 };
 
 const toplevel_builtins = [_][]const u8{
-    "sizeOf", "alignOf", "typeName", "typeInfo",
-    "memcpy", "memmove", "memset",
+    "type",   "memcpy",  "memmove", "memset",
     "link",   "trap",    "compileError",
 };
 
@@ -2072,6 +2068,53 @@ fn resolveModuleFile(doc: *const Document, m_raw: []const u8) ?[]const u8 {
     return null;
 }
 
+/// 模块文件里 `pub const seg = module("x.zx")` 再导出的真实文件
+///（相对该模块文件所在目录解析）。
+fn aliasModuleFile(doc: *const Document, mod_path: []const u8, seg: []const u8) ?[]const u8 {
+    const txt = readFileSmall(mod_path) orelse return null;
+    const al = moduleAliasIn(txt, seg) orelse return null;
+    var ap: std.ArrayList(u8) = .empty;
+    ap.appendSlice(gpa, dirName(mod_path)) catch return null;
+    ap.append(gpa, '/') catch return null;
+    ap.appendSlice(gpa, al) catch return null;
+    if (readFileSmall(ap.items) != null) return dupe(ap.items);
+    // 别名写的是模块名而不是文件名：退回常规解析
+    return resolveModuleFile(doc, al);
+}
+
+/// 限定路径（可能多段）→ 真实模块文件。
+///   "std"           → std/std.zx
+///   "glfw3"         → 绑定名 moduleOfBinding
+///   "std.task"      → std.zx 里 pub const task = module("task.zx") → std/task.zx
+///   "vp.util.walk"  → vendor 模块的二级再导出，同样逐段走
+fn qualModulePath(doc: *const Document, text: []const u8, path: []const u8) ?[]const u8 {
+    if (path.len == 0) return null;
+    const d0 = std.mem.indexOfScalar(u8, path, '.');
+    if (d0 == null) {
+        if (std.mem.eql(u8, path, "std")) return resolveModuleFile(doc, "std");
+        const m = moduleOfBinding(text, path) orelse return null;
+        return resolveModuleFile(doc, m);
+    }
+    const seg0 = path[0..d0.?];
+    const first: []const u8 = if (std.mem.eql(u8, seg0, "std"))
+        "std"
+    else
+        moduleOfBinding(text, seg0) orelse return null;
+    var mp = resolveModuleFile(doc, first) orelse return null;
+    var rest = path[d0.? + 1 ..];
+    while (rest.len > 0) {
+        var seg = rest;
+        var more = false;
+        if (std.mem.indexOfScalar(u8, rest, '.')) |d| {
+            seg = rest[0..d];
+            more = true;
+        }
+        mp = aliasModuleFile(doc, mp, seg) orelse return null;
+        rest = if (more) rest[seg.len + 1 ..] else "";
+    }
+    return mp;
+}
+
 fn definitionAt(doc: *const Document, line: u32, character: u32) ?[]const u8 {
     const text = doc.text;
     const off = posToOffset(text, line, character);
@@ -2093,20 +2136,24 @@ fn definitionAt(doc: *const Document, line: u32, character: u32) ?[]const u8 {
     if (findDeclLine(text, word)) |loc|
         return makeLocation(doc.uri, loc.line, loc.col, loc.col + @as(u32, @intCast(word.len)));
 
-    // 1.5) <module>.<member>：光标停在成员上 → 模块文件的顶层声明
+    // 1.5) <module>.<member>：光标停在成员上 → 模块文件的顶层声明。
+    //      路径可以是多段（std.task / std.map.HashMap 的 base），沿 std 门面
+    //      的 pub const x = module("x.zx") 逐段解析到真实源文件
+    //      （用户 2026-11-10：std.task.Task 跳不过去）。
     if (ws > 0 and text[ws - 1] == '.') {
         var bs = ws - 1;
         while (bs > 0 and (isIdentChar(text[bs - 1]) or text[bs - 1] == '.')) bs -= 1;
         const base = text[bs .. ws - 1];
         if (base.len > 0) {
-            var mm: ?[]const u8 = moduleOfBinding(text, base);
-            if (mm == null and std.mem.eql(u8, base, "std")) mm = "std";
-            if (mm) |mod_name| {
-                if (resolveModuleFile(doc, mod_name)) |p| {
-                    if (readFileSmall(p)) |t| {
-                        if (findDeclLine(t, word)) |loc|
-                            return makeLocation(pathToUri(p), loc.line, loc.col, loc.col + @as(u32, @intCast(word.len)));
-                    }
+            if (qualModulePath(doc, text, base)) |p| {
+                // `std.task` 这类再导出：直接落到被再导出的文件，
+                // 别停在 std.zx 的 `pub const task = module("task.zx")` 上
+                if (aliasModuleFile(doc, p, word)) |ap2| {
+                    return makeLocation(pathToUri(ap2), 0, 0, 0);
+                }
+                if (readFileSmall(p)) |t| {
+                    if (findDeclLine(t, word)) |loc|
+                        return makeLocation(pathToUri(p), loc.line, loc.col, loc.col + @as(u32, @intCast(word.len)));
                 }
             }
         }
@@ -6033,8 +6080,8 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
             if (std_top) {
                 // KEEP — 用户 2026-11-09 第 4 条：Allocator/stackAlloc/heapAlloc
                 // 要暴露出来，带签名 detail + snippet（Allocator 是类型 → struct
-                // 字面量骨架；两个 Alloc 是函数 → 调用骨架）。TypeKind/TypeInfo/
-                // FieldInfo 纯编译期反射，仍由 isCtBuiltin 挡住（第 1 条去污染）。
+                // 字面量骨架；两个 Alloc 是函数 → 调用骨架）。Type/Field
+                // 纯编译期反射，仍由 isCtBuiltin 挡住（第 1 条去污染）。
                 // 第 2 条：print/println/format 从对齐表出签名 + 调用骨架；
                 // debug/atomic 两个命名空间也由编译器 seed（g_std_seeded），列出。
                 for (std_seeded) |m| {

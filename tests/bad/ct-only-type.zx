@@ -1,0 +1,6 @@
+// expect: exists only at compile time
+// @type 的描述符只活在编译期：var/let 要给它开运行时存储，没有对应物。
+const main = fn () u8 {
+    var info = @type(i32);
+    return 0;
+};

@@ -18,7 +18,7 @@
 //
 // WIN32_FIND_DATAA 里 cFileName[260] 是内嵌数组——Zx 没有内嵌数组字段
 // （只有 *[N]T 数组指针），所以把前 44 字节声明成结构体、名字区用指针
-// 算术访问：布局手工对齐 C 侧，@sizeOf(FindData) == 44 是防回归的锚。
+// 算术访问：布局手工对齐 C 侧，@type(FindData).size == 44 是防回归的锚。
 
 extern fn FindFirstFileA(p: *const u8, fd: *u8) usize;
 extern fn FindNextFileA(h: usize, fd: *u8) i32;
@@ -348,16 +348,14 @@ const List = struct {
         if (self.len == self.cap) {
             var ncap = self.cap * 2;
             if (ncap < 16) { ncap = 16; }
-            let raw = self.alloc.alloc(self.alloc.ctx, ncap * @sizeOf([]const u8));
+            let raw = self.alloc.alloc(self.alloc.ctx, ncap * @type([]const u8).size);
             if (raw) r {
                 let dst = (*[]const u8)r;
-                var i: usize = 0;
-                while (i < self.len) {
-                    (dst + i).0 = (self.items + i).0;
-                    i = i + 1;
+                if (self.len > 0) {
+                    @memcpy((*u8)dst, (*u8)self.items, self.len * @type([]const u8).size);
                 }
                 if (self.cap > 0) {
-                    self.alloc.free(self.alloc.ctx, (*u8)self.items, self.cap * @sizeOf([]const u8));
+                    self.alloc.free(self.alloc.ctx, (*u8)self.items, self.cap * @type([]const u8).size);
                 }
                 self.items = dst;
                 self.cap = ncap;
@@ -374,7 +372,7 @@ const List = struct {
 
     const deinit = fn (self: *Self) void {
         if (self.cap > 0) {
-            self.alloc.free(self.alloc.ctx, (*u8)self.items, self.cap * @sizeOf([]const u8));
+            self.alloc.free(self.alloc.ctx, (*u8)self.items, self.cap * @type([]const u8).size);
         }
         self.items = undefined;
         self.len = 0;
