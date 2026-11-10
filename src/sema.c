@@ -2634,7 +2634,17 @@ static Type *static_member_ty(Node *n, Field *f) {
         Value *cv = ct_eval_probe(f->dflt);
         if (cv && f->ty) cv = val_cast(f->ty, cv);
         if (cv && cv->kind != V_UNDEF) n->ct = cv;
+        /* 嵌套类型成员（`const Inner = struct {…};` / `const Sub = Other;`）：
+         * 值本身就是类型，必须把 type_val 挂到节点上。只有 TY_TYPE 没有
+         * type_val 的话，`t.p1.Inner.Sub.leaf` 第二段会拿 null 当 <error>
+         * （用户 2026-11-11：实例链上只能读一层类型，再往下就不认识）。
+         * 纯类型路径 `O.Inner.Sub` 走 check_field 的 TY_TYPE 分支，那里一直
+         * 是好的——差别正是这条。 */
+        if (cv && cv->kind == V_TYPE) n->type_val = cv->tval;
     }
+    if (!n->type_val && f->ty && f->ty->kind == TY_TYPE && f->dflt &&
+        f->dflt->ty && f->dflt->ty->kind == TY_TYPE && f->dflt->type_val)
+        n->type_val = f->dflt->type_val;
     return type_of(n, f->ty);
 }
 
@@ -2849,6 +2859,18 @@ static Type *check_field(Node *n) {
             return BAD(n, "`%s` has no field '%s'", ty_str(bt), n->name);
         }
         if (deny_member(n, bt, f->is_pub, n->name)) return type_of(n, ty_invalid());
+        /* 静态类型成员（`const Inner = struct {…};` / `const Sub = Other;`）：
+         * 成员的值就是这个类型本身，type_val 直接取声明上的。必须放在下面
+         * "编译期聚合值的 type 字段" 分支**之前**——那个分支是去读运行期值
+         * 的字段（std.Field.ty 这种），对普通实例只能拿到 invalid，于是
+         * `t.p.Inner.Sub` 的第二段就变成 `\`<error>\` has no member`
+         *（用户 2026-11-11：实例链上只能读一层类型，再往下就不认识）。 */
+        if (f->is_static && f->ty && f->ty->kind == TY_TYPE && f->dflt &&
+            f->dflt->ty && f->dflt->ty->kind == TY_TYPE && f->dflt->type_val) {
+            n->ty = ty_type();
+            n->type_val = f->dflt->type_val;
+            return type_of(n, ty_type());
+        }
         /* 编译期聚合值里的 type 字段（std.Field.ty）：字段值本身就是
          * 一个类型，把它折出来挂到 type_val 上，这个表达式才能当类型用。 */
         if (f->ty && f->ty->kind == TY_TYPE) {

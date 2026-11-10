@@ -3495,3 +3495,44 @@ pool）是物理隔离的用户态调度器；组是零设施——spawn 即起�
    =={norm}、stdObj.inst 含字段+方法全集。
 
 验证：`sh test.sh` 全绿；lsptest 全过。
+
+## 109. 实例链上的嵌套类型：`r.p1.Inner.Sub{…}` 与类型值补全/跳转
+
+**裁定（2026-11-11，用户报"可以链式读取后面的类型、函数，但变量接收类型时
+不提示类型；类型和函数不能跳转"）**：
+
+1. **编译器**：`check_field` 的 TY_STRUCT 分支里，"编译期聚合值的 type 字段"
+   那条分支（`std.Field.ty` 用）会先去 ct_field 读运行期值的字段，普通实例上
+   只能拿到 invalid。**静态类型成员（`const Inner = struct{…}` /
+   `const Sub = Other;`）必须在它之前处理**：`n->type_val` 直接取
+   `f->dflt->type_val`。少了这一步，`t.p.Inner.Sub` 的第二段就报
+   `` `<error>` has no member ``，只能读一层。`static_member_ty` 里对
+   TY_TYPE 字段也补了同一份兜底（指针/union/enum 的静态成员走那条）。
+2. **LSP 路径解析**：`resolveContainerPath` 新增两种起点/步进——
+   ① 实例起点（`t.p1.Inner`）与类型值绑定（`P.Sub`）：第一段是绑定名时，
+   由 `containerOfBinding` 按"声明类型 → 初值纯路径 → 具名字面量 →
+   inferExprType"取容器；只对**多段**路径开放（单段名字仍走
+   instanceContainerTy，否则"按名字在全扫描集里找容器"的老毛病会回来）。
+   ② 字段段（`t.p1` 的 p1 是字段不是容器）：跟 `fieldTypeIn` 的类型再继续。
+3. **模块再导出**：`std.json.Obj` 这种"模块里的再导出子模块 + 容器"以前会
+   退化成按末段名字全文找 `const X = struct`，只要同目录有同名容器（lsptest
+   的 snipprobe.zx 就有一个私有 `Obj`）就弹错那个的成员。现在逐段尝试
+   `qualModulePath`（`std.json` → std/json.zx）再在子模块里找容器。
+   **这条同时解释了 11-10 那次"std.json.Obj 非确定性双空"——不是僵尸进程，
+   是 fixture 同名。**
+4. **跳转**：`definitionAt` 加 2.5 段——接收者是任意容器路径（实例链 / 限定
+   类型 / 类型值别名）时，用 `resolveContainerPath` 拿体，
+   `memberDeclOffset` 在体里定位成员声明（字段、方法、嵌套类型、枚举变体），
+   再按内容找回文件路径（`pathOfSrcText`）给出 Location。
+5. **类型提示**：`inferExprType` 的点路径分支认类型值接收者与嵌套类型成员
+   （`memberIsTypeDecl`）→ 返回 `type`，于是 `const P = t.p1.Inner;`
+   的行内提示是 `: type`（以前什么都不显示）。hover 的多段 bind 也接了
+   逐段解析（`t.p1` + `Inner` → 贴真实嵌套 struct）。
+6. **守门**：编译器 tests/good/nested-type-chain.zx（实例→类型→类型→方法、
+   字段→类型、const 绑类型值、内联 struct 成员，含运行期断言）；
+   lsptest 新增 12 项：completion.instChain.{l1Field,l2Types,l3Types,
+   typeValued,typeValuedAlias,typeValuedInst}、inlayHint.instChain.
+   {typeValueP,typeValueQ}、definition.def.{typeValueMember,chainFn,chainType}
+  （fixture chain3 刻意用 ChainXxx 前缀，避免与既有 fixture 撞名）。
+
+验证：`sh test.sh` 全绿；lsptest 244 项全过。

@@ -1950,6 +1950,114 @@ r, _ = recv_id("deep3", _rid)
 _hv = r["result"]["contents"]["value"] if r and r.get("result") else ""
 check("hover.deepNestField", "deep: i32" in _hv, _hv[:120])
 
+# 8l 实例链上的嵌套类型与类型值（用户 2026-11-11：
+# "可以链式读取后面的类型/函数，但是变量接收类型时不提示类型；类型和函数
+#  也不能跳转"）。编译器侧同一形状的用例是 .tmp 探针；这里守 LSP：
+#   r.            → 字段 top
+#   r.top.        → 静态成员 MidT + 方法 f1
+#   r.top.MidT.   → LeafT + f2（第二层还能继续）
+#   const P = r.top.MidT;  P.  → 类型值只出静态成员（LeafT/f2）
+#   let q = P.LeafT;       q.  → 实例字段 d
+#   inlayHint：P / q 都要标 `: type`
+#   definition：`P.LeafT` / `r.top.MidT.LeafT.mk` 落到 chain3.zx 的声明
+CHAINLIB = """pub const ChainLeaf = struct {
+    pub d: i32,
+    pub const cmk = fn (v: i32) i32 { return v; };
+};
+
+pub const ChainMid = struct {
+    pub b: i32,
+    pub const LeafT = ChainLeaf;
+    pub const cf2 = fn () i32 { return 2; };
+};
+
+pub const ChainTop = struct {
+    pub a: i32,
+    pub const MidT = ChainMid;
+    pub const cf1 = fn () i32 { return 1; };
+};
+
+pub const ChainRoot = struct {
+    pub top: ChainTop,
+    pub const chainMake = fn () ChainRoot {
+        return ChainRoot{ .top = ChainTop{ .a = 0 } };
+    };
+};
+"""
+open(os.path.join(SRC_DIR, "chain3.zx"), "w", encoding="utf-8").write(CHAINLIB)
+CHAINUSE = """const c = module("chain3");
+
+pub const main = fn () u8 {
+    let r = c.ChainRoot.chainMake();
+    r.
+    r.top.
+    r.top.MidT.
+    const P = r.top.MidT;
+    P.
+    let q = P.LeafT;
+    q.
+    let v = P.LeafT{ .d = 3 };
+    v.
+    _ = r.top.MidT.LeafT.cmk(1);
+    _ = v.d;
+    return 0;
+};
+"""
+chainuri = "file:///" + os.path.join(SRC_DIR, "chainuse.zx").replace("\\", "/")
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": chainuri, "languageId": "zx", "version": 1, "text": CHAINUSE}}})
+_rid = 960
+for _recv, _want, _tag in (
+        ("r.", {"top"}, "instChain.l1Field"),
+        ("r.top.", {"MidT", "cf1"}, "instChain.l2Types"),
+        ("r.top.MidT.", {"LeafT", "cf2"}, "instChain.l3Types"),
+        ("P.", {"LeafT", "cf2"}, "instChain.typeValued"),
+        ("q.", {"cmk"}, "instChain.typeValuedAlias"),
+        ("v.", {"d"}, "instChain.typeValuedInst")):
+    _rid += 1
+    _off = CHAINUSE.index("    %s\n" % _recv) + len("    ") + len(_recv)
+    send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/completion", "params": {
+        "textDocument": {"uri": chainuri}, "position": pos(CHAINUSE, _off)}})
+    _r, _ = recv_id("chain3", _rid)
+    _labs = sorted({i["label"] for i in (_r["result"]["items"] if _r and _r.get("result") else [])})
+    check("completion." + _tag, set(_labs) == _want, str(_labs))
+
+# inlay：`const P = r.top.MidT;` / `let q = P.LeafT;` 都是类型值 → `: type`
+_rid += 1
+send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/inlayHint", "params": {
+    "textDocument": {"uri": chainuri},
+    "range": {"start": {"line": 0, "character": 0},
+              "end": {"line": len(CHAINUSE.split("\n")), "character": 0}}}})
+_r, _ = recv_id("chain3", _rid)
+_ih = {}
+if _r and _r.get("result"):
+    for _h in _r["result"]:
+        _lbl = _h.get("label")
+        if isinstance(_lbl, dict):
+            _parts = _lbl.get("value", "") + "".join(p.get("value", "") for p in _lbl.get("labelParts", []) if isinstance(p, dict))
+        else:
+            _parts = _lbl or ""
+        _ih[_h["position"]["line"]] = _parts
+check("inlayHint.instChain.typeValueP", _ih.get(7) == ": type", str(_ih))
+check("inlayHint.instChain.typeValueQ", _ih.get(9) == ": type", str(_ih))
+
+# definition：类型成员与函数都能跳到 chain3.zx 的真实声明行
+for _tag, _needle in (
+        ("def.typeValueMember", "P.LeafT"),
+        ("def.chainFn", "r.top.MidT.LeafT.cmk"),
+        ("def.chainType", "r.top.MidT.")):
+    _rid += 1
+    # 光标停在最后一段上
+    _last = _needle.rstrip(".").split(".")[-1]
+    _off = CHAINUSE.index(_needle) + _needle.rindex(_last)
+    send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/definition", "params": {
+        "textDocument": {"uri": chainuri}, "position": pos(CHAINUSE, _off)}})
+    _r, _ = recv_id("chain3", _rid)
+    _loc = (_r or {}).get("result") or {}
+    _ok = (isinstance(_loc, dict) and "chain3.zx" in (_loc.get("uri") or "")
+           and _loc.get("range", {}).get("start", {}).get("line") is not None)
+    check("definition." + _tag, _ok, str(_loc)[:200])
+
 cov_lines = ['const std = module("std");', "", "pub const main = fn () u8 {"]
 cov_marks = []
 for _mod, _name, _shape, _factory in cov_types:

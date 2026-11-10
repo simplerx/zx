@@ -1,0 +1,58 @@
+// 实例链上的嵌套类型（用户 2026-11-11 报的 LSP/语义问题）：
+//   `r.p1.Inner.Sub{ … }` / `r.p1.Inner.Sub.mk()` 这些写法里，中间那段
+//   `r.p1.Inner` 是**从实例读出来的类型值**。以前 check_field 只给 TY_TYPE
+//   不给 type_val，第二段就报 `` `<error>` has no member ``；补全那边也只能
+//   读一层。这里把整条链连同别名、标注、方法调用一次钉住。
+const std = module("std");
+
+const Sub = struct {
+    v: i32,
+    const mk = fn (n: i32) Sub { return Sub{ .v = n }; };
+    const twice = fn (self: *const Sub) i32 { return self.v * 2; };
+};
+
+const Inner = struct {
+    tag: i32,
+    const SubT = Sub;
+    const Inline = struct { w: i32 };
+};
+
+const Mid = struct {
+    inner: Inner,
+    const InnerT = Inner;
+};
+
+const Root = struct {
+    p1: Mid,
+};
+
+const main = fn () u8 {
+    let r = Root{ .p1 = Mid{ .inner = Inner{ .tag = 1 } } };
+
+    // 实例 → 类型（一层）：一直是可以的
+    let a = r.p1.InnerT{ .tag = 2 };
+    if (a.tag != 2) { return 1; }
+
+    // 实例 → 类型 → 类型（两层，修的就是这条）
+    let s = r.p1.InnerT.SubT{ .v = 3 };
+    if (s.v != 3) { return 2; }
+
+    // 实例 → 类型 → 类型 → 方法（第三段还能调）
+    if (r.p1.InnerT.SubT.mk(4).v != 4) { return 3; }
+
+    // 实例字段 → 嵌套类型（先走字段再走类型）
+    let s2 = r.p1.inner.SubT{ .v = 5 };
+    if (s2.twice() != 10) { return 4; }
+
+    // 类型值绑到 const 上，再往下走两层
+    const P = r.p1.InnerT.SubT;
+    let s3 = P{ .v = 6 };
+    if (s3.v != 6) { return 5; }
+
+    // 内联 struct 成员（没有名字的嵌套类型）
+    let in = r.p1.InnerT.Inline{ .w = 7 };
+    if (in.w != 7) { return 6; }
+
+    std.println("{} {} {}", s.v, s2.v, s3.v);
+    return 0;
+};
