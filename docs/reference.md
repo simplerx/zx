@@ -1,6 +1,6 @@
 # Zx 语言查阅文档（Reference）
 
-> 版本 1.2.2 · 一份文档看完全部定义和用法。  
+> 版本 1.2.3 · 一份文档看完全部定义和用法。  
 > 语言细则与设计理由在 `spec/zx-spec.md`；错误码逐条解释在 `docs/errors.md`；  
 > 本文是**查阅用**的完整速查：语法、类型、内建、模块、std 全 API、工具链。
 
@@ -239,8 +239,23 @@ switch (v) {
 }
 ```
 
-- **收割**：`label: expr;` 把 `expr` 交给最近一层名为 `label` 的作用域当值；  
-  `label: { … }` 给块起标签，`continue label` 跳出。块不收割时值为 `{}`（void）。
+- **收割**：`label: expr;` 把 `expr` 交给最近一层名为 `label` 的作用域当值，并**立即离开**该作用域；
+  `label: { … }` 给块起标签，`continue label` 跳过本轮。块不收割时值为 `{}`（void）。
+- **收割是循环的正常出口**：恒真循环里收割自己的标签（`n: {}` 空收割 / `n: v;` 带值）会跳出循环，
+  循环后面的语句可达——这是 `while (true)` 加收尾代码的唯一写法（1.2.3 起不再误报 E0502）：
+
+  ```zx
+  var hits: i32 = 0;
+  var total: i32 = 0;
+  n: while (true) {
+      hits = hits + 1;
+      if (hits == 3) { n:{}; }          // 空收割跳出
+  }
+  var got = m: while (true) {
+      total = total + 1;
+      if (total == 5) { m: total; }     // 带值收割：循环的值就是它
+  };
+  ```
 - **defer**：离开当前作用域时倒序执行；**errdefer** 只在以错误返回时执行。
 - `switch` 臂是 `模式: 体`，同一 subject 的臂必须构成完整划分（E0504）。
 

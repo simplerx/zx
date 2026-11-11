@@ -3242,6 +3242,43 @@ check("completion.atOthers.plain",
       _ats.get("memcpy", {}).get("insertTextFormat") is None,
       str(_ats.get("memcpy"))[:200])
 
+# ---------------------------------------------------------------------------
+# 保存自动格式化（textDocument/formatting）。用户 2026-11-11："保存没有
+# 格式化的功能了"。根因：formatDoc 的影子文件被 hideFile 标了 HIDDEN，
+# Windows 对已有 HIDDEN 属性的文件 fopen(...,"wb") 重写直接 ACCESS_DENIED，
+# zxc fmt 静默写失败 → 读回原样 → 空编辑。守门：格式化必须真的给出缩进
+# 修正的 TextEdit（不是 []），且文档没有被格式化污染（影子用完即删）。
+FMTDOC = 'const std = module("std");\n\nconst main = fn () i32 {\n        return 0;\n      };\n'
+fmturi = "file:///" + os.path.join(SRC_DIR, "fmttest.zx").replace("\\", "/")
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": fmturi, "languageId": "zx", "version": 1, "text": FMTDOC}}})
+_rid += 1
+send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/formatting", "params": {
+    "textDocument": {"uri": fmturi},
+    "options": {"tabSize": 4, "insertSpaces": True}}})
+_r, _ = recv_id("formatting", _rid)
+_fres = (_r or {}).get("result") or []
+_ftext = _fres[0].get("newText", "") if isinstance(_fres, list) and _fres else ""
+check("formatting.indentFix",
+      "    return 0;\n" in _ftext and "        return 0" not in _ftext
+      and _ftext.endswith("};\n"),
+      str(_fres)[:200])
+# 影子（.zxls- / .zxls-f 前缀）用完即删。断言前先清掉历史跑留下的旧影子
+#（delete 与 zxc 子进程持句柄竞速失败会留下永久垃圾），再只看这次新增的。
+import glob as _glob, time as _time
+for _old in _glob.glob(os.path.join(SRC_DIR, ".zxls-*")):
+    try:
+        os.remove(_old)
+    except OSError:
+        pass
+_left = None
+for _ in range(10):
+    _left = _glob.glob(os.path.join(SRC_DIR, ".zxls-*"))
+    if not _left:
+        break
+    _time.sleep(0.5)
+check("formatting.shadowCleaned", not _left, str(_left))
+
 # 9 shutdown/exit
 send({"jsonrpc": "2.0", "id": 8, "method": "shutdown", "params": None})
 recv_id("shutdown", 8)

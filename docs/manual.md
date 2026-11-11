@@ -191,6 +191,9 @@ inline for (0..info.fieldCount) i {
 
 - `defer` 离开作用域倒序执行；`errdefer` 只在以错误返回时执行（函数须返回 `!T`）。
 - `continue` 有；**`break` 没有**——多层退出用 `continue label` 或收割。
+- **收割退出恒真循环**：`n: while(true) { …; n:{}; }` 里的空收割是正常出口，循环后面
+  的代码可达；带值收割 `var got = m: while(true) { …; m: x; };` 让循环交出值。不带标签的
+  `while (true)` 永远退不出来（后面报 E0502 unreachable）。
 - `for` 的循环变量是 `usize`：和别的宽度混算要显式 `(T)i`。
 - `inline for` 的体里可以给外面的局部 `var` 赋值（`off = off + d.fields[i].offset;`）。
 
@@ -373,8 +376,9 @@ zxc init myproj            # 生成工程骨架
 | switch 臂报语法错 | 值体臂要分号 | `.red: "r";` |
 | enum 变体传参报错 | 不吃 `.blue` 糖 | 写全名 `Color.blue` |
 | union 读不出成员 | plain union 无标签 | `union(enum)` + `.tag` 分派 |
+| 恒真循环后全报 unreachable | 体里没有收割循环标签，退不出来 | 体里加 `n:{};` / `n:v;` 收割 |
 
 ---
 
-*本文按 Zx 1.2 实现逐片段实测写成；语言演进以编译器行为为准，
+*本文按 Zx 1.2.3 实现逐片段实测写成；语言演进以编译器行为为准，
 API 细节以 `std/` 源码与 `docs/reference.md` 为准。*

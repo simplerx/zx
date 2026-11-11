@@ -7825,7 +7825,12 @@ fn formatDoc(doc: *const Document) ?[]const u8 {
     shadow.print(gpa, "{x}", .{h}) catch return null;
     shadow.appendSlice(gpa, ".zx") catch return null;
     Io.Dir.cwd().writeFile(g_io, .{ .sub_path = shadow.items, .data = doc.text }) catch return null;
-    hideFile(shadow.items);
+    // 注意：这条影子**不能** hideFile——zxc fmt 要对它 fopen(...,"wb") 原地
+    // 重写，Windows 对已有 HIDDEN 属性的文件 CREATE_ALWAYS 直接
+    // ACCESS_DENIED（诊断影子只被子进程读、读不受影响，所以那边可以藏）。
+    // 隐藏了 fmt 就静默写失败 → 读回原样 → 保存自动格式化整个哑掉
+    // （用户 2026-11-11："保存没有格式化的功能了"）。点前缀 + 用完即删，
+    // 且 .zxls- 前缀已被目录枚举过滤，不设隐藏也几乎不闪。
     defer Io.Dir.cwd().deleteFile(g_io, shadow.items) catch {};
 
     // fmt 是子命令：`zxc fmt <file>`。以前拼成 `zxc <file> fmt`，"fmt" 被
