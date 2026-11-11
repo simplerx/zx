@@ -3302,9 +3302,9 @@ check("formatting.literalGroupRec",
       and "    },\n" in _tltext
       and "    );\n" in _tltext,
       str(_tlres)[:400])
-# 手工多行区域归一成规范树（19:xx"树状铺开"）：区域内有尾逗号就整组归一，
-# 调用层没写尾逗号也跟着拆（任一参数多行，整层拆，zig-fmt 同款），
-# 缺的尾逗号由 fmt 补齐；拆行不许丢内容（曾复现丢实参 bug）。
+# 手工多行区域归一（zig-fmt 口径）：闭括号前有尾逗号的组一行一项树状展开；
+# 根组没尾逗号 → 保持单行（内层带尾逗号的 .{…} 照常展开），**不补逗号**
+# （旧口径"缺的尾逗号由 fmt 补齐"已废）。拆行不许丢内容（曾复现丢实参 bug）。
 MLTDOC = ('const main = fn () i32 {\n'
           '    _ = pa(10, .{\n'
           '        .name = "weo",\n'
@@ -3324,16 +3324,52 @@ _r, _ = recv_id("mlformat", _rid)
 _mlres = (_r or {}).get("result") or []
 _mltext = _mlres[0].get("newText", "") if isinstance(_mlres, list) and _mlres else ""
 check("formatting.multilineTree",
-      "    _ = pa(\n" in _mltext
-      and "        10,\n" in _mltext
-      and "        .{\n" in _mltext
-      and '            .name = "weo",\n' in _mltext
-      and "                .b = 1,\n" in _mltext
-      and "                .data = .{.b = 120},\n" in _mltext
+      "    _ = pa(10, .{\n" in _mltext
+      and '        .name = "weo",\n' in _mltext
+      and "        .data = .{\n" in _mltext
+      and "            .b = 1,\n" in _mltext
+      and "            .data = .{.b = 120},\n" in _mltext
       and "        },\n" in _mltext
-      and "    );\n" in _mltext
+      and "    });\n" in _mltext
+      and "        10,\n" not in _mltext
       and _mltext.count("weo") == 1 and _mltext.count("120") == 1,
       str(_mlres)[:400])
+# 无尾逗号 → 整块收一行（用户截图场景：删掉尾逗号要回到一行；不补逗号）。
+CPLDOC = ('const main = fn () i32 {\n'
+          '    _ = pb(1,\n'
+          '        2,\n'
+          '        3\n'
+          '    );\n'
+          '    return 0;\n'
+          '};\n')
+cpuri = "file:///" + os.path.join(SRC_DIR, "cptest.zx").replace("\\", "/")
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": cpuri, "languageId": "zx", "version": 1, "text": CPLDOC}}})
+_rid += 1
+send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/formatting", "params": {
+    "textDocument": {"uri": cpuri},
+    "options": {"tabSize": 4, "insertSpaces": True}}})
+_r, _ = recv_id("cpformat", _rid)
+_cpres = (_r or {}).get("result") or []
+_cptext = _cpres[0].get("newText", "") if isinstance(_cpres, list) and _cpres else ""
+check("formatting.collapseNoTc",
+      "    _ = pb(1, 2, 3);\n" in _cptext,
+      str(_cpres)[:300])
+# struct/enum/union 类型体没尾逗号：容器体不收拢、不拆（保持原样）。
+TYDOC = 'const P = struct{\n        a: i32,\n    b: i32\n};\n'
+tyuri = "file:///" + os.path.join(SRC_DIR, "tytest.zx").replace("\\", "/")
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": tyuri, "languageId": "zx", "version": 1, "text": TYDOC}}})
+_rid += 1
+send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/formatting", "params": {
+    "textDocument": {"uri": tyuri},
+    "options": {"tabSize": 4, "insertSpaces": True}}})
+_r, _ = recv_id("tyformat", _rid)
+_tyres = (_r or {}).get("result") or []
+_tytext = _tyres[0].get("newText", "") if isinstance(_tyres, list) and _tyres else ""
+check("formatting.tybodyKeep",
+      "const P = struct{\n    a: i32,\n    b: i32\n};" in _tytext,
+      str(_tyres)[:300])
 # 影子（.zxls- / .zxls-f 前缀）用完即删。断言前先清掉历史跑留下的旧影子
 #（delete 与 zxc 子进程持句柄竞速失败会留下永久垃圾），再只看这次新增的。
 import glob as _glob, time as _time

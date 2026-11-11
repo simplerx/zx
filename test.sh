@@ -146,23 +146,63 @@ if ( cd "$pdir/tc" && "$ZXCW" src/main.zx --check > "$TPFX.tc.chk" 2>&1 ); then
 else
     printf "  FAIL 尾逗号列表解析失败\n"; cat "$TPFX.tc.chk"; fail=1
 fi
-# 手工多行区域归一成规范树（用户 2026-11-11"像文件树一样竖直铺开"）：
-# 区域内有尾逗号就整组归一，缺的尾逗号由 fmt 补齐；fmt 产物必须可编译
-# （内容保全——曾复现过拆行丢实参的 bug，编译检查就是守门）。
+# 手工多行区域归一（zig-fmt 口径）：闭括号前有尾逗号的组一行一项树状展开；
+# 根组没尾逗号保持单行（内层带尾逗号的 .{…} 照常展开）——**不补逗号**；
+# fmt 产物必须可编译（内容保全——曾复现过拆行丢实参的 bug，编译检查就是守门）。
 printf 'const pa = fn (v: i32, info: struct{name: []const u8, data: struct{b: i32, i: i32, data: struct{b: i32}}}) i32 { _ = info; return v; };\n\nconst main = fn () i32 {\n    _ = pa(10, .{\n        .name = "weo",\n        .data = .{\n            .b = 1, .i = 0, .data = .{.b = 120},\n        }, } );\n    return 0;\n};\n' > "$pdir/tc/src/ml.zx"
 if ( cd "$pdir/tc" && "$ZXCW" fmt src/ml.zx > "$TPFX.tc.mlf" 2>&1 ) \
-   && grep -q "^    _ = pa($" "$pdir/tc/src/ml.zx" \
-   && grep -q "^        10,$" "$pdir/tc/src/ml.zx" \
-   && grep -q "^        .{$" "$pdir/tc/src/ml.zx" \
-   && grep -q "^            .name = \"weo\",$" "$pdir/tc/src/ml.zx" \
-   && grep -q "^                .b = 1,$" "$pdir/tc/src/ml.zx" \
-   && grep -q "^                .data = .{.b = 120},$" "$pdir/tc/src/ml.zx" \
-   && grep -q "^            }," "$pdir/tc/src/ml.zx" \
-   && grep -q "^    );$" "$pdir/tc/src/ml.zx" \
+   && grep -qxF '    _ = pa(10, .{' "$pdir/tc/src/ml.zx" \
+   && grep -qxF '        .name = "weo",' "$pdir/tc/src/ml.zx" \
+   && grep -qxF '        .data = .{' "$pdir/tc/src/ml.zx" \
+   && grep -qxF '            .b = 1,' "$pdir/tc/src/ml.zx" \
+   && grep -qxF '            .data = .{.b = 120},' "$pdir/tc/src/ml.zx" \
+   && grep -qxF '        },' "$pdir/tc/src/ml.zx" \
+   && grep -qxF '    });' "$pdir/tc/src/ml.zx" \
+   && cp "$pdir/tc/src/ml.zx" "$TPFX.tc.ml1" \
+   && ( cd "$pdir/tc" && "$ZXCW" fmt src/ml.zx > /dev/null 2>&1 ) \
+   && cmp -s "$pdir/tc/src/ml.zx" "$TPFX.tc.ml1" \
    && ( cd "$pdir/tc" && "$ZXCW" src/ml.zx --check > /dev/null 2>&1 ); then
-    printf "  ok   手工多行归一成树 + 产物可编译\n"
+    printf "  ok   手工多行归一（尾逗号树）+ 不补逗号 + 幂等 + 产物可编译\n"
 else
-    printf "  FAIL 手工多行归一成树\n"; cat "$TPFX.tc.mlf" 2>/dev/null; fail=1
+    printf "  FAIL 手工多行归一\n"; cat "$TPFX.tc.mlf" 2>/dev/null; fail=1
+fi
+# 无尾逗号 → 整块收一行（用户截图场景：删掉尾逗号要回到一行），不补逗号，
+# 幂等，产物可编译。
+printf 'const pb = fn (a: i32, b: i32, c: i32) i32 { return a + b + c; };\n\nconst main = fn () i32 {\n    _ = pb(1,\n        2,\n        3\n    );\n    return 0;\n};\n' > "$pdir/tc/src/cl.zx"
+if ( cd "$pdir/tc" && "$ZXCW" fmt src/cl.zx > "$TPFX.tc.clf" 2>&1 ) \
+   && grep -qxF '    _ = pb(1, 2, 3);' "$pdir/tc/src/cl.zx" \
+   && cp "$pdir/tc/src/cl.zx" "$TPFX.tc.cl1" \
+   && ( cd "$pdir/tc" && "$ZXCW" fmt src/cl.zx > /dev/null 2>&1 ) \
+   && cmp -s "$pdir/tc/src/cl.zx" "$TPFX.tc.cl1" \
+   && ( cd "$pdir/tc" && "$ZXCW" src/cl.zx --check > /dev/null 2>&1 ); then
+    printf "  ok   无尾逗号整块收一行 + 幂等 + 产物可编译\n"
+else
+    printf "  FAIL 无尾逗号收拢\n"; cat "$TPFX.tc.clf" 2>/dev/null; fail=1
+fi
+# 缩进口径（zig fmt）：字面量组嵌在调用括号里只比开组行深一级——字段 8 格、
+# 闭行 }); 回到 4 格；同一行连开的组共享一级（曾多缩一级、闭行少退一级）。
+printf 'const Cfg = struct{ width: i32, height: i32 };\n\nconst mk = fn (c: Cfg) i32 { return c.width + c.height; };\n\nconst main = fn () i32 {\n    _ = mk(.{ .width = 800, .height = 600, });\n    return 0;\n};\n' > "$pdir/tc/src/ind.zx"
+if ( cd "$pdir/tc" && "$ZXCW" fmt src/ind.zx > "$TPFX.tc.indf" 2>&1 ) \
+   && grep -qxF '    _ = mk(.{' "$pdir/tc/src/ind.zx" \
+   && grep -qxF '        .width = 800,' "$pdir/tc/src/ind.zx" \
+   && grep -qxF '    });' "$pdir/tc/src/ind.zx" \
+   && cp "$pdir/tc/src/ind.zx" "$TPFX.tc.ind1" \
+   && ( cd "$pdir/tc" && "$ZXCW" fmt src/ind.zx > /dev/null 2>&1 ) \
+   && cmp -s "$pdir/tc/src/ind.zx" "$TPFX.tc.ind1" \
+   && ( cd "$pdir/tc" && "$ZXCW" src/ind.zx --check > /dev/null 2>&1 ); then
+    printf "  ok   嵌套字面量组缩进（字段 +1 级 / 闭行回语句层）+ 幂等\n"
+else
+    printf "  FAIL 嵌套字面量组缩进\n"; cat "$TPFX.tc.indf" 2>/dev/null; fail=1
+fi
+# 收拢后会超 100 列就原样保留（手工折行的长表达式不该被并成一条长行）。
+printf 'const f = fn (a: u64, b: u64, c: u64, d: u64, e: u64, g: u64) u64 { return a + b + c + d + e + g; };\n\nconst main = fn () i32 {\n    _ = f(111111111111111,\n          222222222222222,\n          333333333333333,\n          444444444444444,\n          555555555555555,\n          666666666666666);\n    return 0;\n};\n' > "$pdir/tc/src/wd.zx"
+if ( cd "$pdir/tc" && "$ZXCW" fmt src/wd.zx > "$TPFX.tc.wdf" 2>&1 ) \
+   && ! grep -q '111111111111111, 222222222222222' "$pdir/tc/src/wd.zx" \
+   && grep -qxF '    _ = f(111111111111111,' "$pdir/tc/src/wd.zx" \
+   && ( cd "$pdir/tc" && "$ZXCW" src/wd.zx --check > /dev/null 2>&1 ); then
+    printf "  ok   收拢超宽原样保留（不产长行）\n"
+else
+    printf "  FAIL 超宽收拢保护\n"; cat "$TPFX.tc.wdf" 2>/dev/null; fail=1
 fi
 if ( cd "$pdir/tc" && "$ZXCW" fmt src/main.zx > "$TPFX.tc.fmt" 2>&1 ) \
    && grep -q "^const add = fn ($" "$pdir/tc/src/main.zx" \
