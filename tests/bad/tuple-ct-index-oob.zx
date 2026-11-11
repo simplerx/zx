@@ -1,0 +1,6 @@
+// expect: tuple index 7 is out of range
+// tup[N] 的 N 是编译期值，越界在编译期就报，不等运行时 trap。
+const main = fn () void {
+    const t = {1, 2, 3};
+    let x = t[7];
+};

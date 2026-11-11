@@ -66,8 +66,6 @@ const drain = fn (it: *Iter) i32 {
     var total: i32 = 0;
     while (next(it)) v {                    // 每轮重新求值，有值就绑定 v
         total = total + v;
-    } else {                                // 正常结束（收到 null）时执行
-        std.print("drained\n");
     }
     return total;
 };
@@ -116,22 +114,31 @@ const enumNames = fn () void {
 
 // ---------- 收割带值 + continue ----------
 const firstBig = fn (xs: []const i32) i32 {
-    return found: for (xs) x {
+    // 循环没有 else 分支（E0405）：收割值改用 var 接，命中即停（没有 break）
+    var hit: i32 = 0;
+    var found = false;
+    for (xs) x {
+        if (found) { continue; }
         if (x <= 100) { continue; }         // 下一轮
-        found: x;                           // 收割：离开 for，值就是 x
-    } else 0;                               // 只有"正常跑完、没收割"才取这里
+        hit = x;                            // 第一个 >100 的
+        found = true;
+    }
+    return hit;
 };
 
 // ---------- 标签：一次跳出多层 ----------
 // 扁平存储 + 手算下标（数组没有"二维值类型"，见 §3.2）
 const findZero = fn (m: *const [9]i32) ?{usize, usize} {
-    return outer: for (0..3) i {
+    // 循环没有 else 分支（E0405）：兜底用 var
+    var hit: ?{usize, usize} = null;
+    for (0..3) i {
         for (0..3) j {
             if (m[i * 3 + j] == 0) {
-                outer: {i, j};             // 收割：一次跳出两层，值是下标元组
+                hit = .{ i, j };           // 找到零：记录下标元组
             }
         }
-    } else null;                           // 正常跑完：没找到
+    }
+    return hit;                            // 没找到就是 null
 };
 
 // 标签也能给普通块：块算值 + 中途退出
@@ -173,10 +180,13 @@ const countEven = fn (xs: []const i32) usize {
 };
 
 // 无标签的循环不能被提前离开；要 break 的语义，就加标签再收割
+// （循环没有 else 分支——E0405：兜底值用 var）
 const anyNegative = fn (xs: []const i32) bool {
-    return has: for (xs) x {
-        if (x < 0) { has: true; }           // 收割：提前离开，值 true
-    } else false;                            // 正常跑完：没有负数
+    var neg = false;
+    for (xs) x {
+        if (x < 0) { neg = true; }          // 有负数
+    }
+    return neg;
 };
 
 // ---------- defer：离开作用域时执行，后进先出 ----------

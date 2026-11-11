@@ -5488,6 +5488,10 @@ static void gen_value(Node *n, const char *slot, Type *slot_ty) {
         }
         gen_loop_value(n, slot, slot_ty); return;
     case NK_SWITCH:  gen_switch(n, slot, slot_ty); return;
+    case NK_YIELD:
+        /* 裸收割臂落到值语境：gen_stmt 的 yield 分支负责 lab_find、
+         * 写标签的 slot、run_defers、goto Lend——当表达式发只会是 0。 */
+        gen_stmt(n); return;
     default:
         if (slot) line("%s = %s;", slot, cxs(n, slot_ty));
         else      line("%s;", exs(n));
@@ -5519,9 +5523,12 @@ static void gen_arm(Node *arm, const char *slot, Type *slot_ty) {
             gen_block_stmts(arm);
         }
     } else if (slot) {
-        /* 臂本身是控制流（`else if (…)` 就是这种形状）：值由内层的
-         * gen_value 写进 slot，不能当成普通表达式 `slot = <expr>` 发。 */
-        if (is_ctl(arm)) gen_value(arm, slot, slot_ty);
+        /* 臂本身是控制流（`else if (…)` 就是这种形状）或裸收割
+         * （`n: 210;`——zxfe 解析成 NK_YIELD）：值由 gen_value / gen_stmt
+         * 写进 slot，不能当成普通表达式 `slot = <expr>` 发——NK_YIELD
+         * 被当表达式只会发成 `slot = 0`，值和 goto 全丢，生成"能跑、
+         * 答案错"的程序。 */
+        if (is_ctl(arm) || arm->kind == NK_YIELD) gen_value(arm, slot, slot_ty);
         else             line("%s = %s;", slot, cxs(arm, slot_ty));
     } else {
         gen_stmt(arm);

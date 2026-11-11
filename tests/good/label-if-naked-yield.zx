@@ -1,0 +1,16 @@
+// 裸收割臂 `n: 210;`（zxfe 解析成 NK_YIELD）的值必须真的写进 slot。
+// 曾发成 `slot = 0`——值和 goto 全丢，程序能跑但答案错。
+const std = module("std");
+const main = fn () u8 {
+    var i = n: if(true) n:210; else n:11;;
+    std.println("{}", i == 210);
+    var t = true;
+    var j = n: if(t) n:210; else n:11;;
+    std.println("{}", j == 210);
+    var f = false;
+    var k = n: if(f) n:210; else n:11;;
+    std.println("{}", k == 11);
+    var a = if(true) blk: { blk: 210; } else 11;
+    std.println("{}", a == 210);
+    return 0;
+};

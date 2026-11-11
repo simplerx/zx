@@ -1,11 +1,16 @@
-// 标签收割：一次跳出多层、循环 else 的值、continue 继续
+// 标签收割：一次跳出多层、continue 继续（循环没有 else 分支——E0405）
 const std = module("std");
 
 const firstBig = fn (xs: []const i32) i32 {
-    return found: for (xs) x {
+    var hit: i32 = 0;
+    var found = false;
+    for (xs) x {
+        if (found) { continue; }        // 已命中：跳过（没有 break）
         if (x <= 100) { continue; }
-        found: x;
-    } else 0;
+        hit = x;
+        found = true;
+    }
+    return hit;
 };
 
 const countEven = fn (xs: []const i32) usize {

@@ -2449,46 +2449,48 @@ static void setup_search_paths_for_file(const char *file) {
     if (!last) return;
     *last = 0;
 
+    /* 工程根不唯一也不重要：沿向上路径把**每一层**的 vendor/ 都收进搜索
+     * 列表（近→远），zx.json 命中层再读它的 deps。module("name") 依次
+     * 尝试：源文件目录 → 各层 vendor/ → deps。嵌套工程、测试影子目录
+     * 都不会抢根——搜索路径本来就是一个列表，不需要"唯一的根"。 */
     char root[1024];
     root[0] = 0;
+    int n = 0;
+    char zx[1060];
     for (int up = 0; up < 32 && dir[0]; up++) {
-        char zx[1060];
+        snprintf(zx, sizeof zx, "%s/vendor", dir);
+        if (fexists(zx) && n < 47) {
+            snprintf(g_search_abs[n], sizeof g_search_abs[n], "%s", zx);
+            g_search[n++] = g_search_abs[n];
+        }
         snprintf(zx, sizeof zx, "%s/zx.json", dir);
-        if (fexists(zx)) { snprintf(root, sizeof root, "%s", dir); break; }
+        if (fexists(zx) && !root[0]) snprintf(root, sizeof root, "%s", dir);
         char *cut = strrchr(dir, '/');
         if (!cut || cut == dir) break;
         if (cut - dir == 2 && dir[1] == ':') break;   /* E:/ 已到盘符根 */
         *cut = 0;
     }
-    if (!root[0]) return;
-
-    int n = 0;
-    char zx[1060];
-    snprintf(zx, sizeof zx, "%s/vendor", root);
-    if (fexists(zx) && n < 47) {
-        snprintf(g_search_abs[n], sizeof g_search_abs[n], "%s", zx);
-        g_search[n] = g_search_abs[n];
-        n++;
-    }
-    snprintf(zx, sizeof zx, "%s/zx.json", root);
-    FILE *f = fopen(zx, "rb");
-    if (f) {
-        char text[8192];
-        size_t len = fread(text, 1, sizeof text - 1, f);
-        fclose(f);
-        text[len] = 0;
-        char *deps[16];
-        int nd = json_get_str_array(text, "deps", deps, 16);
-        for (int i = 0; i < nd && n < 47; i++) {
-            char d[1024];
-            if (path_is_abs_c(deps[i])) snprintf(d, sizeof d, "%s", deps[i]);
-            else snprintf(d, sizeof d, "%s/%s", root, deps[i]);
-            if (fexists(d)) {
-                snprintf(g_search_abs[n], sizeof g_search_abs[n], "%s", d);
-                g_search[n] = g_search_abs[n];
-                n++;
+    if (root[0]) {
+        snprintf(zx, sizeof zx, "%s/zx.json", root);
+        FILE *f = fopen(zx, "rb");
+        if (f) {
+            char text[8192];
+            size_t len = fread(text, 1, sizeof text - 1, f);
+            fclose(f);
+            text[len] = 0;
+            char *deps[16];
+            int nd = json_get_str_array(text, "deps", deps, 16);
+            for (int i = 0; i < nd && n < 47; i++) {
+                char d[1024];
+                if (path_is_abs_c(deps[i])) snprintf(d, sizeof d, "%s", deps[i]);
+                else snprintf(d, sizeof d, "%s/%s", root, deps[i]);
+                if (fexists(d)) {
+                    snprintf(g_search_abs[n], sizeof g_search_abs[n], "%s", d);
+                    g_search[n] = g_search_abs[n];
+                    n++;
+                }
+                free(deps[i]);
             }
-            free(deps[i]);
         }
     }
     g_search[n] = NULL;

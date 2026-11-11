@@ -80,7 +80,8 @@ static const ErrDoc g_errs[] = {
       "add `pub` in the declaring module; `extern` and friends live at file scope only" },
     { "E0405", "control-flow statement in the wrong place",
       "`continue` belongs in a loop, `return` in a function, no `return` inside "
-      "`defer`, and `errdefer` only in a function that returns `!T`" },
+      "`defer`, and `errdefer` only in a function that returns `!T`; loops have "
+      "no `else` branch -- write that code after the loop" },
     { "E0410", "unused local variable, parameter or binding",
       "rename unused ones to `_x` or `_`; otherwise delete them until needed" },
     { "E0411", "return value discarded without `_`",

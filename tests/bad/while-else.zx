@@ -1,0 +1,9 @@
+// expect: `while` does not take an `else` branch
+// 同 for-else：while 也不收 else 分支。
+const std = module("std");
+const main = fn () u8 {
+    var n: u32 = 0;
+    while (n < 3) { n = n + 1; } else { n = n + 100; }
+    std.println("{}", n);
+    return 0;
+};

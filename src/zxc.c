@@ -64,6 +64,7 @@ static const DiagRule g_rules[] = {
     { "exhaustive",                       "E0504" },
 
     /* 控制流位置：continue/return/defer 放错地方，标签找不到 */
+    { "does not take an `else` branch",   "E0405" },
     { "outside a loop",                   "E0405" },
     { "outside a function",               "E0405" },
     /* errdefer 放错函数：消息里带 "found `T`"，不先命中就会落到

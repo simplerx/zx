@@ -157,6 +157,9 @@ const main = fn () u8 {
 - 字面量 `T{ .f = v }` 编译期检查完整性；匿名结构 `.{ .x = 1 }` 靠期望类型定型。
 - `switch` 臂是 `模式: 体;`，整数/枚举必须完整划分（不完整报 E0504）。
 - plain `union` 读错成员是未定义行为，一律用 `union(enum)` + `.tag` 分派。
+- 元组访问：`t.0` 与 `t[0]` 等价；`tup[N]` 的 **N 必须是编译期值**
+  （元组是异构的，运行时下标给不出单一返回类型，E0501）——遍历配
+  `inline for`，越界编译期就报。
 
 ---
 
@@ -173,7 +176,7 @@ let grade = if (score >= 60) blk: {
 if (opt) v { use(v); } else { … }
 if (result) v { use(v); } else { … }
 
-// 循环：没有 break，条件不满足自然结束；空范围走 else
+// 循环：没有 break，条件不满足自然结束；也没有 else 分支（E0405）
 for (0..n) i { … }
 for (xs) x { … }                 // 遍历切片
 for (xs, 0..) x, i { … }         // 带下标

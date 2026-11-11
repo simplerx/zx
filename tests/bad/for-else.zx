@@ -1,0 +1,10 @@
+// expect: `for` does not take an `else` branch
+// 循环没有 else：zxfe 解析层曾把 else 块静默收进 n->c（后端从不发射，
+// 等于死代码）。语言裁定禁止——收尾逻辑写在循环后面。
+const main = fn () u8 {
+    var n: u32 = 0;
+    for (0..3) i { n = n + (u32)i; } else { n = n + 100; }
+    std.println("{}", n);
+    return 0;
+};
+const std = module("std");

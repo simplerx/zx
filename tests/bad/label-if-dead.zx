@@ -1,0 +1,9 @@
+// expect: never harvested
+// 前导标签的 `if` 没有任何臂对它收割：标签是死的，表达式没有值。
+// 以前静默推成 void，var x = … 拿到 void 绑定，后端生成的代码全是垃圾。
+const std = module("std");
+const main = fn () u8 {
+    var i = n: if(true) n: { n: 210; } else { 11; };
+    std.println("{}", i);
+    return 0;
+};

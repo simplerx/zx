@@ -3119,8 +3119,27 @@ static Type *check_index(Node *n) {
     }
     if (bt->kind == TY_PTR) return type_of(n, bt->elem);
     if (bt->kind == TY_SLICE) return type_of(n, bt->elem);
-    if (bt->kind == TY_TUPLE)
-        return BAD(n, "tuple has no runtime index; use .N with a compile-time number");
+    if (bt->kind == TY_TUPLE) {
+        /* tup[N]：N 必须是编译期值。元组是异构的——第 i 个元素和第 i+1 个
+         * 类型不同，运行时索引给不出单一返回类型，所以不做成运行时下标。
+         * 折值成功就地改写成 t.N（NK_FIELD，name=NULL+ival），与 .N 共用
+         * 同一条 field 链路；遍历配 inline for（循环变量是编译期绑定）。 */
+        Value *iv = n->b->ct ? n->b->ct : ct_eval_probe(n->b);
+        if (iv && iv->kind == V_INT && !iv->neg) {
+            uint64_t x = val_i64(iv);
+            if (x >= (uint64_t)bt->nfields)
+                return BAD(n->b, "tuple index %llu is out of range (len %d)",
+                           (unsigned long long)x, bt->nfields);
+            n->kind = NK_FIELD;
+            n->name = NULL;
+            n->ival = x;
+            n->b = NULL;
+            return type_of(n, bt->fields[x].ty);
+        }
+        return BAD(n->b, "tuple index must be a compile-time value; tuples are " 
+                    "heterogeneous, so runtime indexing cannot type-check -- "
+                    "use .N or `inline for` with a constant");
+    }
     return BAD(n, "`%s` cannot be indexed", ty_str(bt));
 }
 
@@ -5405,7 +5424,16 @@ static Type *check_if(Node *n, Type *expect) {
     }
 
     Type *r;
-    if (lb)                        r = lb->has ? lb->ty : ty_void();
+    if (lb) {
+        /* 前导标签的 `if` 没有任何臂对它收割（`lbl: value;`）：标签是死的，
+         * 表达式也没有值——以前会静默推成 void，var x = … 就拿到一个
+         * void 绑定，后端生成的代码全是垃圾。明确报出来。 */
+        if (!lb->has)
+            err_at(n->line, n->col,
+                   "label '%s' on `if` is never harvested; write `lbl: { lbl: value; }` "
+                   "inside an arm or drop the label", n->label ? n->label : "?");
+        r = lb->has ? lb->ty : ty_void();
+    }
     else if (known)                r = cv->bval ? tt : (et ? et : ty_void());
     else if (et)                   r = unify(n, tt, et);
     /* 没有 `else` 的 `if` 也能当值：条件为假时没有臂执行，值就是零值
@@ -5437,6 +5465,15 @@ static Type *check_while(Node *n, Type *expect) {
         }
         check_block(n->b);
         scope_pop(&sc);
+    }
+
+    /* `else` 是 zxfe 前端的历史残留：解析层收进 n->c，后端从不发射，
+     * 等于一句永远不跑的死代码。语言裁定：循环没有 else——收尾逻辑写在
+     * 循环后面；想区分"跑没跑过"用计数或标志位。 */
+    if (n->c) {
+        err_at(n->c->line, n->c->col,
+               "`while` does not take an `else` branch; write that code after the loop");
+        n->c = NULL;
     }
 
     Type *et = n->c ? check_arm(n->c, expect) : NULL;
@@ -5647,6 +5684,12 @@ static Type *check_for(Node *n, Type *expect) {
         }
         check_block(n->b);
         scope_pop(&sc);
+    }
+
+    if (n->c) {
+        err_at(n->c->line, n->c->col,
+               "`for` does not take an `else` branch; write that code after the loop");
+        n->c = NULL;
     }
 
     Type *et = n->c ? check_arm(n->c, expect) : NULL;
@@ -6722,7 +6765,11 @@ static Value *ct_eval(Node *n) {
          * 存储，值就是编译期常量，检查阶段也必须读得到，否则体里
          * `const k = cap * 2;` 会报 R1（用户 2026-11-11 问的"怎么读取传进来的
          * 泛型值"就是这个）。 */
-        if ((k == SK_VAR || k == SK_PARAM || k == SK_CAPTURE) && g_ct_exec == 0 &&
+        /* SK_LET 与 SK_VAR 同列：let 是运行时绑定，检查期把初始化器值当
+         * 编译期值用是错的（`let i = 5; tup[i]` 曾被折成 tup[5]——运行时
+         * i 可以是任何值）。g_ct_exec>0 是真的在执行编译期代码，那时
+         * let 槽位有真实值，照读。 */
+        if ((k == SK_VAR || k == SK_LET || k == SK_PARAM || k == SK_CAPTURE) && g_ct_exec == 0 &&
             !n->sym->ct_bind) break;
         v = n->sym->ct;
         break;

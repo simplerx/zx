@@ -14,13 +14,15 @@ const delayed = calc: {
     calc: base;
 };
 
-// 3. 标签收割：一次跳出两层
+// 3. 嵌套循环找零（循环没有 else 分支——E0405；兜底用 var）
 const findZero = fn (m: *const [9]i32) ?{usize, usize} {
-    return outer: for (0..3) i {
+    var hit: ?{usize, usize} = null;
+    for (0..3) i {
         for (0..3) j {
-            if (m[i * 3 + j] == 0) { outer: {i, j}; }
+            if (m[i * 3 + j] == 0) { hit = .{ i, j }; }
         }
-    } else null;
+    }
+    return hit;
 };
 
 // 4. 表达式臂是糖

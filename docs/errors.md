@@ -268,9 +268,19 @@ let c: Color = undefined;      // E0401 —— help 会说 `did you mean \`Colou
 <a id="e0405"></a>
 ### E0405 控制流语句放错位置
 
-**典型消息**：`'continue' outside a loop`、`'return' outside a function`、`inside \`defer\``
+**典型消息**：`'continue' outside a loop`、`'return' outside a function`、`inside \`defer\``、
+`` `for` does not take an `else` branch ``
 
 `defer` 块里不能 `return`（它不改变函数出口）。
+
+**循环没有 else 分支**：
+
+```zx
+while (n < 3) { n = n + 1; } else { n = 0; }   // E0405
+for (0..3) i { … } else { … }                 // E0405
+```
+
+收尾逻辑写在循环后面；想区分"循环跑没跑过"用计数或标志位。
 
 <a id="e0410"></a>
 ### E0410 未使用的局部变量、参数或绑定

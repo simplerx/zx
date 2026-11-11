@@ -21,12 +21,13 @@ const main = fn () u8 {
     };
     std.println("hit={}", hit);
 
-    // 带值 while + else
+    // 带值 while 收割（循环没有 else 分支——E0405；空跑兜底用 var）
     var n: usize = 0;
-    const got = count: while (n < 5) {
+    var got: i32 = 0;
+    while (n < 5) {
         n = n + 1;
-        if (n == 3) { count: n * 100; }
-    } else 0;
+        if (n == 3) { got = (i32)(n * 100); }
+    }
     std.println("got={}", got);
 
     // return 穿过两层 defer

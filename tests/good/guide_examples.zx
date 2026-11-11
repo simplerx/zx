@@ -101,11 +101,12 @@ const main = fn () u8 {
     };
     std.println("w={}", w);
 
-    // §7.3 for + else
+    // §7.3 for 的查找（循环没有 else 分支——E0405；兜底用 var）
     let xs = &.{3, 9, 4};
-    const idx = hit: for (xs[0..]) x {
-        if (x == 9) { hit: (i32)1; }
-    } else (i32)0;
+    var idx: i32 = 0;
+    for (xs[0..]) x {
+        if (x == 9) { idx = 1; }
+    }
     std.println("idx={}", idx);
 
     // §8 捕获

@@ -54,9 +54,11 @@ const main = fn () i32 {
     };
 
     // ⑥ for：同上，跳出循环而不是"跳到体末再进下一轮"
-    const f = hit: for (0..8) k {
-        if (k == 3) { hit: (i32)k; }
-    } else -1;
+    // （循环没有 else 分支——E0405；兜底值用 var）
+    var f: i32 = -1;
+    for (0..8) k {
+        if (k == 3) { f = (i32)k; }
+    }
 
     std.println("{} {} {} {}", kind(c), kind(r), measure(c), measure(r));
     std.println("{} {} {} {}", i, j, w, f);

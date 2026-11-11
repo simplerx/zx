@@ -1,5 +1,6 @@
-// expect: tuple has no runtime index
-// 元组是内联值，没有连续存储，只能用编译期下标
+// expect: tuple index must be a compile-time value
+// 元组是异构的：第 i 个和第 i+1 个元素类型不同，运行时下标给不出单一
+// 返回类型，所以 tup[N] 只认编译期值；遍历配 inline for。
 const main = fn () void {
     var t = {1, 2};
     var i: usize = 0;
