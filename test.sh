@@ -204,6 +204,19 @@ if ( cd "$pdir/tc" && "$ZXCW" fmt src/wd.zx > "$TPFX.tc.wdf" 2>&1 ) \
 else
     printf "  FAIL 超宽收拢保护\n"; cat "$TPFX.tc.wdf" 2>/dev/null; fail=1
 fi
+# 宽度保护按"最终缩进"算，不按原始前导空白算：原始 16 格的行 fmt 会归一
+# 到 4 格，按原始算会第一遍"超宽保留"、第二遍"不超宽收拢"来回摆（压测逮住）。
+printf 'const pa = fn (a: i32, b: i32) i32 { return a + b; };\n\nconst main = fn () i32 {\n                _ = pa(1,\n                    2);\n    return 0;\n};\n' > "$pdir/tc/src/wi.zx"
+if ( cd "$pdir/tc" && "$ZXCW" fmt src/wi.zx > "$TPFX.tc.wif" 2>&1 ) \
+   && grep -qxF '    _ = pa(1, 2);' "$pdir/tc/src/wi.zx" \
+   && cp "$pdir/tc/src/wi.zx" "$TPFX.tc.wi1" \
+   && ( cd "$pdir/tc" && "$ZXCW" fmt src/wi.zx > /dev/null 2>&1 ) \
+   && cmp -s "$pdir/tc/src/wi.zx" "$TPFX.tc.wi1" \
+   && ( cd "$pdir/tc" && "$ZXCW" src/wi.zx --check > /dev/null 2>&1 ); then
+    printf "  ok   宽度保护按最终缩进（原始超缩进行收拢后仍幂等）\n"
+else
+    printf "  FAIL 宽度保护不幂等\n"; cat "$TPFX.tc.wif" 2>/dev/null; fail=1
+fi
 if ( cd "$pdir/tc" && "$ZXCW" fmt src/main.zx > "$TPFX.tc.fmt" 2>&1 ) \
    && grep -q "^const add = fn ($" "$pdir/tc/src/main.zx" \
    && grep -q "^    a: i32,$" "$pdir/tc/src/main.zx" \

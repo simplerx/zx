@@ -1560,7 +1560,11 @@ static char *sv_join(StrVec *sv) {
     return buf;
 }
 
-static char **fmt_normalize(char **ls, size_t *out_n) {
+/* inds：每行"归一后"的缩进层（fmt_transform 预先算好，见调用点）。
+ * 宽度保护必须按最终缩进算——按原始前导空白算会在"原始 16 格 → 归一
+ * 4 格"的行上来回摆（第一遍超宽保留、第二遍不超宽收拢，不幂等，
+ * 2026-11-11 晚 fmt 压测逮住）。 */
+static char **fmt_normalize(char **ls, size_t *out_n, const int *inds) {
     size_t n = *out_n;
     StrVec sv = {0};
     bool in_str = false, in_chr = false, in_block = false;
@@ -1663,9 +1667,9 @@ static char **fmt_normalize(char **ls, size_t *out_n) {
                 bool tc2 = false, tb2 = false;
                 {   /* 收拢后会超宽就保留原样：手工折行的长表达式不该被并成
                      * 一条 120 列的长行（zig fmt 也不产超宽行）。 */
-                    size_t w = 0;
-                    while (ls[reg_start][w] == ' ' || ls[reg_start][w] == '\t') w++;
-                    if (w + strlen(joined) > 100) reg_bad = true;
+                    int lvl = (inds && (int)reg_start < (int)n) ? inds[reg_start] : 0;
+                    if (lvl < 0) lvl = 0;
+                    if ((size_t)lvl * 4 + strlen(joined) > 100) reg_bad = true;
                 }
                 bool keep = reg_bad ||
                             (fmt_first_group(joined, &o2, &c2, &tc2, &tb2) &&
@@ -1717,8 +1721,31 @@ static char *fmt_transform(const char *src) {
         }
     }
 
+    /* 缩进预算 pass：先按开组栈算出每行归一后的缩进层。区域归一的
+     * 宽度保护要用最终缩进（原始前导空白会被后面的缩进主循环改写）。 */
+    int *inds = malloc((n ? n : 1) * sizeof(int));
+    {
+        FmtState pst = {0};
+        pst.top = -1;
+        for (size_t i2 = 0; i2 < n; i2++) {
+            const char *s = ls[i2];
+            size_t l2 = strlen(s);
+            while (l2 && (s[l2 - 1] == ' ' || s[l2 - 1] == '\t' || s[l2 - 1] == '\r')) l2--;
+            if (l2 == 0 && !pst.in_block) { inds[i2] = 0; continue; }
+            FmtState probe = pst;
+            bool pre_str = pst.in_str, pre_chr = pst.in_chr, pre_block = pst.in_block;
+            size_t first = 0;
+            fmt_scan_line(s, &probe, &first);
+            inds[i2] = fmt_line_indent(s, first, &pst);
+            pst = probe;
+            pst.curline = (int)i2;
+            fmt_apply_groups(s, pre_str, pre_chr, pre_block, &pst);
+        }
+    }
+
     /* 跨行区域归一化（树状铺开）：在缩进主循环之前做，行所有权移交 */
-    ls = fmt_normalize(ls, &n);
+    ls = fmt_normalize(ls, &n, inds);
+    free(inds);
 
     FmtState st = {0};
     st.top = -1;              /* 空栈；{0} 会把栈顶当 0（不存在的组） */
