@@ -229,6 +229,7 @@ static Node *parse_type_primary(P *p) {
                     for (;;) {
                         push(app, parse_type_or_const(p));
                         if (!accept(p, TOK_COMMA)) break;
+                        if (at(p, TOK_RPAREN)) break;    /* 尾逗号：HashMap(i32, str,) */
                     }
                 }
                 expect(p, TOK_RPAREN);
@@ -278,6 +279,7 @@ static Node *parse_type_primary(P *p) {
                 }
                 push(n, m);
                 if (!accept(p, TOK_COMMA)) break;
+                if (at(p, TOK_RBRACE)) break;    /* 尾逗号：error{a, b,} */
             }
             expect(p, TOK_RBRACE);
             return n;
@@ -564,6 +566,7 @@ static Node *parse_type_prefix(P *p) {
                 pm->a = parse_type(p);
                 push(n, pm);
                 if (!accept(p, TOK_COMMA)) break;
+                if (at(p, TOK_RPAREN)) break;    /* 尾逗号：fn (a: T, b: U,) */
             }
         }
         expect(p, TOK_RPAREN);
@@ -772,6 +775,7 @@ static Node *parse_postfix(P *p, Node *base) {
                      * 内建 @f(…) 才把裸标识符优先当类型看。 */
                     push(n, parse_expr(p));
                     if (!accept(p, TOK_COMMA)) break;
+                    if (at(p, TOK_RPAREN)) break;    /* 尾逗号：f(a, b,) */
                 }
             }
             expect(p, TOK_RPAREN);
@@ -801,6 +805,7 @@ static Node *parse_postfix(P *p, Node *base) {
                     pair->a = parse_expr(p);
                     push(n, pair);
                     if (!accept(p, TOK_COMMA)) break;
+                    if (at(p, TOK_RBRACE)) break;    /* 尾逗号：T{.a = 1, .b = 2,} */
                 }
                 expect(p, TOK_RBRACE);
                 base = n;
@@ -852,6 +857,7 @@ static Node *parse_dot_brace(P *p) {
             pair->a = parse_expr(p);
             push(n, pair);
             if (!accept(p, TOK_COMMA)) break;
+            if (at(p, TOK_RBRACE)) break;    /* 尾逗号：.{.a = 1, .b = 2,} */
         }
         expect(p, TOK_RBRACE);
         return n;
@@ -1099,6 +1105,7 @@ static Node *parse_primary(P *p) {
                 push(n, as_value ? parse_expr(p) : parse_type_or_const(p));
                 ai++;
                 if (!accept(p, TOK_COMMA)) break;
+                if (at(p, TOK_RPAREN)) break;    /* 尾逗号：@memcpy(dst, src, n,) */
             }
         }
         expect(p, TOK_RPAREN);
@@ -1174,6 +1181,7 @@ static Node *parse_fn(P *p, bool allow_name) {
             pm->a = parse_type(p);
             push(n, pm);
             if (!accept(p, TOK_COMMA)) break;
+            if (at(p, TOK_RPAREN)) break;    /* 尾逗号：fn (a: T, b: U,) */
         }
     }
     expect(p, TOK_RPAREN);

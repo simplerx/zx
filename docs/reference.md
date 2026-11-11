@@ -299,6 +299,9 @@ pub const main = fn () u8 { … }          // pub 控制跨文件导出（见 §
 ```
 
 - 返回 `!T` 的函数每条路径都要 return 或到达 `noreturn`（E0308）。
+- **尾逗号**：参数表、调用实参、error 集、元组类型/字面量、struct 字面量
+  都允许以 `,` 结尾（`fn (a: i32, b: i32,)`、`add(1, 2,)`）。`zxc fmt` 的
+  约定：**一行里 `(...)` 以 `,` 结尾就拆成一行一个**（见 §12 格式化）。
 - **泛型**：形参写 `T: type` 的函数是编译期函数，`ArrayList(i32)` 是一次编译期调用。  
   实例名取自构造式（`var xs = std.ArrayList(i32).init(…)` 推断为该实例）。
 - **编译期执行**：const 初始化器、泛型实参、`inline for` 都在编译期算；  
@@ -655,6 +658,9 @@ zxc errors / explain E0301
 - LSP（`bin/zxls.exe`）：诊断、补全（`.` 成员 / `@` 内建 / snippet）、跳转定义、
   hover、inlayHint（未写类型的 `const/let/var` 显示 `: Type`）、签名帮助、引用、
   格式化。Zed 配 `lsp.zx-lsp.binary.path` 指向 zxls；换 exe 后要重启编辑器。
+- **fmt 规则**：4 空格缩进、去尾空白、连续空行压 1、末尾单换行（CRLF 文档
+  保持 CRLF）；同行 `(...)` 以 `,` 结尾就拆成一行一个实参、续行按括号深度
+  缩进、`)` 开头的行反缩进——再跑一遍 fmt 输出一字不变（幂等）。
 
 ---
 

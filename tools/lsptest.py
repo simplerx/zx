@@ -3263,6 +3263,22 @@ check("formatting.indentFix",
       "    return 0;\n" in _ftext and "        return 0" not in _ftext
       and _ftext.endswith("};\n"),
       str(_fres)[:200])
+# 尾逗号拆行：参数/实参表以 ',' 结尾就一行一个（用户 2026-11-11）。
+# LSP formatting 与 CLI fmt 走同一条 zxc fmt 链，这里必须同样拆行。
+TCDOC = 'const add = fn (a: i32, b: i32,) i32 {\n    return a + b;\n};\n'
+tcuri = "file:///" + os.path.join(SRC_DIR, "tctest.zx").replace("\\", "/")
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": tcuri, "languageId": "zx", "version": 1, "text": TCDOC}}})
+_rid += 1
+send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/formatting", "params": {
+    "textDocument": {"uri": tcuri},
+    "options": {"tabSize": 4, "insertSpaces": True}}})
+_r, _ = recv_id("tcformat", _rid)
+_tcres = (_r or {}).get("result") or []
+_tctext = _tcres[0].get("newText", "") if isinstance(_tcres, list) and _tcres else ""
+check("formatting.trailingComma",
+      "fn (\n    a: i32,\n    b: i32,\n) i32 {" in _tctext,
+      str(_tcres)[:300])
 # 影子（.zxls- / .zxls-f 前缀）用完即删。断言前先清掉历史跑留下的旧影子
 #（delete 与 zxc 子进程持句柄竞速失败会留下永久垃圾），再只看这次新增的。
 import glob as _glob, time as _time

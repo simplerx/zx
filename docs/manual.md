@@ -355,6 +355,8 @@ zxc init myproj            # 生成工程骨架
 
 - 工程描述在 `zx.json`；`include/add/fetch/sync/cbuild` 管 vendor/ 下的 C 库。
 - `--release` 走 -O2；增量编译按模块缓存 .o。
+- **fmt**：4 空格缩进、去尾空白、压空行；同行 `(...)` 以 `,` 结尾（尾逗号，
+  参数表/调用实参都合法）就拆成一行一个，续行按括号深度缩进，幂等。
 - LSP（`bin/zxls.exe`）：诊断、补全（含字段类型 detail 与 snippet）、
   hover、inlayHint（未写类型的绑定显示 `: Type`）、签名帮助、格式化。
   编辑器里指到 zxls 路径；**换 exe 后要完全重启编辑器**。

@@ -135,6 +135,33 @@ else
     printf "  FAIL zxc init\n"; cat "$TPFX.cli.init"; fail=1
 fi
 
+# 2.51b 尾逗号列表 + fmt 拆行（用户 2026-11-11）：参数/实参/error 集/
+# 元组/字面量以 ',' 结尾合法；fmt 见同行 (...) 尾逗号就拆成一行一个，
+# 且必须幂等（拆完再 fmt 一字不动）。
+printf "\n== 尾逗号列表 + fmt 拆行\n"
+mkdir -p "$pdir/tc/src"
+printf 'const add = fn (a: i32, b: i32,) i32 {\n    return a + b;\n};\n\nconst main = fn () i32 {\n    _ = add(1, 2,);\n    const e = error{a, b,};\n    const t: {i32, i32,} = .{5, 6,};\n    _ = e;\n    _ = t;\n    return 0;\n};\n' > "$pdir/tc/src/main.zx"
+if ( cd "$pdir/tc" && "$ZXCW" src/main.zx --check > "$TPFX.tc.chk" 2>&1 ); then
+    printf "  ok   尾逗号：参数/实参/error集/元组类型/字面量全解析\n"
+else
+    printf "  FAIL 尾逗号列表解析失败\n"; cat "$TPFX.tc.chk"; fail=1
+fi
+if ( cd "$pdir/tc" && "$ZXCW" fmt src/main.zx > "$TPFX.tc.fmt" 2>&1 ) \
+   && grep -q "^const add = fn ($" "$pdir/tc/src/main.zx" \
+   && grep -q "^    a: i32,$" "$pdir/tc/src/main.zx" \
+   && grep -q "^) i32 {$" "$pdir/tc/src/main.zx" \
+   && grep -q "^        1,$" "$pdir/tc/src/main.zx"; then
+    cp "$pdir/tc/src/main.zx" "$TPFX.tc.once"
+    ( cd "$pdir/tc" && "$ZXCW" fmt src/main.zx > /dev/null 2>&1 )
+    if cmp -s "$pdir/tc/src/main.zx" "$TPFX.tc.once"; then
+        printf "  ok   fmt 拆行 + 幂等\n"
+    else
+        printf "  FAIL fmt 拆行不幂等\n"; diff "$TPFX.tc.once" "$pdir/tc/src/main.zx"; fail=1
+    fi
+else
+    printf "  FAIL fmt 尾逗号拆行\n"; cat "$TPFX.tc.fmt"; fail=1
+fi
+
 # 2.52 `zxc include`：C 头 -> Zx 绑定。守的是整条链路（clang AST 解析、
 # 类型映射、extern var 文件作用域、生成物能被 Zx 自己检查），
 # 不是只测命令有没有打印成功。

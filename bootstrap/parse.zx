@@ -722,6 +722,7 @@ pub const Parser = struct {
                             if (!self.accept(lex.Kind.comma)) {
                                 go2 = false;
                             }
+                            if (self.at(lex.Kind.rparen)) { go2 = false; }  // 尾逗号：HashMap(i32, str,)
                         }
                     }
                     try self.expect(lex.Kind.rparen);
@@ -780,6 +781,7 @@ pub const Parser = struct {
                         }
                         self.push_item(n, m);
                         if (!self.accept(lex.Kind.comma)) { go = false; }
+                        if (self.at(lex.Kind.rbrace)) { go = false; }  // 尾逗号：error{a, b,}
                     }
                 }
                 try self.expect(lex.Kind.rbrace);
@@ -1064,6 +1066,7 @@ pub const Parser = struct {
                     if (!self.accept(lex.Kind.comma)) {
                         go = false;
                     }
+                    if (self.at(lex.Kind.rparen)) { go = false; }  // 尾逗号：fn (a: T, b: U,)
                 }
             }
             try self.expect(lex.Kind.rparen);
@@ -1283,6 +1286,7 @@ pub const Parser = struct {
                                 if (!self.accept(lex.Kind.comma)) {
                                     go2 = false;
                                 }
+                                if (self.at(lex.Kind.rparen)) { go2 = false; }  // 尾逗号：f(a, b,)
                             }
                         }
                         try self.expect(lex.Kind.rparen);
@@ -1320,6 +1324,7 @@ pub const Parser = struct {
                                     if (!self.accept(lex.Kind.comma)) {
                                         go2 = false;
                                     }
+                                    if (self.at(lex.Kind.rbrace)) { go2 = false; }  // 尾逗号：T{.a = 1,}
                                 }
                                 try self.expect(lex.Kind.rbrace);
                                 base = n;
@@ -1380,6 +1385,7 @@ pub const Parser = struct {
                 if (!self.accept(lex.Kind.comma)) {
                     go = false;
                 }
+                if (self.at(lex.Kind.rbrace)) { go = false; }  // 尾逗号：.{.a = 1,}
             }
             try self.expect(lex.Kind.rbrace);
             return n;
@@ -1636,6 +1642,7 @@ pub const Parser = struct {
                     if (!self.accept(lex.Kind.comma)) {
                         go = false;
                     }
+                    if (self.at(lex.Kind.rparen)) { go = false; }  // 尾逗号：@memcpy(dst, src, n,)
                 }
             }
             try self.expect(lex.Kind.rparen);
@@ -1721,6 +1728,7 @@ pub const Parser = struct {
                 if (!self.accept(lex.Kind.comma)) {
                     go = false;
                 }
+                if (self.at(lex.Kind.rparen)) { go = false; }  // 尾逗号：fn (a: T, b: U,)
             }
         }
         try self.expect(lex.Kind.rparen);
