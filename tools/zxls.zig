@@ -3962,7 +3962,16 @@ fn inferExprType(text: []const u8, doc: *const Document, expr: []const u8, depth
             }
         }
         if (lb) |l| {
+            const ix = trimSl(e[l + 1 .. e.len - 1]);
             if (inferExprType(text, doc, e[0..l], depth + 1)) |bt| {
+                // 元组下标（tup[2]，下标是编译期值）：先按元组取第 N 项，
+                // 再退回切片/数组元素。用户 2026-11-11：`const s = tup[2];`
+                // 类型丢失——elemTyOf 不认 `{i32,i32,str}` 这种元组类型。
+                if (allDigits(ix)) {
+                    if (std.fmt.parseInt(usize, ix, 10)) |idx| {
+                        if (tupleElemTy(bt, idx)) |t| return t;
+                    } else |_| {}
+                }
                 if (elemTyOf(bt)) |et| return et;
             }
         }
@@ -7725,6 +7734,14 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                 var detail: []const u8 = "内建函数";
                 for (builtin_docs) |bd| {
                     if (std.mem.eql(u8, bd.name, b)) detail = bd.detail;
+                }
+                // @type 出 snippet：`type(${1:x})$0`——展开后光标落在
+                // 参数占位上，Tab 到结尾再接 `.size` / `.fields[i]`。
+                // insertText 不带 '@'（宿主只替换 '@' 之后的标识符段，
+                // 与上面 addItem 的 label 同口径）。其余内建仍是普通补全。
+                if (std.mem.eql(u8, b, "type")) {
+                    addSnippetRaw(&list, &seen, b, "type(${1:x})$0", detail);
+                    continue;
                 }
                 addItem(&list, &seen, b, 3, detail, 0);
             }

@@ -3192,6 +3192,56 @@ send({"jsonrpc": "2.0", "method": "textDocument/didClose",
 
 
 
+# ---------------------------------------------------------------------------
+# 元组下标 + @type snippet（用户 2026-11-11 第 3 张截图）。
+#   · `const s = tup[2];` 类型丢失：inferExprType 的下标分支只认 elemTyOf
+#     （切片/数组），元组 `{i32,i32,str}` 取第 N 项要 tupleElemTy。
+#   · `@` 内建补全里 @type 出 snippet：`type(${1:x})$0`（insertTextFormat=2），
+#     其余内建（@memcpy/…）仍是普通补全。
+TUPIDX = """const std = module("std");
+
+const tup: {i32,i32,str} = .{10,23,"hello"};
+const s = tup[2];
+const a = tup[0];
+"""
+tupuri = "file:///" + os.path.join(SRC_DIR, "tupidx.zx").replace("\\", "/")
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": tupuri, "languageId": "zx", "version": 1, "text": TUPIDX}}})
+_rid += 1
+send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/inlayHint", "params": {
+    "textDocument": {"uri": tupuri},
+    "range": {"start": {"line": 0, "character": 0},
+              "end": {"line": len(TUPIDX.split("\n")), "character": 0}}}})
+_r, _ = recv_id("tupidx", _rid)
+_tih = {}
+if _r and _r.get("result"):
+    for _h in _r["result"]:
+        _lbx = _h.get("label")
+        if isinstance(_lbx, str):
+            _tih[_h["position"]["line"]] = _lbx
+for _need, _want, _tag in (
+        ("const s = tup[2]", ": str", "tupleIdx.str"),
+        ("const a = tup[0]", ": i32", "tupleIdx.i32")):
+    _ln = TUPIDX[:TUPIDX.index(_need)].count("\n")
+    check("inlayHint." + _tag, _tih.get(_ln) == _want, str(_tih))
+
+atdoc = "const std = module(\"std\");\n@\n"
+aturi = "file:///" + os.path.join(SRC_DIR, "atbuild.zx").replace("\\", "/")
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": aturi, "languageId": "zx", "version": 1, "text": atdoc}}})
+_rid += 1
+send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/completion", "params": {
+    "textDocument": {"uri": aturi}, "position": pos(atdoc, atdoc.index("@\n") + 1)}})
+_r, _ = recv_id("atbuild", _rid)
+_ats = {i["label"]: i for i in ((_r or {}).get("result") or {}).get("items") or []}
+check("completion.atType.snippet",
+      _ats.get("type", {}).get("insertTextFormat") == 2
+      and _ats.get("type", {}).get("insertText") == "type(${1:x})$0",
+      str(_ats.get("type"))[:200])
+check("completion.atOthers.plain",
+      _ats.get("memcpy", {}).get("insertTextFormat") is None,
+      str(_ats.get("memcpy"))[:200])
+
 # 9 shutdown/exit
 send({"jsonrpc": "2.0", "id": 8, "method": "shutdown", "params": None})
 recv_id("shutdown", 8)
