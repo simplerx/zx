@@ -1225,21 +1225,22 @@ static int fmt_scan_line(const char *s, FmtState *st, size_t *first_ns) {
 }
 
 /* ---- 尾逗号拆行（用户 2026-11-11）：参数/实参表以 ',' 结尾就一行一个。
- * 18:xx 扩：字面量组也拆——.{ … } 以及标识符后的 { … }（Person{…}、
- * struct{…} 类型体），且**递归**：外层拆出的项本身又是尾逗号组就继续拆，
- * 一遍 fmt 到稳定形态（zig-fmt 约定）。语句块不带尾逗号，天然不命中；
- * 内层组不带尾逗号（如 .{.b = 120}）保持单行。
- */
+ * 18:xx 扩：字面量组也拆——.{ … } 与标识符后的 { … }（Person{…}、
+ * struct{…} 类型体），递归到稳定形态；语句块不带尾逗号天然不命中；
+ * 内层组不带尾逗号（.{.b = 120}）保持单行。
+ * 19:xx 再扩（用户"像文件树一样竖直铺开"）：拆分目标不再要求最外层组
+ * 自带尾逗号——最外层不带时退到**最浅的**带尾逗号嵌套组；跨行手工区域
+ * 由 fmt_normalize 并回一行再拆，手工换行的组也能归一成规范树。
+ * 规则口径：**尾逗号 = 选择进入规范树**；全组没有任何尾逗号就完全
+ * 不动（手工排版保留）。 */
 
 typedef struct {
     char *text;                             /* 行文本（不带缩进） */
     int lvl;                                /* 相对缩进级别（0 = 与原行同深） */
 } FmtRow;
 
-typedef struct {
-    FmtRow *v;
-    int n, cap;
-} RowVec;
+typedef struct { FmtRow *v; int n, cap; } RowVec;
+typedef struct { char **v; size_t n, cap; } StrVec;
 
 static void rv_push(RowVec *rv, char *text, int lvl) {
     if (rv->n >= rv->cap) {
@@ -1251,21 +1252,39 @@ static void rv_push(RowVec *rv, char *text, int lvl) {
     rv->n++;
 }
 
+static void sv_push(StrVec *sv, char *s) {
+    if (sv->n >= sv->cap) {
+        sv->cap = sv->cap ? sv->cap * 2 : 64;
+        sv->v = realloc(sv->v, sv->cap * sizeof *sv->v);
+    }
+    sv->v[sv->n++] = s;
+}
+
 static bool fmt_ident_ch(char c) {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
            (c >= '0' && c <= '9') || c == '_';
 }
 
-/* 在一行里找“同行开合同行闭、闭括号前最后一个非空白是 ','”的最外层可拆组：
- * '('，或字面量 '{'（前一字符是 '.' / 标识符字符）。字符串/字符里的逗号不算；
- * 见行注释就保守放弃。找到置 op/cl 返回 true。 */
-static bool fmt_find_trailing_group(const char *s, size_t *op, size_t *cl) {
+/* 找一行的"根可拆组"（第一个打开的可拆括号到它的闭合），并报告根闭合
+ * 之前是否存在任何带尾逗号的可拆组。树状口径（用户 2026-11-11"像文件
+ * 树一样竖直铺开"）：有尾逗号就把整个根组铺开成树，项逗号由拆分补齐
+ * （zig-fmt 同款：任一参数多行，调用整层跟着拆）；一行里没有任何尾逗号
+ * 就完全不动（手工排版保留）。可拆组 = '(' 或字面量 '{'（前一字符
+ * '.'/标识符字符）。字符串/字符里的逗号不算；见行注释保守放弃；
+ * 根没在同一行闭合返回 false（跨行区域由 fmt_normalize 并行处理）。 */
+/* root_tc：根组自己是否以尾逗号收尾（决定切刀后要不要做"末刀贴壁"校验；
+ * 根组没自带尾逗号、只是内层有尾逗号触发铺开时，末项后面跟着的是嵌套组，
+ * 不能做这个校验）。 */
+static bool fmt_region_root(const char *s, size_t *op, size_t *cl, bool *has_tc,
+                            bool *root_tc) {
     bool in_str = false, in_chr = false;
     size_t open_stk[64], last_ns[64];
-    char kind[64];                          /* '(' 或 '{' */
-    bool lit[64];                           /* '{' 是否字面量组（.{ 或 T{） */
-    bool seen[64];
+    char kind[64];
+    bool lit[64], seen[64];
     int sp = 0;
+    bool have = false;
+    int root_sp = 0;
+    *has_tc = false;
     for (size_t i = 0; s[i]; i++) {
         char c = s[i];
         if (in_str) { if (c == '\\') i++; else if (c == '"') in_str = false; continue; }
@@ -1275,15 +1294,18 @@ static bool fmt_find_trailing_group(const char *s, size_t *op, size_t *cl) {
             kind[sp] = c;
             lit[sp] = (c == '{') && i > 0 &&
                       (s[i - 1] == '.' || fmt_ident_ch(s[i - 1]));
+            if (!have && (c == '(' || lit[sp])) { have = true; root_sp = sp; *op = i; }
             open_stk[sp] = i; last_ns[sp] = 0; seen[sp] = false; sp++;
             continue;
         }
         if (c == ')' || c == '}') {
             if (sp > 0) {
                 sp--;
-                if (sp == 0 && (kind[sp] == '(' || lit[sp]) && seen[sp] &&
-                    s[last_ns[sp]] == ',') {
-                    *op = open_stk[sp]; *cl = i;
+                bool splittable = (kind[sp] == '(' || lit[sp]);
+                if (splittable && seen[sp] && s[last_ns[sp]] == ',') *has_tc = true;
+                if (have && splittable && (int)sp == root_sp) {
+                    *cl = i;
+                    if (root_tc) *root_tc = seen[sp] && s[last_ns[sp]] == ',';
                     return true;
                 }
             }
@@ -1292,7 +1314,7 @@ static bool fmt_find_trailing_group(const char *s, size_t *op, size_t *cl) {
         if (c == '"') { in_str = true; }
         else if (c == '\'') { in_chr = true; }
         else if (c == '/') {
-            if (s[i + 1] == '/') return false;      /* 行注释：后面不看 */
+            if (s[i + 1] == '/') return false;      /* 行注释：保守放弃 */
             if (s[i + 1] == '*') {                  /* 同行块注释：整段跳过 */
                 i += 2;
                 while (s[i] && !(s[i] == '*' && s[i + 1] == '/')) i++;
@@ -1304,7 +1326,7 @@ static bool fmt_find_trailing_group(const char *s, size_t *op, size_t *cl) {
             seen[sp - 1] = true; last_ns[sp - 1] = i;
         }
     }
-    return false;
+    return false;                                    /* 根没在同一行闭合 */
 }
 
 static char *dup_span(const char *s, size_t a, size_t b) {
@@ -1314,14 +1336,17 @@ static char *dup_span(const char *s, size_t a, size_t b) {
     return r;
 }
 
-/* 递归拆行：找最外层尾逗号组 → 按顶层逗号切项 → 每项再递归。
- * 返回行数组（*nr_out 行，lvl 递增表示更深一层缩进），失败返回 NULL。
- * depth 防御病态嵌套；项文本自带结尾 ','，递归后闭括号行带回该逗号。 */
+/* 递归拆行：找根组（要求行内存在尾逗号，否则不动）→ 按根组顶层逗号切项
+ * → 每项/末行余文再递归。返回行数组（*nr_out 行，lvl 递增表示更深一层
+ * 缩进），失败返回 NULL。depth 防御病态嵌套；项文本自带结尾 ','，
+ * 递归后闭括号行带回该逗号。 */
 static FmtRow *fmt_rows_rec(const char *s, size_t start, int lvl, int *nr_out, int depth) {
     *nr_out = 0;
     if (depth > 12) return NULL;
     size_t op, cl;
-    if (!fmt_find_trailing_group(s + start, &op, &cl)) return NULL;
+    bool has_tc = false, root_tc = false;
+    if (!fmt_region_root(s + start, &op, &cl, &has_tc, &root_tc) || !has_tc)
+        return NULL;
     op += start; cl += start;
     size_t cuts[256]; int ncuts = 0;
     bool in_str = false, in_chr = false;
@@ -1346,7 +1371,9 @@ static FmtRow *fmt_rows_rec(const char *s, size_t start, int lvl, int *nr_out, i
         else if (c == ',' && pd == 0 && bd == 0 && ncuts < 256) cuts[ncuts++] = i;
     }
     if (ncuts == 0) return NULL;
-    {   /* 最后一刀必须紧贴闭括号（中间只许空白）——find 已保证，再核一道 */
+    if (root_tc) {
+        /* 根组自带尾逗号：最后一刀必须紧贴闭括号（中间只许空白），再核一道；
+         * 根组没自带（内层尾逗号触发铺开）时末项后面是嵌套组，不适用。 */
         size_t k = cuts[ncuts - 1] + 1;
         while (k < cl && (s[k] == ' ' || s[k] == '\t')) k++;
         if (k != cl) return NULL;
@@ -1377,8 +1404,30 @@ static FmtRow *fmt_rows_rec(const char *s, size_t start, int lvl, int *nr_out, i
         }
         prev = cuts[j] + 1;
     }
-    {   /* 末行：闭括号起接余下原文。余文里若还有尾逗号组（同行先后两个组）就继续拆，否则',
-         * 一次 fmt 拆不完、不幂等（如 const t: struct{a,} = .{1,}; 两个组都带尾逗号）。 */
+    if (!root_tc) {
+        /* 根组没自带尾逗号：末刀到闭括号之间的余段是**最后一个实参**，
+         * 必须补成一项发射——漏了就是内容丢失（2026-11-11 s6 复现：
+         * pa(10, .{…} ) 拆完只剩 10）。 */
+        size_t a = prev, b = cl;
+        while (a < b && (s[a] == ' ' || s[a] == '\t')) a++;
+        while (b > a && (s[b - 1] == ' ' || s[b - 1] == '\t')) b--;
+        if (a < b) {
+            char *item = malloc(b - a + 2);
+            memcpy(item, s + a, b - a);
+            item[b - a] = ','; item[b - a + 1] = 0;
+            int snr = 0;
+            FmtRow *sub = fmt_rows_rec(item, 0, lvl + 1, &snr, depth + 1);
+            if (sub) {
+                free(item);
+                for (int k2 = 0; k2 < snr; k2++) rv_push(&rv, sub[k2].text, sub[k2].lvl);
+                free(sub);
+            } else {
+                rv_push(&rv, item, lvl + 1);
+            }
+        }
+    }
+    {   /* 末行：闭括号起接余下原文。余文里若还有尾逗号组（同行先后两个组）
+         * 就继续拆，否则一次 fmt 拆不完、不幂等。 */
         char *suffix = dup_span(s, cl, strlen(s));
         int snr = 0;
         FmtRow *sub = fmt_rows_rec(suffix, 0, lvl, &snr, depth + 1);
@@ -1394,8 +1443,143 @@ static FmtRow *fmt_rows_rec(const char *s, size_t start, int lvl, int *nr_out, i
     return rv.v;
 }
 
+/* ---- 跨行区域归一化（"树状铺开"）----
+ * 手工换行拆开的组，行级 fmt 碰都不碰；现在只要区域（某行结束时仍有未
+ * 闭合的可拆组，到围深归 0 那行为止）里没有注释，就并回一行走递归拆分；
+ * 并回后找不到任何尾逗号组（用户只是手工换行、没写尾逗号）则原样保留。
+ * 单行组仍由主循环的 fmt_rows_rec 处理。行所有权：原样保留的行移动进
+ * 新数组；被拆行替换的区域原行在这里 free。 */
+static char *sv_join(StrVec *sv) {
+    size_t total = 2;
+    for (size_t i = 0; i < sv->n; i++) total += strlen(sv->v[i]) + 1;
+    char *buf = malloc(total);
+    size_t k = 0;
+    for (size_t i = 0; i < sv->n; i++) {
+        if (i) buf[k++] = ' ';
+        size_t l = strlen(sv->v[i]);
+        memcpy(buf + k, sv->v[i], l);
+        k += l;
+    }
+    buf[k] = 0;
+    return buf;
+}
+
+static char **fmt_normalize(char **ls, size_t *out_n) {
+    size_t n = *out_n;
+    StrVec sv = {0};
+    bool in_str = false, in_chr = false, in_block = false;
+    char kind[64];
+    bool lit[64];
+    int sp = 0, spl = 0;                /* spl：未闭合的可拆组（( 或字面量 {）数 */
+    size_t reg_start = 0;
+    bool reg_active = false, reg_bad = false;
+    StrVec reg; reg.v = NULL; reg.n = 0; reg.cap = 0;
+
+    for (size_t i = 0; i < n; i++) {
+        char *s = ls[i];
+        size_t len = strlen(s);
+        while (len && (s[len - 1] == '\r' || s[len - 1] == ' ' || s[len - 1] == '\t'))
+            s[--len] = 0;
+
+        if (!reg_active) {
+            for (size_t p = 0; s[p]; p++) {
+                char c = s[p];
+                if (in_block) { if (c == '*' && s[p + 1] == '/') { in_block = false; p++; } continue; }
+                if (in_str) { if (c == '\\') p++; else if (c == '"') in_str = false; continue; }
+                if (in_chr) { if (c == '\\') p++; else if (c == '\'') in_chr = false; continue; }
+                if (c == '"') in_str = true;
+                else if (c == '\'') in_chr = true;
+                else if (c == '/') {
+                    if (s[p + 1] == '/') break;         /* 行注释后不看不影响括号 */
+                    if (s[p + 1] == '*') { in_block = true; p++; }
+                }
+                else if (c == '(' || c == '{') {
+                    bool is_lit = (c == '{') && p > 0 &&
+                                  (s[p - 1] == '.' || fmt_ident_ch(s[p - 1]));
+                    if (sp < 64) { kind[sp] = c; lit[sp] = is_lit; sp++; }
+                    if (is_lit || c == '(') spl++;
+                }
+                else if (c == ')' || c == '}') {
+                    if (sp > 0) {
+                        sp--;
+                        if (kind[sp] == '(' && c == ')' && spl > 0) spl--;
+                        else if (kind[sp] == '{' && c == '}' && lit[sp] && spl > 0) spl--;
+                    }
+                }
+            }
+            if (spl > 0) {                       /* 行末仍有未闭合可拆组：区域起点 */
+                reg_active = true; reg_start = i; reg_bad = false;
+                reg.n = 0;
+                {   char *t = s;                 /* 去前导空白 */
+                    while (*t == ' ' || *t == '\t') t++;
+                    sv_push(&reg, strdup(t));
+                }
+                continue;                        /* 本行暂存，等区域闭合一起处理 */
+            }
+            sv_push(&sv, s);                     /* 普通行直接通过（所有权移动） */
+            continue;
+        }
+
+        /* ---- 区域内 ---- */
+        if (len == 0) continue;                  /* 空行：并接时跳过 */
+        for (size_t p = 0; s[p]; p++) {
+            char c = s[p];
+            if (in_block) { if (c == '*' && s[p + 1] == '/') { in_block = false; p++; } continue; }
+            if (in_str) { if (c == '\\') p++; else if (c == '"') in_str = false; continue; }
+            if (in_chr) { if (c == '\\') p++; else if (c == '\'') in_chr = false; continue; }
+            if (c == '"') in_str = true;
+            else if (c == '\'') in_chr = true;
+            else if (c == '/') {
+                if (s[p + 1] == '/') { reg_bad = true; break; }
+                if (s[p + 1] == '*') { in_block = true; p++; reg_bad = true; }
+            }
+            else if (c == '(' || c == '{') {
+                bool is_lit = (c == '{') && p > 0 &&
+                              (s[p - 1] == '.' || fmt_ident_ch(s[p - 1]));
+                if (sp < 64) { kind[sp] = c; lit[sp] = is_lit; sp++; }
+                if (is_lit || c == '(') spl++;
+            }
+            else if (c == ')' || c == '}') {
+                if (sp > 0) {
+                    sp--;
+                    if (kind[sp] == '(' && c == ')' && spl > 0) spl--;
+                    else if (kind[sp] == '{' && c == '}' && lit[sp] && spl > 0) spl--;
+                }
+            }
+        }
+        {   char *t = s;
+            while (*t == ' ' || *t == '\t') t++;
+            sv_push(&reg, strdup(t));
+        }
+        if (spl == 0) {                          /* 区域闭合：并回一行递归拆 */
+            char *joined = sv_join(&reg);
+            int nr = 0;
+            FmtRow *rows = fmt_rows_rec(joined, 0, 0, &nr, 0);
+            free(joined);
+            if (rows) {
+                for (int r = 0; r < nr; r++) sv_push(&sv, rows[r].text);
+                free(rows);
+                for (size_t k = reg_start; k <= i; k++) free(ls[k]);
+            } else {
+                for (size_t k = reg_start; k <= i; k++) sv_push(&sv, ls[k]);
+            }
+            for (size_t k = 0; k < reg.n; k++) free(reg.v[k]);
+            free(reg.v); reg.v = NULL; reg.n = reg.cap = 0;
+            reg_active = false;
+        }
+    }
+    if (reg_active) {                            /* 到 EOF 都没闭合：原样保留 */
+        for (size_t k = reg_start; k < n; k++) sv_push(&sv, ls[k]);
+        for (size_t k = 0; k < reg.n; k++) free(reg.v[k]);
+        free(reg.v);
+    }
+    free(ls);
+    *out_n = sv.n;
+    return sv.v;
+}
+
 /* 格式化整个源码：4 空格缩进、去尾空白、连续空行压 1、末尾单换行。
- * 尾逗号拆行：参数/实参表、字面量组以 ',' 结尾（同行开合）就一行一个，递归到稳定。
+ * 尾逗号拆行：参数/实参表、字面量组以 ',' 结尾就一行一个并递归到稳定；跨行手工区域并回一行归一（无尾逗号则不动）。
  * CRLF 文档保持 CRLF。返回 malloc 的新文本。 */
 static char *fmt_transform(const char *src) {
     bool had_cr = strstr(src, "\r\n") != NULL;
@@ -1416,6 +1600,9 @@ static char *fmt_transform(const char *src) {
             p = q + 1;
         }
     }
+
+    /* 跨行区域归一化（树状铺开）：在缩进主循环之前做，行所有权移交 */
+    ls = fmt_normalize(ls, &n);
 
     FmtState st = {0};
     Buf out;

@@ -3302,6 +3302,38 @@ check("formatting.literalGroupRec",
       and "    },\n" in _tltext
       and "    );\n" in _tltext,
       str(_tlres)[:400])
+# 手工多行区域归一成规范树（19:xx"树状铺开"）：区域内有尾逗号就整组归一，
+# 调用层没写尾逗号也跟着拆（任一参数多行，整层拆，zig-fmt 同款），
+# 缺的尾逗号由 fmt 补齐；拆行不许丢内容（曾复现丢实参 bug）。
+MLTDOC = ('const main = fn () i32 {\n'
+          '    _ = pa(10, .{\n'
+          '        .name = "weo",\n'
+          '        .data = .{\n'
+          '            .b = 1, .i = 0, .data = .{.b = 120},\n'
+          '        }, } );\n'
+          '    return 0;\n'
+          '};\n')
+mluri = "file:///" + os.path.join(SRC_DIR, "mltest.zx").replace("\\", "/")
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": mluri, "languageId": "zx", "version": 1, "text": MLTDOC}}})
+_rid += 1
+send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/formatting", "params": {
+    "textDocument": {"uri": mluri},
+    "options": {"tabSize": 4, "insertSpaces": True}}})
+_r, _ = recv_id("mlformat", _rid)
+_mlres = (_r or {}).get("result") or []
+_mltext = _mlres[0].get("newText", "") if isinstance(_mlres, list) and _mlres else ""
+check("formatting.multilineTree",
+      "    _ = pa(\n" in _mltext
+      and "        10,\n" in _mltext
+      and "        .{\n" in _mltext
+      and '            .name = "weo",\n' in _mltext
+      and "                .b = 1,\n" in _mltext
+      and "                .data = .{.b = 120},\n" in _mltext
+      and "        },\n" in _mltext
+      and "    );\n" in _mltext
+      and _mltext.count("weo") == 1 and _mltext.count("120") == 1,
+      str(_mlres)[:400])
 # 影子（.zxls- / .zxls-f 前缀）用完即删。断言前先清掉历史跑留下的旧影子
 #（delete 与 zxc 子进程持句柄竞速失败会留下永久垃圾），再只看这次新增的。
 import glob as _glob, time as _time

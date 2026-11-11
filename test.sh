@@ -146,6 +146,24 @@ if ( cd "$pdir/tc" && "$ZXCW" src/main.zx --check > "$TPFX.tc.chk" 2>&1 ); then
 else
     printf "  FAIL 尾逗号列表解析失败\n"; cat "$TPFX.tc.chk"; fail=1
 fi
+# 手工多行区域归一成规范树（用户 2026-11-11"像文件树一样竖直铺开"）：
+# 区域内有尾逗号就整组归一，缺的尾逗号由 fmt 补齐；fmt 产物必须可编译
+# （内容保全——曾复现过拆行丢实参的 bug，编译检查就是守门）。
+printf 'const pa = fn (v: i32, info: struct{name: []const u8, data: struct{b: i32, i: i32, data: struct{b: i32}}}) i32 { _ = info; return v; };\n\nconst main = fn () i32 {\n    _ = pa(10, .{\n        .name = "weo",\n        .data = .{\n            .b = 1, .i = 0, .data = .{.b = 120},\n        }, } );\n    return 0;\n};\n' > "$pdir/tc/src/ml.zx"
+if ( cd "$pdir/tc" && "$ZXCW" fmt src/ml.zx > "$TPFX.tc.mlf" 2>&1 ) \
+   && grep -q "^    _ = pa($" "$pdir/tc/src/ml.zx" \
+   && grep -q "^        10,$" "$pdir/tc/src/ml.zx" \
+   && grep -q "^        .{$" "$pdir/tc/src/ml.zx" \
+   && grep -q "^            .name = \"weo\",$" "$pdir/tc/src/ml.zx" \
+   && grep -q "^                .b = 1,$" "$pdir/tc/src/ml.zx" \
+   && grep -q "^                .data = .{.b = 120},$" "$pdir/tc/src/ml.zx" \
+   && grep -q "^            }," "$pdir/tc/src/ml.zx" \
+   && grep -q "^    );$" "$pdir/tc/src/ml.zx" \
+   && ( cd "$pdir/tc" && "$ZXCW" src/ml.zx --check > /dev/null 2>&1 ); then
+    printf "  ok   手工多行归一成树 + 产物可编译\n"
+else
+    printf "  FAIL 手工多行归一成树\n"; cat "$TPFX.tc.mlf" 2>/dev/null; fail=1
+fi
 if ( cd "$pdir/tc" && "$ZXCW" fmt src/main.zx > "$TPFX.tc.fmt" 2>&1 ) \
    && grep -q "^const add = fn ($" "$pdir/tc/src/main.zx" \
    && grep -q "^    a: i32,$" "$pdir/tc/src/main.zx" \
