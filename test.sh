@@ -136,11 +136,11 @@ else
 fi
 
 # 2.51b 尾逗号列表 + fmt 拆行（用户 2026-11-11）：参数/实参/error 集/
-# 元组/字面量以 ',' 结尾合法；fmt 见同行 (...) 尾逗号就拆成一行一个，
-# 且必须幂等（拆完再 fmt 一字不动）。
+# 元组/字面量以 ',' 结尾合法；fmt 见同行 (...) / 字面量组（.{…}、T{…}）
+# 尾逗号就拆成一行一个，并递归（18:xx 扩展）；且必须幂等（拆完再 fmt 一字不动）。
 printf "\n== 尾逗号列表 + fmt 拆行\n"
 mkdir -p "$pdir/tc/src"
-printf 'const add = fn (a: i32, b: i32,) i32 {\n    return a + b;\n};\n\nconst main = fn () i32 {\n    _ = add(1, 2,);\n    const e = error{a, b,};\n    const t: {i32, i32,} = .{5, 6,};\n    _ = e;\n    _ = t;\n    return 0;\n};\n' > "$pdir/tc/src/main.zx"
+printf 'const add = fn (a: i32, b: i32,) i32 {\n    return a + b;\n};\n\nconst Cfg = struct { name: []const u8, val: i32 };\n\nconst main = fn () i32 {\n    _ = add(1, 2,);\n    const e = error{a, b,};\n    const t: {i32, i32,} = .{5, 6,};\n    const c = Cfg{ .name = "a", .val = 1, };\n    _ = e;\n    _ = t;\n    _ = c;\n    return 0;\n};\n' > "$pdir/tc/src/main.zx"
 if ( cd "$pdir/tc" && "$ZXCW" src/main.zx --check > "$TPFX.tc.chk" 2>&1 ); then
     printf "  ok   尾逗号：参数/实参/error集/元组类型/字面量全解析\n"
 else
@@ -150,11 +150,14 @@ if ( cd "$pdir/tc" && "$ZXCW" fmt src/main.zx > "$TPFX.tc.fmt" 2>&1 ) \
    && grep -q "^const add = fn ($" "$pdir/tc/src/main.zx" \
    && grep -q "^    a: i32,$" "$pdir/tc/src/main.zx" \
    && grep -q "^) i32 {$" "$pdir/tc/src/main.zx" \
-   && grep -q "^        1,$" "$pdir/tc/src/main.zx"; then
+   && grep -q "^        1,$" "$pdir/tc/src/main.zx" \
+   && grep -q "^    const c = Cfg{$" "$pdir/tc/src/main.zx" \
+   && grep -q "^        \.name = \"a\",$" "$pdir/tc/src/main.zx" \
+   && grep -q "^    };$" "$pdir/tc/src/main.zx"; then
     cp "$pdir/tc/src/main.zx" "$TPFX.tc.once"
     ( cd "$pdir/tc" && "$ZXCW" fmt src/main.zx > /dev/null 2>&1 )
     if cmp -s "$pdir/tc/src/main.zx" "$TPFX.tc.once"; then
-        printf "  ok   fmt 拆行 + 幂等\n"
+        printf "  ok   fmt 拆行（调用 + 字面量组递归）+ 幂等\n"
     else
         printf "  FAIL fmt 拆行不幂等\n"; diff "$TPFX.tc.once" "$pdir/tc/src/main.zx"; fail=1
     fi

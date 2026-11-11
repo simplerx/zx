@@ -1224,28 +1224,65 @@ static int fmt_scan_line(const char *s, FmtState *st, size_t *first_ns) {
     return delta;
 }
 
-/* ---- 尾逗号拆行（用户 2026-11-11）：参数/实参表以 ',' 结尾就一行一个 ---- */
+/* ---- 尾逗号拆行（用户 2026-11-11）：参数/实参表以 ',' 结尾就一行一个。
+ * 18:xx 扩：字面量组也拆——.{ … } 以及标识符后的 { … }（Person{…}、
+ * struct{…} 类型体），且**递归**：外层拆出的项本身又是尾逗号组就继续拆，
+ * 一遍 fmt 到稳定形态（zig-fmt 约定）。语句块不带尾逗号，天然不命中；
+ * 内层组不带尾逗号（如 .{.b = 120}）保持单行。
+ */
 
-/* 在一行里找“同行开合同行闭、')' 前最后一个非空白是 ','”的最外层括号组。
- * 字符串/字符字面量里的逗号不算；见行注释就保守放弃。找到置 op/cl 返回 true。 */
+typedef struct {
+    char *text;                             /* 行文本（不带缩进） */
+    int lvl;                                /* 相对缩进级别（0 = 与原行同深） */
+} FmtRow;
+
+typedef struct {
+    FmtRow *v;
+    int n, cap;
+} RowVec;
+
+static void rv_push(RowVec *rv, char *text, int lvl) {
+    if (rv->n >= rv->cap) {
+        rv->cap = rv->cap ? rv->cap * 2 : 16;
+        rv->v = realloc(rv->v, (size_t)rv->cap * sizeof *rv->v);
+    }
+    rv->v[rv->n].text = text;
+    rv->v[rv->n].lvl = lvl;
+    rv->n++;
+}
+
+static bool fmt_ident_ch(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_';
+}
+
+/* 在一行里找“同行开合同行闭、闭括号前最后一个非空白是 ','”的最外层可拆组：
+ * '('，或字面量 '{'（前一字符是 '.' / 标识符字符）。字符串/字符里的逗号不算；
+ * 见行注释就保守放弃。找到置 op/cl 返回 true。 */
 static bool fmt_find_trailing_group(const char *s, size_t *op, size_t *cl) {
     bool in_str = false, in_chr = false;
     size_t open_stk[64], last_ns[64];
+    char kind[64];                          /* '(' 或 '{' */
+    bool lit[64];                           /* '{' 是否字面量组（.{ 或 T{） */
     bool seen[64];
     int sp = 0;
     for (size_t i = 0; s[i]; i++) {
         char c = s[i];
         if (in_str) { if (c == '\\') i++; else if (c == '"') in_str = false; continue; }
         if (in_chr) { if (c == '\\') i++; else if (c == '\'') in_chr = false; continue; }
-        if (c == '(') {
+        if (c == '(' || c == '{') {
             if (sp >= 64) return false;
+            kind[sp] = c;
+            lit[sp] = (c == '{') && i > 0 &&
+                      (s[i - 1] == '.' || fmt_ident_ch(s[i - 1]));
             open_stk[sp] = i; last_ns[sp] = 0; seen[sp] = false; sp++;
             continue;
         }
-        if (c == ')') {
+        if (c == ')' || c == '}') {
             if (sp > 0) {
                 sp--;
-                if (sp == 0 && seen[sp] && s[last_ns[sp]] == ',') {
+                if (sp == 0 && (kind[sp] == '(' || lit[sp]) && seen[sp] &&
+                    s[last_ns[sp]] == ',') {
                     *op = open_stk[sp]; *cl = i;
                     return true;
                 }
@@ -1270,9 +1307,6 @@ static bool fmt_find_trailing_group(const char *s, size_t *op, size_t *cl) {
     return false;
 }
 
-/* 把尾逗号组拆成若干行（行内不带缩进，缩进由 fmt_transform 主循环加）：
- * 首行到 '(' 为止，中间每行一个实参带 ','，末行从 ')' 起接余下原文。
- * 失败（无实参/空实参/跨组）返回 NULL。rows 由调用方逐项 free。 */
 static char *dup_span(const char *s, size_t a, size_t b) {
     char *r = malloc(b - a + 1);
     memcpy(r, s + a, b - a);
@@ -1280,7 +1314,15 @@ static char *dup_span(const char *s, size_t a, size_t b) {
     return r;
 }
 
-static char **fmt_split_rows(const char *s, size_t start, size_t op, size_t cl, int *nrows) {
+/* 递归拆行：找最外层尾逗号组 → 按顶层逗号切项 → 每项再递归。
+ * 返回行数组（*nr_out 行，lvl 递增表示更深一层缩进），失败返回 NULL。
+ * depth 防御病态嵌套；项文本自带结尾 ','，递归后闭括号行带回该逗号。 */
+static FmtRow *fmt_rows_rec(const char *s, size_t start, int lvl, int *nr_out, int depth) {
+    *nr_out = 0;
+    if (depth > 12) return NULL;
+    size_t op, cl;
+    if (!fmt_find_trailing_group(s + start, &op, &cl)) return NULL;
+    op += start; cl += start;
     size_t cuts[256]; int ncuts = 0;
     bool in_str = false, in_chr = false;
     int pd = 0, bd = 0;
@@ -1304,45 +1346,56 @@ static char **fmt_split_rows(const char *s, size_t start, size_t op, size_t cl, 
         else if (c == ',' && pd == 0 && bd == 0 && ncuts < 256) cuts[ncuts++] = i;
     }
     if (ncuts == 0) return NULL;
-    /* 最后一刀必须紧贴 ')'（中间只许空白）——fmt_find_trailing_group 已保证
-     * 最后一个显著字符是 ','，这里再核一道。 */
-    {
+    {   /* 最后一刀必须紧贴闭括号（中间只许空白）——find 已保证，再核一道 */
         size_t k = cuts[ncuts - 1] + 1;
         while (k < cl && (s[k] == ' ' || s[k] == '\t')) k++;
         if (k != cl) return NULL;
     }
-    char **rows = malloc(((size_t)ncuts + 2) * sizeof *rows);
-    int nr = 0;
-    rows[nr++] = dup_span(s, start, op + 1);            /* 首行：… '(' */
+    RowVec rv = {0};
+    rv_push(&rv, dup_span(s, start, op + 1), lvl);      /* 首行：… 开括号 */
     size_t prev = op + 1;
     for (int j = 0; j < ncuts; j++) {
         size_t a = prev, b = cuts[j];
         while (a < b && (s[a] == ' ' || s[a] == '\t')) a++;
         while (b > a && (s[b - 1] == ' ' || s[b - 1] == '\t')) b--;
-        if (a == b) {                                    /* 空实参（foo(  ,)）放弃 */
-            for (int k = 0; k < nr; k++) free(rows[k]);
-            free(rows);
+        if (a == b) {                                   /* 空项（foo(  ,)）放弃 */
+            for (int k2 = 0; k2 < rv.n; k2++) free(rv.v[k2].text);
+            free(rv.v);
             return NULL;
         }
-        char *r = malloc(b - a + 2);
-        memcpy(r, s + a, b - a);
-        r[b - a] = ','; r[b - a + 1] = 0;
-        rows[nr++] = r;
+        char *item = malloc(b - a + 2);
+        memcpy(item, s + a, b - a);
+        item[b - a] = ','; item[b - a + 1] = 0;
+        int snr = 0;
+        FmtRow *sub = fmt_rows_rec(item, 0, lvl + 1, &snr, depth + 1);
+        if (sub) {                                      /* 项本身是尾逗号组：展开 */
+            free(item);
+            for (int k2 = 0; k2 < snr; k2++) rv_push(&rv, sub[k2].text, sub[k2].lvl);
+            free(sub);
+        } else {
+            rv_push(&rv, item, lvl + 1);
+        }
         prev = cuts[j] + 1;
     }
-    rows[nr++] = dup_span(s, cl, strlen(s));             /* 末行：')' 起接余下原文 */
-    *nrows = nr;
-    return rows;
-}
-
-static char **fmt_try_split(const char *raw, size_t start, int *nrows) {
-    size_t op, cl;
-    if (!fmt_find_trailing_group(raw, &op, &cl)) return NULL;
-    return fmt_split_rows(raw, start, op, cl, nrows);
+    {   /* 末行：闭括号起接余下原文。余文里若还有尾逗号组（同行先后两个组）就继续拆，否则',
+         * 一次 fmt 拆不完、不幂等（如 const t: struct{a,} = .{1,}; 两个组都带尾逗号）。 */
+        char *suffix = dup_span(s, cl, strlen(s));
+        int snr = 0;
+        FmtRow *sub = fmt_rows_rec(suffix, 0, lvl, &snr, depth + 1);
+        if (sub) {
+            free(suffix);
+            for (int k2 = 0; k2 < snr; k2++) rv_push(&rv, sub[k2].text, sub[k2].lvl);
+            free(sub);
+        } else {
+            rv_push(&rv, suffix, lvl);
+        }
+    }
+    *nr_out = rv.n;
+    return rv.v;
 }
 
 /* 格式化整个源码：4 空格缩进、去尾空白、连续空行压 1、末尾单换行。
- * 尾逗号拆行：参数/实参表以 ',' 结尾（同行 (...) ）就一行一个。
+ * 尾逗号拆行：参数/实参表、字面量组以 ',' 结尾（同行开合）就一行一个，递归到稳定。
  * CRLF 文档保持 CRLF。返回 malloc 的新文本。 */
 static char *fmt_transform(const char *src) {
     bool had_cr = strstr(src, "\r\n") != NULL;
@@ -1393,18 +1446,18 @@ static char *fmt_transform(const char *src) {
         if (ind < 0) ind = 0;
         /* 尾逗号拆行：同行 (...) 以 ',' 结尾就一行一个实参。
          * 整行花括号 delta 只加一次（拆出的行共享），缩进深度不变。 */
-        char **rows = NULL;
+        FmtRow *rows = NULL;
         int nrows = 0;
         if (!st.in_block && !st.in_str && !st.in_chr)
-            rows = fmt_try_split(raw, first, &nrows);
+            rows = fmt_rows_rec(raw, first, 0, &nrows, 0);
         if (rows) {
             for (int r = 0; r < nrows; r++) {
-                int rind = (r == 0 || r == nrows - 1) ? ind : ind + 1;
+                int rind = ind + rows[r].lvl;               /* 首末行 lvl=0，嵌套项递增 */
                 if (rind < 0) rind = 0;
                 for (int q = 0; q < rind; q++) buf_puts(&out, "    ");
-                buf_puts(&out, rows[r]);
+                buf_puts(&out, rows[r].text);
                 buf_puts(&out, had_cr ? "\r\n" : "\n");
-                free(rows[r]);
+                free(rows[r].text);
             }
             free(rows);
             any_content = true;
@@ -1412,6 +1465,8 @@ static char *fmt_transform(const char *src) {
             depth += delta;
             if (depth < 0) depth = 0;
             st = probe;
+            st.pdepth += st.pdelta;
+            if (st.pdepth < 0) st.pdepth = 0;
             free(raw);
             continue;
         }

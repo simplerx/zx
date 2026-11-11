@@ -3279,6 +3279,29 @@ _tctext = _tcres[0].get("newText", "") if isinstance(_tcres, list) and _tcres el
 check("formatting.trailingComma",
       "fn (\n    a: i32,\n    b: i32,\n) i32 {" in _tctext,
       str(_tcres)[:300])
+# 字面量组递归拆行（18:xx 扩展）：.{…} 尾逗号也拆，嵌套项一层一层展开，
+# 内层不带尾逗号的组（.{.b = 120}）保持单行。
+TLCDOC = 'const main = fn () i32 {\n    _ = pa(10, .{ .name = "weo", .data = .{ .b = 1, .i = 0, .data = .{.b = 120}, }, },);\n    return 0;\n};\n'
+tluri = "file:///" + os.path.join(SRC_DIR, "tltest.zx").replace("\\", "/")
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": tluri, "languageId": "zx", "version": 1, "text": TLCDOC}}})
+_rid += 1
+send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/formatting", "params": {
+    "textDocument": {"uri": tluri},
+    "options": {"tabSize": 4, "insertSpaces": True}}})
+_r, _ = recv_id("tlformat", _rid)
+_tlres = (_r or {}).get("result") or []
+_tltext = _tlres[0].get("newText", "") if isinstance(_tlres, list) and _tlres else ""
+check("formatting.literalGroupRec",
+      "_ = pa(\n" in _tltext
+      and "    .{\n" in _tltext
+      and '        .name = "weo",\n' in _tltext
+      and "        .data = .{\n" in _tltext
+      and "            .b = 1,\n" in _tltext
+      and "            .data = .{.b = 120},\n" in _tltext
+      and "    },\n" in _tltext
+      and "    );\n" in _tltext,
+      str(_tlres)[:400])
 # 影子（.zxls- / .zxls-f 前缀）用完即删。断言前先清掉历史跑留下的旧影子
 #（delete 与 zxc 子进程持句柄竞速失败会留下永久垃圾），再只看这次新增的。
 import glob as _glob, time as _time
