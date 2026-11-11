@@ -1,0 +1,24 @@
+// 标签收割是循环的**正常出口**：恒真循环里收割自己的标签
+// （`n: {}` 空收割 / `m: v` 带值收割）会 run_defers + goto 循环末尾，
+// 循环后面的语句可达——之前这里假报 E0502 unreachable
+//（用户 2026-11-11 截图：`n: while(true) { ...; n:{}; }; var i...;`）。
+// 守门：sema.c 的 while_never_exits 必须认体里的收割出口
+//（stmt_yields_label）；删掉这段扫描，下面两条绑定立即连报 E0502。
+const std = module("std");
+
+const main = fn () i32 {
+    var hits: i32 = 0;
+    n: while(true) {
+        hits = hits + 1;
+        if (hits == 3) { n:{}; }
+    }
+    std.println("exit1: {}", hits);
+
+    var total: i32 = 0;
+    var got = m: while(true) {
+        total = total + 1;
+        if (total == 5) { m: total; }
+    };
+    std.println("exit2: {}", got);
+    return 0;
+};

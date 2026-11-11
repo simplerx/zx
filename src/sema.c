@@ -6004,14 +6004,50 @@ static int if_const(Node *n) {
 }
 
 /* while (true)：条件编译期恒真、又没有捕获，循环就没有正常出口 */
+/* 体里有没有对 label 的收割（`label: ...;` 语句）。收割会 run_defers +
+ * goto 循环末尾（gen_loop_value 建的标签作用域），是循环的**正常出口**。
+ * （用户 2026-11-11：`n: while(true) { ...; n:{}; }; var i...;` 把后面
+ *   活代码假报成 E0502 unreachable。）
+ * 保守口径：嵌套的同名标签作用域理论上会"截住"同名收割（标签内层遮蔽
+ *   外层，spec §8.5），这里仍当出口算——漏报一条死代码比把活代码判死安全。 */
+static bool stmt_yields_label(Node *s, const char *label) {
+    if (!s || !label) return false;
+    switch (s->kind) {
+    case NK_YIELD:
+        return s->label && !strcmp(s->label, label);
+    case NK_BLOCK:
+        for (int i = 0; i < s->nitems; i++)
+            if (stmt_yields_label(s->items[i], label)) return true;
+        return false;
+    case NK_IF:
+        return stmt_yields_label(s->b, label) || stmt_yields_label(s->c, label);
+    case NK_WHILE:
+    case NK_FOR:
+        return stmt_yields_label(s->b, label);
+    case NK_SWITCH:
+        for (int i = 0; i < s->nitems; i++)
+            if (stmt_yields_label(s->items[i]->a, label)) return true;
+        return false;
+    default:
+        return false;
+    }
+}
+
 static bool while_never_exits(Node *n) {
     if (!n->a) return false;
-    if (n->a->kind == NK_BOOL) return n->a->ival != 0;
-    if (!ct_pure(n->a)) return false;
-    Type *c = n->a->ty;
-    if (c && (c->kind == TY_OPT || c->kind == TY_ERR)) return false;
-    Value *cv = n->a->ct;
-    return cv && cv->kind == V_BOOL && cv->bval;
+    if (n->a->kind == NK_BOOL) {
+        if (n->a->ival == 0) return false;
+    } else {
+        if (!ct_pure(n->a)) return false;
+        Type *c = n->a->ty;
+        if (c && (c->kind == TY_OPT || c->kind == TY_ERR)) return false;
+        Value *cv = n->a->ct;
+        if (!(cv && cv->kind == V_BOOL && cv->bval)) return false;
+    }
+    /* 条件恒真还不算"永不退出"：体里可以收割循环自己的标签
+     * （`n: {}` / `n: v;` 会 goto 循环末尾），那是正常出口。 */
+    if (n->label && n->b && stmt_yields_label(n->b, n->label)) return false;
+    return true;
 }
 
 /* for：序列一定有限（`lo..` 的长度由别的序列给，spec §8.3），所以总能跑完 —— 
