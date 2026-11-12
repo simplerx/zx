@@ -1,0 +1,50 @@
+// task_reuse.zx —— 任务槽回收复用（M58 遗留的 1024 累计上限）。
+// 6 轮 × 256 = 1536 次 spawn，远超旧的定长表；旧实现第 1025 个 spawn
+// 返回 null，`.?` 直接 trap。现在：句柄是实例内单调递增的序号，永不复用；
+// 结果按序号存在按需分配的分段表里，ZxTask 对象用完即 free。
+//   · awaitAll 之后 await(h) 仍能取到返回值（§94 的既定用法）
+//   · 6 轮之后的第一批句柄仍有效，取回的仍是它自己的结果，不会 ABA
+//   · close 之后句柄失效，操作返回 closed
+// expect-output:spawns:1536
+// expect-output:last:7
+// expect-output:stale:7
+// expect-output:after-close:closed
+const std = module("std");
+const Task = std.task.Task;
+
+var total: usize = 0;
+const bump = fn (x: usize) !usize {
+    _ = std.atomic.atomicAdd(&total, 1);
+    return x + 1;
+};
+
+const main = fn () !i32 {
+    let co = Task.coro();
+    var stale: usize = 0;
+    var last: usize = 0;
+    var round: usize = 0;
+    while (round < 6) {
+        var i: usize = 0;
+        while (i < 256) {
+            let h = co.spawn(bump, 6).?;
+            if (round == 0 && i == 0) { stale = h; }
+            if (round == 5 && i == 255) { last = h; }
+            i = i + 1;
+        }
+        try co.awaitAll();
+        round = round + 1;
+    }
+    std.println("spawns:{}", std.atomic.atomicLoad(&total));
+
+    if (co.await(last)) v { std.println("last:{}", v); } else e {
+        std.println("last-err:{}", std.debug.errName(e));
+    }
+    if (co.await(stale)) v { std.println("stale:{}", v); } else e {
+        std.println("stale-err:{}", std.debug.errName(e));
+    }
+    co.close();
+    if (co.await(last)) v { std.println("after-close-unexpected:{}", v); } else e {
+        std.println("after-close:{}", std.debug.errName(e));
+    }
+    return 0;
+};

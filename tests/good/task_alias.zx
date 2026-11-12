@@ -1,0 +1,26 @@
+// task_alias.zx —— 预扫描必须按 C 符号驱动，不能靠 `std.Task` 访问形状。
+// 这里 Task 经「模块别名 + 类型别名」取得，实例由 fromId 还原（不调用
+// zx_task_new），全程只调 group 系列 -> 没有任何 zx_task_* 引用：旧扫描器
+// 认不出形状，运行时不发射，链接报 B2001 module `tg` has no definition。
+// expect-output:alias:400
+const std = module("std");
+const tk = std.task;
+const T = tk.Task;
+
+var hits: usize = 0;
+const work = fn (x: usize) !usize {
+    var i: usize = 0;
+    while (i < 100) { _ = std.atomic.atomicAdd(&hits, 1); i = i + 1; }
+    return x + 1;
+};
+
+const main = fn () !i32 {
+    var t: T = T.fromId(0);             // 实例只作接口，不建运行时调度器
+    let g = t.group();
+    var i: usize = 0;
+    while (i < 4) { _ = t.groupSpawn(g, work, i); i = i + 1; }
+    t.groupWait(g);
+    std.println("alias:{}", hits);
+    t.groupClose(g);
+    return 0;
+};

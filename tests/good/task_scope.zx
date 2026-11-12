@@ -1,0 +1,43 @@
+// task_scope.zx —— 结构化并发作用域：生命周期收进词法作用域。
+// 统一 API：作用域是 usize 句柄，能力全在 Task 上。
+// 手工 scope()/defer scopeClose() 与 Task.withScope 糖两条路径都要能跑；
+// scopeJoin() 是「等全体 + 回放首个错误」，全成功时返回首个成员的值；
+// join 之后仍可 await(h) 逐个取结果（和 awaitAll 的纯屏障用法一致）。
+// 嵌套作用域也必须有独立的成员登记与结果回收。
+// expect-output:join:7
+// expect-output:await:7
+// expect-output:with:42
+// expect-output:nested:9
+const std = module("std");
+const Task = std.task.Task;
+
+const job = fn (x: usize) !usize { return x + 1; };
+const add = fn (x: usize) !usize { return x + 2; };
+
+// withScope 的 body 直接拿到实例与作用域句柄（zx 没有闭包）。
+const body = fn (t: *const Task, sc: usize) !usize {
+    let h = t.scopeSpawn(sc, job, 41).?;
+    let v = try t.scopeJoin(sc);
+    if (t.await(h)) r { std.println("with:{}", r); } else e { return e; }
+    if (v != 42) { return error.bad; }
+
+    // 嵌套：内层作用域独立登记成员，join 的结果不串到外层
+    let inner = t.scope();
+    defer t.scopeClose(inner);
+    _ = t.scopeSpawn(inner, add, 7).?;
+    return try t.scopeJoin(inner);
+};
+
+const main = fn () !i32 {
+    let co = Task.coro();
+    defer co.close();
+
+    let sc = co.scope();
+    defer co.scopeClose(sc);
+    let h = co.scopeSpawn(sc, job, 6).?;
+    if (co.scopeJoin(sc)) v { std.println("join:{}", v); } else e { return e; }
+    if (co.await(h)) v { std.println("await:{}", v); } else e { return e; }
+
+    if (co.withScope(body)) v { std.println("nested:{}", v); } else e { return e; }
+    return 0;
+};

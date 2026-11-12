@@ -1,5 +1,6 @@
-// task_group.zx —— Task.group()：内核调度线程组，零锁。
-// spawn 即起 OS 线程（调度交给内核），分组只是原子计数；wait 让步退避。
+// task_group.zx —— t.group()：内核调度线程组，零锁。
+// 组是 usize 句柄，能力全在 Task 实例方法上；spawn 即起 OS 线程
+// （调度交给内核），分组只是原子计数，wait 让步退避。
 // 共享数据的线程安全由 std.atomic 保证 —— 计数归零即写入全部可见。
 // expect-output:group:400
 const std = module("std");
@@ -13,10 +14,13 @@ const work = fn (x: usize) !usize {
 };
 
 const main = fn () !i32 {
-    let g = Task.group();
+    var t: Task = Task.coro();          // 先生成实例，能力全走 t.
+    defer t.close();
+    let g = t.group();
     var i: usize = 0;
-    while (i < 4) { _ = g.spawn(work, i); i = i + 1; }
-    g.wait();
+    while (i < 4) { _ = t.groupSpawn(g, work, i); i = i + 1; }
+    t.groupWait(g);
     std.println("group:{}", hits);
+    t.groupClose(g);                    // 等收尾后释放计数器
     return 0;
 };

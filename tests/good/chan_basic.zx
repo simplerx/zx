@@ -2,6 +2,7 @@
 // 配对直接握手；tryRecv 空报 would_block；close 后操作报 closed。
 // expect-output:sum:6
 // expect-output:try:would_block
+// expect-output:try-send:would_block
 // expect-output:after-close:closed
 const std = module("std");
 const Task = std.task.Task;
@@ -34,6 +35,10 @@ const main = fn () !i32 {
     std.println("sum:{}", total);
     if (co.tryRecv()) v { std.println("unexpected:{}", v); } else e {
         std.println("try:{}", std.debug.errName(e));
+    }
+    // trySend 是 pub 成员：用户文件能直接调（空通道 → would_block）
+    if (co.trySend(9)) { std.println("unexpected-send"); } else e {
+        std.println("try-send:{}", std.debug.errName(e));
     }
     co.close();
     if (co.recv()) v { std.println("unexpected"); } else e {

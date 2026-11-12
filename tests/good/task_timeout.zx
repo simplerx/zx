@@ -1,0 +1,78 @@
+// task_timeout.zx —— timer / deadline 线。
+//   · sleep 是协作式停靠（任务不占 worker），可被 cancel 打断
+//   · awaitTimeout 超时不取消任务，句柄之后照常 await 取结果
+//   · scopeJoinTimeout 宽裕时回放首个结果；deadline 到点 cancel 全体成员
+// 定时器不建后台线程：worker 与根上下文的 5ms 心跳轮询 timer 链。
+// expect-output:timeout:timeout
+// expect-output:late:7
+// expect-output:join:7
+// expect-output:warm:timeout
+// expect-output:cancelled:cancelled
+// expect-output:deadline:timeout
+// expect-output:member:cancelled
+const std = module("std");
+const Task = std.task.Task;
+
+var g_t: usize = 0;
+
+const slow = fn (_: usize) !usize {
+    let t = Task.fromId(g_t);
+    try t.sleep(120);
+    return 7;
+};
+
+// 定期 yield，让任务跨多个调度 tick 而不是一次调度跑到底 —— 这样
+// deadline 到点时它确实还活着，cancel 才有东西可打断。
+const spin = fn (_: usize) !usize {
+    let t = Task.fromId(g_t);
+    var i: usize = 0;
+    while (i < 200000000) {
+        i = i + 1;
+        if (i % 65536 == 0) { t.yield(); }
+    }
+    return 1;
+};
+
+const main = fn () !i32 {
+    let t = Task.coro();
+    defer t.close();
+    g_t = t.id;
+
+    // ① 有界等待超时，任务没被取消，之后仍可用普通 await 取回结果
+    let h = t.spawn(slow, 0).?;
+    if (t.awaitTimeout(h, 15)) v { std.println("unexpected:{}", v); } else e {
+        std.println("timeout:{}", std.debug.errName(e));
+    }
+    if (t.await(h)) v { std.println("late:{}", v); } else e { return e; }
+
+    // ② deadline 宽裕：scopeJoinTimeout 与 scopeJoin 一样回放首个结果
+    let sc = t.scope();
+    defer t.scopeClose(sc);
+    _ = t.scopeSpawn(sc, slow, 0).?;
+    if (t.scopeJoinTimeout(sc, 500)) v { std.println("join:{}", v); } else e {
+        std.println("join-err:{}", std.debug.errName(e));
+    }
+
+    // ③ 让 sleep 真跑起来再 cancel：错误沿 !T 上冒到 await 方
+    let h3 = t.spawn(slow, 0).?;
+    if (t.awaitTimeout(h3, 5)) v { std.println("unexpected-early:{}", v); } else e {
+        std.println("warm:{}", std.debug.errName(e));
+    }
+    t.cancel(h3);
+    if (t.await(h3)) v { std.println("unexpected-ok:{}", v); } else e {
+        std.println("cancelled:{}", std.debug.errName(e));
+    }
+
+    // ④ deadline 到点：返回 timeout 并 cancel 全体成员，纯计算循环也靠
+    //    循环回边的 cancel 检查中断，不会跑满 2 亿次。
+    let sc2 = t.scope();
+    defer t.scopeClose(sc2);
+    let hs = t.scopeSpawn(sc2, spin, 0).?;
+    if (t.scopeJoinTimeout(sc2, 10)) v { std.println("unexpected-join:{}", v); } else e {
+        std.println("deadline:{}", std.debug.errName(e));
+    }
+    if (t.await(hs)) v { std.println("unexpected-await:{}", v); } else e {
+        std.println("member:{}", std.debug.errName(e));
+    }
+    return 0;
+};

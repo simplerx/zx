@@ -1,0 +1,47 @@
+// task_cancel_loop.zx —— 纯计算循环也必须能取消。
+// await 门只在 !T 函数入口，循环体里没有任何 !T 调用时 cancel 石沉大海；
+// 后端现在会在 !T 函数的循环体开头插一次纯检查（不挂起）。
+// killer 等到 spin 真的进了循环（ticks>0）才取消，保证测的是循环回边，
+// 而不是「任务还没启动就被 run_one 结算成 cancelled」。
+// expect-output:caught:cancelled
+// expect-output:interrupted:1
+const std = module("std");
+const Task = std.task.Task;
+const LIMIT: usize = 100000000;
+
+var ticks: usize = 0;
+var handle: usize = 0;
+
+const spin = fn (_: usize) !usize {
+    var i: usize = 0;
+    while (i < LIMIT) {
+        i = i + 1;
+        std.atomic.atomicStore(&ticks, i);
+    }
+    return i;
+};
+
+const killer = fn (ctx: usize) !usize {
+    let t = Task.fromId(ctx);
+    while (std.atomic.atomicLoad(&ticks) == 0) { t.yield(); }
+    t.cancel(std.atomic.atomicLoad(&handle));
+    return 0;
+};
+
+const main = fn () !i32 {
+    let pl = Task.pool(2);
+    let h = pl.spawn(spin, pl.id).?;
+    std.atomic.atomicStore(&handle, h);
+    _ = pl.spawn(killer, pl.id).?;
+    if (pl.await(h)) v {
+        std.println("unexpected:{}", v);
+    } else e {
+        std.println("caught:{}", std.debug.errName(e));
+    }
+    let n = std.atomic.atomicLoad(&ticks);
+    var interrupted: usize = 0;
+    if (n > 0 && n < LIMIT) { interrupted = 1; }
+    std.println("interrupted:{}", interrupted);
+    pl.close();
+    return 0;
+};

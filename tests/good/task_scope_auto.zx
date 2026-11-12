@@ -1,0 +1,60 @@
+// task_scope_auto.zx —— 作用域退出必清理：body 抛错（没有 join）时，
+// withScope 的 defer 仍会 close → cancel 未完成成员 + 等全体收尾。
+// 父任务被取消时 !T 错误同样上冒并触发这个 defer，所以子任务树必被级联
+// 取消，不会留下活任务或工作线程。这里守的是生命周期；「取消正在跑的
+// 兄弟」由 task_scope_fail.zx 单独守。
+// 另外守：close 幂等，close 之后 spawn 返回 null（作用域已封口）。
+// expect-output:auto:boom
+// expect-output:child:cancelled
+// expect-output:after-close:null
+// expect-output:idempotent:1
+const std = module("std");
+const Task = std.task.Task;
+
+const LIMIT: usize = 1000000;
+var g_tid: usize = 0;
+var g_h: usize = 0;
+
+const job = fn (x: usize) !usize { return x + 1; };
+
+const spin = fn (_: usize) !usize {
+    let t = Task.fromId(g_tid);
+    var i: usize = 0;
+    while (i < LIMIT) {
+        i = i + 1;
+        t.yield();
+    }
+    return i;
+};
+
+const body = fn (t: *const Task, sc: usize) !usize {
+    g_h = t.scopeSpawn(sc, spin, 0).?;
+    return error.boom;          // 不 join，直接抛错
+};
+
+const main = fn () !i32 {
+    let co = Task.coro();
+    defer co.close();
+    g_tid = co.id;
+
+    if (co.withScope(body)) v { std.println("auto-unexpected:{}", v); } else e {
+        std.println("auto:{}", std.debug.errName(e));
+    }
+    // 作用域已关闭：子任务被取消并结算，句柄仍可取回自己的结果
+    if (co.await(g_h)) v { std.println("child-unexpected:{}", v); } else e {
+        std.println("child:{}", std.debug.errName(e));
+    }
+
+    let sc = co.scope();
+    defer co.scopeClose(sc);
+    _ = co.scopeSpawn(sc, job, 0).?;
+    co.scopeClose(sc);
+    co.scopeClose(sc);                 // 幂等：第二次直接返回
+    std.println("idempotent:1");
+    if (co.scopeSpawn(sc, job, 0)) h {
+        std.println("after-close-unexpected:{}", h);
+    } else {
+        std.println("after-close:null");
+    }
+    return 0;
+};

@@ -1,0 +1,101 @@
+// task_blocking.zx —— std.io 纯同步、透明；要并发就显式「task + io」。
+//
+// ① coro()：只有根上下文一条执行载体。io 同步占住它，tick 任务在 io
+//    期间一次都没被推进（implicit:0）—— 这是「没有隐式 offload」的
+//    可观测证据：编译器不偷偷起线程，也不偷偷停靠纤程。
+// ② pool(2)：把 io 放进一个任务，另一条 worker 上的任务照常完成
+//    （parallel:1）—— 显式 task + io 就是 zx 的异步做法。
+// ③ 作用域里的 io 任务同样是显式组合。
+// expect-output:implicit:0
+// expect-output:io:67108864
+// expect-output:parallel:1
+// expect-output:scope:5
+const std = module("std");
+const Task = std.task.Task;
+
+const PATH = "io_task_explicit.tmp";
+const BIG: usize = 64 * 1024 * 1024;
+var g_t: usize = 0;
+var g_ticks: usize = 0;
+
+const tick = fn (_: usize) !usize {
+    let t = Task.fromId(g_t);
+    var k: usize = 0;
+    while (k < 3) {
+        try t.sleep(5);
+        k = k + 1;
+        _ = std.atomic.atomicAdd(&g_ticks, 1);
+    }
+    return 1;
+};
+
+const parTick = fn (_: usize) !usize {
+    var k: usize = 0;
+    while (k < 1000) {
+        _ = std.atomic.atomicAdd(&g_ticks, 1);
+        k = k + 1;
+    }
+    return 1;
+};
+
+const writeBig = fn (tag: u8) !usize {
+    var mem = std.heapAlloc(std.heap.page, u8, BIG);
+    mem[0] = tag;
+    let data = mem[0..BIG];
+    var written: usize = 0;
+    if (std.io.openWrite(PATH)) h {
+        written = std.io.write(h, data);
+        std.io.close(h);
+    }
+    _ = std.file.remove(PATH);
+    return written;
+};
+
+const ioJob = fn (_: usize) !usize {
+    let n = try writeBig(65);
+    // 同步 io 占住唯一上下文：tick 一次都没被推进 => 无隐式 offload
+    std.println("implicit:{}", std.atomic.atomicLoad(&g_ticks));
+    return n;
+};
+
+const parIo = fn (_: usize) !usize { return try writeBig(66); };
+
+const quick = fn (_: usize) !usize {
+    if (std.io.openWrite(PATH)) h {
+        _ = std.io.write(h, "scope-io");
+        std.io.close(h);
+    }
+    _ = std.file.remove(PATH);
+    return 5;
+};
+
+const main = fn () !i32 {
+    // ① coro：唯一上下文，io 同步执行
+    let co = Task.coro();
+    g_t = co.id;
+    let ht = co.spawn(tick, 0).?;
+    let hi = co.spawn(ioJob, 0).?;
+    if (co.await(hi)) v { std.println("io:{}", v); } else e { return e; }
+    if (co.await(ht)) v { _ = v; } else e { return e; }
+    co.close();
+
+    // ② pool(2)：显式把 io 放进任务，另一条 worker 上的任务照常完成
+    g_ticks = 0;
+    let pl = Task.pool(2);
+    defer pl.close();
+    g_t = pl.id;
+    let hp = pl.spawn(parTick, 0).?;
+    let hio = pl.spawn(parIo, 0).?;
+    if (pl.await(hio)) v { _ = v; } else e { return e; }
+    if (pl.await(hp)) v { _ = v; } else e { return e; }
+    std.println("parallel:{}", std.atomic.atomicLoad(&g_ticks) >= 1000);
+
+    // ③ 作用域里的 io 任务同样走显式组合
+    let sc = pl.scope();
+    defer pl.scopeClose(sc);
+    _ = pl.scopeSpawn(sc, quick, 0).?;
+    if (pl.scopeJoin(sc)) v { std.println("scope:{}", v); } else e {
+        std.println("scope-err:{}", std.debug.errName(e));
+    }
+    return 0;
+};

@@ -134,3 +134,54 @@
   具名字面量实例）、`isTypeValuedRecv/typeValuedContainer`（`const AB = m.A.B;` 是类型值）。
   emit 用解析回来的 `mem_body_fix` 查成员声明；hover 实例分支同源。
 - 守门 lsptest：`completion.deep.*` 6 条 + `hover.deepNestField`，fixture 刻意同名。
+
+## LSP 能力线：解析链优先级与守门会话（2026-11-12 追加，写文档前必看）
+- 点补全的容器查找按**裸名字**在 `scanFiles()` 里找：`files[0]` 是当前文档，
+  其后是文档目录、std、模块目录。所以「限定路径的容器」必须走
+  `modContainerOf / resolveContainerPath` 锁定模块文件，不能靠裸名兜底；
+  `appendGenericSynthetics` 合成的 `const B = struct{…}` 必须
+  `insertSlice(gpa, 1, …)` 排前部，否则被目录里同名 `B` 抢走。
+- 匿名类型串派生的字段是虚拟成员：emit 时**不许**用 `findDeclStmt` 全文配
+  声明（`anon_only` 时 `stmt = null`），否则同名顶层 fn 会让它被实例命名
+  空间过滤当关联函数剔掉。
+- `tools/lsptest.py` 的 8z 段用**独立短命 LSP 会话**，位置在
+  `# 9 shutdown/exit` 之前但自己的 `p8/s8/r8`；主会话几百个文档会污染扫描
+  缓存，且主进程 shutdown 后全局 `send()` 会 `OSError 22`。补全新守门时
+  needle **不要带尾随 `\n`**（off 落到下一行行首 → 全局标识符补全）。
+- 语义：静态值（关联常量/静态 const）**只在类型命名空间**，enum /
+  union(enum) 实例上也不出；变体恒公开。
+
+
+## 两条解析链全量覆盖（2026-11-12 用户要求"自己也要思考，别只修截图"）
+- **0 项补全大多是 `.ty` 语义过滤字段，不是路径解析失败**：加个静态常量能弹
+  出来就说明路径是通的。别再去改 `resolveContainerPath` 找"解析不到"。
+- **链路 A（容器嵌套类型）四个锚点**：`resolveContainerPathD` 的 n==1 单段
+  类型值别名展开（`const T: type = t.G.F;`）；`lit_ctx` 的 `{` 校验也要认
+  `resolveContainerPath`，`T{ .` 才不退化；`pathNoGenerics` 让
+  `t.G(i32).F.` 逐段下钻而不是拿 G 的成员；`.ty` 过滤成空列表时由
+  `tyCtorFallback` 补一条 `F{...}` 构造骨架（**textEdit 吃掉刚输入的 `.`**，
+  detail 贴字段形状），字段项绝不混进类型命名空间。
+- **链路 B（形参匿名嵌套类）四个锚点**：显式 `var x: struct{…}` 标注优先于
+  初值推断（编辑中 `.{ … .` 初值不完整）；`paramStructTypeNear` 按花括号
+  深度选最浅的 `name:`（同名嵌套字段 `data` 用 `namedTypeNear` 会串到内层）；
+  `selfContainerAt` 按"包含光标且跨度最小"取词法容器（旧版取全文第一份
+  self 容器，vendor 多容器必串）；`anonBindingNestedFields` 的 `= .{`
+  不再要求 `=` 前紧邻标识符（显式标注时那里是 `}`）。
+- **hover**：`genericContainerDef` 要跳过形参上的 `: struct{…}`，别把它当
+  `return struct{…}` 的容器体；初值推不出类型时用 `declTyOf` 兜底。
+- **口径红线**：`completion.literalSecond` 钉住"具名容器字面量续补给全量
+  字段"，不许给 emit 循环加去重（加过一次，立即挂）；只有匿名实参 /
+  嵌套字面量两条链去重。
+- 守门：`tools/lsptest.py` ⑩ 段（仍在 8z 独立短命会话里）24 条，覆盖四种
+  容器嵌套类型、三层 Leaf、泛型返回体/实例尾段、类型值别名、构造骨架
+  textEdit、显式匿名标注、`cfg./cfg.nest./self./data./data.data.`、snippet。
+  冒烟 336 → **360 项全过**。不许删用例来变绿。
+
+## Task 是接口（2026-11-12 用户纠偏，别再退回关联函数）
+- `std.task.Task` 的 4 个静态构造器 `coro/single/pool/fromId` 生成实例，
+  **其余全部是 `t.` 实例方法**（含 `group*`），类型空间只剩
+  `SEL_AWAIT/SEL_RECV` 两个编译期常量。用户选了「实例方法即可」，不引入
+  vtable、不动 C 运行时的 mode 分支；「全挂 Task 实例」，不恢复
+  Group/Scope/Chan 独立类型。
+- `completion.instance.sameNameMember` 断言 `tmap["group"]` 是
+  `group(self: *const Task) usize`；以前把 group 当污染的黑名单已按新语义改。

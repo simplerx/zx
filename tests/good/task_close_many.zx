@@ -1,0 +1,26 @@
+// task_close_many.zx —— 反复创建/关闭实例：close 会释放调度器本体与任务槽，
+// 旧实现每建一个实例就永久留下一个 ZxSched + 1024 槽的表。
+// expect-output:rounds:24
+// expect-output:closed:ok
+const std = module("std");
+const Task = std.task.Task;
+
+var sum: usize = 0;
+const bump = fn (x: usize) !usize {
+    _ = std.atomic.atomicAdd(&sum, x);
+    return x;
+};
+
+const main = fn () !i32 {
+    var k: usize = 0;
+    while (k < 24) {
+        let t = Task.pool(2);
+        _ = t.spawn(bump, 1).?;
+        try t.awaitAll();
+        t.close();
+        k = k + 1;
+    }
+    std.println("rounds:{}", std.atomic.atomicLoad(&sum));
+    std.println("closed:ok");
+    return 0;
+};

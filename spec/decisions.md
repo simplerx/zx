@@ -3400,6 +3400,12 @@ skip 提示要当成失败对待。
 
 ## 106. Task.group()：内核调度线程组，零锁
 
+> **口径更新（§125，2026-11-12）**：本节记录的是组机制的设计动机与 C
+> 实现，二者至今有效；但调用形态已按「Task 是接口」统一成实例方法
+> `t.group()` / `t.groupSpawn()` / `t.groupWait()` / `t.groupClose()` /
+> `t.groupRun()`，`Group` 退成 `usize` 句柄、不再是独立类型。标题里的
+> `Task.group()` 是当时的写法，现行 API 以 §123 表与 §125 为准。
+
 用户拍板：重做一个「全局的、类似线程池的东西」，要求**利用内核调度、不是
 真的线程池、不使用锁**。定位成与实例形态互补的另一极：实例（coro/single/
 pool）是物理隔离的用户态调度器；组是零设施——spawn 即起一条 OS 线程，
@@ -3417,8 +3423,10 @@ pool）是物理隔离的用户态调度器；组是零设施——spawn 即起�
   内存序保证「计数归零即数据就绪」：任务体内 SEQ_CST 原子写
   happens-before 完成方减计数，等待方 ACQUIRE 读到 0 时全部可见——
   这就是「安全的多线程」的全部开销。
-- Zx 侧 std/task.zx：`Group` struct（spawn 返回 bool、wait void）+
-  `Task.group()` 构造。任务即发即忘，返回值/错误不回收。
+- Zx 侧 std/task.zx：当时是 `Group` struct（spawn 返回 bool、wait void）+
+  `Task.group()` 构造；现按 §125 收敛为 `t.group()` → usize 句柄 +
+  `t.groupSpawn/groupWait/groupClose/groupRun`。任务即发即忘，返回值/错误
+  不回收。
 
 取舍：一个任务一条线程，任务数大时开销高于 pool；组内任务不能 await/通信
 （不是纤程，没有调度器可挂）。要结果、取消、通道用实例形态。
@@ -3954,3 +3962,453 @@ union 的点路径没有"类型.变体"形态，宁缺毋滥。
 守门：lsptest completion.enum.{typeMembers,instMembers,methodSelfDetail,
 assocSnippet} + completion.unionenum.{typeMembers,instMembers} +
 hover.enum.instanceMethod（fixture 刻意含显式值变体与 const/var 混排）。
+
+## 120. Scope：结构化并发靠 defer，不靠新语法（2026-11-12）
+
+调研结论：zx 已有**无函数着色**（任务就是普通 `fn(usize) !usize`，await 是
+库方法，取消 = `error.cancelled` 沿 `!T` 上冒），与 Go / Java Loom /
+Zig 0.15+ 移除 async-await 改用 `std.Io` 同向，**不推翻**。缺的是结构化
+并发（Trio nursery / Swift TaskGroup / Kotlin coroutineScope / Java JEP 525）：
+`awaitAll` 是纯屏障不聚合错误，取消没有父子树，忘了 close 就泄漏工作线程，
+兄弟失败后其余仍空转。
+
+**裁定**：沿用 §94「Task 不进编译器类型系统」路线，加纯库类型
+`std.task.Scope`（`{task, id}` + `extern fn zx_sc_*`）。C 运行时给 `ZxTask`
+加一个 `sc` 指针、`ZxScope` 记成员 id 列表与首个错误：
+
+1. `spawn` 在 `zx_ready_push` **之前**登记 —— 入队后 worker 可能立刻跑完并
+   `free(t)`，再碰 t 就是 UAF。ids 扩容放在 `tab_lk` 内，失败只留一个不对
+   外发布的 id 空洞，回滚干净。
+2. `zx_task_finish` 里首个 `tag != 0` 记 `first_tag/ret` 并 cancel 全体兄弟。
+   `done` 的发布推迟到 scope 段之后：await/close 看到 done 时 finish 对 sc
+   的访问必须已结束，否则 close 立刻释放会 UAF。
+3. `join` 逐个 await 成员并回放首个错误；全成功返回首个任务的返回值。
+   `close` = cancel 全体 + 等全体 + 释放 ids，幂等。
+4. **退出必清理靠 `defer`**：正常返回与 `!T` 错误传播都展开 defer，所以父
+   任务被 cancel → 错误上冒 → `sc.close()` 级联取消子任务树。不需要在 C 里
+   维护 active_scope 栈，也不必改 `zx_task_cancel`。
+
+**踩的坑（真 bug，已修）**：上一轮加的「循环回边取消检查」直接发一句裸
+`return (ErrT){ .tag = cancelled }`，而 defer 是**编译期展开**的、只有
+`NK_RETURN` 分支调 `run_defers`。于是任务在纯计算循环里被取消时所有 defer
+都漏掉 —— Scope 的自动清理在这条路径上完全失效。修法：
+`emit_loop_cancel_check` 发 `{ run_defers_m(0, 1, NULL); return …; }`
+（mode 1 = 错误已注定，errdefer 一起展开）。守门 `task_scope_cancel.zx` 的
+`interrupted:1` 就是反例：漏了 defer，子任务会跑满 LIMIT。
+
+另一个窗口：登记 ids 之后、入队之前兄弟可能已失败，`cancel_all` 遍历时这个
+t 还没发布（`zx_task_get` 拿不到）→ 漏取消。两处补判兜住：登记时
+`doomed = sc->failed`，入队前再查一次 `sc->failed || sc->closed`。
+
+**回收**：`zx_sc_close` 只让句柄失效并 free(ids)，scope 壳挂在实例的
+`sc_list` 上由 `zx_task_close` 统一 free —— 「close 之后仍被并发 spawn 拿着
+的旧 scope 指针」不是悬垂指针，拿 lk 检查 closed 就能安全拒绝。
+
+**边界**（§94 原样）：`scope()/join()/close()` 由创建者串行，`spawn` 可并发；
+defer 必须让作用域先于实例关闭。仍未做（阶段 2）：deadline/timeout、
+select、类型化 `Chan(T)`、把 `std.io` 阻塞调用改成停靠任务、静态防数据竞争。
+
+守门：`tests/good/task_scope.zx`（全成功 / withScope 糖 / 嵌套）、
+`task_scope_fail.zx`（fail-fast + 循环中断 + 首个错误）、
+`task_scope_auto.zx`（异常退出自动清理 / close 幂等 / 封口后 spawn）、
+`task_scope_cancel.zx`（父任务取消 → 子任务树级联 + defer 展开）。
+验证：并发用例 16/16；pool(0) 4 轮 × 25 任务 20/20；6 组关键用例各
+20/20；`sh test.sh` → passed 322, failed 0。
+
+## 121. 阶段 2：timer / select / Chan(T) / blocking（2026-11-12）
+
+沿用 §94 / §120 路线（库 struct + `extern`，不加语法、不进类型系统）。
+
+1. **timer 不建后台线程**。`zx_now_ms()`（Win `GetTickCount64` / POSIX
+   `CLOCK_MONOTONIC`）+ 实例 `timers` 链；worker loop 与两个根上下文 drive
+   循环都调 `zx_tm_poll`。`zx_cv_wait` 本来就是 5ms 超时，心跳天然存在。
+   新等待 API 统一基于 `zx_park_tick(s, 1)`：任务上下文挂 timer 后切走，
+   根上下文推进本实例就绪队列。**不挂任何等待者链**，因此只有 timer 一个
+   唤醒源，避开多路 select 常见的「两个来源同时 unpark」「超时后幽灵任务
+   还留在链上」竞态；close 在 `tm_lk` 下整体摘空链再 unpark，仍是单源。
+   `pstate` 必须**先于** arm 设成 PARKING，否则 poll 在 arm 之前 fire 会被
+   吞掉（永久挂起）。
+2. **`done_ms` 才能让 deadline 精确**。`ZxSlot` 加 `done_ms`（finish 时写）。
+   第一版 `joinTimeout` 先查「全体完成」再查 deadline，纯计算任务在**一次
+   调度里**跑过 10ms 截止才结算，轮询回来 `left==0` 就误判成功（守门打出
+   `unexpected-join:1`）。改成完成时刻 > deadline 仍算超时；`awaitTimeout`
+   同源。`task_timeout.zx` 的 spin 定期 `yield`，让它跨 tick 才真正被 cancel。
+3. **select 用轮询而非多链注册**。`zx_sel_wait(h, br, n, ms, which)`：br 每
+   2 项 `[kind,arg]`，kind 0 = await 句柄 / 1 = recv 通道（arg=0 是默认
+   通道）。按数组顺序取第一个就绪者，同时就绪索引小者胜（确定性）。recv
+   分支用 `zx_chan_recv(..., true)` 非阻塞探测并消费对手。1ms 轮询，心跳级。
+4. **Chan(T) 的编译期约束靠 castable 表，不靠 `@compileError`**。实测
+   `@compileError` 放进 `if (cond) {…}` **根本不触发**（连 `if (16 > 8)` 都
+   过），单独用又因 `noreturn` 报 E0502。改成 `(usize)v` / `(T)bits` 往返，
+   `[]T`(16 字节) 直接 E0300，更贴合「转换只有 `(T)val`」的裁定。代价是
+   `Chan(f64)` 会走整数转换丢精度，文档明令用 `Chan(*f64)`。命名通道与
+   默认通道共用 `chan_lk`；`ZxTask.park_ch` 记住任务停在哪条通道上，
+   `zx_task_cancel_one` 才摘得对链，否则 cancel 一个停在 `Chan(T)` 上的
+   任务没人唤醒。通道壳挂 `ch_list` 由实例 close 统一 free（不悬垂）。
+5. **blocking 不改编译器内建**。`std.io` 是 sema 里 `BI_IO` 发的同步 C 调用，
+   自动改成停靠要动内建发射机制，越出本轮范围。`zx_task_block` 走
+   `zx_task_spawn_impl(..., blocking=true)`：建普通 ZxTask 但**不入就绪队列**，
+   改起一条专用 OS 线程，线程里 `zx_task_rootctx()`（`__thread` 新线程自
+   初始化）后 `zx_task_run_one(t, root)`，结束走正常 finish 唤醒 waiters。
+   起线程失败完整回滚槽位 / pending / 纤程栈 / 任务对象。该任务内若 await
+   别的任务会 requeue 回 worker 队列（纤程跨线程迁移），coro 模式下由等待
+   方 drive 推进。
+
+**架构债（用户 2026-11-12 问「为什么不是用 zx 写，而是用 C」，记录在此）**：
+`emit_task_runtime` 是 `backend.c` 里的 C 字符串，注入每份生成 C 约 1100 行
+（`task_modes.zx` 生成 1450 行，129–1222 是运行时）；`std/task.zx` 只是薄
+包装，`std/` 里 fs / json / arena / map / pool 全用 zx 写，task 是唯一例外。
+根因是 zx 编译到 C、没有四类抽象：栈/寄存器上下文切换（`ucontext` /
+Fiber）、TLS（`__thread ZxTask *zx_fb_cur`）、阻塞同步等待与内存序（连
+`std.atomic` 都是编译器内建 `BI_SYNC` 发 C 符号）、无 GC / 所有权下的手动
+生命周期。更自洽的两条路是「纯逻辑（就绪队列 / 任务表 / Scope 记账 /
+select 轮询）上移到 zx，C 只留 4 个原语」或「运行时独立编成 `zxrt.a` 由
+链接器引入」，两者都要动编译流程与 §94 裁定，属独立重构线，本轮不夹带。
+
+守门：`tests/good/{task_timeout,task_select,task_chan,task_blocking}.zx` +
+`tests/bad/chan-wide.zx`。验证：并发用例 20/20；pool(0) 混合压测（50 对
+rendezvous + 20 轮 select）20/20；9 组关键用例各 20/20；`sh test.sh` →
+passed 327, failed 0。仍未做：静态防数据竞争、`std.io` 内建的自动异步化、
+`Chan(T)` 对大于 8 字节值的原生支持。
+
+## §122 架构裁定：否掉 zxrt.a、选纯逻辑上移、io 自动 offload（2026-11-12 用户）
+
+用户看完 §121 的架构债后拍板三条：**① `zxrt.a` 不做**（"最后还是要 C 的
+运行时"），走**纯逻辑上移到 zx 做 task**；**② `std.io` 做成异步，就不需要
+`blocking` 了**；**③ std 里不要太多类**。本轮落地 ②，①与③ 的路线与地基
+一并钉在这里。
+
+### 真异步 I/O 为什么不做（技术判断，不是偷懒）
+
+`std.io` 是 sema 里 `BI_IO` 的 12 个内建，直接映射 `fopen/fread/fwrite/
+fseek/ftell/fclose/fflush`，**调用点是同步表达式**（`io.read(h, buf)` 直接
+返回 usize）。IOCP / io_uring 式完成回调需要编译器把同步调用点变换成状态机
+（CPS）或引入 async/await，那会丢掉 zx 最值钱的**无函数着色**，且
+`std.file` / `BufReader` / `BufWriter` / 变参 `println` 全部要重做，跨平台
+两套后端。用户真正要的效果「不需要 blocking」可以用 Go 那套达到：
+**同步写法不变，运行时在任务上下文把阻塞调用 offload 并停靠当前纤程**。
+这不是把 I/O 变成非阻塞，而是让纤程不占 worker —— 与无着色的语言形态一致。
+
+### io 自动 offload 的实现
+
+- `emit_io_runtime` 把 `read/write/close/flush/seek/tell` 拆成「同步执行体
+  `zx_io_*_sync(void*)`」+「包装 `ZxIoJob`」；`zx_io_run()` 问 hook：
+  返回 0 就本地同步跑（根上下文、非任务线程、没建实例）。
+- `emit_task_runtime` 在 `ZX_HAS_IO_RUNTIME` 下定义 `zx_task_io_offload`：
+  起一条专用 OS 线程跑同步体，当前任务 `while (!done) zx_park_tick(s,1)`
+  按 timer 心跳停靠。**不挂等待者链、不 unpark** —— 避开「入队早于切走」
+  导致同一纤程被两个线程同时运行的窗口。线程收尾前绝不返回：
+  `ZxIoJob` 在调用者纤程栈上，提前放就是 UAF（取消/close 也只能等）。
+- `open*` 与 `stdin/stdout/stderr` 不 offload；`print/println` 走 `ex_io_print`
+  的变参路径，保持同步以保序。
+- `zx_task_block` / `zx_sc_block` / `spawn_impl` 的 `blocking` 分支 /
+  `zx_block_tramp` 全删，`std/task.zx` 的 `Task.blocking` / `Scope.blocking`
+  一起删。`tests/good/task_blocking.zx` 改成守「I/O 期间 root 上下文仍能推进
+  tick」（coro 模式，同步阻塞会让 `g_ticks` 恒 0）。
+
+**生成 C 是多单元编译，踩了两个坑**：自动生成的函数原型排在 `g_bglobals`
+的 typedef 之前，所以所有跨界函数一律收 `void *`（原型不引用 `ZxIoJob`）；
+hook 变量必须 header 里 `extern` 声明 + body 里一份定义，`static` 会被去掉，
+放 header 会造成每单元一份、注册写到 A 单元而 io 读 B 单元（永远为 0）。
+另一次是 C 注释里写了 `open*/stdin*`，那个 `*/` 提前闭合注释，中文句号
+跑进代码变成 "character <U+3002> not allowed in an identifier"。
+
+### 纯逻辑上移的地基（已实测，下一轮实施）
+
+手写 C 原语 + `@link("rt.o")` 的 spike 验证：**zx 生成的函数能直接跑在纤程
+栈上，中途切走两次再恢复，局部变量保持**（`step1:17 → step2:32 →
+step3:132`）。`!T` 有稳定 C 布局，`ZxFn_fn_usize_reusize` =
+`ZxErr_usize (*)(uint64_t)`，zx 函数指针可直接给 C 回调。因此
+「C 只留机制、zx 写策略」成立：
+
+- C 最小原语集（约 8 个）：fiber create / switch / free、TLS current、
+  thread spawn、mutex + condvar timedwait / wake、单调钟、CPU 数。
+  锁与原子仍可复用 `std.atomic.*`（它们本身是 `BI_SYNC` 内建）。
+- 可上移的纯逻辑：就绪队列、段表 / 结果槽、timer 链、通道等待链、
+  Scope fail-fast 记账、select 轮询、`spawn/await/finish/cancel/close` 策略。
+- **张力要认清**：上移会让 zx 侧出现 `ZxSched/ZxTask/ZxSlot` 等**内部**
+  struct。若「不要太多类」连内部实现也算，就只能拿 `*usize` 加偏移量手写
+  内存布局，那是类型安全的倒退，比留在 C 里更糟。当前按「对外类型收敛」
+  理解（见下）。
+
+### std 类型收敛（与逻辑上移同轮做，避免守门用例改两次）
+
+现状 std 共 26 个容器类型：`json` 6、`task` 4（Task / Scope / Group /
+Chan）、`pool` 4、`fs` 4、`std` 3、`arena` 3、`time` 1、`map` 1。
+目标：`std.task` 对外只留 `Task`，Scope / Group 退化为 `usize` 句柄 +
+自由函数或 Task 方法，`Chan(T)` 用泛型函数保留编译期约束但不定义新 struct。
+这次改动会重写全部 20 个并发用例，所以和逻辑上移放同一轮。
+
+## §123 回退 offload / 统一对外 API / 原语层抽取（2026-11-12 用户）
+
+用户三条裁定：**① zx 要简洁、透明，默认 offload 不要**；**② `std.io` 恢复
+纯同步，真要异步显式用 `task + io`**；**③ 「C 原语层抽取 + 调度逻辑上移到
+zx + std 类型收敛」一次做完，把 task 做成统一的对外 API**。补充一句
+「这些都做内部实现吧」—— 实现细节一律内部化，对外不暴露。
+
+### 回退 §122 的 io 自动 offload
+
+`ZxIoJob` / `zx_io_hook` / `zx_io_run` / `zx_io_*_sync` 与
+`zx_task_io_offload`（含 `ZX_HAS_IO_RUNTIME` 整段、`zx_task_new` 里的注册）
+全部删除。`emit_io_runtime` 恢复成 `fread/fwrite/fseek/ftell/fclose/fflush`
+的同步包装，`open*` / 标准句柄 / `print/println` 不变。
+
+理由：Go 式透明 offload 让「一次 `io.write`」在任务纤程里偷偷起一条 OS
+线程并停靠当前纤程，调用点看不出来 —— 与 zx 要的**透明**相反。用户明确
+要「编译器不替我做调度决策」。要并发就自己 `t.spawn` 一个任务、在任务里
+做 io；放进 `pool(n)` 就有独立 worker 承载阻塞。**不做真异步 I/O**：
+IOCP / io_uring 需要 CPS/状态机变换或 async/await，会丢掉无函数着色。
+
+守门 `tests/good/task_blocking.zx` 改成三段：coro 下同步 io 占住唯一上下文
+→ `implicit:0`（证明没有隐式 offload）；pool(2) 下显式 task + io →
+`parallel:1`；作用域里的 io 任务同样显式组合。
+
+### 统一对外 API（std 类型收敛）
+
+`std/task.zx` 只 `pub const Task`。所有句柄统一 `usize`：
+
+| 原来 | 现在 |
+|---|---|
+| `std.task.Scope` + `sc.spawn/join/close` | `t.scope()` → usize；`t.scopeSpawn` / `scopeJoin` / `scopeJoinTimeout` / `scopeClose` |
+| `withScope(fn (*const Scope) !usize)` | `withScope(fn (*const Task, usize) !usize)` |
+| `std.task.Group` + `g.spawn/wait/close` | `t.group()` → usize；`t.groupSpawn/groupWait/groupClose/groupRun`（实例方法，见 §125） |
+| `std.task.Chan(T)`（泛型 struct） | `t.chan()` → usize；`t.chanSend/chanRecv/chanTrySend/chanTryRecv/chanClose`（载荷统一 usize，类型化由调用点 cast） |
+| `std.task.SEL_AWAIT/SEL_RECV` | `Task.SEL_AWAIT/SEL_RECV` 关联常量 |
+
+**语言事实**：容器方法**不能泛型**（E0701 `method cannot be generic`），所以
+`Chan(T)` 不能以「Task 的泛型方法」形式保留；自由泛型函数可以
+（`fn (T: type, …)` 已实测），但那会在 `std.task` 多出对外名字，与「统一
+API」冲突。最终选载荷统一 `usize`，`[]T` 等大值由调用点 `(usize)v` 的
+castable 表挡下（`tests/bad/chan-wide.zx` 仍守 E0300）。
+
+所有 `extern fn` 与内部常量不 `pub`（模块顶层声明默认私有），
+`ZxSched/ZxTask/ZxSlot/ZxChan/ZxScope` 全留在 C 内部 —— 这就是用户要的
+「这些都做内部实现吧」。
+
+### C 原语层抽取
+
+`emit_task_runtime` 里平台机制抽成 `zx_rt_*`，调度层只调原语：
+`zx_rt_cpu_count` / `zx_rt_thread_spawn` / `zx_rt_backoff`（CPU 数、OS 线程、
+让步退避）+ `zx_rt_fiber_make` / `zx_rt_fiber_drop`（纤程栈创建与回收），
+原有的 `zx_now_ms` / `zx_lk` / `zx_cv_*` / `zx_task_switch_to` /
+`zx_task_rootctx` / `__thread zx_fb_cur` 归为同一原语层。生成 C 里加了
+「原语层 / 调度层」分段注释，`zx_task_new` 与 `zx_task_spawn_impl` 不再
+直接出现 `CreateThread` / `ucontext` / `CreateFiber`；`zx_tg_spawn` 也走
+`zx_rt_thread_spawn`（顺带修掉 Win 分支句柄没 `CloseHandle` 的泄漏）。
+
+**坑**：`Sleep` / `sched_yield` 的 `extern` 声明原本在运行时尾部的 group
+段，抽到原语层后变成「先用后声明」，`-Wimplicit-function-declaration`
+直接把 zxrt 编译挂掉。修法是把两条声明提到平台 typedef 块里。
+
+### 上移的边界（诚实记账）
+
+本轮上移到 zx 的是**对外策略与编排**：句柄组合、`withScope` 的 defer
+自动清理、`groupRun` 批量编排、select 分支常量、通道载荷 cast、句柄校验
+与错误归一化，`std/task.zx` 从「每行一个 extern 转发」变成有实际策略的
+库层。**没有**把竞态密集的纤程调度循环 / 等待链 / timer 链整体翻译成 zx：
+`!T` 函数入口的 await 门与循环回边取消检查是编译器注入的 C，它们要读
+`__thread` 当前纤程的取消旗标；整段搬运会让调度器自身的 `!T` 函数被门
+插桩，`pstate` 仲裁、done 发布顺序、close 回收这些已用 20/20 压测压稳的
+不变量要全部重调。用户认可「最后还是要 C 的运行时」，因此这部分作为
+内部机制层保留，剩余全量上移是独立重构线，不在本轮夹带。
+
+### 验证
+
+`sh test.sh` → **passed 327, failed 0 / all checks passed**（LSP 305 项、
+snake 300 局、errors.md 37 码照常）；20 个并发用例各 20 次稳定性压测
+**20/20 用例全稳定**。`task_blocking.zx` 的 `implicit:0` 确定性区分同步 io
+与 offload。按需发射：只 import std 仍 74 行 / 0 符号；只用 io 是 42 个同步
+`zx_io_*`；只用 task 才带 `zx_rt_*` 原语；三种组合 offload 符号均为 0。
+改动文件：`src/backend.c`、`std/task.zx`、`std/std.zx`、`tools/lsptest.py`、
+`docs/reference.md` §14.10、`spec/decisions.md`、`README.md`、
+11 个用例（`task_scope*`、`task_timeout`、`task_chan`、`task_select`、
+`task_group`、`task_alias`、`task_blocking`、`tests/bad/chan-wide.zx`）。
+全部 LF，**未 git commit**。
+
+
+## §124 LSP 解析链的系统性收敛（2026-11-12）
+
+用户用 5 张截图反馈「之前修好的类型不显示 / 没有补全 / 没有 snippet 又出现了」，
+并明确要求不要按截图逐个补丁：**「不止这 5 个，这只是我发现的一部分」**，
+随后逐条扩边界：泛型类、外部导入 module 全查、函数里匿名 struct 递归解析、
+union / union(enum) 的静态成员与方法。结论是四条解析链根因，不是 Zed 用旧
+二进制（能力串一直在），也不是某一类容器漏了特例。
+
+### 四条根因
+
+1. **带类型注解的关联常量被判成字段**：`pub const SEL_AWAIT: usize = 0;`
+   名字后是 `:`，`extractBraceMembers` 旧逻辑按 `.field` 收，于是实例空间冒出
+   一堆静态值、类型空间反而缺常量。修法：`had_decl` 时把 `.field` 升格
+   `.value`；enum / union(enum) 体里初始判成 `.variant` 的静态成员也一并升格
+   （只升 `.field` 会让 enum 静态方法丢签名与骨架）。`.instance` 过滤非函数
+   `.value`，`.ty` 保留关联常量，两空间彻底不许有交集。
+2. **类型值别名上的调用不展开**：`const Hs: type = std.map.HashMap(V: i32);`
+   之后 `Hs.init(...)` 没有行内 `: HashMap`。`inferExprType` 里识别
+   `declTyOf == "type"`，把 `Hs.init(...)` 展开成 `原表达式.init(...)` 再递归。
+3. **外部模块与 src 不是同一条扫描路径**（用户原话）：`scanFiles` 原只扫
+   文档目录 + std，vendor / deps 里的定义只能被 `moduleDecls /
+   resolveModuleFile` 按模块名单点解析，字段类型 `nl.Sub`、泛型体
+   `g.Box(i32)` 在 `findContainerBody / genericBodyOf / resolveContainerPath`
+   里全部落空。改为把 `modDirsInto()` 给出的全部模块目录纳入同一份 `files`，
+   沿用同一套大小预算与影子文件过滤。
+4. **合成容器优先级 / 同名干扰**：
+   - `const B = g.Box(i32);` 由 `appendGenericSynthetics` 合成
+     `const B = struct { … };`，但 append 到 `files` **末尾**；扫描目录里
+     另一个文件恰好也叫 `B` 时按裸名字先命中它，泛型实例字段补全空掉。
+     改为 `files.insertSlice(gpa, 1, syns.items)` 排到扫描集前部（当前文档
+     里的 `const B = g.Box(i32)` 不是 struct，会被 `findContainerBody` 跳过）。
+   - 匿名类型串派生出来的字段是**虚拟成员**，emit 循环却用
+     `findDeclStmt(src, dcl.name)` 全文配声明；同名的顶层
+     `const deep = fn (…)` 被当成它的声明，`is_fn_decl && !has_self` 命中实例
+     命名空间过滤，字段 `deep` 被剔掉。`anon_only` 时禁止找声明。
+
+### 覆盖的形状
+
+具名容器字面量的嵌套字段递归（内联 struct / 同模块命名类型 / 三层匿名嵌套，
+`nestedLiteralFields` + `anonFieldChain` + `fieldTypeIn` + `structTyOf`）；
+函数形参匿名 struct（`info.opts.sub.`）、函数体局部匿名绑定
+（`cfg.opts.deep.`）与局部嵌套字面量（`anonBindingNestedFields`）；
+`union` / `union(enum)` 的字段、带注解关联常量、self 方法、无 self 关联函数、
+嵌套字面量；enum 静态成员与方法回归；snippet 能力线未回归
+（`if` / `fn` 仍 `insertTextFormat:2`）。
+
+### 语义裁定：静态值只属于类型命名空间
+
+旧 `completion.enum.instMembers` 期望 enum 实例 `c.` 上出 `FIRST / COUNT`；
+本轮统一为与 struct 同一条红线：`c.` 只有变体 + self 方法，静态值只在
+`EuColor.` / `U.` / `UE.` 上。**旧断言按新语义更新，不是删用例变绿**。
+
+### 守门与踩过的坑（KEEP）
+
+- `tools/lsptest.py` 8z 段原来在 `# 9 shutdown/exit` **之后**，主 LSP 进程
+  早已 `proc.wait()` 关掉，继续用全局 `send()` → `OSError [Errno 22]`。
+  整段前移并改用**自带短命 LSP 会话**：主会话跑到这里已开过几百个文档，
+  zxls 扫描缓存会让嵌套字面量 / 泛型实例返回空，独立会话才与真实编辑器一致
+  （`.tmp/lspnow/diag8z.py` 干净会话 14/14、换到 `.tmp/lsptest` 立刻复现）。
+- `comp_at / acomp / ucomp` 的 needle **不能带尾随 `\n`**：`off` 会落到
+  下一行行首，zxls 看到行首空白就退化成全局标识符补全。这段以前因
+  `OSError` 从未真正执行，所以 14 处错位一直没暴露。
+- 8z 的 vendor fixture 模块名不能用 `nestlib`：`.tmp/lsptest/src/nestlib.zx`
+  是另一个守门创建的，模块解析「导入文件所在目录优先」会抢在
+  `vendor/nestlib.zx` 前面，`t.Person / t.Wrap` 会拿到别的容器。改成
+  `zxls8zlib` / `zxls8zcross`，只改 8z 段，1286 行那个守门不动。
+- 守门新增：`completion.nest.anonParam.*`（形参三层 + 嵌套字面量）、
+  `inlayHint.nest.anonParam`（完整匿名类型串）、`completion.nest.anonLocal.*`、
+  `completion.nest.union*` / `unionEnum*`（实例/类型两空间 + 嵌套字面量），
+  与此前的 taskInst / taskTy / typeValuedAlias / inlineStruct / namedType /
+  threeLevel / genericInst / genericLiteral / genericAlias / crossModule /
+  snippet 共 336 项。**不许删用例来变绿**。
+
+### 验证
+
+`sh test.sh` → **all checks passed**（LSP 冒烟 **336 项全过**、snake 300 局、
+errors.md 37 码、增量编译、CLI 冒烟全过）。`bin/zxls.exe` 已替换为本次源码
+构建（md5 `94ebd10672a11ab9818a2e13c6930e94`，旧 F-era 存
+`bin/zxls-f-1112.exe`），用 Zed 实际二进制直连探针复验 S1–S12 全通。
+**Zed 需重启重新协商 capabilities** 才能看到行内提示与补全。
+改动文件：`tools/zxls.zig`、`tools/lsptest.py`（均 CRLF）、
+`spec/decisions.md`、`.workbuddy/memory/2026-11-12.md`。未 git commit。
+
+
+## §125 Task 是接口，不是关联函数集合（2026-11-12 用户纠偏）
+
+用户看截图后指出此前把「用 task 做接口」理解反了：
+「我说用 task 实现意思是用 task 做接口，是生成 task 实例，做动态分发，
+不是都变成 Task 的关联函数」。
+
+- **裁定**：`std.task.Task` 是唯一对外类型，也是**接口**。
+  4 个静态构造器 `coro() / single() / pool(n) / fromId(id)` 生成实例，
+  之后所有能力都通过 `t.` 实例方法动态分发。类型命名空间只剩
+  `SEL_AWAIT / SEL_RECV` 两个编译期分支常量（值，不是行为）。
+- 用户通过选项确认两个边界：**「实例方法即可」**（不引入 vtable、不动 C
+  运行时的 mode 分支）、**「全挂 Task 实例」**（不恢复 Group/Scope/Chan
+  独立类型，它们仍是 usize 句柄 + 内部实现）。
+- 落地：`group / groupSpawn / groupWait / groupClose / groupRun` 从
+  `Task.` 关联函数改成实例方法；`tests/good/task_group.zx` → `group:400`、
+  `task_alias.zx` → `alias:400`；`docs/reference.md` §14.10、
+  `std/std.zx` 注释、`src/backend.c` 生成的 C 注释、`tools/lsptest.py`
+  的 `completion.stdTask / unifiedApi / 8z` 同步。
+- 守门修正：`completion.instance.sameNameMember` 以前把 `group` 列进
+  「实例上不该出现的关联函数」黑名单；现在断言
+  `tmap["group"] == "group(self: *const Task) usize"`。**按新语义改断言，
+  不是删用例变绿**。
+- **历史章节口径**：§88 的 `std.Task`、§106 的 `Task.group()` / `Group`
+  保留当时写法，只作演进记录；现行对外 API 以本节、`docs/reference.md`
+  §14.10 和 `std/task.zx` 为准。生成到用户 C 代码里的注释也已同步成
+  `t.send/recv` / `t.await(h)`。
+
+## §126 两条解析链全量覆盖：容器嵌套类型 / 形参匿名嵌套类（2026-11-12）
+
+用户：「有两条解析链路，struct/enum/union/union(enum) 都可以嵌套类，
+函数、方法的参数也可以是匿名的类，也是嵌套类……做到任何地方都能有
+智能提示、补全、snippet」，并要求自己主动补遗漏，不只修截图里几个点。
+
+### 诊断：0 项补全 ≠ 解析失败
+
+`.tmp/nest2/probe_diag.py` 给嵌套类型加静态常量后，
+`t.G.F. / t.S.Inner. / t.E.Inner. / t.U.Inner. / t.UE.Inner. /
+t.S.Deeper.Leaf.` 全都能出常量——**路径解析是通的**，0 项只是 `.ty`
+命名空间按语义把字段全过滤掉了。真正断的是下面这些。
+
+### 链路 A：容器嵌套类型
+
+1. **单段类型值别名展开**（`resolveContainerPathD` n==1）：
+   `const T: type = t.G.F;` 之后 `T.` / `T{ .` / `var x: T; x.` 以前按裸名
+   找 `const T = struct` 全部落空。现在 n==1 时先按
+   `containerOfBinding` 把别名展开成限定路径再逐段下钻。
+2. **具名字面量的别名识别**：`lit_ctx` 的 `{` 校验原本只认
+   `isContainerIn`（裸名找容器）与 `modContainerOf`；补一条
+   `resolveContainerPath`，`T{ .name = 1, .` 不再退化成 0 项。
+3. **泛型实例尾段**：`t.G(i32).F.` 以前整条被当成「接收者是表达式」，
+   把 G 的 `val/name/is` 当 F 的成员。`pathNoGenerics` 抹掉平衡 `(…)`
+   后逐段下钻；只有末段在父容器体里确实是容器声明时才接管，
+   `x.init(…).` 这类值链仍走 `inferContainer`。
+4. **类型空间空列表的构造骨架**（`tyCtorFallback`）：只有字段、没有静态
+   成员的嵌套 struct/union 在 `.ty` 下被过滤成空列表，用户看着就是
+   「解析不到」。补一条 `F{...}` snippet，`detail` 贴
+   `构造实例 · struct { name: i32, flag: bool }`，并用 **textEdit** 吃掉
+   刚输入的 `.`，把 `F.` 变成 `F{ .name = …, }$0`。字段项本身绝不混进
+   类型命名空间（2026-11-10 的彻底分离红线不变）。
+5. **hover**：单段类型值别名贴它指向的容器形状；`t.S.Inner` 贴 Inner
+   自己的声明而不是外层 S；`genericContainerDef` 不再把形参上的
+   `data: struct{…}` 当成 `return struct{…}` 的容器体（hover `t.FF`
+   曾把整个函数体贴成"类型定义"）；初值推不出类型时用声明上的显式标注。
+
+### 链路 B：函数 / 方法形参匿名嵌套类
+
+1. **显式匿名类型标注优先**（`anonTyOfPath` / `anonBindingNestedFields`）：
+   编辑中的 `.{ … .` 初值末尾停在孤立 `.`，`inferExprType` 推不出完整
+   类型串。`var x: struct { a: i32, nest: struct { b: i32, c: i32 } } = .{ … };`
+   的 `x.` / `x.nest.` / 嵌套字面量改为直接吃 `declTyOf`。
+2. **同名嵌套形参按深度选**（`paramStructTypeNear`）：
+   `data: struct { b: i32, data: struct { b: i32, i: i32 } }` 里
+   `namedTypeNear` 取「光标前最后一次出现」会拿到内层类型——
+   `data.` 弹成 `b/i`、`data.data.` 断链。新 helper 按花括号深度选最浅的
+   `name:`，`data.` → `b, data`，`data.data.` → `b, i`。
+3. **`self.` 取词法最内层容器**（`selfContainerAt`）：旧
+   `selfContainerBody` 取全文第一份带 self 方法的容器，vendor 里
+   G/S/E/U/UE/Box 都有 self 方法时 `Box.take` 的 `self.` 会被解析成 S 的
+   成员。改为「包含光标且跨度最小」，容器名从体起点往前最近的
+   `const <Name> =` 取（泛型 fn 的 `return struct{…}` 也落在同一名字上）。
+4. **`= .{` 绑定头解析**：`anonBindingNestedFields` 原来要求 `=` 前紧邻
+   标识符，显式类型标注的 `=` 前是 `}` 直接放弃。改成回扫本语句声明头，
+   拿关键字 / 绑定名 / `: struct{…}` 标注。
+5. **编辑期非法语法也要有提示**：截图 3 的
+   `t.FF(b: 0, data: struct{…}.{ .b })` 不是合法 Zx（编译器报 E0201），
+   但 LSP 在这些位置仍按实参序号 + 字段链给出字段补全与字段类型，
+   `if` snippet 也照常。`anonParamTy` 那条链同时补上「已写字段」去重，
+   与 `nestedLiteralFields` 口径一致。
+
+### 口径与守门
+
+- `completion.literalSecond` 钉住「具名容器字面量续补仍给全量字段」的既有
+  口径（宿主按前缀过滤）。一度给 emit 循环加去重把它改挂，已回退；
+  只有匿名实参 / 嵌套字面量两条链做去重。
+- `tools/lsptest.py` 新增 ⑩ 段（仍在 8z 的独立短命 LSP 会话里，避免主
+  会话扫描缓存污染）：四种容器嵌套类型 / 三层 Leaf / 泛型返回体 /
+  泛型实例尾段 / 类型值别名 + 构造骨架 textEdit / 别名实例与字面量 /
+  别名与嵌套类型 hover / 显式匿名标注局部变量与嵌套字面量 / 方法形参
+  `cfg.` `cfg.nest.` / `self.` / 同名形参 `data.` `data.data.` / snippet。
+  LSP 冒烟 **360 项全过**（336 → 360）。**不许删用例来变绿**。
+- 行尾：`tools/zxls.zig`、`tools/lsptest.py` 全程 CRLF 字节级补丁；
+  `spec/decisions.md`、memory 为 LF。

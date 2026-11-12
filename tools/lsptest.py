@@ -36,9 +36,10 @@ pub const main = fn () i32 {
     let n = o.count;
     var s = Shape{ .circle = 1.0 };
     push(.{ .a = 1010, .msg = "hi" });
-    let g = std.task.Task.group();
-    g.wait();
     let t = std.task.Task.single();
+    let g = t.group();
+    t.groupWait(g);
+    t.groupClose(g);
     t.close();
     std.println("{}", n);
     return 0;
@@ -446,28 +447,41 @@ send({"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {
     "textDocument": {"uri": uri, "version": 14},
     "contentChanges": [{"text": MAIN}]}})
 
-# 3e std.task.Task 关联函数：std.task.Task. → 只有 coro/single/pool/fromId/group。
-# 方法（首参 self）**不进类型命名空间**——用户 2026-11-10 第 2 张截图：
-# "Task 空间上也是这些[方法]"，类型上列方法和实例重复，纯污染。签名里的
-# 参数名 f/ctx/h/v 也不得混进来（extractBraceMembers 的圆括号深度守卫）。
+# 3e std.task.Task 静态面：用户 2026-11-12 拍板「用 task 做接口，生成实例
+# 做动态分发，不是都变成关联函数」。类型命名空间只允许 4 个静态构造器 +
+# 2 个编译期分支常量；group* 与所有能力都是实例方法，不许出现在 `Task.`。
+# `pub const K: T = v` 正确归为关联常量、方法（首参 self）不进类型空间、
+# 形参名 f/ctx/h/v 不混入（extractBraceMembers 圆括号深度守卫）。
 off = MAIN.index("std.task.Task.") + len("std.task.Task.")
 send({"jsonrpc": "2.0", "id": 12, "method": "textDocument/completion", "params": {
     "textDocument": {"uri": uri}, "position": pos(MAIN, off)}})
 r, _ = recv_id("completion.stdTask", 12)
 labels = {i["label"] for i in r["result"]["items"]} if r and r.get("result") else set()
 check("completion.stdTask",
-      labels == {"coro", "single", "pool", "fromId", "group"}
-      and not labels & {"ctx", "f", "h", "v"}, str(sorted(labels)))
+      labels == {"coro", "single", "pool", "fromId",
+                 "SEL_AWAIT", "SEL_RECV"}
+      and not labels & {"ctx", "f", "h", "v", "spawn", "await",
+                        "group", "groupSpawn", "groupWait", "groupClose",
+                        "groupRun"}, str(sorted(labels)))
 
-# 3f 实例类型穿透：let g = std.task.Task.group() → g. 出 Group 的成员
-# （spawn/wait/id），不是 Task 的（coro/single/pool 不得出现）
-off = MAIN.index("g.wait();") + len("g.")
+# 3f 统一对外接口（§123/§125）：Scope/Group/Chan 全退化成 usize 句柄，
+# group* 也从关联函数改成实例方法。t. 必须给齐全套能力，静态构造器与
+# 编译期常量不得混入。
+off = MAIN.index("    t.close();") + len("    t.")
 send({"jsonrpc": "2.0", "id": 13, "method": "textDocument/completion", "params": {
     "textDocument": {"uri": uri}, "position": pos(MAIN, off)}})
-r, _ = recv_id("completion.groupInst", 13)
+r, _ = recv_id("completion.unifiedApi", 13)
 labels = {i["label"] for i in r["result"]["items"]} if r and r.get("result") else set()
-check("completion.groupInst", {"spawn", "wait"} <= labels
-      and "id" not in labels and not labels & {"coro", "single", "pool"}, str(sorted(labels)))
+check("completion.unifiedApi",
+      {"spawn", "await", "awaitAll", "awaitTimeout", "sleep", "cancel", "yield",
+       "send", "recv", "trySend", "tryRecv", "close", "select",
+       "scope", "scopeSpawn", "scopeJoin", "scopeJoinTimeout", "scopeClose",
+       "withScope", "chan", "chanSend", "chanRecv", "chanTrySend",
+       "chanTryRecv", "chanClose",
+       "group", "groupSpawn", "groupWait", "groupClose", "groupRun"} <= labels
+      and not labels & {"coro", "single", "pool", "fromId",
+                        "SEL_AWAIT", "SEL_RECV"},
+      str(sorted(labels)))
 
 # 3f2 同名成员跨容器不串签名（用户 2026-11-10 截图：实例上"显示关联函数"）：
 #   `Task.spawn` 与 `Group.spawn` 同名。t. 的 detail 必须是 Task 的 `?usize` 版，
@@ -482,8 +496,10 @@ check("completion.instance.sameNameMember",
       tmap.get("spawn") == "spawn(self: *const Task, f: fn (usize) !usize, ctx: usize) ?usize"
       and tmap.get("awaitAll") == "awaitAll(self: *const Task) !void"
       and tmap.get("close") == "close(self: *const Task) void"
-      # 关联函数（首参不是 self）一律不进实例补全
-      and not ({"coro", "single", "pool", "fromId", "group"} & set(tmap)),
+      # 关联函数（首参不是 self）一律不进实例补全。group 2026-11-12 起
+      # 是实例方法（Task 是接口，能力全走 t.），不再是污染。
+      and tmap.get("group") == "group(self: *const Task) usize"
+      and not ({"coro", "single", "pool", "fromId"} & set(tmap)),
       str(tmap)[:300])
 
 # 3g hover 变量 → 推断类型（var p = Person{…} 式结构体字面量也要出类型）
@@ -1552,8 +1568,10 @@ gt = {i["label"]: i.get("insertText") for i in git}
 gk = {i["label"]: i.get("kind") for i in git}
 # 用户 2026-11-10："Task 命名空间污染了"。`g.single()` 编译报 E0303
 #（首参不是 self，不是方法），静态构造器只属于 `Task.`，不许混进实例补全。
+# 2026-11-12：group 现在是实例方法（接口统一走 t.），应出现在实例补全里。
 check("completion.stdInstance.staticSnippet",
-      not ({"single", "coro", "pool", "fromId", "group"} & set(gk)) and "id" in gk,
+      not ({"single", "coro", "pool", "fromId"} & set(gk)) and "id" in gk
+      and "group" in gk,
       str(sorted(gk)))
 check("completion.stdInstance.methodSig",
       (gd.get("await") or "") == "await(self: *const Task, h: usize) !usize"
@@ -2731,7 +2749,9 @@ send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
 for _anchor, _want, _tag in (
         ("    EuColor.\n", {"FIRST", "COUNT", "count", "red", "green", "blue"},
          "enum.typeMembers"),
-        ("    c.\n", {"FIRST", "COUNT", "name", "red", "green", "blue"},
+        # 2026-11-12：静态值只属于类型命名空间（与 struct 关联常量同一条
+        # 红线），实例上只留变体 + self 方法。旧断言曾期望 FIRST/COUNT。
+        ("    c.\n", {"name", "red", "green", "blue"},
          "enum.instMembers"),
         ("    EuShape.\n", {"circle", "rect"}, "unionenum.typeMembers"),
         ("    s.\n", {"circle", "rect", "describe"}, "unionenum.instMembers")):
@@ -3386,6 +3406,580 @@ for _ in range(10):
     _time.sleep(0.5)
 check("formatting.shadowCleaned", not _left, str(_left))
 
+# 8z 2026-11-12 用户截图回归（KEEP：能力线被回退时这里会连挂，不许删用例）
+#   ① 带类型注解的关联常量 `pub const K: T = v` 曾被成员解析器判成字段：
+#      实例上冒出"很多其他的东西"、类型空间反而缺常量。任意容器都会中招。
+#   ② `const Hs: type = 泛型实例;` 之后 `Hs.init(...)` 没有行内 : Type。
+#   ③ vendor 定义的类型，字段再套 struct 就没补全/类型提示 —— 要递归查找：
+#      内联 struct、同模块命名容器、多层匿名嵌套三种形状都守。
+NESTLIB = """pub const Person = struct {
+    pub name: []const u8,
+    pub id: i32,
+    pub data: struct { pub a: i32, pub b: i32 },
+};
+
+pub const Sub = struct {
+    pub x: i32,
+    pub y: f64,
+};
+
+pub const Wrap = struct {
+    pub data: Sub,
+    pub deep: struct { pub inner: struct { pub p: i32, pub q: i32 } },
+};
+
+pub const Limits = struct {
+    pub const MAX: usize = 9;
+    pub val: i32,
+};
+"""
+open(os.path.join(TESTDIR, "vendor", "zxls8zlib.zx"), "w", encoding="utf-8").write(NESTLIB)
+
+# 外部模块分开两个文件：geolib.zx 里的字段类型引用 nestlib.zx 的 Sub，
+# 守的是「外部导入的 module 都要查一遍，它们和 src 不是同一条解析路径」。
+open(os.path.join(TESTDIR, "vendor", "zxls8zcross.zx"), "w", encoding="utf-8").write(
+    'const nl = module("zxls8zlib");\n'
+    'pub const Box = fn (T: type) type {\n'
+    '    return struct {\n'
+    '        pub v: T,\n'
+    '        pub meta: struct { pub tag: i32, pub note: i32 },\n'
+    '    };\n'
+    '};\n'
+    '\n'
+    'pub const Holder = struct {\n'
+    '    pub sub: nl.Sub,\n'
+    '    pub meta: struct { pub a: i32, pub b: i32 },\n'
+    '};\n')
+
+NESTUSE = """const std = module("std");
+const t = module("zxls8zlib");
+const g = module("zxls8zcross");
+const Wrap = struct {
+    pub const MAX: usize = 9;
+    pub val: i32,
+};
+const Task = std.task.Task;
+
+pub const main = fn () i32 {
+    var c: Task = std.task.Task.coro();
+    c.
+    std.task.Task.
+    var w = Wrap{ .val = 1 };
+    w.
+    Wrap.
+    var lim = t.Limits{ .val = 1 };
+    lim.
+    t.Limits.
+    const Hs: type = std.map.HashMap(V: i32);
+    var map = Hs.init(std.heap.page);
+    var p: t.Person = t.Person{ .name = "oo", .id = 0, .data = .{ .a = 1, . } };
+    var ww: t.Wrap = t.Wrap{ .data = .{ .x = 1, . }, .deep = .{ .inner = .{ .p = 2, . } } };
+    const B = g.Box(i32);
+    var b = B{ .v = 1, .meta = .{ .tag = 2, . } };
+    b.
+    var h = g.Holder{ .sub = .{ .x = 1, . }, .meta = .{ .a = 1, . } };
+    h.
+    if
+    return 0;
+};
+"""
+nsturi = "file:///" + os.path.join(SRC_DIR, "nestuse.zx").replace("\\", "/")
+open(os.path.join(SRC_DIR, "nestuse.zx"), "w", encoding="utf-8").write(NESTUSE)
+
+# 8z 用独立短命会话：主会话此时已开过几百个文档，zxls 的扫描缓存会污染
+# 嵌套字面量 / 泛型合成容器（干净会话里同样的 fixture 14/14 全通）。
+p8 = subprocess.Popen([ZXLS_BIN], stdin=subprocess.PIPE,
+                      stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+q8 = queue.Queue()
+
+def r8reader():
+    while True:
+        hdr = b""
+        while not hdr.endswith(b"\r\n\r\n"):
+            c = p8.stdout.read(1)
+            if not c:
+                q8.put(None); return
+            hdr += c
+        ln = int([l for l in hdr.split(b"\r\n")
+                  if l.lower().startswith(b"content-length")][0].split(b":")[1])
+        body = b""
+        while len(body) < ln:
+            body += p8.stdout.read(ln - len(body))
+        q8.put(json.loads(body))
+threading.Thread(target=r8reader, daemon=True).start()
+
+def s8(m):
+    data = json.dumps(m).encode()
+    p8.stdin.write(b"Content-Length: %d\r\n\r\n" % len(data) + data)
+    p8.stdin.flush()
+
+def r8(tag, want_id, timeout=30):
+    import time as _t8
+    end = _t8.time() + timeout
+    while _t8.time() < end:
+        try: m = q8.get(timeout=1)
+        except queue.Empty: continue
+        if m is None:
+            print(f"FAIL {tag}: 8z server died"); return None, []
+        if "id" not in m: continue
+        if m["id"] == want_id: return m, []
+    print(f"FAIL {tag}: 8z timeout"); return None, []
+
+s8({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+    "capabilities": {}, "rootUri": "file:///" + TESTDIR.replace("\\", "/")}})
+while True:
+    _m8 = q8.get(timeout=30)
+    if _m8 is None or _m8.get("id") == 1:
+        break
+s8({"jsonrpc": "2.0", "method": "initialized", "params": {}})
+
+s8({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": nsturi, "languageId": "zx", "version": 1, "text": NESTUSE}}})
+
+_rid = 4000
+
+def comp_at(needle, tag):
+    global _rid
+    _rid += 1
+    off = NESTUSE.index(needle) + len(needle)
+    s8({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/completion", "params": {
+        "textDocument": {"uri": nsturi}, "position": pos(NESTUSE, off)}})
+    r, _ = r8(tag, _rid)
+    items = (r["result"]["items"] if r and r.get("result") and isinstance(r["result"], dict)
+             else (r["result"] if r and isinstance(r.get("result"), list) else []))
+    return {i["label"]: i for i in items}
+
+# ① 实例 / 类型两空间彻底分离（Task 与自定义容器各一组，证明是通用机制）
+_c = comp_at("    c.", "nest.taskInst")
+check("completion.nest.taskInst.clean",
+      "await" in _c and "spawn" in _c and not {"SEL_AWAIT", "SEL_RECV"} & set(_c),
+      str(sorted(_c)))
+_t = comp_at("    std.task.Task.", "nest.taskTy")
+check("completion.nest.taskTy.assocConst",
+      {"SEL_AWAIT", "SEL_RECV"} <= set(_t) and "await" not in _t,
+      str(sorted(_t)))
+# 2026-11-12 用户裁定：Task 是接口，能力全走实例；类型空间不许再有任何
+# 行为函数（group* 曾被降级成关联函数，这里守死）。
+check("completion.nest.taskTy.noBehavior",
+      not ({"group", "groupSpawn", "groupWait", "groupClose", "groupRun",
+            "spawn", "await", "select", "scope"} & set(_t)),
+      str(sorted(_t)))
+check("completion.nest.taskInst.groupDispatch",
+      {"group", "groupSpawn", "groupWait", "groupClose", "groupRun"} <= set(_c),
+      str(sorted(_c)))
+_w = comp_at("    w.", "nest.localInst")
+check("completion.nest.localInst.clean",
+      set(_w) == {"val"}, str(sorted(_w)))
+_W = comp_at("    Wrap.", "nest.localTy")
+check("completion.nest.localTy.assocConst",
+      set(_W) == {"MAX"}, str(sorted(_W)))
+_l = comp_at("    lim.", "nest.vendorInst")
+check("completion.nest.vendorInst.clean",
+      set(_l) == {"val"}, str(sorted(_l)))
+_L = comp_at("    t.Limits.", "nest.vendorTy")
+check("completion.nest.vendorTy.assocConst",
+      set(_L) == {"MAX"}, str(sorted(_L)))
+
+# ② 类型值别名上的调用也要有行内 : Type
+_rid += 1
+s8({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/inlayHint", "params": {
+    "textDocument": {"uri": nsturi},
+    "range": {"start": {"line": 0, "character": 0},
+              "end": {"line": NESTUSE.count("\n") + 1, "character": 0}}}})
+_r, _ = r8("nest.inlay", _rid)
+_hs = ((_r or {}).get("result") or [])
+_mapline = NESTUSE[:NESTUSE.index("var map =")].count("\n")
+_maplab = [h["label"] for h in _hs if h.get("position", {}).get("line") == _mapline
+           and h.get("kind") == 1]
+check("inlayHint.nest.typeValuedAlias", ": HashMap" in _maplab, str(_maplab))
+
+# ③ vendor 类型 + 嵌套字面量：内联 struct / 同模块命名类型 / 三层嵌套
+_n1 = comp_at(".data = .{ .a = 1, .", "nest.inlineStruct")
+check("completion.nest.inlineStruct",
+      "b" in _n1 and _n1["b"].get("detail") == "i32" and "a" not in _n1,
+      str(sorted(_n1)))
+_n2 = comp_at(".data = .{ .x = 1, .", "nest.namedType")
+check("completion.nest.namedType",
+      "y" in _n2 and _n2["y"].get("detail") == "f64" and "x" not in _n2,
+      str(sorted(_n2)))
+_n3 = comp_at(".inner = .{ .p = 2, .", "nest.threeLevel")
+check("completion.nest.threeLevel",
+      "q" in _n3 and _n3["q"].get("detail") == "i32" and "p" not in _n3,
+      str(sorted(_n3)))
+
+# ④ snippet 能力线没被连坐（if 骨架仍带 insertTextFormat=2）
+_s = comp_at("    if", "nest.snippet")
+check("completion.nest.snippet",
+      _s.get("if", {}).get("insertTextFormat") == 2, str(sorted(_s)))
+
+# ⑤ 泛型类：类型值绑定 `const B = g.Box(i32)` 之后，实例补全、字面量
+#    嵌套字段、行内 : B 三条链都要通；形参 T 要换成实参 i32。
+_gb = comp_at("    b.", "nest.genericInst")
+check("completion.nest.genericInst",
+      set(_gb) == {"v", "meta"} and _gb["v"].get("detail") == "i32",
+      str({k: v.get("detail") for k, v in _gb.items()}))
+_gl = comp_at(".meta = .{ .tag = 2, .", "nest.genericLiteral")
+check("completion.nest.genericLiteral",
+      "note" in _gl and "tag" not in _gl, str(sorted(_gl)))
+_rid += 1
+s8({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/inlayHint", "params": {
+    "textDocument": {"uri": nsturi},
+    "range": {"start": {"line": 0, "character": 0},
+              "end": {"line": NESTUSE.count("\n") + 1, "character": 0}}}})
+_r, _ = r8("nest.genericInlay", _rid)
+_bl = NESTUSE[:NESTUSE.index("var b = B{")].count("\n")
+_blab = [h["label"] for h in ((_r or {}).get("result") or [])
+         if h.get("position", {}).get("line") == _bl and h.get("kind") == 1]
+check("inlayHint.nest.genericAlias", ": B" in _blab, str(_blab))
+
+# ⑥ 跨外部模块：geolib 里的 `nl.Sub` 定义在另一个 vendor 文件，
+#    容器查找必须把它们和 src 放进同一份扫描集。
+_cm = comp_at(".sub = .{ .x = 1, .", "nest.crossModule")
+check("completion.nest.crossModule",
+      "y" in _cm and _cm["y"].get("detail") == "f64", str(sorted(_cm)))
+_ch = comp_at("    h.", "nest.externalModuleInst")
+check("completion.nest.externalModuleInst",
+      set(_ch) == {"sub", "meta"}, str(sorted(_ch)))
+
+# ⑦ 函数形参 / 函数体局部匿名 struct 递归解析（用户 15:10："记得函数里的
+#    匿名结构体也要解析,递归解析"）。三层嵌套点补全、嵌套字面量、inlay
+#    完整类型串三条链都守；删掉 anonTyOfPath / anonBindingNestedFields
+#    任一条就会连挂。
+ANONSRC = """const deep = fn (info: struct { a: i32, opts: struct { w: i32, sub: struct { p: i32, q: i32 } } }) i32 {
+    var x = info.opts.w;
+    info.
+    info.opts.
+    info.opts.sub.
+    return 0;
+};
+pub const main = fn () i32 {
+    const cfg = .{ .w = 1, .opts = .{ .h = 2, .deep = .{ .z = 3, .y = 4 } } };
+    cfg.
+    cfg.opts.
+    cfg.opts.deep.
+    var c2 = .{ .w = 1, .opts = .{ .h = 2, . } };
+    deep(.{ .a = 1, .opts = .{ .w = 2, .sub = .{ .p = 3, . } } });
+    return 0;
+};
+"""
+anuri = "file:///" + os.path.join(SRC_DIR, "anonuse.zx").replace("\\", "/")
+open(os.path.join(SRC_DIR, "anonuse.zx"), "w", encoding="utf-8").write(ANONSRC)
+s8({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": anuri, "languageId": "zx", "version": 1, "text": ANONSRC}}})
+
+def acomp(needle, tag):
+    global _rid
+    _rid += 1
+    off = ANONSRC.index(needle) + len(needle)
+    s8({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/completion", "params": {
+        "textDocument": {"uri": anuri}, "position": pos(ANONSRC, off)}})
+    r, _ = r8(tag, _rid)
+    items = (r["result"]["items"] if r and r.get("result") and isinstance(r["result"], dict)
+             else (r["result"] if r and isinstance(r.get("result"), list) else []))
+    return {i["label"]: i for i in items}
+
+_ap1 = acomp("    info.", "anon.paramTop")
+check("completion.nest.anonParam.top",
+      set(_ap1) == {"a", "opts"}
+      and "sub: struct" in (_ap1["opts"].get("detail") or ""),
+      str({k: v.get("detail") for k, v in _ap1.items()}))
+_ap2 = acomp("    info.opts.", "anon.paramMid")
+check("completion.nest.anonParam.mid",
+      set(_ap2) == {"w", "sub"}
+      and (_ap2["sub"].get("detail") or "") == "struct { p: i32, q: i32 }",
+      str({k: v.get("detail") for k, v in _ap2.items()}))
+_ap3 = acomp("    info.opts.sub.", "anon.paramDeep")
+check("completion.nest.anonParam.deep",
+      set(_ap3) == {"p", "q"} and _ap3["q"].get("detail") == "i32",
+      str(sorted(_ap3)))
+_ap4 = acomp(".sub = .{ .p = 3, .", "anon.paramLiteral")
+check("completion.nest.anonParam.literal",
+      "q" in _ap4 and _ap4["q"].get("detail") == "i32", str(sorted(_ap4)))
+
+_rid += 1
+s8({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/inlayHint", "params": {
+    "textDocument": {"uri": anuri},
+    "range": {"start": {"line": 0, "character": 0},
+              "end": {"line": ANONSRC.count("\n") + 1, "character": 0}}}})
+_r, _ = r8("anon.inlay", _rid)
+_ail = [h.get("label") for h in ((_r or {}).get("result") or [])]
+check("inlayHint.nest.anonParam",
+      any("struct { a: i32, opts:" in (l or "") for l in _ail)
+      and any("struct { p: i32, q: i32 }" in (l or "") for l in _ail),
+      str(_ail[:8]))
+
+_al1 = acomp("    cfg.", "anon.localTop")
+check("completion.nest.anonLocal.top",
+      set(_al1) == {"w", "opts"}
+      and "deep:struct" in (_al1["opts"].get("detail") or ""),
+      str({k: v.get("detail") for k, v in _al1.items()}))
+_al2 = acomp("    cfg.opts.", "anon.localMid")
+check("completion.nest.anonLocal.mid",
+      set(_al2) == {"h", "deep"}, str(sorted(_al2)))
+_al3 = acomp("    cfg.opts.deep.", "anon.localDeep")
+check("completion.nest.anonLocal.deep",
+      set(_al3) == {"z", "y"} and _al3["y"].get("detail") == "i32",
+      str(sorted(_al3)))
+_al4 = acomp(".opts = .{ .h = 2, .", "anon.localLiteral")
+check("completion.nest.anonLocal.literal",
+      "deep" in _al4
+      and "struct{z:i32,y:i32}" in (_al4["deep"].get("detail") or ""),
+      str({k: v.get("detail") for k, v in _al4.items()}))
+
+# ⑧ union / union(enum) 静态成员、关联常量、方法函数（用户 15:21 补充）。
+#    `.instance` / `.ty` 两空间分离与 struct 同规则；嵌套字面量也要递归。
+UNIONSRC = """const U = union {
+    pub a: i32,
+    pub opts: struct { pub w: i32, pub h: i32 },
+    pub const MAX: usize = 7;
+    pub const name = fn (self: *const Self) i32 { return 1; };
+    pub const make = fn () U { return U{ .a = 1, .opts = .{ .w = 1, .h = 2 } }; };
+};
+const UE = union(enum) {
+    circle: f64,
+    rect: struct { pub w: i32, pub h: i32 },
+    pub const ZERO: usize = 0;
+    pub const describe = fn (self: Self) []const u8 { return "x"; };
+    pub const mk = fn () UE { return UE{ .circle = 1.0 }; };
+};
+pub const main = fn () i32 {
+    var u = U{ .a = 1, .opts = .{ .w = 2, . } };
+    u.
+    U.
+    var e = UE{ .rect = .{ .w = 1, . } };
+    e.
+    UE.
+    return 0;
+};
+"""
+unuri = "file:///" + os.path.join(SRC_DIR, "unionuse.zx").replace("\\", "/")
+open(os.path.join(SRC_DIR, "unionuse.zx"), "w", encoding="utf-8").write(UNIONSRC)
+s8({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": unuri, "languageId": "zx", "version": 1, "text": UNIONSRC}}})
+
+def ucomp(needle, tag):
+    global _rid
+    _rid += 1
+    off = UNIONSRC.index(needle) + len(needle)
+    s8({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/completion", "params": {
+        "textDocument": {"uri": unuri}, "position": pos(UNIONSRC, off)}})
+    r, _ = r8(tag, _rid)
+    items = (r["result"]["items"] if r and r.get("result") and isinstance(r["result"], dict)
+             else (r["result"] if r and isinstance(r.get("result"), list) else []))
+    return {i["label"]: i for i in items}
+
+_u1 = ucomp("    u.", "union.inst")
+check("completion.nest.unionInst",
+      set(_u1) == {"a", "opts", "name"}
+      and "self" in (_u1["name"].get("detail") or "")
+      and _u1["name"].get("insertTextFormat") == 2,
+      str({k: v.get("detail") for k, v in _u1.items()}))
+_u2 = ucomp("    U.", "union.ty")
+check("completion.nest.unionTy",
+      set(_u2) == {"MAX", "make"}
+      and "usize" in (_u2["MAX"].get("detail") or "")
+      and _u2["make"].get("insertTextFormat") == 2,
+      str({k: v.get("detail") for k, v in _u2.items()}))
+_u3 = ucomp("    e.", "unionenum.inst")
+check("completion.nest.unionEnumInst",
+      set(_u3) == {"circle", "rect", "describe"}
+      and "self" in (_u3["describe"].get("detail") or ""), str(sorted(_u3)))
+_u4 = ucomp("    UE.", "unionenum.ty")
+check("completion.nest.unionEnumTy",
+      set(_u4) == {"circle", "rect", "ZERO", "mk"}, str(sorted(_u4)))
+_u5 = ucomp(".opts = .{ .w = 2, .", "union.literal")
+check("completion.nest.unionLiteral",
+      "h" in _u5 and _u5["h"].get("detail") == "i32", str(sorted(_u5)))
+_u6 = ucomp(".rect = .{ .w = 1, .", "unionenum.literal")
+check("completion.nest.unionEnumLiteral",
+      "h" in _u6 and _u6["h"].get("detail") == "i32", str(sorted(_u6)))
+
+# ⑨ enum 实例静态值回归在 2745 行的 enum.instMembers 断言里守：
+#    上表的 `c.` 集合去掉了 FIRST/COUNT，与 ⑧ 同一条命名空间红线。
+
+
+# ⑩ 两条解析链系统性守门（用户 2026-11-12："struct/enum/union/union(enum)
+#    都可以嵌套类，函数、方法的参数也可以是匿名的类，也是嵌套类……任何
+#    地方都要有智能提示、补全、snippet"）。
+#    链路 A：四种容器 + 泛型函数返回体里的嵌套类型、类型值别名、构造骨架。
+#    链路 B：函数/方法形参的匿名嵌套 struct、形参体内 self、显式匿名类型
+#    标注的局部变量、编辑中的嵌套字面量。
+KLIB = """pub const SG = struct {
+    pub const Inner = struct { pub a: i32, pub b: i32 };
+    pub const Deeper = struct { pub const Leaf = struct { pub q: i32 }; pub p: i32 };
+    pub id: i32,
+};
+pub const SE = enum { red, green, pub const Inner = struct { pub z: i32 }; };
+pub const SU = union { pub a: i32, pub const Inner = struct { pub z: i32 }; };
+pub const SUE = union(enum) { circle: f64, pub const Inner = struct { pub z: i32 }; };
+pub const GG = fn (T: type) type {
+    return struct {
+        pub val: T,
+        pub const F = struct { pub name: i32, pub flag: bool };
+    };
+};
+pub const BX = struct {
+    pub id: i32,
+    pub const take = fn (self: *const Self, cfg: struct { a: i32, nest: struct { b: i32, c: i32 } }) i32 {
+        cfg.
+        cfg.nest.
+        self.
+        return 0;
+    };
+};
+pub const FF2 = fn (b: i32, data: struct { b: i32, data: struct { b: i32, i: i32 } }) i32 {
+    data.
+    data.data.
+    return 0;
+};
+"""
+_klib_path = os.path.join(TESTDIR, "vendor", "zxls8zk.zx")
+open(_klib_path, "w", encoding="utf-8").write(KLIB)
+kliburi = "file:///" + _klib_path.replace("\\", "/")
+
+KUSE = """const std = module("std");
+const k = module("zxls8zk");
+pub const main = fn () i32 {
+    k.SG.Inner.
+    k.SG.Deeper.Leaf.
+    k.SE.Inner.
+    k.SU.Inner.
+    k.SUE.Inner.
+    k.GG.F.
+    k.GG(i32).F.
+    const KT: type = k.GG.F;
+    KT.
+    var kx: KT = KT{ .name = 1, .flag = 0 };
+    kx.
+    KT{ .name = 1, . }
+    var ka: struct { a: i32, nest: struct { b: i32, c: i32 } } = .{ .a = 1, .nest = .{ .b = 3, .c = 4 } };
+    ka.
+    ka.nest.
+    var kb: struct { a: i32, nest: struct { b: i32, c: i32 } } = .{ .a = 1, .nest = .{ .b = 2, . } };
+    if
+    return 0;
+};
+"""
+_kuse_path = os.path.join(SRC_DIR, "kchain.zx")
+open(_kuse_path, "w", encoding="utf-8").write(KUSE)
+kuri = "file:///" + _kuse_path.replace("\\", "/")
+
+for _u, _txt in ((kuri, KUSE), (kliburi, KLIB)):
+    s8({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+        "textDocument": {"uri": _u, "languageId": "zx", "version": 1, "text": _txt}}})
+
+
+def kcomp(src, uri_, needle, tag):
+    global _rid
+    _rid += 1
+    idx = src.find(needle)
+    if idx < 0:
+        print(f"FAIL {tag}: needle {needle!r} not found"); return {}
+    off = idx + len(needle)
+    s8({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/completion", "params": {
+        "textDocument": {"uri": uri_}, "position": pos(src, off)}})
+    r, _ = r8(tag, _rid)
+    items = (r["result"]["items"] if r and r.get("result") and isinstance(r["result"], dict)
+             else (r["result"] if r and isinstance(r.get("result"), list) else []))
+    return {i["label"]: i for i in items}
+
+
+def khover(src, uri_, needle, word, tag):
+    global _rid
+    _rid += 1
+    idx = src.find(needle)
+    w = needle.find(word)
+    off = idx + w + len(word)
+    s8({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/hover", "params": {
+        "textDocument": {"uri": uri_}, "position": pos(src, off)}})
+    r, _ = r8(tag, _rid)
+    v = ((r or {}).get("result") or {}).get("contents", {})
+    return v.get("value", "") if isinstance(v, dict) else str(v)
+
+
+def ctor_ok(mp, label, shape):
+    it = mp.get(label, {})
+    det = it.get("detail") or ""
+    te = it.get("textEdit") or {}
+    nt = te.get("newText") or ""
+    return (shape in det and nt.startswith("{ .")
+            and te.get("range", {}).get("start") is not None
+            and it.get("insertTextFormat") == 2), str(mp)[:220]
+
+
+# 链路 A1：四种容器 + 三层嵌套 + 泛型返回体 + 泛型实例尾段的类型空间
+for _needle, _label, _shape, _tag in (
+    ("    k.SG.Inner.", "Inner{...}", "a: i32", "kchain.structInner"),
+    ("    k.SG.Deeper.Leaf.", "Leaf{...}", "q: i32", "kchain.threeLevel"),
+    ("    k.SE.Inner.", "Inner{...}", "z: i32", "kchain.enumInner"),
+    ("    k.SU.Inner.", "Inner{...}", "z: i32", "kchain.unionInner"),
+    ("    k.SUE.Inner.", "Inner{...}", "z: i32", "kchain.unionEnumInner"),
+    ("    k.GG.F.", "F{...}", "name: i32", "kchain.genericNested"),
+    ("    k.GG(i32).F.", "F{...}", "name: i32", "kchain.genericInstNested"),
+    ("    KT.", "KT{...}", "name: i32", "kchain.typeAliasCtor"),
+):
+    _m = kcomp(KUSE, kuri, _needle, _tag)
+    _ok, _det = ctor_ok(_m, _label, _shape)
+    check("completion." + _tag, _ok, _det)
+
+_kx = kcomp(KUSE, kuri, "    kx.", "kchain.aliasInstance")
+check("completion.kchain.aliasInstance",
+      set(_kx) == {"name", "flag"} and _kx["flag"].get("detail") == "bool",
+      str({k_: v_.get("detail") for k_, v_ in _kx.items()}))
+_ktl = kcomp(KUSE, kuri, "    KT{ .name = 1, .", "kchain.aliasLiteral")
+# 续补沿用 completion.literalSecond 的既有口径：给全量字段（宿主按前缀
+# 自行过滤），不在这里去重。
+check("completion.kchain.aliasLiteral",
+      "flag" in _ktl, str(sorted(_ktl)))
+check("hover.kchain.typeAlias",
+      "name: i32" in khover(KUSE, kuri, "    const KT: type = k.GG.F;", "KT", "kchain.aliasHover"))
+
+# 链路 A2：具名嵌套类型 hover 必须贴 Inner 自己，不是外层容器
+check("hover.kchain.nestedType",
+      "pub const Inner" in khover(KUSE, kuri, "    k.SG.Inner.", "Inner", "kchain.innerHover"))
+
+# 链路 B1：显式匿名类型标注的局部变量、嵌套点路径、编辑中的嵌套字面量
+_ka = kcomp(KUSE, kuri, "    ka.", "kchain.anonAnnot")
+check("completion.kchain.anonAnnot",
+      set(_ka) == {"a", "nest"} and "struct { b: i32, c: i32 }" in (_ka["nest"].get("detail") or ""),
+      str({k_: v_.get("detail") for k_, v_ in _ka.items()}))
+_kan = kcomp(KUSE, kuri, "    ka.nest.", "kchain.anonAnnotDeep")
+check("completion.kchain.anonAnnotDeep",
+      set(_kan) == {"b", "c"} and _kan["c"].get("detail") == "i32", str(sorted(_kan)))
+_kbl2 = kcomp(KUSE, kuri, ".nest = .{ .b = 2, .", "kchain.anonAnnotNestedLiteral")
+check("completion.kchain.anonAnnotNestedLiteral",
+      "c" in _kbl2 and "b" not in _kbl2, str(sorted(_kbl2)))
+_kah = khover(KUSE, kuri, "    var ka: struct", "ka", "kchain.anonHover")
+check("hover.kchain.anonAnnot",
+      "struct" in _kah and ("a: i32" in _kah or "a:i32" in _kah)
+      and ("nest" in _kah), _kah[:200])
+
+# 链路 B2：vendor 里的函数/方法形参匿名嵌套 struct 与 self
+_cfg = kcomp(KLIB, kliburi, "        cfg.", "kchain.methodParam")
+check("completion.kchain.methodParam", set(_cfg) == {"a", "nest"}, str(sorted(_cfg)))
+_cfgn = kcomp(KLIB, kliburi, "        cfg.nest.", "kchain.methodParamDeep")
+check("completion.kchain.methodParamDeep", set(_cfgn) == {"b", "c"}, str(sorted(_cfgn)))
+_slf = kcomp(KLIB, kliburi, "        self.", "kchain.methodSelf")
+check("completion.kchain.methodSelf",
+      {"id", "take"} <= set(_slf), str(sorted(_slf)))
+_dat = kcomp(KLIB, kliburi, "    data.", "kchain.fnParamSameName")
+check("completion.kchain.fnParamSameName",
+      set(_dat) == {"b", "data"}, str(sorted(_dat)))
+_datd = kcomp(KLIB, kliburi, "    data.data.", "kchain.fnParamSameNameDeep")
+check("completion.kchain.fnParamSameNameDeep",
+      set(_datd) == {"b", "i"}, str(sorted(_datd)))
+
+# 链路 B3：snippet 能力线没被连坐
+_s2 = kcomp(KUSE, kuri, "    if", "kchain.snippet")
+check("completion.kchain.snippet",
+      _s2.get("if", {}).get("insertTextFormat") == 2, str(sorted(_s2)))
+
+
+try:
+    p8.kill()
+except Exception:
+    pass
+
 # 9 shutdown/exit
 send({"jsonrpc": "2.0", "id": 8, "method": "shutdown", "params": None})
 recv_id("shutdown", 8)
@@ -3615,6 +4209,7 @@ def inlay_perf():
         except Exception:
             pass
 
+
 perf = inlay_perf()
 if perf is None:
     print("skip inlayHint.perf (非 Windows)")
@@ -3624,6 +4219,7 @@ else:
           "%.2fs, %d 条提示（超时或提示数不足：多半又退化成 O(绑定数 × 文件长度)）" % (dt, nh))
     print("     inlayHint: %.3f s, %d 条提示, %d 行" % (dt, nh, n))
 
+# ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 if fails:
     print(f"SMOKE FAILED: {len(fails)} -> {fails}"); sys.exit(1)

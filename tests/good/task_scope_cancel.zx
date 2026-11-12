@@ -1,0 +1,67 @@
+// task_scope_cancel.zx —— 取消沿父子树传播。
+// 父任务在自己的作用域里 spawn 子任务；main cancel 父任务 → 父任务在循环
+// 回边收到 cancelled → !T 错误返回路径展开 defer → scopeClose 级联取消
+// 整个子任务树并等它收尾。作用域退出绝不留活任务。
+// 同时守一个后端不变量：循环回边注入的 return 必须照常展开 defer，
+// 否则这里的子任务会跑到 LIMIT 才停（interrupted:0）。
+// expect-output:parent:cancelled
+// expect-output:child:cancelled
+// expect-output:interrupted:1
+const std = module("std");
+const Task = std.task.Task;
+
+const LIMIT: usize = 100000000;
+var g_tid: usize = 0;
+var g_h: usize = 0;
+var ready: usize = 0;
+var ticks: usize = 0;
+
+const child = fn (_: usize) !usize {
+    let t = Task.fromId(g_tid);
+    var i: usize = 0;
+    while (i < LIMIT) {
+        i = i + 1;
+        std.atomic.atomicStore(&ticks, i);
+        if (i == 1) { std.atomic.atomicStore(&ready, 1); }
+        t.yield();
+    }
+    return i;
+};
+
+const parent = fn (_: usize) !usize {
+    let t = Task.fromId(g_tid);
+    let sc = t.scope();
+    defer t.scopeClose(sc);
+    g_h = t.scopeSpawn(sc, child, 0).?;
+    var i: usize = 0;
+    while (i < LIMIT) {
+        i = i + 1;
+        t.yield();
+    }
+    return i;
+};
+
+const main = fn () !i32 {
+    let pl = Task.pool(2);
+    defer pl.close();
+    g_tid = pl.id;
+    let p = pl.spawn(parent, pl.id).?;
+
+    // 等子任务真的跑起来，避免测成「还没启动就被判 cancelled」
+    var guard: usize = 0;
+    while (std.atomic.atomicLoad(&ready) == 0 && guard < 1000000000) {
+        guard = guard + 1;
+    }
+    pl.cancel(p);
+    if (pl.await(p)) v { std.println("parent-unexpected:{}", v); } else e {
+        std.println("parent:{}", std.debug.errName(e));
+    }
+    if (pl.await(g_h)) v { std.println("child-unexpected:{}", v); } else e {
+        std.println("child:{}", std.debug.errName(e));
+    }
+    let n = std.atomic.atomicLoad(&ticks);
+    var it: usize = 0;
+    if (n > 0 && n < LIMIT) { it = 1; }
+    std.println("interrupted:{}", it);
+    return 0;
+};
