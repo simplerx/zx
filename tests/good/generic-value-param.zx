@@ -1,0 +1,50 @@
+// 泛型值参数作数组长度：`fn (N: u64) type` 一个 `T: type` 都没有，也必须是
+// 类型构造函数（参数全在编译期），否则 N 没有绑定，`*[N]u64` 只能报
+// 「array length must be a non-negative compile-time integer」。
+const std = module("std");
+
+const List = fn (N: u64) type {
+    return struct {
+        pub genId: *[N]u64,
+        pub ptr: *[N]*u8,
+
+        // N 进了类型，也能当值用：这两个方法都读编译期那个 N。
+        pub const len = fn (self: *const Self) u64 { return N; };
+
+        pub const slot = fn (self: *const Self, i: usize) u64 {
+            return self.genId[i];
+        };
+    };
+};
+
+// 长度可以是 N 的表达式：`*[N + 1]u64` 由 ev_int 折成常量。
+const Tail = fn (N: u64) type {
+    return struct {
+        pub extra: *[N + 1]u64,
+
+        pub const cap = fn (self: *const Self) u64 { return N + 1; };
+    };
+};
+
+pub const main = fn () u8 {
+    var g: *[4]u64 = &.{ 0, 0, 0, 0 };
+    var p: *[4]*u8 = &.{ null, null, null, null };
+    var l = List(4){ .genId = g, .ptr = p };
+
+    l.genId[2] = 42;
+    std.println("len {}", l.len());
+    std.println("slot {}", l.slot(2));
+
+    var e: *[3]u64 = &.{ 0, 0, 0 };
+    var t = Tail(2){ .extra = e };
+    t.extra[2] = 7;
+    std.println("cap {}", t.cap());
+    std.println("tail {}", t.extra[2]);
+    return 0;
+};
+
+// expect-output
+// len 4
+// slot 42
+// cap 3
+// tail 7

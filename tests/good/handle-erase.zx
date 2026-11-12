@@ -1,28 +1,63 @@
-// §133：按访问点擦除的守门用例。直线作用域，Handle 从 create 发行到
-// get 之间没有 free / deinit / 强转 / 跨函数，编译器能证明这个访问点。
-// release 档应把 t.get(h) 改写为私有的 getUnchecked（跳过 gen 比对）；
-// dev 档保留 get（走完整 valid）。两种发射的输出必须完全一致。
+// §135：句柄检查只在编译期做。容器同时声明 get 与私有 getUnchecked 就是
+// opt-in——编译器把每个能证明 LIVE 的 get 直接改写成 getUnchecked（零检查）。
+// 这里 create -> get -> free 全在直线代码里，所以访问点可证明；
+// dev / release 两档发射同一种形态，不再有「dev 保留 get」的第二条路。
 const std = module("std");
 
-const Point = struct { x: i32, y: i32 };
-const Table = std.slot.SlotTable(Point, 8);
+const Handle = struct { pos: usize };
+
+const Table = fn (cap: usize) type {
+    return struct {
+        gens: *[cap]u64,
+        ptr: *[cap]*u8,
+        used: usize,
+
+        pub const init = fn (g: *[cap]u64, p: *[cap]*u8) Self {
+            return Self{ .gens = g, .ptr = p, .used = 0 };
+        };
+
+        // 发行点：编译器认这个方法来给 Handle 记版本。
+        pub const create = fn (self: *Self) ?Handle {
+            if (self.used >= cap) { return null; }
+            let i = self.used;
+            self.used = i + 1;
+            self.gens[i] = 1;
+            return Handle{ .pos = i };
+        };
+
+        // 检查点标记。外部只写 get；编译器要么改写成 getUnchecked，要么报错。
+        pub const get = fn (self: *Self, h: Handle) ?*u8 {
+            return self.getUnchecked(h);
+        };
+
+        // 实际路径：纯地址。私有，用户手写 `t.getUnchecked(h)` 会被 E0404 挡住。
+        const getUnchecked = fn (self: *Self, h: Handle) ?*u8 {
+            return (*u8)&self.ptr[h.pos];
+        };
+
+        pub const free = fn (self: *Self, h: Handle) bool {
+            self.ptr[h.pos] = null;
+            return true;
+        };
+    };
+};
 
 pub const main = fn () u8 {
-    const al = std.heap.page;
-    var t = Table.init(al).?;
+    var gens: *[4]u64 = &.{ 0, 0, 0, 0 };
+    var raw: *[4]*u8 = &.{ null, null, null, null };
+    var t = Table(4).init(gens, raw);
+
     let h = t.create().?;
     if (t.get(h)) p {
-        p.x = 11;
-        std.println("get {}", p.x);
+        p[0] = 11;
+        std.println("get {}", (i32)p[0]);
     } else {
         return 1;
     }
     std.println("free {}", t.free(h));
-    std.println("leak {}", t.deinit());
     return 0;
 };
 
 // expect-output
 // get 11
 // free true
-// leak 0

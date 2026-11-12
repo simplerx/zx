@@ -4195,24 +4195,69 @@ check("diagnostics.noCodeDescriptionForOldClients",
 # stderr 的 `path:line:col: error[CODE]: msg` -> publishDiagnostics，
 # codeDescription.href 按码小写自动拼出 docs/errors.md#e0510。用独立短命会话
 # 把这条链钉死——能力线以守门用例保存，不许删用例变绿。
-E0510_TXT = """const std = module("std");
+HANDLE_TABLE = """const std = module("std");
 
-const Point = struct { x: i32 };
-const Table = std.slot.SlotTable(Point, 4);
+const Handle = struct { pos: usize };
 
+const Table = fn (cap: usize) type {
+    return struct {
+        gens: *[cap]u64,
+        ptr: *[cap]*u8,
+        used: usize,
+
+        pub const init = fn (g: *[cap]u64, p: *[cap]*u8) Self {
+            return Self{ .gens = g, .ptr = p, .used = 0 };
+        };
+        pub const create = fn (self: *Self) ?Handle {
+            if (self.used >= cap) { return null; }
+            let i = self.used;
+            self.used = i + 1;
+            return Handle{ .pos = i };
+        };
+        pub const get = fn (self: *Self, h: Handle) ?*u8 {
+            return self.getUnchecked(h);
+        };
+        const getUnchecked = fn (self: *Self, h: Handle) ?*u8 {
+            return (*u8)&self.ptr[h.pos];
+        };
+        pub const free = fn (self: *Self, h: Handle) bool {
+            self.ptr[h.pos] = null;
+            return true;
+        };
+    };
+};
+"""
+
+E0510_TXT = HANDLE_TABLE + """
 pub const main = fn () u8 {
-    const al = std.heap.page;
-    var t = Table.init(al).?;
+    var gens: *[4]u64 = &.{ 0, 0, 0, 0 };
+    var raw: *[4]*u8 = &.{ null, null, null, null };
+    var t = Table(4).init(gens, raw);
     let h = t.create().?;
     std.println("free {}", t.free(h));
     let p = t.get(h).?;
-    std.println("{}", p.x);
+    std.println("{}", (i32)p[0]);
     return 0;
 };
 """
-e0510_uri = "file:///" + os.path.join(TESTDIR, "e0510.zx").replace("\\", "/")
 
-def e0510_client():
+# §135：抹源（Handle 存进结构体字段）是 E0511，不是运行时查表。
+E0511_TXT = HANDLE_TABLE + """
+const Holder = struct { h: Handle };
+
+pub const main = fn () u8 {
+    var gens: *[4]u64 = &.{ 0, 0, 0, 0 };
+    var raw: *[4]*u8 = &.{ null, null, null, null };
+    var t = Table(4).init(gens, raw);
+    let h = t.create().?;
+    let boxed = Holder{ .h = h };
+    let p = t.get(boxed.h).?;
+    std.println("{}", (i32)p[0]);
+    return 0;
+};
+"""
+def diag_client(name, text):
+    uri = "file:///" + os.path.join(TESTDIR, name).replace("\\", "/")
     p = subprocess.Popen([ZXLS_BIN], stdin=subprocess.PIPE,
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     def es(msg):
@@ -4239,15 +4284,15 @@ def e0510_client():
     er()
     es({"jsonrpc": "2.0", "method": "initialized", "params": {}})
     es({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
-        "textDocument": {"uri": e0510_uri, "languageId": "zx",
-                         "version": 1, "text": E0510_TXT}}})
+        "textDocument": {"uri": uri, "languageId": "zx",
+                         "version": 1, "text": text}}})
     got = []
     for _ in range(20):
         m = er()
         if not m:
             break
         if (m.get("method") == "textDocument/publishDiagnostics"
-                and m["params"].get("uri", "").endswith("e0510.zx")
+                and m["params"].get("uri", "").endswith(name)
                 and m["params"].get("diagnostics")):
             got = m["params"]["diagnostics"]
             break
@@ -4258,13 +4303,21 @@ def e0510_client():
     except Exception: p.kill()
     return got
 
-_e510_diags = e0510_client()
+_e510_diags = diag_client("e0510.zx", E0510_TXT)
 _d510 = next((d for d in _e510_diags if d.get("code") == "E0510"), None)
 _h510 = ((_d510 or {}).get("codeDescription") or {}).get("href", "")
 check("diagnostics.e0510CodeDescription",
       _d510 is not None and _d510.get("source") == "zxc"
       and _h510.endswith("docs/errors.md#e0510"),
       _h510 or str(_e510_diags)[:300])
+
+_e511_diags = diag_client("e0511.zx", E0511_TXT)
+_d511 = next((d for d in _e511_diags if d.get("code") == "E0511"), None)
+_h511 = ((_d511 or {}).get("codeDescription") or {}).get("href", "")
+check("diagnostics.e0511CodeDescription",
+      _d511 is not None and _d511.get("source") == "zxc"
+      and _h511.endswith("docs/errors.md#e0511"),
+      _h511 or str(_e511_diags)[:300])
 
 # ---------------------------------------------------------------------------
 # 同一个文件反复 didOpen（守一个真崩过的悬垂键）

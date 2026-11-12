@@ -5032,3 +5032,62 @@ at compile time」是同一族，只是「编译期已知为 null」的来源从
   合起来也不是内存安全；裸指针、`(T)val` 抹源、C 边界、跨线程仍不受保护。
   红线不变：不做 GC / 引用计数 / 所有权类型 / 借用检查 / RAII / 胖指针 /
   第二套分配 API / 与 §44 冲突的 storage inference。
+
+## §135 撤掉运行时 side table：句柄检查全部收进编译期（2026-11-13 用户裁定）
+
+**用户原话**：「抹源会出问题；还是不要第 3、4 运行时检查，只保留编译期检查
+就可以了」。随后两项追问当场拍板：抹源点**报编译错误**、`std.slot` **连库
+一起删**。这推翻了 §130 的「编译期证明不了就交给运行时 side table」那半句。
+
+**为什么推翻**：抹源之后靠 `valid()` 返回 `null` 兜底，看起来安全，实际上
+把「这个指针还活着吗」变成了运行时的概率问题——`if (t.get(h))` 里那个
+`else` 分支一旦没写，`.?` 就 abort，写了也只是把错误推迟到用户忘写的那一刻。
+既然编译器已经知道「我不知道」，就不该假装有第二道防线。**证明不了 = 错**，
+比「证明不了 = 查表」诚实。
+
+### 落点
+
+1. **删库**：`std/slot.zx`、`std/std.zx` 的 `pub const slot` 注册。句柄表
+   完全交回用户手写（`tests/good/handle-erase.zx` 就是最小样板：`Handle`
+   结构 + `gens/ptr/used` 三列 + `init/create/get/getUnchecked/free`）。
+2. **编译器口径**（`sema.c: region_handle_call`）：
+   - `get(h)`：能证明 LIVE → **无条件**改写成私有 `getUnchecked`（不再看
+     `--release`，dev / release 同一种发射）；证明不了 → E0511。
+   - `free(h)`：`RS_FREED` → E0509（二次释放）；`RS_DEAD` → E0510；
+     身份不可知 → E0511。
+   - 删掉 `handle_dead_get` 与 `NK_UNWRAP` 里的 E0510 判定：失效在 `get`
+     处就报，同一条语句报两个码只会把修法埋掉。
+   - `ZX_HANDLE_CHECKS` 环境变量一并删除——没有「保留检查」这个档位了。
+3. **两个码分工**：E0510 = 编译期**确定失效**（已 `free` / 表已 `deinit`）；
+   E0511 = **证明不了身份**（`(T)val` 抹源、存进字段再取、跨函数、控制流里
+   发行）。E0510 的定位从「`.?` 强制解包」扩大到「读失效句柄」，`.?` 不再
+   是判据。`zxc.c` 的 `g_rules` 加两条 E0511 前缀串、E0510 换文案。
+4. **opt-in 契约**（没有 std 库之后，这是唯一入口，写进 `docs/errors.md`）：
+   容器同时声明 `create`（发行）、`get`（检查点标记）、私有 `getUnchecked`
+   （实际路径）即 opt-in；`free` / `deinit` 可选。**`get` 的函数体不进生成的
+   代码**——要么被改写成 `getUnchecked`，要么报错。方法名是契约，不是类型，
+   编译器不认识 `Handle` 这个类型本身。
+5. **LSP 通道不变**：仍复用 `diagnosticsWorker` 解析 stderr，`zxls` 零改动；
+   守门从单码扩成双码（`diagnostics.e0510CodeDescription` /
+   `e0511CodeDescription`）。
+
+### 代价与边界（明确写死）
+
+- **句柄必须留在局部变量里**，`create/get/free` 全在直线代码。放进聚合、
+  跨函数传参、在 `if`/循环里发行 → E0511。要跨作用域就自己把容器方法写成
+  显式 `?*T` 接口，别再指望编译器替你证明。
+- 普通堆指针（`std.heapAlloc` + `Allocator.free`）不受影响：账本照记、
+  E0509 照报，opaque 的点只做观测（`ZX_REGION=1`），不报错也不误报。
+- 运行时真正消失的只有 side table 这一层：`std.pool` / arena / ECS 的
+  世代句柄是库自己的数据结构，不在本裁定的射程内。
+- 用例变化：删 `tests/good/slot-table.zx`（运行时行为）、`handle-check-ok.zx`
+  （「检查性使用不报错」在新口径下不成立）；改写 `handle-erase.zx` /
+  `handle-invalid-unwrap.zx` / `handle-closed-unwrap.zx` 为自写容器；
+  新增 `tests/bad/handle-provenance-lost.zx`（E0511）。
+- 顺带修掉一个真 bug：`fn (N: u64) type` 这种**没有 `T: type` 的类型构造
+  函数**原先不算泛型（`fn_is_generic` 只看类型参数），`N` 不绑定 → 体内
+  `*[N]u64` 报 E0501。现在返回 `type` 的函数一律按泛型实例化，值参数可以
+  直接当数组长度（`*[N]u64`、`*[N + 1]u64` 都走 `ev_int` 折常量）。守门
+  `tests/good/generic-value-param.zx`。
+- §130 / §132 / §133 里「运行时 side table」「按点擦除双发射」的段落
+  按本节作废；**编译期那半（状态机、预分配、账本、E0509）一字不动**。

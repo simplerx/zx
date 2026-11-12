@@ -782,17 +782,17 @@ else
     fail=1
 fi
 
-printf "\n== §133 按访问点擦除：release 改写 / dev 保留 / 两档输出一致\n"
+printf "\n== §135 静态句柄：证明得了就发 getUnchecked，dev/release 同形态\n"
 $ZXC tests/good/handle-erase.zx --emit-c --release > "$TPFX.erz.rel.c" 2>/dev/null
 $ZXC tests/good/handle-erase.zx --emit-c > "$TPFX.erz.dev.c" 2>/dev/null
 ZX_REGION=1 $ZXC tests/good/handle-erase.zx --check --release > "$TPFX.erz.log" 2>&1 || true
-if grep -q 'erase: 1/1 proven, 1 erased (mode=release)' "$TPFX.erz.log" \
+if grep -q 'erase: 2/2 proven, 1 erased' "$TPFX.erz.log" \
    && grep -q '_c0 = getUnchecked_' "$TPFX.erz.rel.c" \
-   && ! grep -q '_c0 = getUnchecked_' "$TPFX.erz.dev.c" \
-   && grep -q '_c0 = get_' "$TPFX.erz.dev.c"; then
-    printf "  ok   release 擦成 getUnchecked，dev 保留 get，账本记 1/1\n"
+   && grep -q '_c0 = getUnchecked_' "$TPFX.erz.dev.c" \
+   && ! grep -q '_c0 = get_' "$TPFX.erz.dev.c"; then
+    printf "  ok   两档都把 get 改成 getUnchecked，账本记 2/2 proven\n"
 else
-    printf "  FAIL 按访问点擦除守门失败（账本或发射层）\n"
+    printf "  FAIL 静态句柄擦除守门失败（账本或发射层）\n"
     sed -n '1,12p' "$TPFX.erz.log"
     grep -n '_c0 = ' "$TPFX.erz.rel.c" "$TPFX.erz.dev.c" | head -n 6
     fail=1
@@ -800,40 +800,39 @@ fi
 $ZXC tests/good/handle-erase.zx -o "$TPFX.erz.bin" --release > /dev/null 2>&1 || true
 "$TPFX.erz.bin" > "$TPFX.erz.run" 2>&1 || true
 if grep -q '^get 11$' "$TPFX.erz.run" \
-   && grep -q '^free true$' "$TPFX.erz.run" \
-   && grep -q '^leak 0$' "$TPFX.erz.run"; then
-    printf "  ok   release 档实跑输出与 dev 档一致\n"
+   && grep -q '^free true$' "$TPFX.erz.run"; then
+    printf "  ok   静态句柄用例实跑输出正确\n"
 else
-    printf "  FAIL release 档运行输出不对\n"
+    printf "  FAIL 静态句柄用例运行输出不对\n"
     sed -n '1,10p' "$TPFX.erz.run"
     fail=1
 fi
-ZX_REGION=1 ZX_HANDLE_CHECKS=1 $ZXC tests/good/handle-erase.zx --check --release > "$TPFX.erz.keep.log" 2>&1 || true
-if grep -q 'PROVEN kept' "$TPFX.erz.keep.log"; then
-    printf "  ok   ZX_HANDLE_CHECKS=1 强制保留全检查\n"
-else
-    printf "  FAIL 强制保留全检查没生效\n"
-    sed -n '1,10p' "$TPFX.erz.keep.log"
-    fail=1
-fi
 
-printf "\n== §134 E0510：确定失效句柄的 `.?` 报硬错，LSP 通道输入格式正确\n"
+printf "\n== §135 句柄只在编译期查：确定失效 E0510、证明不了 E0511\n"
 $ZXC tests/bad/handle-invalid-unwrap.zx --check > "$TPFX.e0510.log" 2>&1 || true
 if grep -q 'error\[E0510\]' "$TPFX.e0510.log" \
-   && grep -q 'forced-unwrap on an invalid handle' "$TPFX.e0510.log"; then
+   && grep -q 'read of an invalid handle' "$TPFX.e0510.log"; then
     printf "  ok   E0510 按 path:line:col: error[CODE] 输出（diagnosticsWorker 可解析）\n"
 else
     printf "  FAIL E0510 诊断格式不对（LSP 会解析不到）\n"
     sed -n '1,12p' "$TPFX.e0510.log"
     fail=1
 fi
-$ZXC explain E0510 > "$TPFX.e0510.explain" 2>&1 || true
-if grep -q 'docs/errors.md#e0510' "$TPFX.e0510.explain" \
-   && grep -q 'if (t.get(h))' "$TPFX.e0510.explain"; then
-    printf "  ok   zxc explain E0510 有修法与文档锚点\n"
+$ZXC tests/bad/handle-provenance-lost.zx --check > "$TPFX.e0511.log" 2>&1 || true
+if grep -q 'error\[E0511\]' "$TPFX.e0511.log" \
+   && grep -q 'cannot prove this handle is alive' "$TPFX.e0511.log"; then
+    printf "  ok   抹源（Handle 存进字段）直接 E0511，没有运行时兜底\n"
 else
-    printf "  FAIL zxc explain E0510 缺修法或锚点\n"
-    sed -n '1,12p' "$TPFX.e0510.explain"
+    printf "  FAIL E0511 抹源守门失败\n"
+    sed -n '1,12p' "$TPFX.e0511.log"
+    fail=1
+fi
+$ZXC explain E0511 > "$TPFX.e0511.explain" 2>&1 || true
+if grep -q 'docs/errors.md#e0511' "$TPFX.e0511.explain"; then
+    printf "  ok   zxc explain E0511 有修法与文档锚点\n"
+else
+    printf "  FAIL zxc explain E0511 缺锚点\n"
+    sed -n '1,12p' "$TPFX.e0511.explain"
     fail=1
 fi
 

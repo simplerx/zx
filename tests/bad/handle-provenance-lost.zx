@@ -1,0 +1,49 @@
+// §135：抹源就是硬错。默认口径是「只保留编译期检查」——所以 Handle 一旦
+// 存进结构体字段再取回来，provenance 断在「字段取回」这一步，编译器再也
+// 不知道它是否还有效。这时不退回运行时查表，而是直接 E0511。
+// expect: cannot prove this handle is alive
+// expect-code: E0511
+// expect-count: 1
+const std = module("std");
+
+const Handle = struct { pos: usize };
+const Holder = struct { h: Handle };
+
+const Table = fn (cap: usize) type {
+    return struct {
+        gens: *[cap]u64,
+        ptr: *[cap]*u8,
+        used: usize,
+
+        pub const init = fn (g: *[cap]u64, p: *[cap]*u8) Self {
+            return Self{ .gens = g, .ptr = p, .used = 0 };
+        };
+
+        pub const create = fn (self: *Self) ?Handle {
+            if (self.used >= cap) { return null; }
+            let i = self.used;
+            self.used = i + 1;
+            return Handle{ .pos = i };
+        };
+
+        pub const get = fn (self: *Self, h: Handle) ?*u8 {
+            return self.getUnchecked(h);
+        };
+
+        const getUnchecked = fn (self: *Self, h: Handle) ?*u8 {
+            return (*u8)&self.ptr[h.pos];
+        };
+    };
+};
+
+pub const main = fn () u8 {
+    var gens: *[4]u64 = &.{ 0, 0, 0, 0 };
+    var raw: *[4]*u8 = &.{ null, null, null, null };
+    var t = Table(4).init(gens, raw);
+
+    let h = t.create().?;
+    let boxed = Holder{ .h = h };   // Handle 进了字段：provenance 从这断了
+    let p = t.get(boxed.h).?;         // E0511：证明不了它活着
+    std.println("{}", (i32)p[0]);
+    return 0;
+};

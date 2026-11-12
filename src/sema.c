@@ -2530,52 +2530,73 @@ static void region_handle_call(Node *n) {
     int id = harg ? region_of_expr(harg) : 0;
     RegionSlot *r = (id > 0 && id <= g_nrslots) ? &g_rslots[id - 1] : NULL;
 
+    /* §135（用户 2026-11-13 裁定）：句柄检查只在编译期做，运行时 side
+     * table 这条线撤掉。于是「证明不了」不再是退回查表，而是硬错：抹源
+     * （cast / 存进字段 / 跨函数）之后没有第二道防线，必须当场拒绝。
+     * 两个码分工：E0510 = 编译期**确定失效**；E0511 = **证明不了身份**。 */
+    const char *why = "handle provenance lost";
+    bool known = false;
+    if (!r)                        why = "handle provenance lost";
+    else if (!r->is_handle)        why = "not a handle issued by create()";
+    else if (r->tainted)           why = "issue/free point inside control flow";
+    else                           known = true;
+
     if (!strcmp(m, "free")) {
-        if (!r || !r->is_handle) return;
-        if (g_flow_depth > 0) r->tainted = true;  /* 作废事件路径不定 */
-        if (r->state == RS_LIVE) {
-            r->state = RS_FREED;
-            r->free_line = n->line; r->free_col = n->col;
+        if (!known) {
+            diag_code_at("E0511", n->line, n->col,
+                "cannot prove which handle this is (%s) -- handle checks are "
+                "compile-time only, so an unprovable handle is an error, not a "
+                "runtime lookup", why);
+            prove_add(n, false, false, why);
+            return;
         }
-        return;   /* 不报 E0509：运行时 side table 的 fail-safe 已覆盖 */
+        if (r->state == RS_FREED) {
+            diag_code_at("E0509", n->line, n->col,
+                "this handle was already freed (first free at line %d, issued "
+                "by create at line %d)", r->free_line, r->line);
+            prove_add(n, true, false, "already freed");
+            return;
+        }
+        if (r->state == RS_DEAD) {
+            diag_code_at("E0510", n->line, n->col,
+                "this handle is dead at compile time (%s) -- free it before "
+                "`deinit`, or drop the `deinit`", "handle table closed by deinit");
+            prove_add(n, false, false, "handle table closed by deinit");
+            return;
+        }
+        if (g_flow_depth > 0) r->tainted = true;  /* 作废事件路径不定 */
+        r->state = RS_FREED;
+        r->free_line = n->line; r->free_col = n->col;
+        prove_add(n, true, false, "free of a live handle");
+        return;
     }
 
-    /* get(h)：按访问点判证明。release 档把可证明点擦成 getUnchecked。 */
-    bool proven = false;
-    const char *why = "handle provenance lost";
-    if (!r)                        why = "handle provenance lost";
-    else if (!r->is_handle)        why = "not a handle slot";
-    else if (r->state == RS_DEAD)  why = "handle table closed by deinit";
-    else if (r->state == RS_FREED) why = "handle already freed";
-    else if (r->tainted)           why = "issue/free point inside control flow";
-    else if (g_in_defer)           why = "defer body";
-    else                           proven = true;
-    /* ZX_HANDLE_CHECKS=1 强制保留全检查（debug 巡检用） */
-    bool erase = proven && g_zx_release && !getenv("ZX_HANDLE_CHECKS")
-                 && n->inst != NULL;
-    if (erase) n->a->name = "getUnchecked";
-    prove_add(n, proven, erase,
-              proven ? "proven LIVE, straight-line" : why);
+    /* get(h)：能证明 LIVE 就直接发私有 getUnchecked（零检查）。两档发射同一种
+     * 形态——不再有「dev 保留 get、靠 valid() 返回 null」的第二条路。 */
+    if (known && g_in_defer) { why = "defer body"; known = false; }
+    if (!known) {
+        diag_code_at("E0511", n->line, n->col,
+            "cannot prove this handle is alive (%s) -- handle table checks were "
+            "removed from the runtime; keep create/get/free in straight-line "
+            "code and bind the handle to a local", why);
+        prove_add(n, false, false, why);
+        return;
+    }
+    if (r->state == RS_FREED || r->state == RS_DEAD) {
+        diag_code_at("E0510", n->line, n->col,
+            "read of an invalid handle (%s) -- it is dead at compile time and the "
+            "runtime no longer has a table to re-check it",
+            r->state == RS_DEAD ? "handle table closed by deinit" : "already freed");
+        prove_add(n, true, false, "invalid handle");
+        return;
+    }
+    n->a->name = "getUnchecked";
+    prove_add(n, true, true, "proven LIVE, straight-line");
 }
 
-/* §134：给 `.?` 用的「确定失效」查询。与 region_handle_call 共用同一份
- * 账本和同一条 provenance 规则，只在编译期能证明失效、且路径未 tainted
- * 时才返回非空。检查性使用（if 捕获 / == null / 丢弃）不经过这里。 */
-static RegionSlot *handle_dead_get(Node *call) {
-    if (!call || call->kind != NK_CALL || !call->a ||
-        call->a->kind != NK_FIELD || !call->a->name || !call->a->a) return NULL;
-    /* 已擦除的点叫 getUnchecked，且必然是 PROVEN(LIVE)，不会走到这里 */
-    if (strcmp(call->a->name, "get")) return NULL;
-    if (!handle_container(call->a->a->ty)) return NULL;
-    Node *harg = call->meth_done ? (call->nitems >= 2 ? call->items[1] : NULL)
-                                 : (call->nitems >= 1 ? call->items[0] : NULL);
-    int id = harg ? region_of_expr(harg) : 0;
-    if (id <= 0 || id > g_nrslots) return NULL;
-    RegionSlot *r = &g_rslots[id - 1];
-    if (!r->is_handle || r->tainted) return NULL;
-    if (r->state != RS_FREED && r->state != RS_DEAD) return NULL;
-    return r;
-}
+/* §135：`.?` 不再单独判失效。句柄的失效在 get 处就报 E0510（那里既知道
+ * 「确定失效」也知道「证明不了」），再在 unwrap 处报一遍会变成一条语句
+ * 两个错，反而盖住真正的修法。 */
 
 /* §132：编译期分配账本的只读视图。`zxc explain region <file.zx>` 与
  * `ZX_REGION=1` 共用这份输出；unit 记的是分配点所在模块，不是入口文件，
@@ -4357,17 +4378,8 @@ static Type *check_expr_raw(Node *n, Type *expect) {
                           "`null` only fills a `?T` or a `*T`, it is not one");
         if (t->kind != TY_OPT && t->kind != TY_ERR)
             return BAD(n, "`.?` needs an optional or an error union, found `%s`", ty_str(t));
-        /* §134：状态机确定句柄已失效时，get(h) 必然返回 null，`.?` 必然
-         * abort。只在「确定失效 + provenance 未断 + 未 tainted + 强制解包」
-         * 时报错；if 捕获 / == null 是 side table 的 fail-safe 查询，不报。 */
-        {
-            RegionSlot *hs = handle_dead_get(n->a);
-            if (hs)
-                return BAD_CODE("E0510", n,
-                    "`.?` forced-unwrap on an invalid handle (%s) -- `get()` returns "
-                    "null there; use `if (t.get(h)) p { ... }` to check validity",
-                    hs->state == RS_DEAD ? "table closed by deinit" : "already freed");
-        }
+        /* §135：句柄失效在 get 处已报 E0510 / E0511，这里不再重复判——
+         * 同一条语句报两个码只会把真正的修法埋掉。 */
         /* 编译期就知道是空的：`.?` 在这里必然 abort，和除零同一处置（§7.R10）——
          * 能定就在编译期报，不要留到运行期。 */
         Value *cv = ct_eval_probe(n->a);
@@ -7774,7 +7786,11 @@ static bool fn_is_generic(Node *fn) {
     if (!fn || fn->kind != NK_FN) return false;
     for (int i = 0; i < fn->nitems; i++)
         if (is_type_param(fn->items[i])) return true;
-    return false;
+    /* 返回 `type` 的类型构造函数：参数全是编译期值，所以即使一个 `T: type`
+     * 都没有（`fn (N: u64) type`），它也是泛型。少了这一条，`N` 不会被绑定，
+     * 体内 `*[N]u64` 只能报「长度不是编译期常量」。 */
+    return fn->a && fn->a->kind == NK_TYPE_IDENT && fn->a->name &&
+           !strcmp(fn->a->name, "type");
 }
 
 /* 返回 `type` 的函数是类型构造函数：它的全部实参都在编译期求值 */

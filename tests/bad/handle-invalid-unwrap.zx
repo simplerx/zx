@@ -1,20 +1,52 @@
-// §134：编译期状态机确定句柄已失效时，`.?` 强制解包必然 trap。
-// 这是「确定失效 + 确定性解引用」，不是 side table 的合法性查询，
-// 所以报硬错 E0510；检查性使用（if 捕获 / == null）由另一条 good 用例守。
-// expect: forced-unwrap on an invalid handle
+// §135：编译期确定失效的句柄不能再读。free 之后状态机记 FREED，
+// 此时任何 get 都是 E0510——运行时 side table 已经撤掉，没有第二道防线。
+// expect: read of an invalid handle
 // expect-code: E0510
 // expect-count: 1
 const std = module("std");
 
-const Point = struct { x: i32 };
-const Table = std.slot.SlotTable(Point, 4);
+const Handle = struct { pos: usize };
+
+const Table = fn (cap: usize) type {
+    return struct {
+        gens: *[cap]u64,
+        ptr: *[cap]*u8,
+        used: usize,
+
+        pub const init = fn (g: *[cap]u64, p: *[cap]*u8) Self {
+            return Self{ .gens = g, .ptr = p, .used = 0 };
+        };
+
+        pub const create = fn (self: *Self) ?Handle {
+            if (self.used >= cap) { return null; }
+            let i = self.used;
+            self.used = i + 1;
+            return Handle{ .pos = i };
+        };
+
+        pub const get = fn (self: *Self, h: Handle) ?*u8 {
+            return self.getUnchecked(h);
+        };
+
+        const getUnchecked = fn (self: *Self, h: Handle) ?*u8 {
+            return (*u8)&self.ptr[h.pos];
+        };
+
+        pub const free = fn (self: *Self, h: Handle) bool {
+            self.ptr[h.pos] = null;
+            return true;
+        };
+    };
+};
 
 pub const main = fn () u8 {
-    const al = std.heap.page;
-    var t = Table.init(al).?;
-    let h = t.create().?;              // 直线发行：provenance 完整、未 tainted
-    std.println("free {}", t.free(h));  // 直线作废：slot -> RS_FREED
-    let p = t.get(h).?;                // E0510：已失效还强制认为非空
-    std.println("{}", p.x);
+    var gens: *[4]u64 = &.{ 0, 0, 0, 0 };
+    var raw: *[4]*u8 = &.{ null, null, null, null };
+    var t = Table(4).init(gens, raw);
+
+    let h = t.create().?;              // 直线发行：provenance 完整
+    std.println("free {}", t.free(h));   // 直线作废 -> RS_FREED
+    let p = t.get(h).?;                  // E0510：已失效还读
+    std.println("{}", (i32)p[0]);
     return 0;
 };

@@ -63,7 +63,10 @@ static const DiagRule g_rules[] = {
     { "escapes",                          "E0503" },
     { "exhaustive",                       "E0504" },
     { "was already freed",                "E0509" },
-    { "forced-unwrap on an invalid handle", "E0510" },
+    { "read of an invalid handle",        "E0510" },
+    { "this handle is dead at compile time", "E0510" },
+    { "cannot prove this handle is alive", "E0511" },
+    { "cannot prove which handle this is", "E0511" },
 
     /* 控制流位置：continue/return/defer 放错地方，标签找不到 */
     { "does not take an `else` branch",   "E0405" },

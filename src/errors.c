@@ -107,8 +107,10 @@ static const ErrDoc g_errs[] = {
       "`0` means \"no error\", `65535` belongs to `error.null` -- pick another number, and do not name a member `null` (that code is fixed)" },
     { "E0509", "the same allocation was freed twice",
       "each allocation has exactly one release event; delete the second `free`, or move ownership explicitly (the compile-time ledger only tracks straight-line local paths)" },
-    { "E0510", "forced unwrap on an invalid handle",
-      "`get(h)` returns `null` after `free(h)` / `deinit()`; use `if (t.get(h)) p { ... }` to check validity instead of `.?`" },
+    { "E0510", "read of a handle that is already dead at compile time",
+      "`free(h)` / `deinit()` end a handle's life; the compile-time ledger knows it, and there is no runtime table to re-check -- stop reading it, or drop the `deinit`" },
+    { "E0511", "cannot prove that a handle is alive",
+      "handle checks are compile-time only (no runtime side table): keep `create`/`get`/`free` in straight-line code, bind the handle to a local, and do not store it in a struct, pass it through a cast, or issue it inside control flow" },
 
     /* ---- 模块 ---- */
     { "E0601", "module resolution failed",
