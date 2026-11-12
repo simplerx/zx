@@ -18,6 +18,10 @@ pub const map = module("map.zx");
 // `p.alloc(n)` / `p.free(ptr)` / `p.create(T)`；重复释放会被拦下。
 pub const pool = module("pool.zx");
 
+// 世代槽位表（slot.zx）。`std.slot.SlotTable(T, N)` 生成一张 SoA side table，对外只发 Handle，
+// 读写与释放全走 `get(h)` / `free(h)`；编译期状态机证明不了的指针由它在运行时兜（decisions §130）。
+pub const slot = module("slot.zx");
+
 // 文件系统（fs.zx）。路径操作零分配；DirIter 流式遍历；stat/exists 元数据。
 pub const fs = module("fs.zx");
 

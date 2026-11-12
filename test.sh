@@ -770,6 +770,18 @@ else
     fail=1
 fi
 
+printf "\n== §132 账本可观测：explain region 打印 slot 状态与合并组\n"
+$ZXC explain region tests/good/region-alloc.zx > "$TPFX.ledger.log" 2>&1 || true
+if grep -q '^region ledger:' "$TPFX.ledger.log" \
+   && grep -q 'slot 1 LIVE' "$TPFX.ledger.log" \
+   && grep -q 'gid=1 off=0' "$TPFX.ledger.log"; then
+    printf "  ok   explain region 输出 slot 状态 / 尺寸 / 合并组\n"
+else
+    printf "  FAIL explain region 账本守门失败\n"
+    sed -n '1,20p' "$TPFX.ledger.log"
+    fail=1
+fi
+
 printf "\n== 模块名必须显式绑定（别名可缩写 / 可再导出）\n"
 BP="$TPFX.modbind"
 if mkdir -p "$BP/src" \

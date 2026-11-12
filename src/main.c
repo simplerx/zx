@@ -64,6 +64,8 @@ int   backend_emit_split(Node *root, Buf *header, Buf *rt, BUnit *units, int max
 /* 生成的 .c 行 → 模块内 zx 行（供后端诊断翻译用；false = 该行没有映射） */
 bool  backend_map_lookup(int unit, int cline, int *zx_line, int *zx_col);
 void  sema_check(Node *root);
+void  region_ledger_dump(FILE *out, const char *path);   /* §132 分配账本 */
+static void setup_search_paths_for_file(const char *file);
 void  sema_set_search_paths(const char *const *dirs);   /* deps 模块搜索路径 */
 const char *sema_module_path(int i);                    /* 模块 i 的源文件路径 */
 static char *read_source(const char *path, size_t *out_len);
@@ -841,6 +843,7 @@ static void usage(FILE *f) {
         "  fmt [file...] [--check]          format (--check reports without writing)\n"
         "  errors                           list all error codes (by category)\n"
         "  explain <CODE>                   explain one error code: meaning and fix\n"
+        "  explain region <file.zx>         print the allocation ledger (slot / state / merge)\n"
         "\n"
         "single-file options:\n"
         "  --check        check only (default behavior, explicit form)\n"
@@ -864,6 +867,18 @@ static void usage(FILE *f) {
 
 static void print_version(FILE *f) {
     fprintf(f, "zxc %s\n", ZXC_VERSION);
+}
+
+/* §132：`zxc explain region <file.zx>` 只跑前端 + 语义分析，把编译期
+ * 分配账本打出来——不生成 C、不建可执行文件，是纯只读视图。 */
+static int explain_region(const char *file) {
+    g_srcpath = file;
+    setup_search_paths_for_file(file);
+    Node *root = fe_parse_file(file);
+    if (!root || g_error_count) return 1;
+    sema_check(root);
+    region_ledger_dump(stdout, file);
+    return g_error_count ? 1 : 0;
 }
 
 /* 子命令级帮助。返回 0 = 认得的子命令，-1 = 没有这个子命令。 */
@@ -3500,6 +3515,14 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "usage: zxc explain <CODE>    e.g. zxc explain E0304\n");
                 return 2;
             }
+            /* §132：region 不是错误码，是分配账本查询 */
+            if (!strcmp(argv[2], "region")) {
+                if (argc < 4) {
+                    fprintf(stderr, "usage: zxc explain region <file.zx>\n");
+                    return 2;
+                }
+                return explain_region(argv[3]);
+            }
             return errors_print_one(stdout, argv[2]);
         }
         if (!strcmp(sub, "init"))  return cmd_init(argc, argv, 2);
@@ -3588,6 +3611,8 @@ int main(int argc, char **argv) {
         if (check && g_error_count == 0) {
             double t_s0 = prog_clock();
             sema_check(root);
+            if (getenv("ZX_REGION") && g_error_count == 0)
+                region_ledger_dump(stderr, file);
             if (getenv("ZX_TIMING"))
                 fprintf(stderr, "[timing] sema %.3f s\n", prog_clock() - t_s0);
             /* 只查不编（没 -o）不打进度：那是诊断场景，输出越干净越好 */

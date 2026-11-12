@@ -1283,8 +1283,18 @@ static void coerce(Buf *b, Node *e, Type *to) {
         buf_printf(b, "), %llu })", (unsigned long long)from->len);
         return;
     }
-    /* 数组 → 裸指针（R7） */
+    /* 数组 → 裸指针（R7）。has_len 只是类型里的编译期长度，C 表示仍是
+     * `Elem*`；目标元素类型不同时必须真发一次 C cast，否则 clang 报
+     * incompatible pointer types（§132 回收 SoA 列时踩到）。 */
     if (from->kind == TY_PTR && from->has_len && to->kind == TY_PTR && !to->has_len) {
+        if (!ty_eq(from->elem, to->elem)) {
+            buf_puts(b, "((");
+            ctype(b, to);
+            buf_puts(b, ")(");
+            ex(b, e);
+            buf_puts(b, "))");
+            return;
+        }
         buf_puts(b, "(");
         ex(b, e);
         buf_puts(b, ")");

@@ -1,0 +1,66 @@
+// §130 第 2 步：运行时 SoA side table（世代槽位表）回归。
+// 三个能力都走同一个中介 get/free：二次释放、失效句柄、区间末巡检。
+// 两个额外的硬条件：跨池句柄必须被拒、gen 防 ABA（同槽复用后旧句柄失效）。
+const std = module("std");
+
+const Point = struct { x: i32, y: i32 };
+const Table = std.slot.SlotTable(Point, 8);
+
+pub const main = fn () u8 {
+    const al = std.heap.page;
+    let ta = Table.init(al);
+    if (ta) av {
+        let tb = Table.init(al);
+        if (tb) bv {
+            var a = av;
+            var b = bv;
+
+            if (a.create()) h {
+                if (a.get(h)) p {
+                    p.x = 11;
+                    p.y = 22;
+                    std.println("get {}", p.x + p.y);
+                } else { return 1; }
+
+                std.println("free {}", a.free(h));
+                std.println("double {}", !a.free(h));
+                std.println("stale {}", a.get(h) == null);
+
+                // 同槽复用：旧句柄仍失效，新句柄有效（gen 防 ABA）
+                if (a.create()) h2 {
+                    std.println("aba {}", a.get(h) == null);
+                    std.println("fresh {}", a.get(h2) != null);
+
+                    // A 池句柄落到 B 池表上：pool id 不同，读写与释放都必须被拒
+                    std.println("cross get {}", b.get(h2) == null);
+                    std.println("cross free {}", !b.free(h2));
+
+                    std.println("live {}", a.liveCount() + b.liveCount());
+
+                    // 故意留 h2 不还：deinit 巡检要报出这一笔，并整批归还
+                    std.println("leak {}", a.deinit() + b.deinit());
+                    std.println("closed {}", a.get(h2) == null && b.get(h2) == null);
+                    std.println("done");
+                    return 0;
+                }
+                return 2;
+            }
+            return 3;
+        }
+    }
+    return 4;
+};
+
+// expect-output
+// get 33
+// free true
+// double true
+// stale true
+// aba true
+// fresh true
+// cross get true
+// cross free true
+// live 1
+// leak 1
+// closed true
+// done

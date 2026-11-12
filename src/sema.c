@@ -2258,6 +2258,9 @@ typedef struct {
     int      line, col;       /* 分配点 */
     int      free_line, free_col;  /* 第一次释放点 */
     uint64_t size, align;     /* 编译期已知，预分配布局用 */
+    const char *unit;         /* §132 账本：分配点所在模块（g_srcpath） */
+    int      gid;             /* §132 账本：合并组，0 = 未合并 */
+    uint64_t off, total;      /* §132 账本：组内静态偏移 / 组总字节 */
     Node    *site;
     Symbol  *sym;             /* 绑定的局部变量（若有） */
 } RegionSlot;
@@ -2282,6 +2285,7 @@ static int region_new(Node *site, uint64_t size, uint64_t align) {
     r->state = RS_LIVE;
     r->line = site->line; r->col = site->col;
     r->size = size; r->align = align;
+    r->unit = g_srcpath;
     r->site = site;
     return id;
 }
@@ -2417,13 +2421,46 @@ static void region_plan_block(Node *blk) {
     uint64_t total = region_align_up(off, maxal);
     if (!total) return;
     int gid = ++g_region_gid;
-    for (int k = 0; k < n; k++) sites[k]->reg_gid = gid;
+    for (int k = 0; k < n; k++) {
+        sites[k]->reg_gid = gid;
+        RegionSlot *r = &g_rslots[sites[k]->reg_slot - 1];
+        r->gid = gid;
+        r->off = sites[k]->reg_off;
+        r->total = total;
+    }
     blk->reg_gid = gid;
     blk->reg_total = total;
     blk->reg_alloc = a0;
     if (getenv("ZX_REGION"))
         fprintf(stderr, "region merged: gid=%d slots=%d total=%llu\n",
                 gid, n, (unsigned long long)total);
+}
+
+/* §132：编译期分配账本的只读视图。`zxc explain region <file.zx>` 与
+ * `ZX_REGION=1` 共用这份输出；unit 记的是分配点所在模块，不是入口文件，
+ * 这样多模块工程里行号才对得上。这是观测，不改任何语义。 */
+void region_ledger_dump(FILE *out, const char *path) {
+    int nlive = 0, nfree = 0, nmerged = 0;
+    for (int i = 0; i < g_nrslots; i++) {
+        if (g_rslots[i].state == RS_FREED) nfree++; else nlive++;
+        if (g_rslots[i].gid > 0) nmerged++;
+    }
+    fprintf(out, "region ledger: %d slot(s) live=%d freed=%d merged=%d group(s)=%d\n",
+            g_nrslots, nlive, nfree, nmerged, g_region_gid);
+    for (int i = 0; i < g_nrslots; i++) {
+        RegionSlot *r = &g_rslots[i];
+        const char *unit = r->unit ? r->unit : (path ? path : "-");
+        fprintf(out, "  slot %d %-5s %s:%d:%d size=%llu align=%llu free=%d:%d",
+                i + 1, r->state == RS_LIVE ? "LIVE" : "FREED",
+                unit, r->line, r->col,
+                (unsigned long long)r->size, (unsigned long long)r->align,
+                r->free_line, r->free_col);
+        if (r->gid > 0)
+            fprintf(out, " gid=%d off=%llu total=%llu", r->gid,
+                    (unsigned long long)r->off, (unsigned long long)r->total);
+        fputc('\n', out);
+    }
+    if (!g_nrslots) fputs("  (no std.heapAlloc site in this unit)\n", out);
 }
 
 /* ---------------- 逃逸检查：值是否指向当前栈帧 ----------------

@@ -4749,3 +4749,86 @@ GC、引用计数、智能指针、所有权类型、借用检查、RAII / 析�
 发行、跨函数 / C 边界 / 跨线程的非法指针，仍只能靠运行时兜。
 红线不变：不做 GC、引用计数、所有权类型、借用检查、RAII、胖指针、
 第二套分配 API，不做与 §44 冲突的 storage inference。
+
+
+## §132 第二增量：运行时 SoA side table + 账本可观测（2026-11-13）
+
+用户「继续」，按 §130 分步表把第 2 步落地，并顺带做掉第 3 步里
+「`zxc explain` 打账本」的只读部分。两者是同一套 slot 语义的两个时态，
+不造第二套系统：编译期账本管能证明的分配点，运行时表管证明不了的指针。
+
+### 运行时 side table：`std/slot.zx`
+
+- `SlotTable(T, cap)` 是编译期泛型容器（`fn (T: type, cap: usize) type`），
+  与 `ArrayList(T)` / `HashMap(i32)` 同一条路径；不引入新语法。
+- **SoA 三列**，不是 `[Header][payload]`：`gens: *[cap]u64`、
+  `alive: *[cap]u8`（0 空闲 / 1 在用 / 2 退役）、`ptr: *[cap]*u8`（纯地址）。
+  块头为 0，`free` 不用 `p - HDR`，也不存在头大小与对齐的耦合。
+  `*[cap]T` 只是 8 字节指针槽（§2），三列都由 `Allocator.alloc` 显式申请；
+  std 内部模块不能自引用 `std.heapAlloc`（循环依赖），所以 `init` 返回
+  `?Self`，与 `arena.ArenaAllocator.init` / `BufReader.init` 同形，失败回滚。
+- **中介不可绕过**：三列与 `Handle` 的字段全是私有（容器字段默认私有，
+  跨文件 E0404），对外只发 `Handle{pool,pos,gen}` 值；读写走 `get(h) ?*T`、
+  作废走 `free(h) bool`。`ptr[]` 一旦对外可见，谁都能 `(*T)ptr[i]` 绕过检查。
+- **pool id**：模块级 `g_next_pool` 从 1 递增，句柄带池标识；A 池句柄落到
+  B 池表上、idx 合法且 gen 恰好相同也不能通过（§130 指出的硬伤）。
+  `deinit` 把 `pool` 置 0，之后所有操作一律拒绝，不去解引用已归还的列
+  （`std.pool` 在 `deinit` 后再 free 是空指针解引用，这里是显式 fail-safe）。
+- **alive 与 gen 不冗余**：alive 防二次释放，gen 防 ABA（free 后同槽重分配、
+  旧句柄来访）。gen 用 u64 单调递增；一旦回绕到 0 就把该槽永久退役
+  （`alive=2`），不赌「2⁶⁴ 次复用不可达」。`free` 先归还对象再递增 gen，
+  二次释放时 `valid` 直接拒绝，不改表状态。
+- **未释放只做可观测**：`liveCount()` 数活槽，`deinit()` 返回未释放数并
+  整批清算。分不清「故意长命到 deinit」和「忘了还」，所以不是 error，
+  与编译期账本口径一致。debug 区间末巡检由调用方读这个返回值。
+- 守门 `tests/good/slot-table.zx` 钉住 12 条输出：get 可读写、free 成功、
+  二次释放被拒、free 后旧句柄 null、同槽复用后旧句柄仍 null（ABA）、
+  新句柄有效、跨池 get/free 被拒、liveCount=1、deinit 报 1 笔未释放、
+  deinit 后 get 被拒。
+- 与 §69 的关系不变：`std.pool.Pool` 是另一类负载的通用分级池，**不替换**；
+  slot 表是句柄化的长命引用表，两者不共用一套分配 API。
+
+### 编译器：修 `coerce` 的通用发射缺陷（不是库侧补丁）
+
+写 slot 表时踩到 B1001：`(*u8)self.gens` 生成的 C 只有 `(self->gens)`，
+`uint64_t*` 传给 `uint8_t*` 参数，clang 报 incompatible pointer types。
+根因在 `src/backend.c` 的 `coerce`：「数组指针 → 裸指针（R7）」分支只加
+括号、不发目标类型的 C cast，元素类型不同时必然出错；元素相同（既有代码
+全是这种）看不出来。修法：该分支里 `!ty_eq(from->elem, to->elem)` 时发
+`((<ctype to>)(expr))`，相同时保持原样。这是「不合理就根治」的落点——
+没有在库里改用 `*u8` 字段或加中间变量绕开，`*T` / `[]T` 布局一字未改。
+
+### 账本可观测：`zxc explain region <file.zx>`
+
+- `RegionSlot` 加 `unit`（分配点所在模块，取 `g_srcpath`）、`gid`、
+  `off`、`total`；`region_plan_block` 合并时回填，编译完不发射。
+- `region_ledger_dump(FILE*, path)` 是**只读视图**，打印
+  `region ledger: N slot(s) live=… freed=… merged=… group(s)=…`，逐槽给
+  `LIVE/FREED`、模块:行:列、`size`/`align`、首次释放点、合并组的
+  `gid/off/total`。`unit` 记模块而非入口文件，多模块工程里行号才对得上。
+- 两个入口：`zxc explain region <file.zx>`（只跑前端 + sema，不生成 C、
+  不建可执行文件）与 `ZX_REGION=1`（在单文件编译路径上把账本打到 stderr，
+  原有 `region merged:` 行保留）。`explain <CODE>` 原有行为不变，
+  `explain region` 缺文件时给 usage 而不是当成错误码查询。
+- `test.sh` 新增守门段：钉住 `^region ledger:`、`slot 1 LIVE`、
+  `gid=1 off=0`，确保账本不是只有合并行。
+
+### 验证与边界
+
+- 定向回归（按项目节奏**未跑全量**：每轮只测本轮结果）：
+  `slot-table / region-alloc / alloc-once / addr-array / casts-one-way /
+  std-pool / reflect / double-free` → **passed 14, failed 0**。
+  编译器重建通过（只有既有的 `unsequenced` warning）；`git diff --check` 干净。
+- 账本实测：`region-alloc.zx` 出 `2 slot(s) live=2 freed=0 merged=2
+  group(s)=1`，两槽 `off=0/32 total=64`；`alloc-once.zx` 出
+  `slot 1 FREED ... free=10:12`；`slot-table.zx` 没有 `heapAlloc` 分配点，
+  出 `(no std.heapAlloc site in this unit)`（运行时表走的是
+  `Allocator.alloc`，本来就不进编译期账本）。
+- **仍未做**（§130 第 3/4 步剩余）：按访问点擦除、debug/release 双发射、
+  `zxc explain` 打印「这个点为什么没被擦除」与擦除率、运行时 ledger dump
+  交给 LSP 显示、新增 E 码 + errors.md 锚点让 `diagnosticsWorker` 提前标红。
+  当前 `explain region` 打的是**账本**，不是擦除率；后者要等双发射落地。
+- 口径不变：编译期是局部可证明安全，运行时是 fail-safe 拒绝，合起来
+  **也不是内存安全**。裸指针路径、`(T)val` 抹源、C 边界、跨线程仍不受保护。
+  红线不变：不做 GC / 引用计数 / 所有权类型 / 借用检查 / RAII / 胖指针 /
+  第二套分配 API / 与 §44 冲突的 storage inference。
