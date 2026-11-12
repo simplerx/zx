@@ -50,6 +50,13 @@
   `var x = List(2)` 的 x 是**类型**（只出构造骨架），字段/方法要 `L{…}` 实例
   或 `var v: L` 标注。
 
+- **fixture 容器名必须全局唯一**（§137）：`SRC_DIR` 下所有 fixture 进同一个
+  `scanFiles`，`pval.zx` 里写 `P` / `List` 会直接把 instChain 的 `P.`、gval 的
+  `List` 串味。新 fixture 用 `Pv*` 之类前缀。
+- **形参接收者**（§137）：命名类型形参（`p: *P` / `xs: []const i32` /
+  `l: *List(4)`）走 `completeAt` 兜底段的 `namedTypeNear` 分支；`namedTypeNear`
+  必须挡空 needle，否则 `indexOfPos` 越界 panic（`struct{…}.` 触发整机崩溃）。
+
 ### 解析链优先级与守门会话
 - `scanFiles()` 按**裸名字**找容器（`files[0]` 是当前文档，其后文档目录、std、模块目录）。限定路径必须走 `modContainerOf / resolveContainerPath` 锁模块文件，不能靠裸名兜底；`appendGenericSynthetics` 合成声明要 `insertSlice(gpa,1,…)` 排前部，否则被同名容器抢走。
 - 多段路径不许"拿末段名字配容器"：`resolveContainerPath` 每段只在上一层体里 `findMemberStmt`（深度感知）。三处入口：限定类型路径、`instancePathContainer`、`isTypeValuedRecv/typeValuedContainer`。emit 用 `mem_body_fix`；hover 实例分支同源。守门 `completion.deep.*` 6 条 + `hover.deepNestField`。

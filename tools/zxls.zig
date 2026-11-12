@@ -2212,6 +2212,10 @@ fn fieldTypeIn(body: []const u8, name: []const u8) ?[]const u8 {
 /// 同名多处时取 off 之前最近的一份（作用域遮蔽近似），前面没有就取全文第一份。
 /// 返回类型切片；识别不了返回 null。
 fn namedTypeNear(text: []const u8, name: []const u8, off: usize) ?[]const u8 {
+    // 空 needle 会让 indexOfPos 一路返回 from（不夹到 len），from 越过末尾后
+    // `text[c - 1]` 直接越界 panic（2026-11-13：`struct{…}.` 的接收者 path
+    // 是空串，补全把整个语言服务器打挂）。
+    if (name.len == 0) return null;
     var prev: ?[]const u8 = null;
     var first: ?[]const u8 = null;
     var from: usize = 0;
@@ -8450,6 +8454,39 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                                 if (sliceOrArrayRecv(raw)) |si| {
                                     handled = true;
                                     addSliceMembers(&list, &seen, prefix, si);
+                                }
+                            }
+                        }
+                    }
+                    // KEEP — 命名类型的**形参**接收者（2026-11-13）：`fn (p: *P)`
+                    // 的 `p.`、`fn (xs: []const i32)` 的 `xs.` 一个成员都不出。
+                    // findDeclStmt 只认 var/let/const，形参没有声明语句；
+                    // anonTyOfPath 只认 `name: struct{…}` 的匿名串，`*P` 落空。
+                    // 这里按 `name: T` 取类型串（含 `*` / `[]` / `?` 装饰），
+                    // 剥装饰后：切片或定长数组出 len/ptr（源文件无声明文本），
+                    // 泛型构造调用 `List(4)` 由 inferContainer 折成构造函数名，
+                    // 单名容器照常取成员。
+                    if (!handled and path.len > 0 and
+                        std.mem.indexOfScalar(u8, path, '.') == null)
+                    {
+                        if (namedTypeNear(text, path, off)) |pty| {
+                            const pt = trimSl(pty);
+                            if (sliceOrArrayRecv(pt)) |si| {
+                                handled = true;
+                                addSliceMembers(&list, &seen, prefix, si);
+                            } else {
+                                var cfp = scanFiles(doc, text);
+                                defer cfp.deinit(gpa);
+                                if (inferContainer(cfp.items, text, pt, 0)) |cy| {
+                                    if (containerMembersAny(cfp.items, cy, &decls)) |ctxtp| {
+                                        handled = decls.items.len > 0;
+                                        if (handled) {
+                                            recv_kind = .instance;
+                                            mem_txt = ctxtp;
+                                            markContainerFns(ctxtp, &decls);
+                                            owner = cy;
+                                        }
+                                    }
                                 }
                             }
                         }

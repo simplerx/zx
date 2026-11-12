@@ -4072,7 +4072,44 @@ _mgv_path = os.path.join(SRC_DIR, "gval.zx")
 open(_mgv_path, "w", encoding="utf-8").write(MGV)
 mgvuri = "file:///" + _mgv_path.replace("\\", "/")
 
-for _u, _txt in ((muri, MUSE), (mliburi, MLIB), (mgvuri, MGV)):
+# §137 命名类型**形参**的成员补全（2026-11-13）：`fn (p: *P) { p. }` 一个
+# 成员都不出——findDeclStmt 只认 var/let/const，形参没有声明语句；
+# anonTyOfPath 只认 `name: struct{…}` 的匿名串，`*P` / `[]T` / `List(4)` 全落空。
+# 容器名一律带 `Pv` 前缀：SRC_DIR 里所有 fixture 进同一个 scanFiles，与
+# instChain 的 `P`、gval 的 `List` 同名会互相串味（本轮已踩过一次）。
+PVM = """const PvUnit = struct {
+    pub a: i32,
+    pub b: i32,
+};
+
+const PvBox = fn (N: u64) type {
+    return struct {
+        pub genId: *[N]u64,
+        pub cap: u64,
+    };
+};
+
+const byVal = fn (pv: PvUnit) void {
+    pv.
+};
+
+const byPtr = fn (pr: *PvUnit) void {
+    pr.
+};
+
+const bySlice = fn (xs: []const i32) void {
+    xs.
+};
+
+const byCtor = fn (l: *PvBox(4)) void {
+    l.
+};
+"""
+_pv_path = os.path.join(SRC_DIR, "pval.zx")
+open(_pv_path, "w", encoding="utf-8").write(PVM)
+pvuri = "file:///" + _pv_path.replace("\\", "/")
+
+for _u, _txt in ((muri, MUSE), (mliburi, MLIB), (mgvuri, MGV), (pvuri, PVM)):
     s8({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
         "textDocument": {"uri": _u, "languageId": "zx", "version": 1, "text": _txt}}})
 
@@ -4143,6 +4180,16 @@ check("completion.gval.ctorLiteral",
 _gv4 = mcomp(MGV, mgvuri, "    y.", "gval.ctorInstance")
 check("completion.gval.ctorInstance",
       {"genId", "ptr", "len"} <= set(_gv4), str(sorted(_gv4)))
+
+# §137 命名类型形参：值形参 / 指针形参 / 切片形参 / 泛型构造类型形参
+_pv1 = mcomp(PVM, pvuri, "    pv.", "pv.valueParam")
+check("completion.pv.valueParam", {"a", "b"} <= set(_pv1), str(sorted(_pv1)))
+_pv2 = mcomp(PVM, pvuri, "pr.", "pv.ptrParam")
+check("completion.pv.ptrParam", {"a", "b"} <= set(_pv2), str(sorted(_pv2)))
+_pv3 = mcomp(PVM, pvuri, "    xs.", "pv.sliceParam")
+check("completion.pv.sliceParam", {"len", "ptr"} <= set(_pv3), str(sorted(_pv3)))
+_pv4 = mcomp(PVM, pvuri, "    l.", "pv.ctorParam")
+check("completion.pv.ctorParam", {"genId", "cap"} <= set(_pv4), str(sorted(_pv4)))
 
 # B Task（§128）：t. 只列保留的实例方法；scope/chan/timer 已不导出
 _mt = mcomp(MUSE, muri, "    t.", "mchain.taskInstance")

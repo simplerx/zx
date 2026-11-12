@@ -5140,3 +5140,40 @@ at compile time」是同一族，只是「编译期已知为 null」的来源从
 （`var y = List(2){…}; y.` 字段**和**方法都要出）。LSP 冒烟 380 → 384 项。
 `const L: type = List(2); L.` 属于类型命名空间，只出构造骨架 `L{...}`，
 不出字段——`L.genId` 编译不过。
+
+## §137 命名类型的形参也能补出成员（2026-11-13，§136 之后自查发现）
+
+做 §136 时顺手验了形参，发现 `fn (p: *P) { p. }` 一个成员都不出——
+`fn (xs: []const i32) { xs. }` 连 `.len/.ptr` 都没有。这不是回归，是
+**从来没实现过**：`findDeclStmt` 只认 `var/let/const`，形参没有声明语句；
+`anonTyOfPath` 那条"形参"线只认 `name: struct{…}` 的**匿名**串，
+`*P` / `[]T` / `List(4)` 全落空。`self.` 之所以正常，是因为容器方法有
+`selfContainerAt` 单独一条路。
+
+### 落点
+
+在 `completeAt` 的实例兜底段（匿名类型线之前）加一条分支：只有在
+`!handled`、接收者是单段裸名字时才走，用 `namedTypeNear` 取 `name: T` 附近的
+类型串（含 `*` / `[]` / `?` / `[N]` 装饰），然后分两路：
+
+- `sliceOrArrayRecv(T)` 命中 → 出 `.len` / `.ptr`（切片没有声明文本）；
+- 否则 `inferContainer(files, T, 0)` → `containerMembersAny`：单名容器取成员，
+  `*List(4)` 这种构造调用由 §136 的 `'('` 分支折成构造函数名。
+
+### 顺带修掉一个能打挂语言服务器的越界
+
+`namedTypeNear` 没挡空 needle：`indexOfPos(text, from, "")` 每次返回 `from`，
+`from` 越过 `text.len` 后 `text[c - 1]` 直接 panic（ReleaseSafe 也一样）。
+触发点是编辑期的 `struct{…}.`——接收者 path 是空串。现在函数入口
+`if (name.len == 0) return null;`，调用点也加了 `path.len > 0`。
+
+### 守门 + 一条新纪律
+
+`pval.zx`（`PVM`）四条：`pv.valueParam`（`pv: PvUnit`）、`pv.ptrParam`
+（`pr: *PvUnit`）、`pv.sliceParam`（`xs: []const i32` → len/ptr）、
+`pv.ctorParam`（`l: *PvBox(4)` → genId/cap）。冒烟 384 → **388 项**。
+
+**fixture 容器名必须全局唯一**（写死）：`SRC_DIR` 下所有 fixture 进同一个
+`scanFiles`，我在 `pval.zx` 里用了 `P` / `List`，立刻把 `instChain` 的 `P.`
+变成 `P{...}`、把 gval 的 `List` 串成另一份——本轮的 `completion.instChain.typeValued`
+就是这么挂的。新 fixture 一律带前缀（`Pv*`）。
