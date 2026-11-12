@@ -432,6 +432,26 @@ const Bad = error{ null, boom };       // E0508：null 是保留码 65535
 `error.null` 本身是能写的**值**（`return error.null;`、`e == error.null`），
 它就是 `?T` 被 `try` 时抛的那个码；`std.debug.errName(error.null)` 得到 `"null"`。
 
+<a id="e0509"></a>
+### E0509 同一笔分配被释放了两次
+
+编译器在 `std.heapAlloc` 的分配点发一个编译期「发行版本」，
+`Allocator.free` 是消费这个版本的作废事件。直线代码里第二次消费同一个
+版本就是硬错：
+
+```zx
+let p = std.heapAlloc(al, u8, 64);
+al.free(al.ctx, (*u8)p, 64);
+al.free(al.ctx, (*u8)p, 64);   // E0509
+```
+
+删掉第二次 `free`；确实要在别处释放时，把所有权显式转移出去。
+
+只判「作废事件可见 + provenance 未断」的局部路径。分支里的释放、
+`(usize)` 之类指针↔整数互转、指针存进聚合字段再取出、跨函数 / C 边界
+/ 跨线程、循环里同一分配点反复发行，都标 opaque 退回运行时 side table，
+编译期不报、也不误报。这是**局部可证明安全**，不是全局内存安全。
+
 ---
 
 ## 模块 E06xx

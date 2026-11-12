@@ -4669,3 +4669,83 @@ GC、引用计数、智能指针、所有权类型、借用检查、RAII / 析�
 **守门**：新增 `tests/bad/` 二次释放用例、`tests/good/` 正常释放与
 `undefined` 不分配用例；每步只跑本轮定向用例，**按新语义写断言，不删用例
 变绿**。
+
+## §131 首增量落地：一份账本同时驱动状态机与预分配（2026-11-12）
+
+用户追加裁定「前面讨论的预分配方案也可以执行」，于是把 §130 分步表里的
+第 1 步（编译期状态机最小闭环）与预分配**合并成一轮**，共用同一份
+「分配区间账本」，不造第二套系统。
+
+### 载体：并列字段，不是改写逃逸检查
+
+- `ast.h` 的 `Node` 末尾加 5 个纯编译期字段：`reg_slot`（发行版本 id）、
+  `reg_gid`（合并组）、`reg_off`（静态字节偏移）、`reg_total`（组总字节）、
+  `reg_alloc`（共用分配器表达式）。`Symbol` 加 `int reg_slot`。
+- **实现偏差要记一笔**：§130 写的是「`stack_val` 从 bool 扩成 token」，
+  落地用的是**并列新字段**。理由：`stack_val` 牵动 `expr_frame` /
+  `addr_frame` 的逃逸检查和既有守门，改 bool 会把一个新增能力变成对
+  通用路径的重写；并列字段语义等价、编译完同样擦除，风险低一个量级。
+- 后端不改指针表示：`*T` 仍 8 字节、`[]T` 仍 `{ptr,len}` 16 字节，
+  `(T)val`、C 互操作、指针算术不变。
+
+### 编译期状态机（词法作用域级、不做路径敏感）
+
+- `std.heapAlloc` 的分配点发一个 `RegionSlot`（`LIVE → FREED`，记录
+  分配/首次释放的**行与列**、`size`/`align`）。`NK_DECL` 初值与 `=`
+  赋值把版本绑定到局部符号；重新赋成别的值就把旧版本标 opaque。
+- `Allocator.free(ctx, ptr, size)` 是消费事件：第二次消费同一版本报
+  **E0509**。诊断只在**直线路径**迁移（`g_flow_depth > 0` 的控制流臂
+  一律不判），且 provenance 没断：`NK_IDENT`、`.?`、指针→指针强转
+  （`(*u8)p`，地址不变）、指针算术可追；指针↔整数、聚合字段取回、
+  全局、C 边界、跨函数 / 跨线程全断。
+- 重复检查同一棵树（泛型 / 折值）会重扫同一个释放点：用
+  `(free_line, free_col)` 判重，不把重扫误报成第二次释放。
+- **未释放不做 error**：arena 语义下「活到 deinit」是合法的，只留账本，
+  不制造满屏误报。`explain` 账本仍属 §130 第 3 步，本轮未做。
+- 诊断码走既有三处通道：`src/errors.c` 文案、`src/zxc.c` g_rules
+  （`was already freed` 放在笼统规则之前）、`docs/errors.md#e0509`。
+  LSP 复用 `diagnosticsWorker` 解析 stderr、`zxls.zig` **一字未改**。
+
+### 预分配：白名单 + 静态偏移 + 一次整体归还
+
+判据全部满足才合并，任一不满足就退回逐点 `zx_heapalloc`：
+
+1. 同一个词法块的**直接** `NK_DECL` 初值是 `std.heapAlloc`，N 编译期
+   常量，且至少 2 个；`stackAlloc` / `&.{…}` 本来就在栈帧，不参与。
+2. 所有分配器是**同一个局部标识符**（不把两个不同 arena 混进一块）。
+3. 变量只出现在下标 / 切片 / `.len` 的 base 与声明初值里；`return`、
+   强转、取地址、指针比较、传参、赋给聚合字段、二次赋值任一命中即放弃。
+4. 区间内**无单笔 free**（合并后只能整块归还），所有 slot 仍 `LIVE`。
+5. `max(align_i) <= 16`（malloc 只保证 16）；布局为
+   `Σ alignUp(N_i*size_i, align_i)`，按 align 插入 padding，各点发
+   `base + K_i`，**块头为 0**。
+
+发射层：`gen_block_stmts` 一次 `zx_heapalloc(al, Σ)`，各 `ex_heapalloc`
+按 `reg_off` 发纯偏移；新增对称的 `zx_heapfree(al, p, n)`（字段名走
+`dotname`，与定义侧 `mname` 的 C 转义一致），挂在 `CScope` 上，由现有
+`run_defers_m` 在**离开作用域**时排在用户 `defer` 之后归还，覆盖正常
+出口、`return` 与 `!T` 错误传播。修过一处自己引入的瑕疵：函数级展开
+`down_to == 0` 后要把该层登记清零，否则 `return` 路径与块尾各发一次
+（`goto` 型出口会变成真的二次释放）。
+
+### 可观测与守门
+
+- `ZX_REGION=1` 时编译器向 stderr 打 `region merged: gid=N slots=K
+  total=T`；`zxc explain` 的完整账本仍留下一轮。
+- `test.sh` 新增守门段：编译 `tests/good/region-alloc.zx` 后同时钉住
+  账本里的 `slots=2`、生成 C 里 `zx_heapalloc(` **恰好 1 次**、
+  `zx_heapfree(` **恰好 1 次**。只 grep 账本会假绿，必须看发射结果。
+- 用例：`tests/bad/double-free.zx`（E0509，expect-count 1）、
+  `tests/good/alloc-once.zx`（正常一次 free，`v=7`）、
+  `tests/good/region-alloc.zx`（合并后 `a=4 b=13`）。
+- 全量回归：`passed 342, failed 0`（337 → 342）、错误码 38 个三方一致、
+  LSP 378 项、snake 300 局、`all checks passed`。
+
+### 明确边界（没做完的部分）
+
+仍是**局部可证明安全**，不是全局内存安全。§130 第 2/3/4 步未做：
+运行时 SoA side table、`get(h)` 中介、按访问点擦除、debug/release 双发射、
+`zxc explain` 账本与擦除率、运行时未释放巡检。循环里同一分配点反复
+发行、跨函数 / C 边界 / 跨线程的非法指针，仍只能靠运行时兜。
+红线不变：不做 GC、引用计数、所有权类型、借用检查、RAII、胖指针、
+第二套分配 API，不做与 §44 冲突的 storage inference。

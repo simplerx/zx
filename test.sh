@@ -756,6 +756,20 @@ fi
 #     自己的绑定吃掉，文件一多必乱。守门钉死三态：① 未绑定裸名照常报
 #     unknown identifier；② 显式绑定 / 缩写别名 / pub 再导出跑得通；
 #     ③ 磁盘上有同名模块也不改变普通绑定的含义。
+printf "\n== §130 预分配：同区间 heapAlloc 合并为一次 alloc\n"
+ZX_REGION=1 $ZXC tests/good/region-alloc.zx -o "$TPFX.rgnbin.exe" > "$TPFX.rgn.log" 2>&1 || true
+rgc="$TPFX.rgnbin.exe_main.c"
+na=$(grep -c 'zx_heapalloc(' "$rgc" 2>/dev/null || printf 0)
+nf=$(grep -c 'zx_heapfree(' "$rgc" 2>/dev/null || printf 0)
+if grep -q 'region merged: gid=.* slots=2 ' "$TPFX.rgn.log" \
+   && [ "$na" = "1" ] && [ "$nf" = "1" ]; then
+    printf "  ok   slots=2 合并：1 次 alloc + 静态偏移 + 1 次 free\n"
+else
+    printf "  FAIL 预分配守门失败（账本 / C 里 alloc=%s free=%s）\n" "$na" "$nf"
+    sed -n '1,20p' "$TPFX.rgn.log"
+    fail=1
+fi
+
 printf "\n== 模块名必须显式绑定（别名可缩写 / 可再导出）\n"
 BP="$TPFX.modbind"
 if mkdir -p "$BP/src" \

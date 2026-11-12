@@ -854,12 +854,20 @@ typedef struct CScope {
     struct CScope *parent;
     Node          *defer[MAX_CDEFER];   /* 外层节点（NK_DEFER / NK_ERRDEFER），体在 ->a */
     int            ndefer;
+    /* §130 预分配：这一层登记的一块合并存储，离开作用域时整体归还 */
+    int            reg_gid;
+    uint64_t       reg_total;
+    Node          *reg_alloc;
 } CScope;
 
 static CScope *g_csc;
 static int     g_depth;
 
-static void cscope_push(CScope *s) { s->parent = g_csc; s->ndefer = 0; g_csc = s; g_depth++; }
+static void cscope_push(CScope *s) {
+    s->parent = g_csc; s->ndefer = 0;
+    s->reg_gid = 0; s->reg_total = 0; s->reg_alloc = NULL;
+    g_csc = s; g_depth++;
+}
 static void cscope_pop(void)       { if (g_csc) { g_csc = g_csc->parent; g_depth--; } }
 
 /* 标签（收割目标 / 循环） */
@@ -886,6 +894,7 @@ static void gen_loop_value(Node *n, const char *slot, Type *slot_ty);
 static void gen_for_body(Node *n, int id);
 static void gen_block_stmts(Node *b);
 static void run_defers(int down_to);
+static void emit_region_free(int gid, uint64_t total, Node *al);
 static char *inst_name(Node *g, const char *base);   /* 泛型实例的 C 名 */
 
 /* 当前函数：生成 return 时要看返回类型 / 是不是 main */
@@ -954,6 +963,14 @@ static void run_defers_m(int down_to, int mode, const char *errcond) {
             } else {
                 gen_stmt(dn->a);
             }
+        }
+        /* §130：合并区间的整体归还排在用户 defer 之后，正常/错误出口都覆盖。
+         * 函数级展开（down_to==0，例如 return）已经把这条路径上所有层都
+         * 还过了；随后块尾的 cscope_leave 不能再发一遍（goto 型出口会变成
+         * 真的二次释放），发完即把该层登记清掉。 */
+        if (s->reg_gid > 0) {
+            emit_region_free(s->reg_gid, s->reg_total, s->reg_alloc);
+            if (down_to == 0) s->reg_gid = 0;
         }
     }
 }
@@ -2102,6 +2119,15 @@ static void emit_heapalloc_runtime(void) {
         "    return r;\n"
         "}\n\n",
         an.data, un.data, mt.data);
+    /* §130 预分配的对称释放：一次 alloc 一块，区间末整体归还。
+     * 字段名走 dotname，与定义侧 mname 的 C 关键字转义保持一致。 */
+    Buf fr; buf_init(&fr); dotname(&fr, "free");
+    Buf cx; buf_init(&cx); dotname(&cx, "ctx");
+    buf_printf(g_out,
+        "static void zx_heapfree(%s al, void *p, %s n) {\n"
+        "    al%s(al%s, (uint8_t *)p, n);\n"
+        "}\n\n",
+        an.data, un.data, fr.data, cx.data);
     g_out = sv;
     g_ind = si;
 }
@@ -4368,6 +4394,13 @@ static bool g_need_heapalloc;   /* 用过 std.heapAlloc → 带上 zx_heapalloc 
 static void ex_heapalloc(Buf *b, Node *n) {
     g_need_heapalloc = true;
     Type *et = (n->ty && n->ty->kind == TY_PTR) ? n->ty->elem : ty_u8();
+    /* §130 预分配：这个点不再单独申请，按编译期算好的静态偏移落位 */
+    if (n->reg_gid > 0) {
+        Buf t; buf_init(&t); ctype(&t, et);
+        buf_printf(b, "((%s *)(__zxr%d + (uint64_t)%llu))",
+                   t.data, n->reg_gid, (unsigned long long)n->reg_off);
+        return;
+    }
     Buf t; buf_init(&t); ctype(&t, et);
     buf_puts(b, "((");
     buf_puts(b, t.data);
@@ -6153,7 +6186,26 @@ static void gen_value(Node *n, const char *slot, Type *slot_ty) {
     }
 }
 
+/* §130 合并存储的整体归还，跟 run_defers_m 同走「离开作用域」通道 */
+static void emit_region_free(int gid, uint64_t total, Node *al) {
+    if (!al) return;
+    Buf a; buf_init(&a); ex(&a, al);
+    line("zx_heapfree(%s, __zxr%d, (uint64_t)%llu);",
+         a.data, gid, (unsigned long long)total);
+}
+
 static void gen_block_stmts(Node *b) {
+    if (b->reg_gid > 0) {
+        Buf a; buf_init(&a); ex(&a, b->reg_alloc);
+        g_need_heapalloc = true;
+        line("uint8_t *__zxr%d = (uint8_t *)zx_heapalloc(%s, (uint64_t)%llu);",
+             b->reg_gid, a.data, (unsigned long long)b->reg_total);
+        if (g_csc) {
+            g_csc->reg_gid = b->reg_gid;
+            g_csc->reg_total = b->reg_total;
+            g_csc->reg_alloc = b->reg_alloc;
+        }
+    }
     for (int i = 0; i < b->nitems; i++) gen_stmt(b->items[i]);
 }
 

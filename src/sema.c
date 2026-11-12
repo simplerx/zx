@@ -135,6 +135,7 @@ struct Symbol {
     bool        used;      /* 被读过或写过一次；没碰过的局部绑定要报（M66） */
     struct Symbol *locals_next;  /* 本函数体的局部登记链（见 local_track） */
     bool        stack_val; /* 它的值指向当前栈帧（逃逸检查用，见 addr_frame） */
+    int         reg_slot;  /* §130 发行版本 id：0 = 无 / opaque（见 region_ledger） */
     const char *cname;     /* 后端用的 C 名字（模块内名字带前缀） */
     int         decl_line; /* 声明位置（D2 note 用；0 = 没记） */
     int         decl_col;
@@ -2237,6 +2238,194 @@ static Type *check_ptr_arith(Node *n, Type *a, Type *b, TokKind op) {
     return type_of(n, ty_ptr(a->elem, a->is_const, false, 0));
 }
 
+/* ---------------- §130 分配区间账本 ----------------
+ *
+ * 一份信息两用：编译期状态机（LIVE -> FREED，二次释放硬错）与预分配合并
+ * （同一区间内常量大小的 heapAlloc 合成一次 alloc + 静态偏移）。
+ * token 是**符号版本** `(site, 发行序号)`，不是运行时的 u32 gen：
+ * 编译期不需要知道代数数值，只要认出「同一个发行版本」。
+ *
+ * 硬边界（decisions §130）：sema 是单遍 AST 遍历，没有 CFG / 路径合并。
+ * 所以只做词法作用域级、不做路径敏感——控制流臂里的 free 不迁移状态
+ * （标 opaque），循环里同一个分配点反复发行也一律 opaque 退回运行时。
+ * 后端不改指针表示：*T 仍 8 字节、[]T 仍 16 字节，token 编译完擦除。
+ */
+#define RS_LIVE   0
+#define RS_FREED  1
+
+typedef struct {
+    int      state;
+    int      line, col;       /* 分配点 */
+    int      free_line, free_col;  /* 第一次释放点 */
+    uint64_t size, align;     /* 编译期已知，预分配布局用 */
+    Node    *site;
+    Symbol  *sym;             /* 绑定的局部变量（若有） */
+} RegionSlot;
+
+static RegionSlot *g_rslots;
+static int         g_nrslots, g_crslots;
+static int         g_flow_depth;   /* 处在 if/while/for/switch 臂里 */
+static int         g_region_gid;   /* 合并组编号，从 1 起 */
+
+static int region_new(Node *site, uint64_t size, uint64_t align) {
+    if (g_nrslots == g_crslots) {
+        int nc = g_crslots ? g_crslots * 2 : 32;
+        RegionSlot *p = realloc(g_rslots, (size_t)nc * sizeof(RegionSlot));
+        if (!p) return 0;
+        g_rslots = p;
+        memset(g_rslots + g_crslots, 0,
+               (size_t)(nc - g_crslots) * sizeof(RegionSlot));
+        g_crslots = nc;
+    }
+    int id = ++g_nrslots;
+    RegionSlot *r = &g_rslots[id - 1];
+    r->state = RS_LIVE;
+    r->line = site->line; r->col = site->col;
+    r->size = size; r->align = align;
+    r->site = site;
+    return id;
+}
+
+static void region_bind(int id, Symbol *s) {
+    if (id > 0 && id <= g_nrslots) g_rslots[id - 1].sym = s;
+}
+
+/* 从表达式追回发行版本。只保住「地址没变」的传播：赋值、指针→指针
+ * 强转、.?, 指针算术；聚合字段取回 / 全局 / 指针↔整数 / C 边界一律断。 */
+static int region_of_expr(Node *e) {
+    if (!e) return 0;
+    switch (e->kind) {
+    case NK_IDENT:  return e->sym ? e->sym->reg_slot : 0;
+    case NK_UNWRAP: return region_of_expr(e->a);
+    case NK_CAST: {
+        Type *t = e->ty, *s = e->b ? e->b->ty : NULL;
+        if (t && s && t->kind == TY_PTR && s->kind == TY_PTR)
+            return region_of_expr(e->b);
+        return 0;
+    }
+    case NK_BIN:
+        if (e->op == TOK_PLUS || e->op == TOK_MINUS)
+            return region_of_expr(e->a);
+        return 0;
+    default: return 0;
+    }
+}
+
+static bool is_allocator_ty(Type *t) {
+    if (!t) return false;
+    if (t == sema_allocator_type()) return true;
+    return t->kind == TY_STRUCT && t->name && !strcmp(t->name, "Allocator");
+}
+
+/* Allocator.free(ctx, ptr, size) 是一次作废事件。只在直线代码里迁移，
+ * 且 provenance 没断才判；其余一律标 opaque 交运行时 side table。 */
+static void region_note_free(Node *call) {
+    if (g_flow_depth > 0) return;
+    Node *a = call->a;
+    if (!a || a->kind != NK_FIELD || !a->name || strcmp(a->name, "free") ||
+        !a->a || !is_allocator_ty(a->a->ty) || call->nitems != 3) return;
+    Node *ptr = call->items[1];
+    int id = region_of_expr(ptr);
+    if (!id || id > g_nrslots) return;
+    RegionSlot *r = &g_rslots[id - 1];
+    if (r->state == RS_FREED) {
+        /* 同一个释放点被重复检查（泛型 / 折值会重扫同一棵树）不算第二次 */
+        if (r->free_line == call->line && r->free_col == call->col) return;
+        diag_code_at("E0509", call->line, call->col,
+            "this allocation was already freed (first free at line %d, "
+            "allocated at line %d)", r->free_line, r->line);
+        return;
+    }
+    if (r->state != RS_LIVE) return;
+    r->state = RS_FREED;
+    r->free_line = call->line;
+    r->free_col = call->col;
+}
+
+static uint64_t region_align_up(uint64_t v, uint64_t a) {
+    return a <= 1 ? v : ((v + a - 1) / a) * a;
+}
+
+/* 合并白名单：这些变量只允许出现在下标/切片/字段的 base、声明初值里。
+ * return、强转、取地址、比较、传参、赋给字段、二次赋值都会改变地址或
+ * 延长生命周期，命中即整组退回逐点分配。 */
+static bool region_uses_ok(Node *n, Node *parent, Symbol **syms, int ns) {
+    if (!n) return true;
+    if (n->kind == NK_IDENT && n->sym) {
+        bool hit = false;
+        for (int k = 0; k < ns; k++) if (syms[k] == n->sym) { hit = true; break; }
+        if (hit) {
+            bool ok = false;
+            if (parent && parent->a == n &&
+                (parent->kind == NK_INDEX || parent->kind == NK_SLICE ||
+                 parent->kind == NK_FIELD)) ok = true;
+            if (parent && parent->kind == NK_DECL && parent->b == n) ok = true;
+            if (!ok) return false;
+        }
+    }
+    if (!region_uses_ok(n->a, n, syms, ns)) return false;
+    if (!region_uses_ok(n->b, n, syms, ns)) return false;
+    if (!region_uses_ok(n->c, n, syms, ns)) return false;
+    if (!region_uses_ok(n->d, n, syms, ns)) return false;
+    for (int i = 0; i < n->nitems; i++)
+        if (!region_uses_ok(n->items[i], n, syms, ns)) return false;
+    for (int i = 0; i < n->nunroll; i++)
+        if (!region_uses_ok(n->unroll[i], n, syms, ns)) return false;
+    return true;
+}
+
+/* 在一个词法块里做预分配合并（§130 第 4 条白名单）。size/align 编译期
+ * 已知：N 由 ev_int 强制为常量，@type(T).size/.align 同为编译期值。 */
+static void region_plan_block(Node *blk) {
+    if (g_flow_depth > 0 || g_in_defer || g_fn_depth <= 0) return;
+    if (blk->reg_gid > 0) return;     /* 泛型 / 编译期执行会重复检查同一棵树 */
+    Node   *sites[16];
+    Symbol *syms[16];
+    int n = 0;
+    for (int i = 0; i < blk->nitems; i++) {
+        Node *s = blk->items[i];
+        if (s->kind != NK_DECL || !s->b || s->b->kind != NK_CALL ||
+            !s->b->reg_slot || !s->sym) continue;
+        if (n >= 16) return;
+        sites[n] = s->b; syms[n] = s->sym; n++;
+    }
+    if (n < 2) return;
+    /* 同一分配器：只认同一个局部标识符，别把两个不同 arena 混在一块 */
+    Node *a0 = sites[0]->items[0];
+    if (!a0 || a0->kind != NK_IDENT || !a0->name) return;
+    for (int k = 1; k < n; k++) {
+        Node *ak = sites[k]->items[0];
+        if (!ak || ak->kind != NK_IDENT || !ak->name ||
+            strcmp(ak->name, a0->name)) return;
+    }
+    /* 区间内必须全部还活着：出现过单笔 free 就是另一种生命周期，不合并 */
+    for (int k = 0; k < n; k++) {
+        int id = sites[k]->reg_slot;
+        if (id <= 0 || id > g_nrslots || g_rslots[id - 1].state != RS_LIVE) return;
+    }
+    if (!region_uses_ok(blk, NULL, syms, n)) return;
+    uint64_t off = 0, maxal = 1;
+    for (int k = 0; k < n; k++) {
+        RegionSlot *r = &g_rslots[sites[k]->reg_slot - 1];
+        uint64_t al = r->align ? r->align : 1;
+        if (al > maxal) maxal = al;
+        off = region_align_up(off, al);
+        sites[k]->reg_off = off;
+        off += r->size;
+    }
+    if (maxal > 16) return;          /* malloc 只保证 16 字节对齐 */
+    uint64_t total = region_align_up(off, maxal);
+    if (!total) return;
+    int gid = ++g_region_gid;
+    for (int k = 0; k < n; k++) sites[k]->reg_gid = gid;
+    blk->reg_gid = gid;
+    blk->reg_total = total;
+    blk->reg_alloc = a0;
+    if (getenv("ZX_REGION"))
+        fprintf(stderr, "region merged: gid=%d slots=%d total=%llu\n",
+                gid, n, (unsigned long long)total);
+}
+
 /* ---------------- 逃逸检查：值是否指向当前栈帧 ----------------
  *
  * expr_frame(e)——e 的"值"是不是一个指向当前函数栈帧的指针；
@@ -2303,6 +2492,12 @@ static Type *check_assign(Node *n) {
         /* 赋进局部变量的指针也记来源：之后 return 它同样要拦 */
         if (n->a->kind == NK_IDENT && n->a->sym && expr_frame(n->b))
             n->a->sym->stack_val = true;
+        /* §130：赋值重新绑定发行版本；赋成别的值就把旧版本标 opaque */
+        if (n->a->kind == NK_IDENT && n->a->sym) {
+            int rs = n->b ? n->b->reg_slot : 0;
+            n->a->sym->reg_slot = rs;
+            if (rs) region_bind(rs, n->a->sym);
+        }
     } else if (lt && lt->kind == TY_PTR) {
         if (n->op != TOK_PLUSEQ && n->op != TOK_MINUSEQ)
             return BAD(n, "only `+=` and `-=` apply to pointers");
@@ -3517,6 +3712,12 @@ static Type *check_call(Node *n, Type *expect) {
                     return BAD(n->items[base + 1],
                                "std.%s count must be known at compile time", m->name);
                 n->esc = !heap;          /* 栈那份指向当前帧：逃逸检查盯它 */
+                if (heap && !n->reg_slot) {
+                    int sz = ty_size(elem), al = ty_align(elem);
+                    n->reg_slot = region_new(n,
+                        (uint64_t)(sz > 0 ? sz : 1) * c.v,
+                        (uint64_t)(al > 0 ? al : 1));
+                }
                 return type_of(n, ty_ptr(elem, false, true, c.v));
             }
         }
@@ -4044,7 +4245,12 @@ static Type *check_expr_raw(Node *n, Type *expect) {
     case NK_FIELD:    return check_field(n);
     case NK_INDEX:    return check_index(n);
     case NK_SLICE:    return check_slice_expr(n);
-    case NK_CALL:     return check_call(n, expect);
+    case NK_CALL: {
+        Type *r = check_call(n, expect);
+        /* 实参检查完才能追 provenance：Allocator.free 是一次 release 事件 */
+        region_note_free(n);
+        return r;
+    }
     case NK_STRUCT_LIT: return check_struct_lit(n, expect);
     case NK_ARRAY_LIT:  return check_array_lit(n, n->items, n->nitems, expect);
     case NK_TUPLE:    return check_tuple_lit(n, expect);
@@ -5106,6 +5312,7 @@ static Type *check_block(Node *n) {
     g_root_stmts = false;
     check_stmts(n);
     g_root_stmts = save_root;
+    region_plan_block(n);
 
     Type *t = ty_void();
     if (lb) t = lb->has ? lb->ty : ty_void();
@@ -5127,6 +5334,11 @@ static void check_stmt(Node *n) {
             for (int k = 0; k < n->c->nitems; k++) ensure(n->c->items[k]->sym);
         } else if (n->sym) {
             ensure(n->sym);
+        }
+        /* §130：把分配点的发行版本挂到绑定符号上，free 才能查状态 */
+        if (n->sym && n->b && n->b->reg_slot) {
+            n->sym->reg_slot = n->b->reg_slot;
+            region_bind(n->b->reg_slot, n->sym);
         }
         return;
 
@@ -6169,14 +6381,20 @@ static void check_return_paths(Node *fn, Type *ret) {
 }
 
 static Type *sema_construct(Node *n, Type *expect) {
+    /* §130：控制流臂里的状态迁移不可证明，整段标 opaque（不做路径敏感） */
+    bool ctl = (n->kind != NK_BLOCK);
+    if (ctl) g_flow_depth++;
+    Type *r;
     switch (n->kind) {
-    case NK_BLOCK:  return check_block(n);
-    case NK_IF:     return check_if(n, expect);
-    case NK_WHILE:  return check_while(n, expect);
-    case NK_FOR:    return check_for(n, expect);
-    case NK_SWITCH: return check_switch(n, expect);
-    default:        return type_of(n, ty_void());
+    case NK_BLOCK:  r = check_block(n); break;
+    case NK_IF:     r = check_if(n, expect); break;
+    case NK_WHILE:  r = check_while(n, expect); break;
+    case NK_FOR:    r = check_for(n, expect); break;
+    case NK_SWITCH: r = check_switch(n, expect); break;
+    default:        r = type_of(n, ty_void()); break;
     }
+    if (ctl) g_flow_depth--;
+    return r;
 }
 
 /* ---------------- 强制转换（唯一的隐式规则集合 R7） ---------------- */

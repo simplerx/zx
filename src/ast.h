@@ -95,6 +95,19 @@ struct Node {
                                只在 g_ct_exec==0 时读写——编译期执行阶段 var
                                槽位是活的，同一棵树可能算得出值。 */
     int           index;    /* destructuring slot */
+
+    /* §130 分配区间账本：编译期状态机的发行版本 + 预分配合并布局。
+     * 全是编译期信息，编译完擦除；指针仍是 8 字节、[]T 仍是 16 字节。
+     * reg_slot   NK_CALL(std.heapAlloc) 的发行版本 id（0 = 无 / opaque）。
+     * reg_gid    NK_CALL 所属合并组 / NK_BLOCK 上的组标记（0 = 无，从 1 起）。
+     * reg_off    NK_CALL 在合并块里的字节偏移。
+     * reg_total  NK_BLOCK 上该组的总字节数。
+     * reg_alloc  NK_BLOCK 上该组共用的分配器表达式节点。 */
+    int           reg_slot;
+    int           reg_gid;
+    uint64_t      reg_off;
+    uint64_t      reg_total;
+    Node         *reg_alloc;
 };
 
 Node *node_new(NodeKind k, int line, int col);

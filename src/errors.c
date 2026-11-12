@@ -105,6 +105,8 @@ static const ErrDoc g_errs[] = {
       "this is a deliberate error: read its message; inside a generic it means these arguments are unsupported" },
     { "E0508", "error code uses a reserved value",
       "`0` means \"no error\", `65535` belongs to `error.null` -- pick another number, and do not name a member `null` (that code is fixed)" },
+    { "E0509", "the same allocation was freed twice",
+      "each allocation has exactly one release event; delete the second `free`, or move ownership explicitly (the compile-time ledger only tracks straight-line local paths)" },
 
     /* ---- 模块 ---- */
     { "E0601", "module resolution failed",

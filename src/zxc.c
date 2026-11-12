@@ -62,6 +62,7 @@ static const DiagRule g_rules[] = {
     { "stack frame",                      "E0503" },
     { "escapes",                          "E0503" },
     { "exhaustive",                       "E0504" },
+    { "was already freed",                "E0509" },
 
     /* 控制流位置：continue/return/defer 放错地方，标签找不到 */
     { "does not take an `else` branch",   "E0405" },

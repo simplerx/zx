@@ -1,0 +1,16 @@
+// §130 编译期状态机：同一发行版本的堆分配被 free 两次是硬错。
+// 只判「作废事件可见 + provenance 未断」的直线路径；分支、强转抹源、
+// 聚合字段取回、跨函数一律标 opaque 退回运行时，不在这里报。
+// expect: this allocation was already freed
+// expect-code: E0509
+// expect-count: 1
+const std = module("std");
+
+const main = fn () u8 {
+    const al = std.heap.page;
+    var p = std.heapAlloc(al, u8, 64);
+    p[0] = 7;
+    al.free(al.ctx, (*u8)p, 64);
+    al.free(al.ctx, (*u8)p, 64);      // E0509：第二次消费已 FREED 的 slot
+    return 0;
+};
