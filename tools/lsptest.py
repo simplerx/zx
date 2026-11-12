@@ -4191,6 +4191,81 @@ plain = no_cd_client()
 check("diagnostics.noCodeDescriptionForOldClients",
       bool(plain) and all("codeDescription" not in d for d in plain), str(plain)[:300])
 
+# §134 新 E 码接进 LSP 显示通道：zxls 源码零改动。diagnosticsWorker 解析编译器
+# stderr 的 `path:line:col: error[CODE]: msg` -> publishDiagnostics，
+# codeDescription.href 按码小写自动拼出 docs/errors.md#e0510。用独立短命会话
+# 把这条链钉死——能力线以守门用例保存，不许删用例变绿。
+E0510_TXT = """const std = module("std");
+
+const Point = struct { x: i32 };
+const Table = std.slot.SlotTable(Point, 4);
+
+pub const main = fn () u8 {
+    const al = std.heap.page;
+    var t = Table.init(al).?;
+    let h = t.create().?;
+    std.println("free {}", t.free(h));
+    let p = t.get(h).?;
+    std.println("{}", p.x);
+    return 0;
+};
+"""
+e0510_uri = "file:///" + os.path.join(TESTDIR, "e0510.zx").replace("\\", "/")
+
+def e0510_client():
+    p = subprocess.Popen([ZXLS_BIN], stdin=subprocess.PIPE,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    def es(msg):
+        d = json.dumps(msg).encode()
+        p.stdin.write(b"Content-Length: %d\r\n\r\n" % len(d) + d)
+        p.stdin.flush()
+    def er(timeout=30):
+        import time as _t5
+        end = _t5.time() + timeout
+        buf = b""
+        while _t5.time() < end:
+            c = p.stdout.read(1)
+            if not c:
+                return None
+            buf += c
+            if buf.endswith(b"\r\n\r\n"):
+                hdr = dict(l.split(b": ", 1) for l in buf.split(b"\r\n") if b": " in l)
+                return json.loads(p.stdout.read(int(hdr[b"Content-Length"])))
+        return None
+    es({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "rootUri": "file:///" + TESTDIR.replace("\\", "/"),
+        "capabilities": {"textDocument": {"publishDiagnostics": {
+            "codeDescriptionSupport": True}}}}})
+    er()
+    es({"jsonrpc": "2.0", "method": "initialized", "params": {}})
+    es({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+        "textDocument": {"uri": e0510_uri, "languageId": "zx",
+                         "version": 1, "text": E0510_TXT}}})
+    got = []
+    for _ in range(20):
+        m = er()
+        if not m:
+            break
+        if (m.get("method") == "textDocument/publishDiagnostics"
+                and m["params"].get("uri", "").endswith("e0510.zx")
+                and m["params"].get("diagnostics")):
+            got = m["params"]["diagnostics"]
+            break
+    es({"jsonrpc": "2.0", "id": 2, "method": "shutdown", "params": None})
+    er()
+    es({"jsonrpc": "2.0", "method": "exit", "params": None})
+    try: p.wait(timeout=5)
+    except Exception: p.kill()
+    return got
+
+_e510_diags = e0510_client()
+_d510 = next((d for d in _e510_diags if d.get("code") == "E0510"), None)
+_h510 = ((_d510 or {}).get("codeDescription") or {}).get("href", "")
+check("diagnostics.e0510CodeDescription",
+      _d510 is not None and _d510.get("source") == "zxc"
+      and _h510.endswith("docs/errors.md#e0510"),
+      _h510 or str(_e510_diags)[:300])
+
 # ---------------------------------------------------------------------------
 # 同一个文件反复 didOpen（守一个真崩过的悬垂键）
 #

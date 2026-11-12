@@ -1,0 +1,19 @@
+// §134：另一条作废路径。`deinit()` 把同一张表的整批 slot 标 RS_DEAD，
+// 之后 `.?` 强制解包同样必然 trap，报 E0510（原因串应与 free 那条不同）。
+// expect: table closed by deinit
+// expect-code: E0510
+// expect-count: 1
+const std = module("std");
+
+const Point = struct { x: i32 };
+const Table = std.slot.SlotTable(Point, 4);
+
+pub const main = fn () u8 {
+    const al = std.heap.page;
+    var t = Table.init(al).?;
+    let h = t.create().?;
+    std.println("leak {}", t.deinit());   // 整批 RS_DEAD
+    let p = t.get(h).?;                  // E0510：表已关闭还强制认为非空
+    std.println("{}", p.x);
+    return 0;
+};

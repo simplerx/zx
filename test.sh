@@ -817,6 +817,26 @@ else
     fail=1
 fi
 
+printf "\n== §134 E0510：确定失效句柄的 `.?` 报硬错，LSP 通道输入格式正确\n"
+$ZXC tests/bad/handle-invalid-unwrap.zx --check > "$TPFX.e0510.log" 2>&1 || true
+if grep -q 'error\[E0510\]' "$TPFX.e0510.log" \
+   && grep -q 'forced-unwrap on an invalid handle' "$TPFX.e0510.log"; then
+    printf "  ok   E0510 按 path:line:col: error[CODE] 输出（diagnosticsWorker 可解析）\n"
+else
+    printf "  FAIL E0510 诊断格式不对（LSP 会解析不到）\n"
+    sed -n '1,12p' "$TPFX.e0510.log"
+    fail=1
+fi
+$ZXC explain E0510 > "$TPFX.e0510.explain" 2>&1 || true
+if grep -q 'docs/errors.md#e0510' "$TPFX.e0510.explain" \
+   && grep -q 'if (t.get(h))' "$TPFX.e0510.explain"; then
+    printf "  ok   zxc explain E0510 有修法与文档锚点\n"
+else
+    printf "  FAIL zxc explain E0510 缺修法或锚点\n"
+    sed -n '1,12p' "$TPFX.e0510.explain"
+    fail=1
+fi
+
 printf "\n== 模块名必须显式绑定（别名可缩写 / 可再导出）\n"
 BP="$TPFX.modbind"
 if mkdir -p "$BP/src" \

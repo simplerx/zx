@@ -107,6 +107,8 @@ static const ErrDoc g_errs[] = {
       "`0` means \"no error\", `65535` belongs to `error.null` -- pick another number, and do not name a member `null` (that code is fixed)" },
     { "E0509", "the same allocation was freed twice",
       "each allocation has exactly one release event; delete the second `free`, or move ownership explicitly (the compile-time ledger only tracks straight-line local paths)" },
+    { "E0510", "forced unwrap on an invalid handle",
+      "`get(h)` returns `null` after `free(h)` / `deinit()`; use `if (t.get(h)) p { ... }` to check validity instead of `.?`" },
 
     /* ---- 模块 ---- */
     { "E0601", "module resolution failed",

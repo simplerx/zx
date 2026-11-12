@@ -4931,3 +4931,104 @@ release 把 side table 收缩到「未被覆盖的槽」。当前 `explain regio
 **也不是内存安全**；裸指针、`(T)val` 抹源、C 边界、跨线程仍不受保护。
 红线不变：不做 GC / 引用计数 / 所有权类型 / 借用检查 / RAII / 胖指针 /
 第二套分配 API / 与 §44 冲突的 storage inference。
+
+
+## §134 第四增量：E0510 接进 LSP 显示通道（2026-11-13）
+
+用户「继续」，按 §130 分步表落地**第 4 步**：「LSP 显示：新 E 码 +
+`docs/errors.md` 锚点，复用 `diagnosticsWorker`」。至此分步表四步的验收
+口径全部完成。本轮编译器只加一条诊断，**`tools/zxls.zig` 一字未改**。
+
+### 先解决 §133 留下的那个问题：什么时候该报硬错
+
+§133 判定「失效后使用不报硬错」，理由是 `free` 之后 `get(h)` 返回 `null`
+是 side table 刻意提供的 fail-safe **查询合法性**，做成 error 会把
+`slot-table.zx` 的 `stale` / `closed` 判成错，等于逼自己删守门用例变绿。
+本轮把这个判定精化，不推翻它：
+
+| 使用形态 | 例子 | 判定 |
+|---|---|---|
+| 检查性使用 | `if (t.get(h)) p {...}`、`t.get(h) == null`、丢弃结果 | **不报**，运行时给 null 分支 |
+| 确定性解引用 | `t.get(h).?` | 状态机确定失效 → **E0510 硬错** |
+
+区别是客观的：`.?` 强制认为非空，而 `valid()` 在句柄失效后必返回 false，
+所以这个点每一次都会 abort。这与 E0506「`.?` on a value that is `null`
+at compile time」是同一族，只是「编译期已知为 null」的来源从字面量换成
+了状态机结论。**不是启发式、不是可能已释放**。
+
+### E0510 的判据与实现
+
+`handle_dead_get(call)` 复用 §133 的同一份 `g_rslots` 与同一条 provenance
+规则（`handle_container` opt-in 约定、`region_of_expr`、`meth_done` 的实参
+位置），不新增账本：
+
+1. 调用名是 `get`（已擦除的点叫 `getUnchecked`，且必然 PROVEN/LIVE）；
+2. 接收者容器同时有 `get` 与私有 `getUnchecked`；
+3. 句柄实参能追回 slot，`is_handle` 为真、**未 tainted**；
+4. slot 状态是 `RS_FREED` 或 `RS_DEAD`；
+5. 该 `get` 的返回值正被 `.?` 强制解包（`check_expr(NK_UNWRAP)` 里判）。
+
+任一不满足就不报。tainted（发行/作废点落在控制流构造里）、provenance 断
+（强转抹源 / 聚合字段取回 / 跨函数 / C 边界 / 跨线程）、`RS_LIVE` 一律
+交运行时 `valid()` 拒绝。判定放在 `case NK_UNWRAP` 里 `check_expr(n->a)`
+之后、E0506 之前——先让 `region_handle_call` 把状态迁移做完，再查账本。
+原因串区分 `already freed` 与 `table closed by deinit`。
+
+### LSP 显示：复用，不重写（§130 的核心裁定）
+
+- 编译器照旧 `diag_code_at` 发 `path:line:col: error[E0510]: msg`；
+  `tools/zxls.zig:8880` 的 `diagnosticsWorker` 解析这一行，
+  `:9021` 的 `codeDescription` 按码小写拼 `docs/errors.md#e0510`。
+  **zxls 源码、二进制、capabilities 全未动**，编辑期自动标红并可点开文档。
+- 三处同步：`src/errors.c` 码表、`src/zxc.c` 的 `g_rules`、
+  `docs/errors.md` 的 `<a id="e0510"></a>` 段。错误码总数 38 → **39**，
+  `zxc errors` / `zxc explain E0510` / `docs/errors.md` 三方一致检查通过。
+- 守门 `tools/lsptest.py` 新增独立短命会话（仿 10e，initialize 带
+  `codeDescriptionSupport: True`），didOpen 一份触发 E0510 的文档，断言
+  `publishDiagnostics` 里 `code == "E0510"`、`source == "zxc"`、
+  `href` 以 `docs/errors.md#e0510` 结尾：`diagnostics.e0510CodeDescription`。
+  LSP 冒烟 **385 项全过**。zxls 里重写状态机仍然禁止。
+
+### 守门用例（能力线以用例保存，不删用例变绿）
+
+- `tests/bad/handle-invalid-unwrap.zx`：直线 `create → free → get(h).?`，
+  `expect-code: E0510` + `expect-count: 1`（确认无级联诊断）。
+- `tests/bad/handle-closed-unwrap.zx`：直线 `create → deinit → get(h).?`，
+  守 `RS_DEAD` 分支与 `table closed by deinit` 原因串。
+- `tests/good/handle-check-ok.zx`：同样是直线发行 + 直线作废（slot 确实
+  已失效、未 tainted），但用 `if (t.get(h)) p` 与 `== null` 查询，
+  **编译通过且实跑输出固定**——钉住「检查性使用不误报」。
+- `test.sh` §134 段：钉住诊断行格式（`error[E0510]`，LSP 的输入契约）
+  与 `zxc explain E0510` 的修法/锚点；三方一致段自动覆盖新码。
+
+### 明确不做：三项延伸的裁定
+
+上一轮答复把下面三项列进「剩余」，本轮按「简约 + 不造平行系统」逐条裁定，
+它们**不属于 §130 分步表第 4 步的验收口径**（该步只要求新 E 码 + 锚点 +
+复用 diagnosticsWorker）：
+
+1. **运行时 ledger dump 成文件交给 LSP 展示** —— 不做。`diagnosticsWorker`
+   只解析编译器进程的 stderr，不读运行时产物；要展示得新定义一个文件格式
+   与 LSP 主动读取协议，而 `deinit()` 已返回未释放数、`liveCount()` 可查，
+   「可观测」已经成立。为一个显示通道造第二套协议不划算。
+2. **debug 区间末巡检自动接进 `diagnosticsWorker`** —— 不做。「未释放」
+   本就不是 error（分不清故意长命与忘还），做成 warning 要改 zxls 的
+   解析层（现在只认 `: error[`），与「状态机只在编译器实现一次」相冲。
+3. **release 把 side table 收缩到「未被覆盖的槽」** —— 不做。`ptr[]`
+   擦不掉（§133），而按点擦除已由 callee 改写覆盖：PROVEN 点根本不调
+   `valid()`，`gens/alive` 两列在那条路径上连读都不读。整列删除需要证明
+   「该表所有访问点全 PROVEN」并改 `init`/`deinit` 结构，收益只是省两列
+   内存，与「简约」相冲。
+
+### 验证与口径
+
+- 编译器重建通过（仅既有 warning）；定向回归 **30 个用例 passed 51,
+  failed 0**，覆盖 `.?` / optional / `if` 捕获 / 错误传播 / 泛型别名 /
+  反射 / 静态成员 / pool / 强转 / 逃逸 / 预分配 / Handle 擦除。
+  按项目节奏**未跑 `sh test.sh` 全量**（本轮只测本轮结果）。
+- LSP 冒烟 `SMOKE ALL PASS`（385 项）；`zxc explain E0509` / `E0510`
+  兼容；`git diff --check` 干净，CRLF/LF 各文件行尾未漂移。
+- 口径不变：编译期是**局部可证明安全**，运行时是 fail-safe 拒绝，
+  合起来也不是内存安全；裸指针、`(T)val` 抹源、C 边界、跨线程仍不受保护。
+  红线不变：不做 GC / 引用计数 / 所有权类型 / 借用检查 / RAII / 胖指针 /
+  第二套分配 API / 与 §44 冲突的 storage inference。

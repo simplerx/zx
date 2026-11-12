@@ -2558,6 +2558,25 @@ static void region_handle_call(Node *n) {
               proven ? "proven LIVE, straight-line" : why);
 }
 
+/* §134：给 `.?` 用的「确定失效」查询。与 region_handle_call 共用同一份
+ * 账本和同一条 provenance 规则，只在编译期能证明失效、且路径未 tainted
+ * 时才返回非空。检查性使用（if 捕获 / == null / 丢弃）不经过这里。 */
+static RegionSlot *handle_dead_get(Node *call) {
+    if (!call || call->kind != NK_CALL || !call->a ||
+        call->a->kind != NK_FIELD || !call->a->name || !call->a->a) return NULL;
+    /* 已擦除的点叫 getUnchecked，且必然是 PROVEN(LIVE)，不会走到这里 */
+    if (strcmp(call->a->name, "get")) return NULL;
+    if (!handle_container(call->a->a->ty)) return NULL;
+    Node *harg = call->meth_done ? (call->nitems >= 2 ? call->items[1] : NULL)
+                                 : (call->nitems >= 1 ? call->items[0] : NULL);
+    int id = harg ? region_of_expr(harg) : 0;
+    if (id <= 0 || id > g_nrslots) return NULL;
+    RegionSlot *r = &g_rslots[id - 1];
+    if (!r->is_handle || r->tainted) return NULL;
+    if (r->state != RS_FREED && r->state != RS_DEAD) return NULL;
+    return r;
+}
+
 /* §132：编译期分配账本的只读视图。`zxc explain region <file.zx>` 与
  * `ZX_REGION=1` 共用这份输出；unit 记的是分配点所在模块，不是入口文件，
  * 这样多模块工程里行号才对得上。这是观测，不改任何语义。 */
@@ -4338,6 +4357,17 @@ static Type *check_expr_raw(Node *n, Type *expect) {
                           "`null` only fills a `?T` or a `*T`, it is not one");
         if (t->kind != TY_OPT && t->kind != TY_ERR)
             return BAD(n, "`.?` needs an optional or an error union, found `%s`", ty_str(t));
+        /* §134：状态机确定句柄已失效时，get(h) 必然返回 null，`.?` 必然
+         * abort。只在「确定失效 + provenance 未断 + 未 tainted + 强制解包」
+         * 时报错；if 捕获 / == null 是 side table 的 fail-safe 查询，不报。 */
+        {
+            RegionSlot *hs = handle_dead_get(n->a);
+            if (hs)
+                return BAD_CODE("E0510", n,
+                    "`.?` forced-unwrap on an invalid handle (%s) -- `get()` returns "
+                    "null there; use `if (t.get(h)) p { ... }` to check validity",
+                    hs->state == RS_DEAD ? "table closed by deinit" : "already freed");
+        }
         /* 编译期就知道是空的：`.?` 在这里必然 abort，和除零同一处置（§7.R10）——
          * 能定就在编译期报，不要留到运行期。 */
         Value *cv = ct_eval_probe(n->a);
