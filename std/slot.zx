@@ -110,8 +110,16 @@ pub const SlotTable = fn (T: type, cap: usize) type {
         };
 
         // 唯一的取地址通道。外部永远拿不到 ptr[] 那一列。
+        // §133：检查通过后转调私有 companion。release 档里编译器对能证明
+        // 的访问点直接发 getUnchecked，跳过 valid；dev 档保留本层检查。
         pub const get = fn (self: *Self, h: Handle) ?*T {
             if (!self.valid(h)) { return null; }
+            return self.getUnchecked(h);
+        };
+
+        // 编译器改写的目标。私有：用户写 `t.getUnchecked(h)` 会被 E0404
+        // 挡住，中介不可绕过。只有编译期证明 LIVE 的访问点会落到这里。
+        const getUnchecked = fn (self: *Self, h: Handle) ?*T {
             return (*T)self.ptr[h.pos];
         };
 

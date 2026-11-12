@@ -1,0 +1,28 @@
+// §133：按访问点擦除的守门用例。直线作用域，Handle 从 create 发行到
+// get 之间没有 free / deinit / 强转 / 跨函数，编译器能证明这个访问点。
+// release 档应把 t.get(h) 改写为私有的 getUnchecked（跳过 gen 比对）；
+// dev 档保留 get（走完整 valid）。两种发射的输出必须完全一致。
+const std = module("std");
+
+const Point = struct { x: i32, y: i32 };
+const Table = std.slot.SlotTable(Point, 8);
+
+pub const main = fn () u8 {
+    const al = std.heap.page;
+    var t = Table.init(al).?;
+    let h = t.create().?;
+    if (t.get(h)) p {
+        p.x = 11;
+        std.println("get {}", p.x);
+    } else {
+        return 1;
+    }
+    std.println("free {}", t.free(h));
+    std.println("leak {}", t.deinit());
+    return 0;
+};
+
+// expect-output
+// get 11
+// free true
+// leak 0

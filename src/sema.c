@@ -2252,6 +2252,7 @@ static Type *check_ptr_arith(Node *n, Type *a, Type *b, TokKind op) {
  */
 #define RS_LIVE   0
 #define RS_FREED  1
+#define RS_DEAD   2   /* §133：整张句柄表被 deinit 作废 */
 
 typedef struct {
     int      state;
@@ -2263,6 +2264,9 @@ typedef struct {
     uint64_t off, total;      /* §132 账本：组内静态偏移 / 组总字节 */
     Node    *site;
     Symbol  *sym;             /* 绑定的局部变量（若有） */
+    bool     is_handle;       /* §133：Handle 发行版本，不是堆字节分配 */
+    bool     tainted;         /* 发行/作废点在控制流里，静态身份不可证明 */
+    Symbol  *owner_sym;       /* 表实例（接收者符号），deinit 按它整批作废 */
 } RegionSlot;
 
 static RegionSlot *g_rslots;
@@ -2300,6 +2304,7 @@ static int region_of_expr(Node *e) {
     if (!e) return 0;
     switch (e->kind) {
     case NK_IDENT:  return e->sym ? e->sym->reg_slot : 0;
+    case NK_CALL:   return e->reg_slot;   /* §133：create() 发行的 Handle 版本 */
     case NK_UNWRAP: return region_of_expr(e->a);
     case NK_CAST: {
         Type *t = e->ty, *s = e->b ? e->b->ty : NULL;
@@ -2436,6 +2441,123 @@ static void region_plan_block(Node *blk) {
                 gid, n, (unsigned long long)total);
 }
 
+/* ---------------- §133：Handle 证明账本与按访问点擦除 ----------------
+ *
+ * 同一套 slot 语义的两个时态：编译期状态机管能证明的分配点，运行时
+ * side table 管证明不了的句柄。这里把 Handle 也接进同一份账本：
+ *   create() 发行一个 is_handle slot；free() 消费；deinit() 整批 DEAD；
+ *   get() 是访问点，逐点判 PROVEN / OPAQUE。
+ * release 档里 PROVEN 的 get 改写成私有的 getUnchecked（跳过 gen 比对），
+ * dev 档保留 get。两种发射形态共存，ptr[] 擦不掉，擦的是比对代码。
+ * 失效后使用不报硬错：side table 本来就返回 null，写成 error 会把
+ * 「查询合法性」也判成错误，破坏 fail-safe 契约。
+ */
+typedef struct {
+    int line, col;
+    const char *unit;
+    bool proven, erased;
+    const char *reason;
+} ProvePoint;
+
+static ProvePoint *g_proves;
+static int         g_nproves, g_cproves;
+extern int         g_zx_release;   /* src/main.c：--release 档位 */
+
+static void prove_add(Node *n, bool proven, bool erased, const char *reason) {
+    for (int i = 0; i < g_nproves; i++)
+        if (g_proves[i].line == n->line && g_proves[i].col == n->col) return;
+    if (g_nproves == g_cproves) {
+        int nc = g_cproves ? g_cproves * 2 : 16;
+        ProvePoint *p = realloc(g_proves, (size_t)nc * sizeof(ProvePoint));
+        if (!p) return;
+        g_proves = p; g_cproves = nc;
+    }
+    ProvePoint *q = &g_proves[g_nproves++];
+    q->line = n->line; q->col = n->col; q->unit = g_srcpath;
+    q->proven = proven; q->erased = erased; q->reason = reason;
+}
+
+static Type *strip_ptr_ty(Type *t) {
+    return (t && t->kind == TY_PTR) ? t->elem : t;
+}
+
+/* opt-in 约定：容器同时声明 get 与私有 getUnchecked，才算「有中介的表」。
+ * 机制通用、策略在库；不硬编码容器名、不加内建、不改指针表示。 */
+static bool handle_container(Type *recv) {
+    Type *t = strip_ptr_ty(recv);
+    if (!t || t->kind != TY_STRUCT) return false;
+    bool has_get = false, has_unchecked = false;
+    for (int i = 0; i < t->nmethods; i++) {
+        const char *nm = t->methods[i].name;
+        if (!nm) continue;
+        if (!strcmp(nm, "get")) has_get = true;
+        else if (!strcmp(nm, "getUnchecked")) has_unchecked = true;
+    }
+    return has_get && has_unchecked;
+}
+
+static void region_handle_call(Node *n) {
+    if (!n->a || n->a->kind != NK_FIELD || !n->a->name || !n->a->a) return;
+    if (!handle_container(n->a->a->ty)) return;
+    const char *m = n->a->name;
+    if (!strcmp(m, "getUnchecked")) return;      /* 已改写：幂等 */
+    Symbol *own = n->a->a->sym;
+
+    if (!strcmp(m, "create")) {
+        if (n->reg_slot) return;
+        int id = region_new(n, 0, 0);
+        if (!id) return;
+        n->reg_slot = id;
+        RegionSlot *r = &g_rslots[id - 1];
+        r->is_handle = true;
+        r->owner_sym = own;
+        /* 发行点在控制流构造里：同一源码点可能反复发行，静态身份分不出代 */
+        if (g_flow_depth > 0 || !own) r->tainted = true;
+        return;
+    }
+    if (!strcmp(m, "deinit")) {
+        for (int i = 0; i < g_nrslots; i++) {
+            RegionSlot *r = &g_rslots[i];
+            if (r->is_handle && r->owner_sym && r->owner_sym == own)
+                r->state = RS_DEAD;
+        }
+        return;
+    }
+    if (strcmp(m, "free") && strcmp(m, "get")) return;
+    /* 方法调用已把接收者插到 items[0]，句柄实参落在 items[1] */
+    Node *harg = n->meth_done ? (n->nitems >= 2 ? n->items[1] : NULL)
+                             : (n->nitems >= 1 ? n->items[0] : NULL);
+    int id = harg ? region_of_expr(harg) : 0;
+    RegionSlot *r = (id > 0 && id <= g_nrslots) ? &g_rslots[id - 1] : NULL;
+
+    if (!strcmp(m, "free")) {
+        if (!r || !r->is_handle) return;
+        if (g_flow_depth > 0) r->tainted = true;  /* 作废事件路径不定 */
+        if (r->state == RS_LIVE) {
+            r->state = RS_FREED;
+            r->free_line = n->line; r->free_col = n->col;
+        }
+        return;   /* 不报 E0509：运行时 side table 的 fail-safe 已覆盖 */
+    }
+
+    /* get(h)：按访问点判证明。release 档把可证明点擦成 getUnchecked。 */
+    bool proven = false;
+    const char *why = "handle provenance lost";
+    if (!r)                        why = "handle provenance lost";
+    else if (!r->is_handle)        why = "not a handle slot";
+    else if (r->state == RS_DEAD)  why = "handle table closed by deinit";
+    else if (r->state == RS_FREED) why = "handle already freed";
+    else if (r->tainted)           why = "issue/free point inside control flow";
+    else if (g_in_defer)           why = "defer body";
+    else                           proven = true;
+    /* ZX_HANDLE_CHECKS=1 强制保留全检查（debug 巡检用） */
+    bool erase = proven && g_zx_release && !getenv("ZX_HANDLE_CHECKS")
+                 && n->inst != NULL;
+    if (erase) n->a->name = "getUnchecked";
+    prove_add(n, proven, erase,
+              proven ? "proven LIVE, straight-line" : why);
+}
+
 /* §132：编译期分配账本的只读视图。`zxc explain region <file.zx>` 与
  * `ZX_REGION=1` 共用这份输出；unit 记的是分配点所在模块，不是入口文件，
  * 这样多模块工程里行号才对得上。这是观测，不改任何语义。 */
@@ -2460,7 +2582,23 @@ void region_ledger_dump(FILE *out, const char *path) {
                     (unsigned long long)r->off, (unsigned long long)r->total);
         fputc('\n', out);
     }
-    if (!g_nrslots) fputs("  (no std.heapAlloc site in this unit)\n", out);
+    int nprov = 0, nerase = 0;
+    for (int i = 0; i < g_nproves; i++) {
+        if (g_proves[i].proven) nprov++;
+        if (g_proves[i].erased) nerase++;
+    }
+    fprintf(out, "erase: %d/%d proven, %d erased (mode=%s)\n",
+            nprov, g_nproves, nerase, g_zx_release ? "release" : "dev");
+    for (int i = 0; i < g_nproves; i++) {
+        ProvePoint *q = &g_proves[i];
+        const char *unit = q->unit ? q->unit : (path ? path : "-");
+        fprintf(out, "  point %s:%d:%d %-6s %-6s %s\n",
+                unit, q->line, q->col,
+                q->proven ? "PROVEN" : "OPAQUE",
+                q->erased ? "erased" : "kept", q->reason);
+    }
+    if (!g_nrslots && !g_nproves)
+        fputs("  (no std.heapAlloc site, no handle access point in this unit)\n", out);
 }
 
 /* ---------------- 逃逸检查：值是否指向当前栈帧 ----------------
@@ -4286,6 +4424,7 @@ static Type *check_expr_raw(Node *n, Type *expect) {
         Type *r = check_call(n, expect);
         /* 实参检查完才能追 provenance：Allocator.free 是一次 release 事件 */
         region_note_free(n);
+        region_handle_call(n);
         return r;
     }
     case NK_STRUCT_LIT: return check_struct_lit(n, expect);
@@ -5373,9 +5512,9 @@ static void check_stmt(Node *n) {
             ensure(n->sym);
         }
         /* §130：把分配点的发行版本挂到绑定符号上，free 才能查状态 */
-        if (n->sym && n->b && n->b->reg_slot) {
-            n->sym->reg_slot = n->b->reg_slot;
-            region_bind(n->b->reg_slot, n->sym);
+        if (n->sym && n->b) {
+            int rs = region_of_expr(n->b);
+            if (rs) { n->sym->reg_slot = rs; region_bind(rs, n->sym); }
         }
         return;
 
@@ -5636,7 +5775,8 @@ static Type *check_if(Node *n, Type *expect) {
         scope_push(&sc);
         if (cap_ty && n->name) {
             Symbol *s = scope_add(&sc, n->name, SK_CAPTURE);
-            if (s) { s->ty = cap_ty; s->state = 2; }
+            if (s) { s->ty = cap_ty; s->state = 2;
+                     s->reg_slot = region_of_expr(n->a); }
         }
         tt = (known && !cv->bval) ? ty_void() : check_arm(n->b, expect);
         scope_pop(&sc);

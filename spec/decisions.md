@@ -4832,3 +4832,102 @@ GC、引用计数、智能指针、所有权类型、借用检查、RAII / 析�
   **也不是内存安全**。裸指针路径、`(T)val` 抹源、C 边界、跨线程仍不受保护。
   红线不变：不做 GC / 引用计数 / 所有权类型 / 借用检查 / RAII / 胖指针 /
   第二套分配 API / 与 §44 冲突的 storage inference。
+
+
+## §133 第三增量：Handle 证明账本 + 按访问点擦除 + 双发射（2026-11-13）
+
+用户「继续」，按 §130 分步表把**第 3 步**落地。前置条件是 Handle 得先进
+同一份账本，否则「哪些访问点被证明」无从判定——所以本轮把
+「编译期状态机扩到 Handle」与「按点擦除 + debug/release 双发射 +
+擦除率可观测」做成一条链，仍然只有一份 `g_rslots`，不造第二套系统。
+
+### 同一份账本里的 Handle
+
+- `RegionSlot` 加 `is_handle` / `tainted` / `owner_sym`。`create()` 发行一个
+  `is_handle` slot（size/align 记 0，它不占堆字节），`free()` 消费成
+  `RS_FREED`，`deinit()` 把同一 `owner_sym`（接收者符号）的整批标
+  `RS_DEAD`，`get()` 是访问点，逐点记 `PROVEN / OPAQUE` 与原因。
+- **opt-in 约定**：容器同时声明 `get` 与私有 `getUnchecked` 才算「有中介的
+  表」。机制在编译器、策略在库；不硬编码容器名、不加内建、不改指针表示。
+  `std/slot.zx` 的 `get` 现在检查通过后转调私有 companion，用户手写
+  `t.getUnchecked(h)` 会被 E0404 挡住——**中介不可绕过**。
+- `region_of_expr` 加 `NK_CALL` 一档；decl 初值绑定改用 `region_of_expr`
+  （`let h = t.create().?;` 才追得到），`if (x) v { … }` 的捕获符号在创建时
+  绑定 `region_of_expr(cond)`。三处都是既有传播结构的延伸。
+- **tainted 是保守的关键**：发行点或作废点落在控制流构造里（含 `if` 条件，
+  因为 `sema_construct` 对整个 NK_IF 加 `g_flow_depth`），就把 slot 标
+  tainted，之后所有访问点 OPAQUE。理由：分支里的 `free` 不做路径合并、
+  循环里同一源码点反复发行分不出代数，静态都可能误证明。比「见
+  `g_flow_depth>0` 就一律 opaque」更精确，又不会把未走到的释放擦成 UAF。
+
+### 按点擦除：改写调用点，不是整体擦除
+
+- **实现偏差要记一笔**：§130 写的是「能证明的点发纯地址、零元数据」，
+  落地用的是**把该调用点的 callee 名字改写成 `getUnchecked`**。
+  原因：zx 没有跨调用的常量传播 / 内联特化，`get` 函数体内的
+  `if (checked)` 不会因为调用点注入一个字面量而被剪枝；直接换一个同签名、
+  同返回类型的 companion 是同一语义的更直接实现，且 **backend 一字未改**——
+  泛型容器方法走 `inst_name(n->inst, n->a->name)`，改写 `name` 即可。
+  改写发生在 `check_expr(NK_CALL)` 里 `check_call` 返回之后，先完成可见性、
+  arity、类型检查，再换名，所以私有 companion 只有编译器能生成调用。
+- 判据：`slot` 存在、`is_handle`、未 tainted、`RS_LIVE`（非 FREED / DEAD）、
+  不在 `defer` 体、且 `n->inst` 非空。任一不满足 → `OPAQUE kept`。
+- **两种发射形态共存**：dev 档发 `get_i2(&t, h)`（走完整 `valid`：pool id /
+  pos 界 / alive / gen）；release 档对 PROVEN 点发
+  `getUnchecked_i2(&t, h)`（直接 `ptr[h.pos]`），OPAQUE 点仍发 `get`。
+  `ptr[]` 擦不掉，擦掉的是比对代码。`--emit-c` 里 `get`/`valid` 定义仍会
+  因模块全量发射而存在，但调用点已不经过它，最终二进制由 C 编译器 DCE。
+- **档位联动 `--release`**：`src/main.c` 加 `g_zx_release`，四处
+  `g_cflags = release ? CC_REL : CC_DEV` 同步赋值；sema 只在
+  `g_zx_release && !getenv("ZX_HANDLE_CHECKS")` 时擦除。
+  `ZX_HANDLE_CHECKS=1` 是 debug 巡检的强制保留开关，与 `ZX_REGION=1` 同款。
+- **失效后使用不报硬错**：`get(h)` 在 `free` 后返回 `null` 是 side table
+  刻意提供的 fail-safe **查询合法性**（`tests/good/slot-table.zx` 的
+  `stale` / `closed` 就在用它）。做成 error 会把合法的检查也判成错，
+  等于逼用户删守门用例变绿。所以 `RS_FREED` / `RS_DEAD` 只给 OPAQUE 原因，
+  由运行时拒绝；§130 第 4 步的「新 E 码」因此**本轮未做**。
+
+### 擦除率可观测
+
+`region_ledger_dump` 追加两行类别，与 §132 的 slot 行共用同一份视图：
+
+```
+erase: 1/1 proven, 1 erased (mode=release)
+  point tests/good/handle-erase.zx:14:14 PROVEN erased proven LIVE, straight-line
+```
+
+`zxc explain region <file.zx>`（默认 dev 档）、`ZX_REGION=1 zxc --check
+--release` 都能看到。`zxc explain <CODE>` 行为不变。原因串区分
+`handle already freed` / `handle table closed by deinit` /
+`issue/free point inside control flow` / `handle provenance lost`，
+正是 §130 要的「打印这个点为什么没被擦除」。
+
+实测：`tests/good/handle-erase.zx` 直线作用域 1/1 PROVEN，release 全擦；
+`tests/good/slot-table.zx` 7 个访问点 **0/7 PROVEN**（发行在 `if` 条件里
+→ tainted，free 后 / deinit 后各有更具体原因），全部保留运行时检查。
+两档实跑输出一致：`get 11 / free true / leak 0`。
+
+### 守门与验证
+
+- 新增 `tests/good/handle-erase.zx`：直线 `create → get → free → deinit`，
+  期望输出固定；`slot-table.zx` 一字未改，仍 12 条断言全过。
+- `test.sh` §133 段**账本 + 发射层双守门**（吸取 §131 只 grep 账本假绿的
+  教训）：钉 `erase: 1/1 proven, 1 erased (mode=release)`、
+  release C 有 `_c0 = getUnchecked_`、dev C 没有且仍有 `_c0 = get_`；
+  再 `--release` 真编译真跑比对三行输出；最后验 `ZX_HANDLE_CHECKS=1`
+  强制保留。
+- 定向回归（按项目节奏**未跑全量**）：27 个用例覆盖 Handle、预分配、
+  `if` 捕获 / optional / 错误传播、泛型别名、反射、静态成员、pool、
+  数组指针 / 强转 / 逃逸检查 → **passed 47, failed 0**。
+  编译器重建通过（仅既有 `unsequenced` warning）；`git diff --check` 干净。
+
+### 仍未做（§130 第 4 步）
+
+运行时 ledger dump 成文件交给 LSP **展示**、debug 区间末巡检自动接进
+`diagnosticsWorker`、新增 E 码让「确定失效的句柄使用」在编辑期标红、
+release 把 side table 收缩到「未被覆盖的槽」。当前 `explain region` 打的是
+**证明账本与擦除率**，不是运行时泄漏明细。
+口径不变：编译期是局部可证明安全，运行时是 fail-safe 拒绝，合起来
+**也不是内存安全**；裸指针、`(T)val` 抹源、C 边界、跨线程仍不受保护。
+红线不变：不做 GC / 引用计数 / 所有权类型 / 借用检查 / RAII / 胖指针 /
+第二套分配 API / 与 §44 冲突的 storage inference。

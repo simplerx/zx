@@ -782,6 +782,41 @@ else
     fail=1
 fi
 
+printf "\n== §133 按访问点擦除：release 改写 / dev 保留 / 两档输出一致\n"
+$ZXC tests/good/handle-erase.zx --emit-c --release > "$TPFX.erz.rel.c" 2>/dev/null
+$ZXC tests/good/handle-erase.zx --emit-c > "$TPFX.erz.dev.c" 2>/dev/null
+ZX_REGION=1 $ZXC tests/good/handle-erase.zx --check --release > "$TPFX.erz.log" 2>&1 || true
+if grep -q 'erase: 1/1 proven, 1 erased (mode=release)' "$TPFX.erz.log" \
+   && grep -q '_c0 = getUnchecked_' "$TPFX.erz.rel.c" \
+   && ! grep -q '_c0 = getUnchecked_' "$TPFX.erz.dev.c" \
+   && grep -q '_c0 = get_' "$TPFX.erz.dev.c"; then
+    printf "  ok   release 擦成 getUnchecked，dev 保留 get，账本记 1/1\n"
+else
+    printf "  FAIL 按访问点擦除守门失败（账本或发射层）\n"
+    sed -n '1,12p' "$TPFX.erz.log"
+    grep -n '_c0 = ' "$TPFX.erz.rel.c" "$TPFX.erz.dev.c" | head -n 6
+    fail=1
+fi
+$ZXC tests/good/handle-erase.zx -o "$TPFX.erz.bin" --release > /dev/null 2>&1 || true
+"$TPFX.erz.bin" > "$TPFX.erz.run" 2>&1 || true
+if grep -q '^get 11$' "$TPFX.erz.run" \
+   && grep -q '^free true$' "$TPFX.erz.run" \
+   && grep -q '^leak 0$' "$TPFX.erz.run"; then
+    printf "  ok   release 档实跑输出与 dev 档一致\n"
+else
+    printf "  FAIL release 档运行输出不对\n"
+    sed -n '1,10p' "$TPFX.erz.run"
+    fail=1
+fi
+ZX_REGION=1 ZX_HANDLE_CHECKS=1 $ZXC tests/good/handle-erase.zx --check --release > "$TPFX.erz.keep.log" 2>&1 || true
+if grep -q 'PROVEN kept' "$TPFX.erz.keep.log"; then
+    printf "  ok   ZX_HANDLE_CHECKS=1 强制保留全检查\n"
+else
+    printf "  FAIL 强制保留全检查没生效\n"
+    sed -n '1,10p' "$TPFX.erz.keep.log"
+    fail=1
+fi
+
 printf "\n== 模块名必须显式绑定（别名可缩写 / 可再导出）\n"
 BP="$TPFX.modbind"
 if mkdir -p "$BP/src" \

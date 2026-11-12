@@ -75,6 +75,7 @@ static int  cmd_fetch(int argc, char **argv, int argi);
 
 static const char *g_cc;
 static const char *g_cflags;
+int g_zx_release = 0;   /* §133：--release 档位，sema 的按点擦除读它 */
 /* dev 档 -O0：迭代速度优先（0.4s/unit 级）；--release 才上 -O2。
  * 注意 zig cc 的 -O0 映射 Debug 会自带 UB 检查（曾把 arena 的未对齐
  * 访问直接炸成 panic——那是个真问题，但在代码层修，不靠 dev 档暴露），
@@ -2818,6 +2819,7 @@ static int cmd_cbuild(int argc, char **argv, int argi) {
         return 2;
     }
     g_cflags = release ? CC_REL : CC_DEV;
+    g_zx_release = release;
     char **libs = NULL, err[1024];
     int ncomp = 0;
     int nlib = csrc_build(g_cc, g_cflags, "vendor", ZX_CACHE_DIR, group, force,
@@ -3081,6 +3083,7 @@ static int do_build(Proj *pj, bool release, OutKind kind, char *outpath, size_t 
     }
 
     g_cflags = release ? CC_REL : CC_DEV;
+    g_zx_release = release;
     g_srcpath = pj->main;
     Node *root = fe_parse_file(pj->main);
     if (!root || g_error_count) return 1;
@@ -3314,6 +3317,7 @@ static int test_run1(const char *file, const char *filter, bool release) {
     sema_check(rr);
     if (g_error_count) return 200;
     g_cflags = release ? CC_REL : CC_DEV;
+    g_zx_release = release;
     if (build_program(rr, bpath, ZX_CACHE_DIR, OUT_EXE) != 0) return 200;
 
     int failed = 0;
@@ -3579,6 +3583,7 @@ int main(int argc, char **argv) {
     }
     if (!file) { usage(stderr); return 2; }
     g_cflags = release ? CC_REL : CC_DEV;
+    g_zx_release = release;
 
     g_srcpath = file;
     /* KEEP: LSP 诊断走这条单文件分派；没有工程搜索路径就会假报
