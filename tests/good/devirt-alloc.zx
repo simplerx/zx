@@ -1,0 +1,79 @@
+// devirt-alloc.zx —— 分配器去虚拟化（§138）。
+//
+// `a.alloc(a.ctx, n)` 在 C 里是函数指针字段的**间接调用**。类型检查阶段
+// 若能证明目标（std.heap.page / Allocator{…} 字面量 / 工厂 init 的返回值），
+// 就把被调改成直接调用——dev 档（-O0）也省掉那次取字段 + 间接跳转。
+// 证明不了（变量被重新绑定、来自形参）就保持原样。两条路的行为必须一致。
+// expect-exit: 0
+// expect-output
+// page: live 0 bytes 0
+// literal: live 0 allocs 2
+// factory: live 0
+// runtime: live 0
+const std = module("std");
+
+// 计数分配器：验证 `Allocator{ .ctx = …, .alloc = … }` 这条链
+const Counter = struct {
+    live: usize,
+    n: usize,
+};
+
+const countAlloc = fn (ctx: ?*u8, n: usize) ?*u8 {
+    if (ctx) c {
+        let st = (*Counter)c;
+        if (std.heap.page.alloc(null, n)) p {
+            st.0.live = st.0.live + 1;
+            st.0.n = st.0.n + 1;
+            return p;
+        }
+    }
+    return null;
+};
+
+const countFree = fn (ctx: ?*u8, p: *u8, n: usize) void {
+    if (ctx) c {
+        let st = (*Counter)c;
+        st.0.live = st.0.live - 1;
+        std.heap.page.free(null, p, n);
+    }
+};
+
+// 挡住去虚拟化：形参是运行期才知道的分配器
+const opaque = fn (a: Allocator) Allocator { return a; };
+
+pub const main = fn () i32 {
+    // ① std.heap.page：编译器内建，目标已知
+    var a = std.heap.page;
+    if (a.alloc(a.ctx, 32)) p1 {
+        a.free(a.ctx, p1, 32);
+    }
+    std.println("page: live {} bytes {}", 0, 0);
+
+    // ② Allocator 字面量：alloc/free 都是本文件的函数
+    var counter = Counter{ .live = 0, .n = 0 };
+    var b = Allocator{ .ctx = (*u8)&counter, .alloc = countAlloc, .free = countFree };
+    let q1 = b.alloc(b.ctx, 16);
+    let q2 = b.alloc(b.ctx, 24);
+    if (q1) x1 { b.free(b.ctx, x1, 16); } else { return 1; }
+    if (q2) x2 { b.free(b.ctx, x2, 24); } else { return 1; }
+    std.println("literal: live {} allocs {}", counter.live, counter.n);
+
+    // ③ 工厂：DebugAllocator.init 的函数体里只有一条 return 字面量
+    var dbg = std.debug_alloc.DebugAllocator.init(std.heap.page);
+    if (dbg) d {
+        if (d.alloc(d.ctx, 40)) r1 {
+            d.free(d.ctx, r1, 40);
+        }
+        std.println("factory: live {}", std.debug_alloc.DebugAllocator.liveBlocks(d));
+        std.debug_alloc.DebugAllocator.deinit(d);
+    }
+
+    // ④ 重新绑定过：来源不再可证明，退回间接调用（行为相同）
+    var c = std.heap.page;
+    c = opaque(c);
+    if (c.alloc(c.ctx, 8)) s1 {
+        c.free(c.ctx, s1, 8);
+    }
+    std.println("runtime: live {}", 0);
+    return 0;
+};

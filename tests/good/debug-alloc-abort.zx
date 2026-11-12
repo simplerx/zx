@@ -1,0 +1,38 @@
+// debug-alloc-abort.zx —— DebugAllocator 的三条致命路径：泄漏 / 重复释放 /
+// 释放长度不符。三条都会打印现场并 panic（abort），所以不能写 expect-output
+// 交给 runner 跑（abort 会带走整个测试进程）；test.sh 用独立进程分别跑，
+// 断言 stderr 里的 panic 原因与 stdout 里的报告。
+//
+// 用法：prog leak | double | size
+const std = module("std");
+
+pub const main = fn () i32 {
+    let args = std.process.args();
+    var mode: []const u8 = "leak";
+    if (args.len > 0) { mode = args[0]; }
+
+    var da = std.debug_alloc.DebugAllocator.init(std.heap.page);
+    if (da) a {
+        if (std.str.eq(mode, "leak")) {
+            // 分配了不还：deinit 时逐块列出来再 panic
+            let p = a.alloc(a.ctx, 24);
+            if (p) _ = 0 else return 2;
+            std.println("case leak: 24 byte(s) left");
+        } else if (std.str.eq(mode, "double")) {
+            let p = a.alloc(a.ctx, 16);
+            if (p) pp {
+                a.free(a.ctx, pp, 16);
+                std.println("case double: freeing the same block twice");
+                a.free(a.ctx, pp, 16);
+            }
+        } else {
+            let p = a.alloc(a.ctx, 16);
+            if (p) pp {
+                std.println("case size: free(64) on a 16 byte block");
+                a.free(a.ctx, pp, 64);
+            }
+        }
+        std.debug_alloc.DebugAllocator.deinit(a);
+    }
+    return 0;
+};

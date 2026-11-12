@@ -1934,12 +1934,13 @@ std.io.print(h, fmt, args…)   // 写句柄 h，不换行（println 带换行�
 
 ```zx
 const Allocator = struct {
-    alloc: fn(usize) ?*u8,          // 要 n 字节，失败给 null
-    free:  fn(*u8, usize) void,     // 还回去
+    ctx:   ?*u8,                    // 有状态分配器的载体（arena / 池 / 记账）
+    alloc: fn(?*u8, usize) ?*u8,    // 要 n 字节，失败给 null
+    free:  fn(?*u8, *u8, usize) void, // 还回去（长度要和申请时一致）
 };
 ```
 
-   它是一个普通的结构体值，不是魔法；现成的只有 `std.heap.page`（向系统要页）。用完自己还：`alloc.free(s.ptr, s.len)`。
+   它是一个普通的结构体值，不是魔法；现成的只有 `std.heap.page`（向系统要页）。用完自己还：`alloc.free(alloc.ctx, s.ptr, s.len)`。
 
 格式串：
 
@@ -2083,14 +2084,14 @@ const main = fn () u8 {
 
 ```zx
 const alloc = std.heap.page;
-let raw = alloc.alloc(1024);          // ?*u8
+let raw = alloc.alloc(alloc.ctx, 1024);   // ?*u8
 if (raw) p {
-    let buf = p[0..1024];             // []u8 —— 裸指针加上界才能变切片
-    alloc.free(p, 1024);
+    let buf = p[0..1024];                 // []u8 —— 裸指针加上界才能变切片
+    alloc.free(alloc.ctx, p, 1024);
 }
 ```
 
-- 分配器是**一个结构体值**（`alloc(size) ?*u8` 和 `free(*u8, size)` 两个字段），可以自己造一个（见 `tests/good/arena.zx` 的 bump 分配器）。
+- 分配器是**一个结构体值**：`ctx: ?*u8` + `alloc(ctx, size) ?*u8` + `free(ctx, p, size)`。ctx 让有状态分配器（arena / 池 / 记账）把状态塞进去，不必用全局变量；自己造一个见 `std/arena.zx` 与 `tests/good/arena.zx` 的 bump 分配器。
 - 栈分配是默认；`&.{…}` 落在当前栈帧（`var` 绑定时）；要更多就 `std.stackAlloc` / `std.heapAlloc`（§3.5）。
 - 生命周期：字段/元素跟随持有者；`struct` 里的 `var` 是全局单例。
 - 没有借用检查、没有生命周期标注、没有 RAII；清理靠 `defer`（§8.6），不靠析构函数。
@@ -2107,6 +2108,8 @@ if (raw) p {
 | `std.stackAlloc(T, N)` | `*[N]T` | 栈帧上申请一段数组，N 编译期已知（§3.5） |
 | `std.heapAlloc(alloc, T, N)` | `*[N]T` | 向分配器要一段数组，OOM 直接 abort（§3.5） |
 | `std.heap.page` | `Allocator` | 唯一的现成分配器（malloc/free） |
+| `std.arena.ArenaAllocator` | `init(backing)` → `?Allocator` | 一次性批量释放：`alloc` 推指针，`free` 空操作，`deinit(a)` 全还 |
+| `std.debug_alloc.DebugAllocator` | `init(backing)` → `?Allocator` | 记账分配器：泄漏 / 重复释放 / 长度不符当场报（§13.2） |
 | `std.print` / `std.println` / `std.format` | 内建 | 见 §11.1 |
 | `std.file.read(alloc, path)` | `?[]const u8` | 整个文件读进分配器给的缓冲，末尾补 0 |
 | `std.file.write(path, data)` / `append` | `bool` | 覆盖写 / 追加写 |
@@ -2187,6 +2190,40 @@ if (std.BufReader.open(al, "big.txt", 4096)) r0 {
 这样探测链里没有墓碑，少一个状态少一类 bug。
 
 ---
+
+### 13.2 分配器调用与内联：两条自动规则
+
+`Allocator` 是普通结构体值，`a.alloc(a.ctx, n)` 在 C 里是**函数指针字段的间接
+调用**。zx 在类型检查阶段做两件事，都不改变语义、都不需要关键字：
+
+**① 去虚拟化**：能证明 `alloc` / `free` 指向哪个函数时，直接发直调。证明链
+只走词法可见的来源：
+
+- `std.heap.page`（编译器内建）；
+- `Allocator{ .ctx = …, .alloc = f, .free = g }` 字面量；
+- `if (x) v { … }` 的捕获（初值就是条件表达式）；
+- 工厂调用（`ArenaAllocator.init(…)` / `DebugAllocator.init(…)`），且被调函数
+  体里**恰好一条** `return Allocator{…}`。
+
+任何一条反证成立就放弃，保持间接调用：变量被重新赋值过、被 `&` 取过地址、
+工厂有多条返回。
+
+```zx
+var a = std.heap.page;
+let p = a.alloc(a.ctx, 32);      // 生成的 C：zx_page_alloc(a.ctx, 32)
+```
+
+**② 自动内联**：本模块**私有**的小函数（≤24 个 AST 节点、无循环、无嵌套 `fn`、
+不递归）在生成 C 时带 `static inline __attribute__((always_inline))`，于是
+dev 档（`-O0`）也会展开。**没有 `inline` 关键字**：该不该内联由编译器按规模
+判断，跟 `inline for` 那个 `inline`（编译期展开循环）不是一回事。
+
+跨模块的函数不做强制内联：C 单元之间只有原型，硬内联得把函数体搬进共享头，
+收益不值。`--release`（`-O2`）本来就会自己内联，上面两条主要救 dev 档。
+
+**做不到的部分**：分配器在运行期才知道时（容器字段 `self.alloc`、函数形参），
+间接调用消不掉——那是类型擦除的代价，`-O2` 也消不掉。要彻底消掉得把容器对
+分配器单态化（`ArrayList(T, A)`），zed 的取舍是不做。
 
 ## 14. 内建（`@` 前缀，不可重定义）
 

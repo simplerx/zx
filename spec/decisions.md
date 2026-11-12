@@ -5177,3 +5177,106 @@ at compile time」是同一族，只是「编译期已知为 null」的来源从
 `scanFiles`，我在 `pval.zx` 里用了 `P` / `List`，立刻把 `instChain` 的 `P.`
 变成 `P{...}`、把 gval 的 `List` 串成另一份——本轮的 `completion.instChain.typeValued`
 就是这么挂的。新 fixture 一律带前缀（`Pv*`）。
+
+## §138 DebugAllocator、分配器去虚拟化与自动内联（2026-11-13 用户）
+
+**用户原话**：「做一个 DebugAllocator，可以追溯内存，有内存泄漏时会报错并打印
+报告；另外 Allocator 的 alloc / free 如前面说过的，做 inline，减少一次分发
+调用。zx 可以做到 inline 吗？如果能，是自动 inline（最好自动计算）还是要加
+inline（添加关键字）？」
+
+先说结论：**不加 `inline` 关键字**。`alloc` / `free` 是结构体里的**函数指针
+字段**，`a.alloc(...)` 是间接调用——`always_inline` 对间接调用一点用都没有，
+能内联的只有直调。所以要分两步：先把「目标是谁」证明出来（去虚拟化，得到
+直调），再让「直调的那个小函数」展开（自动内联）。两件都自动，不看关键字。
+
+### 1. std.debug_alloc.DebugAllocator
+
+布局沿用 arena 的做法：`[48B Header][payload]`，Header 记 `prev/next/size/
+seq/magic`，活跃块挂双向链，账本（Tracker）自己从 backing 出、不参与记账。
+
+- **可追溯**：每次分配一个自增序号，报告按 `#序号 / 字节数 / 地址` 列；
+  `liveBlocks` / `liveBytes` / `peakBytes` / `allocCount` 给读数。
+- **泄漏**：`deinit(a)` 先打印 `LEAK: N block(s) / M byte(s)` 与逐块清单，
+  再 `std.debug.panic`；`deinitQuiet(a)` 只报告、返回泄漏块数（工具/测试用）。
+- **重复释放 / 野指针 / 长度不符**：free 先看 magic（FREED = 重复释放，
+  其它值 = 不是这儿的块），再比长度。三条都打印现场摘要（当前 live/peak/
+  分配次数）后 panic，不静默失败。
+- `HDR` 由 `@type(Header).size` 向上取整到 16 得来，改 Header 不会让 payload
+  错位——手写常数迟早对不上。
+
+### 2. 去虚拟化（真正消掉那次分发）
+
+类型检查阶段，`a.alloc(a.ctx, n)` 若满足证明链，就把被调节点换成函数标识符
+（实参原样搬过去，因为字段签名和函数签名逐字相同）。证明链：
+
+- `std.heap.page` → `zx_page_alloc` / `zx_page_free`（造一对只有 cname/ty 的
+  符号；`need_by_cname` 认名字置 `g_need_page`）；
+- `Allocator{ .alloc = f, .free = g }` 字面量 → `f` / `g` 的符号；
+- `if (x) v { … }` 捕获 → 递归到条件表达式（`Symbol.cap_src`）；
+- 工厂调用 `F.init(…)` → 被调函数体里**恰好一条** `return Allocator{…}`，
+  取那条字面量的对应字段。
+
+否定证据（任一成立就放弃）：变量被赋值过（`Symbol.nassign`）、被 `&` 取过
+地址（`Symbol.escaped`）、工厂有多条返回（多义）。改完的节点是 `NK_IDENT`，
+重复检查天然幂等（第二次不再匹配字段形态）。
+
+效果：`var a = std.heap.page; a.alloc(a.ctx, n)` 生成的 C 从
+`a_4_5.alloc(a_4_5.ctx, 32)` 变成 `zx_page_alloc(a_4_5.ctx, 32)`。
+
+### 3. 自动内联（不加关键字）
+
+`gen_fn` 对**本模块私有**的函数判规模：AST 节点数 ≤ 24、无循环、无嵌套
+`fn`、不递归 → 定义行发 `ZX_INLINE`（`static inline __attribute__((always_inline))`，
+MSVC 走 `__forceinline`）。原型保持 `static`：属性只需在定义处，别的单元本来
+就看不见 static 函数。
+
+为什么不给用户关键字：`-O2`（release）本来就内联小函数，`-O0`（dev，默认档）
+一次都不内联——按规模自动判就够了，多一个关键字只会让用户猜阈值。
+
+跨模块不做：C 单元之间只有原型，强制内联得把函数体搬进共享头，链式依赖会把
+半个 std 拖进头文件，收益不值。
+
+### 4. 顺手修的：panic 前 flush stdout
+
+`zx_debug_panic` 现在先 `fflush(stdout)`。被重定向时 stdout 是全缓冲，
+`abort()` 不走退出清理——泄漏报告打在 stdout、panic 在 stderr，重定向到文件
+时报告会整块丢（本轮第一次跑 DebugAllocator 就撞上了）。
+
+### 5. 已知限制（写清楚，别再踩）
+
+**容器体内裸名调用同容器的静态函数编不过**：
+
+```zx
+const C = struct {
+    pub const a = fn () i32 { return 1; };
+    pub const b = fn () i32 { return a() + 1; };   // B1001: call to undeclared 'a'
+};
+```
+
+定义发成 `a_i0`（`inst_name`），裸名引用发成 `a`。根因不在后端取名：sema 的
+裸名解析没有给容器成员建实例（`C.a()` 走字段路径才有），后端也就没有可用的
+名字。**绕法：写 `Self.a()`**（verified）。`std/debug_alloc` 的 `shutdown`
+因此写成模块级函数。修这条要动 sema 的容器上下文，留作后续。
+
+### 6. 实测（dev 档 -O0，1e6 次 alloc+free，各 64B）
+
+| 形态 | 耗时 |
+|---|---|
+| 间接（`var b = opaque(page)`，`b.alloc`） | 26.28 ms |
+| 直调（`var c = std.heap.page`，`c.alloc`） | 26.04 ms |
+
+差 ~1%：page 背后是 malloc/free，分发占不了大头。分配器越轻（arena 的 bump、
+池的空闲链），这次分发占比越高——去虚拟化是给那种场景准备的。
+
+### 守门
+
+- `tests/good/debug-alloc.zx`：正常路径记账（`pushes: len 4 live 1 bytes 32
+  peak 32`）、`deinit` 后归零、裸 48B 分配释放。
+- `tests/good/devirt-alloc.zx`：page / 字面量 / 工厂 / 重新绑定四条链，行为
+  一致；生成 C 里 `zx_page_alloc(` / `countAlloc(` / `debug_alloc_trackedAlloc(`
+  三个直调名 + 仍存在的 `\.alloc(`（容器字段那处不可证明）。
+- `tests/good/debug-alloc-abort.zx` + test.sh：泄漏 / 重复释放 / 长度不符三条
+  致命路径，各起一个进程断言 stdout 报告与 stderr 的 panic 原因（abort 会带走
+  测试进程，不能塞进 runner）。
+- test.sh 新增 §138 两段（去虚拟化 + 自动内联 + DebugAllocator 五条断言）。

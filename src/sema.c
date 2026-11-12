@@ -139,6 +139,12 @@ struct Symbol {
     const char *cname;     /* 后端用的 C 名字（模块内名字带前缀） */
     int         decl_line; /* 声明位置（D2 note 用；0 = 没记） */
     int         decl_col;
+    /* 分配器去虚拟化（§138）的三条否定证据：声明后被重新赋值过、
+     * 被 & 取过地址（指针可能改写它）、以及 if/while 捕获的初值来源。
+     * 只要有一条不干净，`a.alloc(...)` 就保持原样的间接调用。 */
+    int          nassign;  /* `a = …` / `a += …` 的次数 */
+    bool         escaped;  /* 被 `&a` 取过地址 */
+    Node        *cap_src;  /* SK_CAPTURE：捕获的源表达式（?T 解包前） */
     Symbol     *next;
 };
 
@@ -2712,6 +2718,9 @@ static Type *check_assign(Node *n) {
     if (n->op == TOK_ASSIGN) {
         rt = check_expr(n->b, lt);
         coerce_node(n->b, rt, lt, "assignment");
+        /* 重新绑定过就不再信任初值（§138：分配器去虚拟化的前提是
+         * "这个变量从声明到这里没被改过"）。 */
+        if (n->a->kind == NK_IDENT && n->a->sym) n->a->sym->nassign++;
         /* 赋进局部变量的指针也记来源：之后 return 它同样要拦 */
         if (n->a->kind == NK_IDENT && n->a->sym && expr_frame(n->b))
             n->a->sym->stack_val = true;
@@ -2969,6 +2978,8 @@ static Type *check_unary(Node *n, Type *expect) {
     if (n->op == TOK_AMP) {
         if (n->a->kind == NK_TUPLE)      /* &{…}（不带点）也不该当元组 */
             return check_array_lit(n, n->a->items, n->a->nitems, expect);
+        /* 取过地址：别人手里有它的指针，随时可能改写（§138 否定证据） */
+        if (n->a->kind == NK_IDENT && n->a->sym) n->a->sym->escaped = true;
         Type *t = check_expr(n->a, NULL);
         /* `*[N]T` 只是"带长度的指针"：C 那边就是 `T *`，本身有槽位，
          * `&xs` 是合法的 `**(...)`（用户 2026-11-10 确认的设计）。
@@ -3757,6 +3768,159 @@ static bool addr_ok(Node *e) {
     }
 }
 
+/* ============ 分配器去虚拟化（decisions §138） ============
+ *
+ * Allocator 是 { ctx, alloc, free } 三个字段的普通结构体，调用点是
+ * `a.alloc(a.ctx, n)`——C 里就是 `a.alloc(...)` 的**间接调用**。间接调用
+ * 让 `inline` 关键字无能为力（能内联的是直调），-O0 下它还多两次访存
+ * （取字段 + 跳转）。这里在类型检查阶段把**能证明目标**的调用改写成直调：
+ *
+ *     a.alloc(a.ctx, n)   ->   zx_xxx_alloc(a.ctx, n)
+ *
+ * 证明链只走词法可见的那几条（够覆盖 std.heap.page、ArenaAllocator /
+ * DebugAllocator 这类工厂、以及用户自己 `Allocator{ .alloc = f }`）：
+ *   - std.heap.page
+ *   - Allocator{ .ctx = …, .alloc = F, .free = G }
+ *   - `if (x) v { … }` 的捕获（初值 = 条件表达式）
+ *   - 工厂调用 `F.init(…)`，且 F 的函数体里恰好一条 return 结构体字面量
+ * 否定证据（任何一条成立就放弃，保持间接调用）：
+ *   - 变量被重新赋值过（nassign > 0）
+ *   - 变量被 `&` 取过地址（escaped）
+ *   - 函数体里不止一条 return 分配器字面量（多义）
+ *
+ * 只改 n->a（被调），不动实参——alloc/free 的签名与字段类型逐字相同，
+ * 第一个实参本来就是 ctx。改完的节点是 NK_IDENT，重复检查天然幂等。
+ */
+
+static bool ty_is_allocator(Type *t) {
+    return t && t->kind == TY_STRUCT && t->name && !strcmp(t->name, "Allocator");
+}
+
+/* std.heap.page 的 alloc/free 在运行时里是两个 static C 函数
+ * （emit_debug_runtime 同一条生成路径，need_by_cname 认名字置 g_need_page）。
+ * 给它们造一对只有 cname/ty 的符号，后端就能当普通函数直调。 */
+static Symbol *page_alloc_fn(bool want_alloc) {
+    static Symbol sa, sf;
+    static bool init;
+    if (!init) {
+        init = true;
+        Type *p8 = ty_opt(ty_ptr(ty_u8(), false, false, 0));
+        Type *ra = ty_opt(ty_ptr(ty_u8(), false, false, 0));
+        Type *ap[2] = { p8, ty_usize() };
+        sa.name = "zx_page_alloc"; sa.cname = "zx_page_alloc";
+        sa.kind = SK_CONST; sa.state = 2;
+        sa.ty = ty_fn(ap, 2, ra);
+
+        Type *fp[3] = { p8, ty_ptr(ty_u8(), false, false, 0), ty_usize() };
+        sf.name = "zx_page_free"; sf.cname = "zx_page_free";
+        sf.kind = SK_CONST; sf.state = 2;
+        sf.ty = ty_fn(fp, 3, ty_void());
+    }
+    return want_alloc ? &sa : &sf;
+}
+
+/* 结构体字面量里 .alloc / .free 的值节点 */
+static Node *allocator_pair_value(Node *lit, const char *field) {
+    if (!lit || lit->kind != NK_STRUCT_LIT) return NULL;
+    for (int i = 0; i < lit->nitems; i++) {
+        Node *p = lit->items[i];
+        if (p && p->kind == NK_PAIR && p->name && !strcmp(p->name, field))
+            return p->a;
+    }
+    return NULL;
+}
+
+/* 收集函数体里的 `return Allocator{…}`（不进军嵌套函数）。多于一条就不用。 */
+static void collect_allocator_returns(Node *n, int depth, Node **found, int *count) {
+    if (!n || depth > 16 || *count > 1) return;
+    if (n->kind == NK_FN) return;
+    if (n->kind == NK_RETURN && n->a && n->a->kind == NK_STRUCT_LIT &&
+        ty_is_allocator(n->a->ty)) {
+        *found = n->a;
+        *count = *count + 1;
+        return;
+    }
+    collect_allocator_returns(n->a, depth + 1, found, count);
+    collect_allocator_returns(n->b, depth + 1, found, count);
+    collect_allocator_returns(n->c, depth + 1, found, count);
+    collect_allocator_returns(n->d, depth + 1, found, count);
+    for (int i = 0; i < n->nitems; i++)
+        collect_allocator_returns(n->items[i], depth + 1, found, count);
+}
+
+/* 从"分配器值"往前推 alloc/free 的函数符号。推不出返回 NULL。 */
+static Symbol *allocator_target(Node *e, bool want_alloc, int depth) {
+    if (!e || depth > 6) return NULL;
+    switch (e->kind) {
+    case NK_IDENT: {
+        Symbol *s = e->sym;
+        /* `std.heap.page` 走别名/直接引用两条形状 */
+        if (s && s == std_builtin("heap.page")) return page_alloc_fn(want_alloc);
+        if (!s) return NULL;
+        if (s->nassign != 0 || s->escaped) return NULL;
+        /* if/while 捕获：初值是条件的源表达式 */
+        if (s->cap_src) return allocator_target(s->cap_src, want_alloc, depth + 1);
+        Node *d = s->decl;
+        if (!d || d->kind != NK_DECL || !d->b) return NULL;
+        return allocator_target(d->b, want_alloc, depth + 1);
+    }
+    case NK_FIELD:
+        if (e->sym && e->sym == std_builtin("heap.page")) return page_alloc_fn(want_alloc);
+        return NULL;
+    case NK_STRUCT_LIT: {
+        Node *v = allocator_pair_value(e, want_alloc ? "alloc" : "free");
+        if (!v) return NULL;
+        if ((v->kind == NK_IDENT || v->kind == NK_FIELD) && v->sym) return v->sym;
+        return NULL;
+    }
+    case NK_CAST:      /* coerce 插的空转换 */
+        return allocator_target(e->b, want_alloc, depth + 1);
+    case NK_UNWRAP:    /* `x.?` */
+    case NK_TRY:
+        return allocator_target(e->a, want_alloc, depth + 1);
+    case NK_CALL: {
+        /* 工厂：`DebugAllocator.init(page)` / `ArenaAllocator.init(page)` */
+        Node *callee = e->a;
+        Symbol *fs = (callee && callee->sym) ? callee->sym : NULL;
+        if (!fs) return NULL;
+        Node *d = fs->decl;
+        if (!d || d->kind != NK_DECL || !d->b || d->b->kind != NK_FN) return NULL;
+        if (!d->b->b) return NULL;
+        Node *lit = NULL;
+        int cnt = 0;
+        collect_allocator_returns(d->b->b, 0, &lit, &cnt);
+        if (cnt != 1 || !lit) return NULL;
+        Node *v = allocator_pair_value(lit, want_alloc ? "alloc" : "free");
+        if (!v) return NULL;
+        if ((v->kind == NK_IDENT || v->kind == NK_FIELD) && v->sym) return v->sym;
+        return NULL;
+    }
+    default:
+        return NULL;
+    }
+}
+
+/* `a.alloc(a.ctx, n)` / `a.free(a.ctx, p, n)`：证明得了就直调。 */
+static void devirt_allocator_call(Node *n) {
+    if (!n || !n->a || n->a->kind != NK_FIELD || !n->a->name) return;
+    bool want_alloc = !strcmp(n->a->name, "alloc");
+    bool want_free  = !strcmp(n->a->name, "free");
+    if (!want_alloc && !want_free) return;
+    if (n->meth_done) return;                    /* 方法调用：不是字段分发 */
+    if (!n->a->ty || n->a->ty->kind != TY_FN) return;
+    Node *recv = n->a->a;
+    if (!recv || !ty_is_allocator(recv->ty)) return;
+    /* 实参个数这时已经对齐（check_call 前面报过错），签名与字段类型逐字相同 */
+    if (n->nitems != (want_alloc ? 2 : 3)) return;
+    Symbol *tgt = allocator_target(recv, want_alloc, 0);
+    if (!tgt || !tgt->ty || tgt->ty->kind != TY_FN) return;
+    Node *id = node_new(NK_IDENT, n->a->line, n->a->col);
+    id->name = tgt->name;
+    id->sym  = tgt;
+    id->ty   = tgt->ty;
+    n->a = id;
+}
+
 /* 方法调用。两种写法：
  *
  *   p.sum()          →  sum(p)          （接收者是 f 的第一个参数）
@@ -4048,6 +4212,8 @@ static Type *check_call(Node *n, Type *expect) {
         Type *got = check_expr(n->items[i], want);
         coerce_node(n->items[i], got, want, "argument");
     }
+    /* 函数指针字段的分发：能证明目标就改成直调（§138） */
+    devirt_allocator_call(n);
     return type_of(n, ct->ret ? ct->ret : ty_void());
 }
 
@@ -5826,7 +5992,8 @@ static Type *check_if(Node *n, Type *expect) {
         if (cap_ty && n->name) {
             Symbol *s = scope_add(&sc, n->name, SK_CAPTURE);
             if (s) { s->ty = cap_ty; s->state = 2;
-                     s->reg_slot = region_of_expr(n->a); }
+                     s->reg_slot = region_of_expr(n->a);
+                     s->cap_src = n->a; }
         }
         tt = (known && !cv->bval) ? ty_void() : check_arm(n->b, expect);
         scope_pop(&sc);

@@ -1,0 +1,43 @@
+// debug-alloc.zx —— std.debug_alloc.DebugAllocator 的正常路径：
+// 分配/释放记账准确、收尾干净时不吵。
+// （泄漏与重复释放会 panic，那两条在 test.sh 的独立进程里跑——
+//   abort() 会带走整个测试进程，不适合放进文件用例。）
+// expect-exit: 0
+// expect-output
+// pushes: len 4 live 1 bytes 32 peak 32
+// after deinit: live 0 bytes 0
+// raw: 48 48
+// direct: ok
+const std = module("std");
+
+pub const main = fn () i32 {
+    var da = std.debug_alloc.DebugAllocator.init(std.heap.page);
+    if (da) a {
+        // 让 ArrayList 走记账分配器：增长一次就是一次可追溯的分配
+        var list = std.ArrayList(i32).init(a);
+        var i: usize = 0;
+        while (i < 4) {
+            _ = list.push((i32)i);
+            i = i + 1;
+        }
+        std.println("pushes: len {} live {} bytes {} peak {}",
+            list.len,
+            std.debug_alloc.DebugAllocator.liveBlocks(a),
+            std.debug_alloc.DebugAllocator.liveBytes(a),
+            std.debug_alloc.DebugAllocator.peakBytes(a));
+        list.deinit();
+        std.println("after deinit: live {} bytes {}",
+            std.debug_alloc.DebugAllocator.liveBlocks(a),
+            std.debug_alloc.DebugAllocator.liveBytes(a));
+
+        // free 的长度必须和 alloc 一致，否则当场报错
+        let raw = a.alloc(a.ctx, 48);
+        if (raw) rp {
+            std.println("raw: {} {}", std.debug_alloc.DebugAllocator.liveBytes(a), 48);
+            a.free(a.ctx, rp, 48);
+            std.println("direct: ok");
+        }
+        std.debug_alloc.DebugAllocator.deinit(a);
+    }
+    return 0;
+};

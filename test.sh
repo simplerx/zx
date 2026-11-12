@@ -836,6 +836,79 @@ else
     fail=1
 fi
 
+printf "\n== §138 分配器去虚拟化：能证明目标就直调\n"
+$ZXC tests/good/devirt-alloc.zx --emit-c > "$TPFX.dv.c" 2>/dev/null
+if grep -q 'zx_page_alloc(' "$TPFX.dv.c" \
+   && grep -q 'countAlloc(' "$TPFX.dv.c" \
+   && grep -q 'debug_alloc_trackedAlloc(' "$TPFX.dv.c" \
+   && grep -q '\.alloc(' "$TPFX.dv.c"; then
+    printf "  ok   page / 字面量 / 工厂三条链直调，证明不了的仍是间接\n"
+else
+    printf "  FAIL 去虚拟化没按预期生效\n"
+    grep -n 'alloc(' "$TPFX.dv.c" | head -n 8
+    fail=1
+fi
+# 自动内联（§138）：入口模块的小函数在 -O0 也展开
+if [ "$(grep -c '^ZX_INLINE ' "$TPFX.dv.c")" -ge 1 ]; then
+    printf "  ok   小函数自动带 ZX_INLINE（dev 档 -O0 也内联）\n"
+else
+    printf "  FAIL 自动内联没有生效\n"
+    fail=1
+fi
+$ZXC tests/good/devirt-alloc.zx -o "$TPFX.dv.exe" > /dev/null 2>&1 || true
+"$TPFX.dv.exe" > "$TPFX.dv.run" 2>&1 || true
+if grep -q '^page: live 0 bytes 0$' "$TPFX.dv.run" \
+   && grep -q '^literal: live 0 allocs 2$' "$TPFX.dv.run" \
+   && grep -q '^factory: live 0$' "$TPFX.dv.run" \
+   && grep -q '^runtime: live 0$' "$TPFX.dv.run"; then
+    printf "  ok   四条链行为一致（实跑）\n"
+else
+    printf "  FAIL 去虚拟化后行为不对\n"
+    sed -n '1,8p' "$TPFX.dv.run"
+    fail=1
+fi
+
+printf "\n== §138 DebugAllocator：泄漏 / 重复释放 / 长度不符都报现场\n"
+$ZXC tests/good/debug-alloc.zx -o "$TPFX.da.exe" > /dev/null 2>&1 || true
+"$TPFX.da.exe" > "$TPFX.da.run" 2>&1 || true
+if grep -q '^pushes: len 4 live 1 bytes 32 peak 32$' "$TPFX.da.run" \
+   && grep -q '^after deinit: live 0 bytes 0$' "$TPFX.da.run"; then
+    printf "  ok   正常路径记账准确、收尾干净\n"
+else
+    printf "  FAIL DebugAllocator 正常路径\n"
+    sed -n '1,8p' "$TPFX.da.run"
+    fail=1
+fi
+$ZXC tests/good/debug-alloc-abort.zx -o "$TPFX.daab.exe" > /dev/null 2>&1 || true
+"$TPFX.daab.exe" leak > "$TPFX.da.leak" 2>&1 || true
+if grep -q 'LEAK: 1 block(s) / 24 byte(s) still live' "$TPFX.da.leak" \
+   && grep -q 'block #1  24 byte(s)' "$TPFX.da.leak" \
+   && grep -q 'panic: \[debug_alloc\] memory leak' "$TPFX.da.leak"; then
+    printf "  ok   泄漏：逐块列出（序号/大小/地址）后 panic\n"
+else
+    printf "  FAIL 泄漏报告\n"
+    sed -n '1,10p' "$TPFX.da.leak"
+    fail=1
+fi
+"$TPFX.daab.exe" double > "$TPFX.da.dbl" 2>&1 || true
+if grep -q 'double free: block #1 at' "$TPFX.da.dbl" \
+   && grep -q 'panic: \[debug_alloc\] double free' "$TPFX.da.dbl"; then
+    printf "  ok   重复释放：认出已释放的块并报错\n"
+else
+    printf "  FAIL 重复释放\n"
+    sed -n '1,10p' "$TPFX.da.dbl"
+    fail=1
+fi
+"$TPFX.daab.exe" size > "$TPFX.da.size" 2>&1 || true
+if grep -q 'size mismatch at .*: free(64) but block #1 is 16 byte(s)' "$TPFX.da.size" \
+   && grep -q 'panic: \[debug_alloc\] free size mismatch' "$TPFX.da.size"; then
+    printf "  ok   释放长度不符：报出两边的大小\n"
+else
+    printf "  FAIL 释放长度校验\n"
+    sed -n '1,10p' "$TPFX.da.size"
+    fail=1
+fi
+
 printf "\n== 模块名必须显式绑定（别名可缩写 / 可再导出）\n"
 BP="$TPFX.modbind"
 if mkdir -p "$BP/src" \

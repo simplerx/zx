@@ -760,7 +760,12 @@ static char **g_anydef;      /* 每个描述符的初始化项，按索引就位
  * 和先 `const page = std.heap.page;` 再使用，最终落到同一个 C 名字上。 */
 static void need_by_cname(const char *cn) {
     if (!cn) return;
-    if (!strcmp(cn, "zx_alloc_page")) g_need_page = true;
+    /* zx_page_alloc / zx_page_free：分配器去虚拟化（§138）把
+     * `a.alloc(...)` 改成直调这两个运行时函数，声明与定义由 g_need_page
+     * 那一段一起发。 */
+    if (!strcmp(cn, "zx_alloc_page") ||
+        !strcmp(cn, "zx_page_alloc") || !strcmp(cn, "zx_page_free"))
+        g_need_page = true;
     if (!strncmp(cn, "zx_file_", 8))  g_need_file = true;
     if (!strncmp(cn, "zx_io_", 6))    g_need_io = true;
     if (!strncmp(cn, "zx_proc_", 8))  g_need_proc = true;
@@ -2481,6 +2486,9 @@ static void emit_debug_runtime(void) {
                      " int32_t line, int32_t col, ZxSlice_u8 fn);");
     buf_puts(g_out,
         "void zx_debug_panic(ZxSlice_u8 msg, ZxSlice_u8 file, int32_t line, int32_t col, ZxSlice_u8 fn) {\n"
+        /* 刷 panic 之前先把 stdout 冲下去：被重定向时 stdout 是全缓冲，
+         * abort() 不走退出清理，诊断前的报告本来会丢。即便是控制台的行缓冲也一样。 */
+        "    fflush(stdout);\n"
         "    fprintf(stderr, \"panic: %.*s\\n  at %.*s:%d:%d in %.*s\\n\",\n"
         "            (int)msg.len, (const char *)msg.ptr,\n"
         "            (int)file.len, (const char *)file.ptr, line, col,\n"
@@ -6776,16 +6784,62 @@ static void gen_extern(Node *fn) {
     bline(&g_bpub, "%s;", sig.data);
 }
 
+/* 自动内联的规模判据（decisions §138）。
+ *
+ * dev 档是 -O0，C 编译器一次内联都不做——而 zx 的 std 里满是"一行包装"
+ * （align16 / classPop / 字段 getter / 分配器转发）。这里给它们打上
+ * always_inline，省掉调用/返回与寄存器保存。
+ *
+ * 判据保守到只看形状：节点数 <= 24、没有循环、没有嵌套 fn、不递归。
+ * 超出的交给 C 编译器（-O2 自己会内联）。不做收益分析——那需要 profile，
+ * 编译期拿不到，硬猜只会让编译变慢。 */
+typedef struct { bool loop; bool self; } InlScan;
+
+static void inl_scan(Node *n, const char *cname_, const char *src_name,
+                     InlScan *st, int *cnt, int depth) {
+    if (!n || depth > 24) return;
+    *cnt = *cnt + 1;
+    if (n->kind == NK_FOR || n->kind == NK_WHILE) st->loop = true;
+    if (n->kind == NK_FN) { st->loop = true; return; }
+    if (n->kind == NK_CALL && n->a) {
+        Node *c = n->a;
+        while (c && (c->kind == NK_FIELD || c->kind == NK_UNWRAP)) c = c->a;
+        if (c && c->kind == NK_IDENT) {
+            const char *cn = sym_cname(c);
+            if ((cname_ && cn && !strcmp(cn, cname_)) ||
+                (src_name && c->name && !strcmp(c->name, src_name)))
+                st->self = true;
+        }
+    }
+    inl_scan(n->a, cname_, src_name, st, cnt, depth + 1);
+    inl_scan(n->b, cname_, src_name, st, cnt, depth + 1);
+    inl_scan(n->c, cname_, src_name, st, cnt, depth + 1);
+    inl_scan(n->d, cname_, src_name, st, cnt, depth + 1);
+    for (int i = 0; i < n->nitems; i++)
+        inl_scan(n->items[i], cname_, src_name, st, cnt, depth + 1);
+}
+
+static bool fn_small_for_inline(Node *fn, const char *name) {
+    if (!fn || !fn->b || fn->is_extern) return false;
+    InlScan st = { false, false };
+    int cnt = 0;
+    inl_scan(fn->b, name, fn->name, &st, &cnt, 0);
+    if (st.loop || st.self) return false;
+    return cnt <= 24;
+}
+
 static void gen_fn(Node *fn, const char *name, bool is_main, bool exported) {
     Type *ft = fn->type_val;
     Type *ret = (ft && ft->kind == TY_FN) ? ft->ret : ty_void();
+    /* 自动内联：只对**本模块私有**的函数有意义——exported 要给别的单元
+     * 调（那边只有原型，没有函数体），main 也不能 inline。 */
+    bool inl = !is_main && !exported && fn_small_for_inline(fn, name);
 
     Buf sig; buf_init(&sig);
     if (is_main) {
         buf_puts(&sig, "int ");
         buf_puts(&sig, "main");
     } else {
-        if (!exported) buf_puts(&sig, "static ");
         ctype(&sig, ret);
         buf_putc(&sig, ' ');
         cname(&sig, name ? name : "anon");
@@ -6794,7 +6848,10 @@ static void gen_fn(Node *fn, const char *name, bool is_main, bool exported) {
     gen_params(&sig, fn, is_main);
     buf_putc(&sig, ')');
 
-    bline(exported ? &g_bpub : &g_bproto, "%s;", sig.data);
+    /* 原型一直是 static：属性只写在定义处（同单元 clang 会用定义处的），
+     * 别的单元本来就看不见 static 函数。 */
+    if (is_main) bline(&g_bproto, "%s;", sig.data);
+    else bline(exported ? &g_bpub : &g_bproto, exported ? "%s;" : "static %s;", sig.data);
 
     /* 函数体内的局部 fn 绑定：先把它们发成同单元的 static 函数，
      * gen_decl_inner 再把局部槽初始化成函数地址（见 gen_local_fns）。 */
@@ -6807,7 +6864,9 @@ static void gen_fn(Node *fn, const char *name, bool is_main, bool exported) {
         line("int zx_proc_argc = 0;");
         line("char **zx_proc_argv = 0;");
     }
-    line("%s {", sig.data);
+    if (is_main || exported) line("%s {", sig.data);
+    else if (inl) line("ZX_INLINE %s {", sig.data);
+    else line("static %s {", sig.data);
     g_ind++;
     if (is_main) {
         for (int i = 0; i < g_ninit; i++) line("%s();", g_initname[i]);
@@ -7245,6 +7304,17 @@ static void buf_protos_from(Buf *bodies, Buf *protos) {
  * 返回单元数。 */
 int backend_emit_split(Node *root, Buf *header, Buf *rt, BUnit *units, int maxunits) {
     buf_init(&g_btypes);
+    /* 自动内联（decisions §138）：小函数在 -O0（dev 档）也展开。
+     * 为什么要宏：MSVC 不认 __attribute__，而默认工具链 zig cc 是 clang。
+     * always_inline 只在**定义**处需要——原型保持 static，同单元内
+     * clang 会采用定义处的属性；别的单元根本调不到 static 函数。 */
+    buf_puts(&g_btypes,
+        "/* ZX_INLINE: small functions are inlined even at -O0 */\n"
+        "#if defined(_MSC_VER) && !defined(__clang__)\n"
+        "#define ZX_INLINE static __forceinline\n"
+        "#else\n"
+        "#define ZX_INLINE static inline __attribute__((always_inline))\n"
+        "#endif\n\n");
     buf_init(&g_bpub);
     buf_init(&g_bglobals);
     buf_init(&g_bproto);

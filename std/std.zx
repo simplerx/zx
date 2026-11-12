@@ -29,6 +29,11 @@ pub const json = module("json.zx");
 // deinit 一次全释放。ctx 机制下 arena 是有状态分配器的标准实现。
 pub const arena = module("arena.zx");
 
+// DebugAllocator（debug_alloc.zx）。记账分配器：每次分配都留档，
+// 泄漏 / 重复释放 / 野指针当场报出来。`init(std.heap.page)` 造出来的
+// 分配器直接喂给 ArrayList / json / fs；`deinit(a)` 收尾。
+pub const debug_alloc = module("debug_alloc.zx");
+
 // 时间（time.zx）。QPC 单调钟（nsBetween 测耗时）、墙钟、ISO 8601 格式化。
 pub const time = module("time.zx");
 

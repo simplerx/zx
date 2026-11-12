@@ -1,0 +1,248 @@
+// debug_alloc.zx —— 记账分配器：每一次分配都留档，泄漏 / 野指针 / 重复释放
+//                   当场报出来，不用等 valgrind。
+//
+// 用法：
+//   const std = module("std");
+//
+//   var da = std.debug_alloc.DebugAllocator.init(std.heap.page);
+//   if (da) a {
+//       var list = std.ArrayList(i32).init(a);   // 谁吃 Allocator 都能套
+//       list.push(1);
+//       list.deinit();                           // 真释放
+//       std.debug_alloc.DebugAllocator.deinit(a); // 零泄漏 -> 干净退出
+//   }
+//
+// 语义：
+//   alloc —— 多要 HDR 字节的块头，记 [size, 序号, 链表]，返回负载起点；
+//   free  —— 校验块头里的标记与长度：重复释放、不是这儿分配的指针、长度
+//            对不上，三种都会打印现场并 panic（不是静默失败）；
+//   deinit—— 还有活跃块就是泄漏：逐块打印 [序号 / 大小 / 地址]，汇总后 panic。
+//
+// 追踪什么：每次分配一个自增序号（第 N 次），报告里按序号列出来，配合
+// `deinit` 的汇总可以对照代码里第几次分配没还。
+//
+// 布局（16 字节对齐）：
+//     [ HDR ][ payload n ]
+// HDR 由 Header 的大小向上取整到 16 得来，不改 Header 就自动跟着对——
+// 手写常数迟早会对不上，那会让 payload 错位 8 字节，查起来极难。
+//
+// 账本自己（Tracker）从 backing 里出，不参与追踪，也不会递归记账。
+
+const std = module("std");
+
+const ALIGN: usize = 16;
+
+const LIVE:  u32 = 0x4C495645;   // 'LIVE'
+const FREED: u32 = 0x46524545;   // 'FREE'
+
+// 块头。prev/next 是活跃链（双向），摘除 O(1)。
+const Header = struct {
+    prev: ?*Header,
+    next: ?*Header,
+    size: usize,   // 用户申请的字节数
+    seq: u64,      // 分配序号（从 1 起）
+    magic: u32,    // LIVE / FREED
+    pad: u32,      // 补齐 + 以后加字段的余量
+};
+
+// 负载起点对齐 16：块头大小向上取整到 16 的倍数。
+const HDR: usize = (@type(Header).size + ALIGN - 1) / ALIGN * ALIGN;
+
+// 账本。ctx 指向它；也是「分配器身份」的载体（同 arena 的 State）。
+const Tracker = struct {
+    backing: Allocator,
+    head: ?*Header,     // 活跃块链
+    nlive: usize,       // 活跃块数
+    liveBytes: usize,   // 活跃字节
+    peakBytes: usize,   // 峰值活跃字节
+    nalloc: usize,      // 累计分配次数（= 最后一个序号）
+};
+
+// ---- 两个函数指针：Allocator 的本体 ----
+
+const trackedAlloc = fn (ctx: ?*u8, n: usize) ?*u8 {
+    if (ctx) c {
+        let t = (*Tracker)c;
+        if (t.0.backing.alloc(t.0.backing.ctx, HDR + n)) raw {
+            let h = (*Header)raw;
+            h.0.prev = null;
+            h.0.next = t.0.head;
+            h.0.size = n;
+            h.0.seq = (u64)(t.0.nalloc + 1);
+            h.0.magic = LIVE;
+            h.0.pad = 0;
+            if (t.0.head) old {
+                old.0.prev = h;
+            }
+            t.0.head = h;
+            t.0.nalloc = t.0.nalloc + 1;
+            t.0.nlive = t.0.nlive + 1;
+            t.0.liveBytes = t.0.liveBytes + n;
+            if (t.0.liveBytes > t.0.peakBytes) { t.0.peakBytes = t.0.liveBytes; }
+            return ((*u8)raw) + HDR;
+        }
+    }
+    return null;
+};
+
+// 现场摘要：报错前先把「现在账上是多少」摆出来，否则只看到一条 panic。
+const dumpSummary = fn (t: *Tracker) void {
+    std.println("[debug_alloc] live {} block(s) / {} byte(s), peak {} / {} allocs total",
+            t.0.nlive, t.0.liveBytes, t.0.peakBytes, t.0.nalloc);
+};
+
+const trackedFree = fn (ctx: ?*u8, p: *u8, n: usize) void {
+    if (ctx) c {
+        let t = (*Tracker)c;
+        let addr = (usize)p;
+        // 低于 HDR 的地址不可能是本分配器的负载：连块头都读不到。
+        if (addr < HDR) {
+            std.println("[debug_alloc] free({x}) is below any tracked block", addr);
+            dumpSummary(t);
+            std.debug.panic("[debug_alloc] free of an unknown pointer");
+        }
+        let h = (*Header)(addr - HDR);
+
+        // 先看标记：FREED 是重复释放，其它值不是这儿的块。
+        if (h.0.magic == FREED) {
+            std.println("[debug_alloc] double free: block #{} at {x} ({} byte(s)) was already freed",
+                    h.0.seq, addr, h.0.size);
+            dumpSummary(t);
+            std.debug.panic("[debug_alloc] double free");
+        }
+        if (h.0.magic != LIVE) {
+            std.println("[debug_alloc] free({x}) points at a block that was never allocated here",
+                    addr);
+            dumpSummary(t);
+            std.debug.panic("[debug_alloc] free of an unknown pointer");
+        }
+        // 长度对不上：调用方记错了大小（多释放/少释放都会伤到后面的块）。
+        if (n != h.0.size) {
+            std.println("[debug_alloc] size mismatch at {x}: free({}) but block #{} is {} byte(s)",
+                    addr, n, h.0.seq, h.0.size);
+            dumpSummary(t);
+            std.debug.panic("[debug_alloc] free size mismatch");
+        }
+
+        // 摘链：头/中间/尾三种位置一条代码走完。
+        if (h.0.prev) pv {
+            pv.0.next = h.0.next;
+        } else {
+            t.0.head = h.0.next;
+        }
+        if (h.0.next) nx {
+            nx.0.prev = h.0.prev;
+        }
+
+        t.0.nlive = t.0.nlive - 1;
+        t.0.liveBytes = t.0.liveBytes - n;
+        h.0.magic = FREED;
+        t.0.backing.free(t.0.backing.ctx, (*u8)h, HDR + n);
+    }
+};
+
+// 收尾的实体：打印泄漏报告、把账本自己还给 backing，返回泄漏块数。
+// 写成模块级函数而不是容器成员——容器内互调静态成员目前发不出正确的
+// C 名字（见 decisions §138），模块级调用没有这个问题。
+const shutdown = fn (a: Allocator) usize {
+    if (a.ctx) c {
+        let t = (*Tracker)c;
+        let leaked = t.0.nlive;
+        let bytes = t.0.liveBytes;
+        if (leaked > 0) {
+            std.println("[debug_alloc] LEAK: {} block(s) / {} byte(s) still live",
+                    leaked, bytes);
+            var h = t.0.head;
+            var i: usize = 0;
+            while (i < leaked) {
+                if (h) hb {
+                    std.println("[debug_alloc]   block #{}  {} byte(s)  @ {x}",
+                            hb.0.seq, hb.0.size, (usize)hb + HDR);
+                    h = hb.0.next;
+                }
+                i = i + 1;
+            }
+            std.println("[debug_alloc] total {} alloc(s), peak {} byte(s)",
+                    t.0.nalloc, t.0.peakBytes);
+        }
+        // 账本自己还回去，泄漏块不动（它们已经是「证据」）。
+        t.0.backing.free(t.0.backing.ctx, (*u8)t, @type(Tracker).size);
+        return leaked;
+    }
+    return 0;
+};
+
+pub const DebugAllocator = struct {
+    // 造一个记账分配器。账本自己从 backing 里出。
+    pub const init = fn (backing: Allocator) ?Allocator {
+        if (backing.alloc(backing.ctx, @type(Tracker).size)) raw {
+            let t = (*Tracker)raw;
+            t.0.backing = backing;
+            t.0.head = null;
+            t.0.nlive = 0;
+            t.0.liveBytes = 0;
+            t.0.peakBytes = 0;
+            t.0.nalloc = 0;
+            return Allocator{ .ctx = (*u8)t, .alloc = trackedAlloc, .free = trackedFree };
+        }
+        return null;
+    };
+
+    // ---- 诊断读数 ----
+
+    pub const liveBlocks = fn (a: Allocator) usize {
+        if (a.ctx) c { return ((*Tracker)c).0.nlive; }
+        return 0;
+    };
+
+    pub const liveBytes = fn (a: Allocator) usize {
+        if (a.ctx) c { return ((*Tracker)c).0.liveBytes; }
+        return 0;
+    };
+
+    pub const peakBytes = fn (a: Allocator) usize {
+        if (a.ctx) c { return ((*Tracker)c).0.peakBytes; }
+        return 0;
+    };
+
+    pub const allocCount = fn (a: Allocator) usize {
+        if (a.ctx) c { return ((*Tracker)c).0.nalloc; }
+        return 0;
+    };
+
+    // 打印当前活跃块清单。返回块数（0 = 干净）。
+    // 按序号列：序号是「第几次分配」，比地址好对代码。
+    pub const report = fn (a: Allocator) usize {
+        if (a.ctx) c {
+            let t = (*Tracker)c;
+            var h = t.0.head;
+            var i: usize = 0;
+            while (i < t.0.nlive) {
+                if (h) hb {
+                    std.println("[debug_alloc]   block #{}  {} byte(s)  @ {x}",
+                            hb.0.seq, hb.0.size, (usize)hb + HDR);
+                    h = hb.0.next;
+                }
+                i = i + 1;
+            }
+            return t.0.nlive;
+        }
+        return 0;
+    };
+
+    // 收尾（宽容版）：打印报告、释放账本，返回泄漏块数。
+    // 工具/测试里想自己决定怎么报，用这个。
+    pub const deinitQuiet = fn (a: Allocator) usize {
+        return shutdown(a);
+    };
+
+    // 收尾（严格版）：有泄漏就打印报告并报错。
+    // 无泄漏时和普通分配器的 deinit 一样安静。
+    pub const deinit = fn (a: Allocator) void {
+        let leaked = shutdown(a);
+        if (leaked > 0) {
+            std.println("[debug_alloc] help: the blocks above were allocated here and never freed");
+            std.debug.panic("[debug_alloc] memory leak");
+        }
+    };
+};
