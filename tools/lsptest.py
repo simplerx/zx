@@ -464,24 +464,29 @@ check("completion.stdTask",
                         "group", "groupSpawn", "groupWait", "groupClose",
                         "groupRun"}, str(sorted(labels)))
 
-# 3f 统一对外接口（§123/§125）：Scope/Group/Chan 全退化成 usize 句柄，
-# group* 也从关联函数改成实例方法。t. 必须给齐全套能力，静态构造器与
-# 编译期常量不得混入。
+# 3f 统一对外接口（§123/§125/§128）：接口只留任务调度、默认通道、
+# select 与内核线程组；group* 是实例方法。t. 必须给齐这套能力，静态
+# 构造器与编译期常量不得混入，被删的 scope/chan/timer 不许再出现。
 off = MAIN.index("    t.close();") + len("    t.")
 send({"jsonrpc": "2.0", "id": 13, "method": "textDocument/completion", "params": {
     "textDocument": {"uri": uri}, "position": pos(MAIN, off)}})
 r, _ = recv_id("completion.unifiedApi", 13)
 labels = {i["label"] for i in r["result"]["items"]} if r and r.get("result") else set()
 check("completion.unifiedApi",
-      {"spawn", "await", "awaitAll", "awaitTimeout", "sleep", "cancel", "yield",
+      {"spawn", "await", "awaitAll", "cancel", "yield",
        "send", "recv", "trySend", "tryRecv", "close", "select",
-       "scope", "scopeSpawn", "scopeJoin", "scopeJoinTimeout", "scopeClose",
-       "withScope", "chan", "chanSend", "chanRecv", "chanTrySend",
-       "chanTryRecv", "chanClose",
        "group", "groupSpawn", "groupWait", "groupClose", "groupRun"} <= labels
       and not labels & {"coro", "single", "pool", "fromId",
                         "SEL_AWAIT", "SEL_RECV"},
       str(sorted(labels)))
+
+# §128：scope / chan / timer 不做对外 API，t. 上不许再冒出这些名字。
+_removed = {"scope", "scopeSpawn", "scopeJoin", "scopeJoinTimeout",
+            "scopeClose", "withScope", "chan", "chanSend", "chanRecv",
+            "chanTrySend", "chanTryRecv", "chanClose", "sleep",
+            "awaitTimeout"}
+check("completion.unifiedApi.noRemoved",
+      not (_removed & labels), str(sorted(_removed & labels)))
 
 # 3f2 同名成员跨容器不串签名（用户 2026-11-10 截图：实例上"显示关联函数"）：
 #   `Task.spawn` 与 `Group.spawn` 同名。t. 的 detail 必须是 Task 的 `?usize` 版，
@@ -4081,12 +4086,18 @@ _mgi = mcomp(MUSE, muri, "    gx.", "mchain.genericAliasInstance")
 check("completion.mchain.genericAliasInstance",
       {"val", "name"} <= set(_mgi), str(sorted(_mgi)))
 
-# B Task：scope / 通道 / timer / group / select 都在实例上
+# B Task（§128）：t. 只列保留的实例方法；scope/chan/timer 已不导出
 _mt = mcomp(MUSE, muri, "    t.", "mchain.taskInstance")
 check("completion.mchain.taskInstanceCapabilities",
-      {"scope", "scopeSpawn", "scopeJoin", "scopeJoinTimeout", "chan", "chanSend",
-       "sleep", "awaitTimeout", "select", "group", "withScope"} <= set(_mt),
+      {"spawn", "await", "awaitAll", "cancel", "yield", "send", "recv",
+       "trySend", "tryRecv", "select", "group", "groupRun",
+       "close"} <= set(_mt),
       str(sorted(_mt)))
+check("completion.mchain.taskInstance.noRemoved",
+      not ({"scope", "scopeSpawn", "scopeJoin", "scopeJoinTimeout",
+            "scopeClose", "withScope", "chan", "chanSend", "chanRecv",
+            "chanTrySend", "chanTryRecv", "chanClose", "sleep",
+            "awaitTimeout"} & set(_mt)), str(sorted(_mt)))
 _mtt = mcomp(MUSE, muri, "    std.task.Task.", "mchain.taskType")
 check("completion.mchain.taskTypeNamespace",
       set(_mtt) == {"coro", "single", "pool", "fromId", "SEL_AWAIT", "SEL_RECV"},

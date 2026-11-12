@@ -4442,11 +4442,12 @@ t.S.Deeper.Leaf.` 全都能出常量——**路径解析是通的**，0 项只�
    现在只放行 `: type` 标注，照样合成一份 `const g = struct{…};` 塞进扫描
    集前部，三条链复用同一份声明。其他标注仍走老路。
 
-### 不是缺陷：Task 的能力全在实例上
+### 不是缺陷：Task 的能力全在实例上（§128 已收窄）
 
 `std.task.Task.` 只有 `coro/single/pool/fromId` + `SEL_AWAIT/SEL_RECV`
-共 6 项，是 §125 的类型命名空间语义；探针实测 `t.` 有 **31 个实例方法**，
-`scope* / withScope / chan* / group* / select / sleep / awaitTimeout` 全在。
+共 6 项，是 §125 的类型命名空间语义。当时探针实测 `t.` 有 **31 个实例方法**，
+`scope* / withScope / chan* / group* / select / sleep / awaitTimeout` 全在；
+§128 起按用户裁定收窄成 **20 个实例方法**，本节记录的是当时的观测。
 已在 `docs/reference.md` §14.10 开头加醒目说明，避免"看不见 = 没实现"。
 
 ### 守门与验证
@@ -4456,3 +4457,74 @@ t.S.Deeper.Leaf.` 全都能出常量——**路径解析是通的**，0 项只�
 `data.` `data.data.` / 泛型别名链 `g.` / 模块限定别名 `h.` / `g{` / `gx.` /
 `t.` 的 11 个能力方法 / `Task.` 恰好 6 项 / `if` snippet。
 LSP 冒烟 **360 → 373 项全过**，守的是"不许删用例变绿"。
+
+## §128 scope / chan / timer 不做 Task 接口，Task 回到紧凑接口（2026-11-12 用户拍板）
+
+用户：「scope/chan/timer 我是要把他们做成 Task 类，他们都是 Task，让他们的
+实例做动态分发（多态），不是把他们做成方法；你看看 scope/chan/timer 可以
+实现 Task 的接口吗？如果不行就不做了，把他们从 task 的方法删去，task 保留
+原来干净的接口」。
+
+### 结论：做不成，按条件走「删去」分支
+
+- **语言层没有接口**。`spec/decisions.md`「明确不做的事」与 `spec/zx-spec.md`
+  都写死「无 trait / interface / 类型类、无重载、不做 trait / 约束」。
+  `Task` 只是普通 `struct`，文档里叫它接口是设计口径，不是语言特性：没有
+  「`Scope` 是一种 `Task`」的表达，没有子类型替换，也没有编译期分派校验。
+  函数指针能作字段（`cb: fn (i32) i32`），所以像 `std.Allocator` 那样拼
+  `{ ctx, spawn: fn, await: fn, … }` 在技术上可行 —— 但调用点全靠
+  `(T)bits` 强转 ctx，零静态检查；§125 用户也已拍过「不引入 vtable、不动
+  C 运行时」。模拟出来的是「函数指针表 + 强转」，比现在更不透明，不是多态。
+- **契约不匹配**。`Task` 是调度器实例（任务表 / 就绪队列 / 线程池），
+  `Scope` 是子任务树生命周期，`Chan` 是通信端点，`Timer` 连独立对象都没有
+  （只是 `ZxTask` 上 timer 链的两个操作）。让三者「实现同一接口」必须填满
+  `spawn/await/close/select` 全部槽位、不支持的填 `@trap` 占位，接口比现在
+  更脏，误调用直接崩。
+- **两个硬限制**：容器方法不能泛型（E0701），`Chan(T)` 当初正因此被收敛成
+  `usize` 载荷（§123）；C 侧 `zx_sc_new(t)` / `zx_ch_new(t)` /
+  `zx_task_sleep(t, ms)` / `zx_sel_wait(t, …)` 全绑在 `ZxTask` 上，拆独立
+  类型要重做状态与生命周期。用户明确不做机制层重构。
+
+### 删除边界（用户选项确认）
+
+按点名的三组删，**保留** `group*`、实例自带默认通道
+`send/recv/trySend/tryRecv`、`select` 与 `SEL_*`：
+
+- 删 `scope / scopeSpawn / scopeJoin / scopeJoinTimeout / scopeClose /
+  withScope`（6）、`chan / chanSend / chanRecv / chanTrySend / chanTryRecv /
+  chanClose`（6）、`sleep / awaitTimeout`（2）；`extern fn zx_sc_*` /
+  `zx_ch_*` / `zx_task_sleep` / `zx_task_await_timeout` 同步移除。
+- `std/task.zx` 从 31 个实例方法收窄到 **20 个**：4 构造器 + `spawn /
+  await / awaitAll / cancel / yield` + `send / recv / trySend / tryRecv` +
+  `select` + `group / groupSpawn / groupWait / groupClose / groupRun` +
+  `close`。`Task.` 静态面仍是 4 构造器 + `SEL_AWAIT/SEL_RECV` 共 6 项。
+- **C 运行时一个字不改**：`zx_task_close` 要遍历 `ZxScope` / `ZxChan`
+  停靠者链逐个唤醒，`zx_sel_wait` 的 `SEL_RECV` 走 `zx_chan_recv(s, NULL, …)`，
+  默认通道 `send/recv` 也走同一套 `zx_chan_*`；chan/timer/scope 的内部
+  机制全被保留能力复用，没有可独立裁掉的部分，且整个运行时按需整体
+  发射。它们是服务唤醒链的内部机制，不是对外类型（用户 §123「这些都做
+  内部实现吧」）。未再被 zx 层引用的 C 入口留在生成代码里，不导出。
+
+### 用例与守门
+
+- 删 6 个完全依赖被删 API 的用例：`task_chan / task_scope /
+  task_scope_auto / task_scope_cancel / task_scope_fail / task_timeout`。
+- 改写 3 个：`task_blocking.zx` 的 `sleep` 换 `yield`，「无隐式 offload」
+  证据从「tick 推进次数」改成「tick 有没有跑完」（`!T` 调用注入的取消门
+  本来就会推进一次队列，量次数会假报 1）；③ 段从 `scope*` 换成裸
+  `spawn/await`。`task_select.zx` 改用默认通道 `SEL_RECV, 0`，慢任务换成
+  空分支 `n = 0` 测整体超时。`tests/bad/chan-wide.zx` 改用 `t.send(bad)`
+  继续守 E0300。
+- `chan_basic.zx` 是**默认通道**测试，保留（文件名不改）。
+- `tools/lsptest.py` 的 `completion.unifiedApi` / `nest.taskTy.noBehavior` /
+  `mchain.taskInstanceCapabilities` 按新接口改断言，并新增反向断言：
+  被删的名字不得出现在 `t.` 补全里。**按新语义改断言，不删用例变绿**。
+- `docs/reference.md` §14.10、`std/std.zx`、`README.md` 同步；`docs/manual.md`
+  的示例只用 `spawn/await`，无需改。
+
+### 口径
+
+- 这不是「能力被砍」：C 机制层完整保留，只是不再从 `Task` 导出。
+- 想让 scope/chan/timer 成为真正的多态类型，前提是先给 zx 加
+  interface / trait / 子类型（或至少带静态校验的接口值），那是语言级
+  改动，独立任务，本轮不做。

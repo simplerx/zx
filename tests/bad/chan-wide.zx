@@ -1,15 +1,13 @@
 // expect: cannot cast
-// 命名通道的载荷统一是 usize，靠 (usize)v / (T)bits 往返。castable 表就是
-// 编译期约束：[]T 是 16 字节的胖指针，cast 不到 usize，必须报 E0300。
+// 实例默认通道的载荷统一是 usize，靠 (usize)v / (T)bits 往返。castable 表
+// 就是编译期约束：[]T 是 16 字节的胖指针，cast 不到 usize，必须报 E0300。
 // 大值请传指针，生命周期由发送方管理。
 const std = module("std");
 const main = fn () i32 {
     let t = std.task.Task.coro();
     defer t.close();
-    let ch = t.chan();
-    defer t.chanClose(ch);
     let slice: []const u8 = "abc";
     let bad = (usize)slice;        // 胖指针 -> usize：cannot cast
-    if (t.chanSend(ch, bad)) { } else e { std.println("{}", std.debug.errName(e)); }
+    if (t.send(bad)) { } else e { std.println("{}", std.debug.errName(e)); }
     return 0;
 };

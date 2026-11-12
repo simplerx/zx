@@ -33,8 +33,10 @@ pub const arena = module("arena.zx");
 pub const time = module("time.zx");
 
 // 任务（task.zx）。对外只有 Task 一个类型：它是接口，coro/single/pool/
-// fromId 生成实例，其余能力全是 `t.` 实例方法（动态分发）；作用域 / 组 /
-// 通道都是 usize 句柄。Task. 上只剩编译期分支常量 SEL_AWAIT / SEL_RECV。
+// fromId 生成实例，其余能力全是 `t.` 实例方法（分发）。接口只保留任务
+// 调度、实例自带的默认通道、select 与内核线程组；作用域 / 命名通道 /
+// 定时器不做对外 API（zx 没有接口/多态，见 decisions §128），它们留在
+// C 机制层服务唤醒链。Task. 上只剩 SEL_AWAIT / SEL_RECV。
 // std.io 保持纯同步，要并发就显式「task + io」。
 pub const task = module("task.zx");
 

@@ -5,11 +5,11 @@
 //    可观测证据：编译器不偷偷起线程，也不偷偷停靠纤程。
 // ② pool(2)：把 io 放进一个任务，另一条 worker 上的任务照常完成
 //    （parallel:1）—— 显式 task + io 就是 zx 的异步做法。
-// ③ 作用域里的 io 任务同样是显式组合。
+// ③ 不做任何包装，再跑一次显式 task + io 组合。
 // expect-output:implicit:0
 // expect-output:io:67108864
 // expect-output:parallel:1
-// expect-output:scope:5
+// expect-output:explicit:5
 const std = module("std");
 const Task = std.task.Task;
 
@@ -17,15 +17,19 @@ const PATH = "io_task_explicit.tmp";
 const BIG: usize = 64 * 1024 * 1024;
 var g_t: usize = 0;
 var g_ticks: usize = 0;
+var g_done: usize = 0;
 
+// 一直留在就绪队列里的活跃任务。同步 io 占住唯一上下文时它跑不完；
+// 若编译器偷偷把 io offload 到别的线程，根上下文空出来就会把它跑完，
+// g_done 变 1 —— 这是「没有隐式 offload」的可观测证据。
 const tick = fn (_: usize) !usize {
     let t = Task.fromId(g_t);
     var k: usize = 0;
-    while (k < 3) {
-        try t.sleep(5);
+    while (k < 200) {
+        t.yield();
         k = k + 1;
-        _ = std.atomic.atomicAdd(&g_ticks, 1);
     }
+    _ = std.atomic.atomicAdd(&g_done, 1);
     return 1;
 };
 
@@ -53,8 +57,9 @@ const writeBig = fn (tag: u8) !usize {
 
 const ioJob = fn (_: usize) !usize {
     let n = try writeBig(65);
-    // 同步 io 占住唯一上下文：tick 一次都没被推进 => 无隐式 offload
-    std.println("implicit:{}", std.atomic.atomicLoad(&g_ticks));
+    // 不量「推进次数」：!T 调用注入的取消门本来就会推进一次队列。
+    // 量的是 tick 有没有跑完 —— 同步 io 下必为 0。
+    std.println("implicit:{}", std.atomic.atomicLoad(&g_done));
     return n;
 };
 
@@ -62,7 +67,7 @@ const parIo = fn (_: usize) !usize { return try writeBig(66); };
 
 const quick = fn (_: usize) !usize {
     if (std.io.openWrite(PATH)) h {
-        _ = std.io.write(h, "scope-io");
+        _ = std.io.write(h, "explicit-io");
         std.io.close(h);
     }
     _ = std.file.remove(PATH);
@@ -90,12 +95,10 @@ const main = fn () !i32 {
     if (pl.await(hp)) v { _ = v; } else e { return e; }
     std.println("parallel:{}", std.atomic.atomicLoad(&g_ticks) >= 1000);
 
-    // ③ 作用域里的 io 任务同样走显式组合
-    let sc = pl.scope();
-    defer pl.scopeClose(sc);
-    _ = pl.scopeSpawn(sc, quick, 0).?;
-    if (pl.scopeJoin(sc)) v { std.println("scope:{}", v); } else e {
-        std.println("scope-err:{}", std.debug.errName(e));
+    // ③ 不做任何包装：io 任务照样交给实例显式组合
+    let hq = pl.spawn(quick, 0).?;
+    if (pl.await(hq)) v { std.println("explicit:{}", v); } else e {
+        std.println("explicit-err:{}", std.debug.errName(e));
     }
     return 0;
 };

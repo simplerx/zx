@@ -1,14 +1,20 @@
 // task.zx —— zx 唯一的并发抽象。对外只有 Task 一个类型。
 //
-// 简洁、透明（decisions §123）：
+// 简洁、透明（decisions §123 / §128）：
 //   * std.io 是纯同步调用，没有 hook / offload / 隐式线程。要并发就显式
 //     「task + io」：起一个任务，在任务里做 io；编译器不替用户做调度决策。
 //   * 任务函数是普通 fn(usize) !usize，await 是普通方法。没有 async/await、
 //     没有函数着色、没有新语法、没有类型系统里的新概念。
 //   * Task 是接口：4 个静态构造器（coro/single/pool/fromId）生成实例，
-//     其余能力全是实例方法，通过 `t.` 动态分发 —— 没有 `Task.spawn()`
-//     这类关联函数调用。所有句柄（任务 / 作用域 / 组 / 通道）都是 usize；
-//     Scope / Group / Chan 与运行时入口都是内部实现，不导出。
+//     其余能力全是实例方法，通过 `t.` 分发 —— 没有 `Task.spawn()`
+//     这类关联函数调用。句柄（任务 / 组 / 分支）统一 usize。
+//   * 接口只保留四组：任务调度、实例自带的默认 rendezvous、select、
+//     内核线程组。**不导出**作用域 / 命名通道 / 定时器：zx 没有
+//     trait / interface / 子类型，Scope/Chan/Timer 无法「实现 Task 接口」
+//     做多态；手写 vtable 只是函数指针表 + ctx 强转，没有静态检查，
+//     而三者的能力集与 Task 也不构成同一契约（见 §128）。C 运行时里
+//     这些机制仍然存在，但只作内部实现，服务默认通道、select 超时与
+//     close 的唤醒链，不进对外 API。
 //   * 类型命名空间只剩编译期分支常量 SEL_AWAIT / SEL_RECV（值，不是行为）。
 //
 // 实例物理隔离：每个 Task 有自己的任务表、就绪队列、通道与一组线程。
@@ -18,13 +24,11 @@
 //
 // 边界（decisions §94）：spawn/await/cancel/send/recv 可从本实例管理的
 // 任意 OS 线程并发调用；构造、awaitAll、close 由创建者串行使用。
-// defer 顺序：先 `defer t.close()`，再 `defer t.scopeClose(sc)` /
-// `defer t.chanClose(ch)`，让子资源先于实例关闭。
 //
 // 运行时分层：C（src/backend.c 的 emit_task_runtime）是内部机制层，只提供
 // 栈切换 / TLS / 线程 / 锁 / 条件变量 / 单调钟 / 原子这些 zx 表达不了的
 // 原语，以及竞态密集的纤程调度与等待链；库层用下面这些私有 extern 声明
-// 使用它们。策略与编排（句柄、作用域清理、批量组、select 分支）在 zx 侧。
+// 使用它们。策略与编排（句柄、组批量、select 分支常量）在 zx 侧。
 // API 与边界见 docs/reference.md §14.10。
 
 // ---- 内部：运行时入口（不导出）----
@@ -40,26 +44,11 @@ extern fn zx_task_recv(s: usize) !usize;
 extern fn zx_task_try_send(s: usize, v: usize) !void;
 extern fn zx_task_try_recv(s: usize) !usize;
 extern fn zx_task_close(s: usize) void;
-extern fn zx_task_sleep(s: usize, ms: usize) !void;
-extern fn zx_task_await_timeout(s: usize, h: usize, ms: usize) !usize;
 
 extern fn zx_tg_new() usize;
 extern fn zx_tg_spawn(g: usize, f: fn (usize) !usize, ctx: usize) usize;
 extern fn zx_tg_wait(g: usize) void;
 extern fn zx_tg_close(g: usize) void;
-
-extern fn zx_sc_new(t: usize) usize;
-extern fn zx_sc_spawn(s: usize, f: fn (usize) !usize, ctx: usize) ?usize;
-extern fn zx_sc_join(s: usize) !usize;
-extern fn zx_sc_join_timeout(s: usize, ms: usize) !usize;
-extern fn zx_sc_close(s: usize) void;
-
-extern fn zx_ch_new(t: usize) usize;
-extern fn zx_ch_close(ch: usize) void;
-extern fn zx_ch_send(ch: usize, v: usize) !void;
-extern fn zx_ch_recv(ch: usize) !usize;
-extern fn zx_ch_try_send(ch: usize, v: usize) !void;
-extern fn zx_ch_try_recv(ch: usize) !usize;
 
 extern fn zx_sel_wait(t: usize, br: *const usize, n: usize, ms: usize, which: *usize) !usize;
 
@@ -104,17 +93,6 @@ pub const Task = struct {
         return zx_task_await_all(self.id);
     };
 
-    // 有界等待：ms 到点返回 error.timeout（不取消任务，句柄仍有效）。
-    pub const awaitTimeout = fn (self: *const Self, h: usize, ms: usize) !usize {
-        return zx_task_await_timeout(self.id, h, ms);
-    };
-
-    // 协作式睡眠：任务上下文停靠（worker 空出来跑别的），根上下文推进
-    // 本实例的就绪队列。被 cancel 时返回 error.cancelled。
-    pub const sleep = fn (self: *const Self, ms: usize) !void {
-        return zx_task_sleep(self.id, ms);
-    };
-
     pub const cancel = fn (self: *const Self, h: usize) void {
         zx_task_cancel(self.id, h);
     };
@@ -125,7 +103,8 @@ pub const Task = struct {
 
     // ---- 通信：实例自带的无缓冲 rendezvous ----
     // 任务内真停靠（配对直接握手）；根上下文是非阻塞的协作式操作，
-    // 没有对手就返回 would_block。
+    // 没有对手就返回 would_block。载荷是 usize：大值传指针，由调用点
+    // (usize)v / (T)bits 自己 cast，castable 表当编译期约束。
 
     pub const send = fn (self: *const Self, v: usize) !void {
         return zx_task_send(self.id, v);
@@ -143,98 +122,20 @@ pub const Task = struct {
         return zx_task_try_recv(self.id);
     };
 
-    // ---- 命名通道：句柄化，载荷统一 usize ----
-    //
-    // 通道载荷是一个 usize（8 字节）：整数、bool、枚举、指针都行。更大的
-    // 值请传指针，生命周期由发送方管理 —— zx 没有 GC，让通道暗中拷贝大
-    // 对象只会制造悬垂。类型化由调用点自己 cast（`(usize)v` / `(T)bits`），
-    // castable 表顺带当了编译期约束：切片 / 结构体传不进来。
-    //
-    //   let ch = t.chan();  defer t.chanClose(ch);
-    //   try t.chanSend(ch, 42);  const v = try t.chanRecv(ch);
-    //
-    // 无缓冲 rendezvous；单独 chanClose 只封口并唤醒停靠者，壳由实例
-    // close 统一回收。ch = 0 表示实例自带的默认通道。
-
-    pub const chan = fn (self: *const Self) usize {
-        return zx_ch_new(self.id);
-    };
-
-    pub const chanSend = fn (self: *const Self, ch: usize, v: usize) !void {
-        return zx_ch_send(ch, v);
-    };
-
-    pub const chanRecv = fn (self: *const Self, ch: usize) !usize {
-        return zx_ch_recv(ch);
-    };
-
-    pub const chanTrySend = fn (self: *const Self, ch: usize, v: usize) !void {
-        return zx_ch_try_send(ch, v);
-    };
-
-    pub const chanTryRecv = fn (self: *const Self, ch: usize) !usize {
-        return zx_ch_try_recv(ch);
-    };
-
-    pub const chanClose = fn (self: *const Self, ch: usize) void {
-        zx_ch_close(ch);
-    };
-
     // ---- select ----
     //
     // br 每 2 项描述一个分支 [kind, arg]，which 出参写胜者索引，ms 是整体
     // 超时。同时就绪时索引小者胜（确定性）；返回胜者的值。
     //   var which: usize = 0;
-    //   let br = &.{ Task.SEL_AWAIT, h, Task.SEL_RECV, ch };
+    //   let br = &.{ Task.SEL_AWAIT, h, Task.SEL_RECV, 0 };
     //   if (t.select(br, 2, 100, &which)) v { ... } else e { ... }
 
     // select 分支种类：br 每 2 个 usize 是 [kind, arg]。
     pub const SEL_AWAIT: usize = 0;   // arg = 任务句柄
-    pub const SEL_RECV: usize = 1;    // arg = 通道句柄（0 = 默认通道）
+    pub const SEL_RECV: usize = 1;    // arg = 0 即实例默认通道
 
     pub const select = fn (self: *const Self, br: *const usize, n: usize, ms: usize, which: *usize) !usize {
         return zx_sel_wait(self.id, br, n, ms, which);
-    };
-
-    // ---- 结构化并发：作用域句柄 ----
-    //
-    //   spawn      登记成员；任一成员失败时运行时立刻 cancel 其余兄弟
-    //   scopeJoin  等全体收尾，回放首个错误；全成功返回首个成员的返回值
-    //   scopeClose cancel 未完成成员 + 等全体收尾；幂等
-    //
-    // 「退出必清理」靠 defer：`defer t.scopeClose(sc)`（或直接用 withScope），
-    // 正常返回与 !T 错误传播都会走 defer。父任务被 cancel 时错误沿 !T
-    // 上冒，defer 触发 close，整棵子任务树被级联取消。
-    // 成员结果仍用 t.await(h) 逐个取（与 awaitAll 的纯屏障用法一致）。
-
-    pub const scope = fn (self: *const Self) usize {
-        return zx_sc_new(self.id);
-    };
-
-    pub const scopeSpawn = fn (self: *const Self, sc: usize, f: fn (usize) !usize, ctx: usize) ?usize {
-        return zx_sc_spawn(sc, f, ctx);
-    };
-
-    pub const scopeJoin = fn (self: *const Self, sc: usize) !usize {
-        return zx_sc_join(sc);
-    };
-
-    // deadline：全体成员必须在 ms 内收尾，到点返回 error.timeout 并 cancel
-    // 全体成员。defer t.scopeClose(sc) 仍照常兜底。
-    pub const scopeJoinTimeout = fn (self: *const Self, sc: usize, ms: usize) !usize {
-        return zx_sc_join_timeout(sc, ms);
-    };
-
-    pub const scopeClose = fn (self: *const Self, sc: usize) void {
-        zx_sc_close(sc);
-    };
-
-    // 糖写法：defer 由 withScope 自己登记，body 抛错也照样清理。
-    // zx 没有闭包，body 要读外部数据用全局变量或 Task.fromId(t.id)。
-    pub const withScope = fn (self: *const Self, body: fn (*const Self, usize) !usize) !usize {
-        let sc = self.scope();
-        defer self.scopeClose(sc);
-        return try body(self, sc);
     };
 
     // ---- 内核线程组：句柄化 ----

@@ -604,20 +604,27 @@ alloc 是 O(1) bump、16 对齐；free 是 no-op（arena 语义）。**不是线
 
 **对外只有一个类型 `std.task.Task`**（下文简称 `Task`），它是**接口**：
 4 个静态构造器 `coro() / single() / pool(n) / fromId(id)` 生成实例，之后
-所有能力都通过 `t.` 实例方法动态分发 —— 没有 `Task.spawn()` 这类关联函数
-调用。任务 / 作用域 / 组 / 通道的句柄一律是 `usize`；`Scope` / `Group` /
-`Chan` 与运行时入口都是内部实现，不导出。类型命名空间只剩两个编译期分支
-常量 `Task.SEL_AWAIT / SEL_RECV`（值，不是行为）。任务函数是普通
-`fn (usize) !usize`，`await` 是普通方法 —— 没有 async/await、没有函数着色、
-没有新语法。
+所有能力都通过 `t.` 实例方法分发 —— 没有 `Task.spawn()` 这类关联函数
+调用。任务与组的句柄一律是 `usize`；运行时入口都是内部实现，不导出。
+类型命名空间只剩两个编译期分支常量 `Task.SEL_AWAIT / SEL_RECV`（值，
+不是行为）。任务函数是普通 `fn (usize) !usize`，`await` 是普通方法 ——
+没有 async/await、没有函数着色、没有新语法。
 
-> **在编辑器里找不到 scope / 通道 / timer？** 在 `std.task.Task.` 后敲补全
-> 只会看到 6 项：4 个静态构造器 + `SEL_AWAIT` / `SEL_RECV`。这不是「没实现」，
-> 而是类型命名空间按语义只列静态面。全部 **31 个能力方法都在实例上**：先写
+**接口只保留四组**：任务调度、实例自带的默认 rendezvous、`select`、
+内核线程组。作用域 / 命名通道 / 定时器**不做对外 API**：zx 没有
+trait / interface / 子类型，`Scope` / `Chan` / `Timer` 无法「实现 Task
+接口」做多态；手写 vtable 只是「函数指针表 + ctx 强转」，没有静态检查，
+而三者与 Task 的能力集也不构成同一契约（decisions §128）。C 运行时里
+这些机制仍作为内部实现存在，服务默认通道、`select` 超时与 `close` 的
+唤醒链 —— 它们是机制，不是对外类型。
+
+> **在编辑器里敲补全**：`std.task.Task.` 只有 6 项（4 个静态构造器 +
+> `SEL_AWAIT` / `SEL_RECV`），这是类型命名空间按语义只列静态面。
+> 全部 **20 个实例方法都在 `t.` 上**：先写
 > `var t = std.task.Task.single();`，再敲 `t.` 就能看到
-> `spawn / await* / cancel / sleep / select / scope* / withScope / chan* /
-> group* / send / recv / close` 等。分组清单见下面「实例方法」与
-> 「结构化并发」「超时、select、命名通道」「内核线程组」四节。
+> `spawn / await / awaitAll / cancel / yield / send / recv / trySend /
+> tryRecv / select / group / groupSpawn / groupWait / groupClose /
+> groupRun / close`。
 
 ```zx
 const job = fn (ctx: usize) !usize { … };    // 任务函数形状固定
@@ -631,13 +638,13 @@ try t.awaitAll();
 try t.send(v);  const x = try t.recv();     // 实例自带 rendezvous 通道
 ```
 
-- 静态构造器（唯一允许写在 `Task.` 上的函数）：`coro()` 协程实例（不建线程，
+- **静态构造器**（唯一允许写在 `Task.` 上的函数）：`coro()` 协程实例（不建线程，
   await 时推进）、`single()` 1 条专属线程、`pool(n)` n 条工作线程（n=0 取
   CPU-1）、`fromId(id)` 从任务内还原实例。
-- 实例方法（全部走 `t.`）：`spawn / await / awaitAll / awaitTimeout / cancel /
-  yield / sleep / send / recv / trySend / tryRecv / close`、`select`、
-  `scope* / withScope`、`chan*`、`group*`；`select` 的分支种类是编译期关联
-  常量 `Task.SEL_AWAIT` / `Task.SEL_RECV`。
+- **实例方法**（全部走 `t.`）：`spawn / await / awaitAll / cancel / yield /
+  send / recv / trySend / tryRecv / select / group / groupSpawn / groupWait /
+  groupClose / groupRun / close`；`select` 的分支种类是编译期关联常量
+  `Task.SEL_AWAIT` / `Task.SEL_RECV`。
 - **边界**（decisions §94）：`spawn / await / cancel / send / recv` 可从实例管理的
   任意工作线程并发调用；构造、`awaitAll`、`close` 由创建者串行使用，不保证外部线程
   并发构造或关闭实例。`close()` 停止线程组并释放实例内存与全部任务结果，之后句柄
@@ -647,6 +654,16 @@ try t.send(v);  const x = try t.recv();     // 实例自带 rendezvous 通道
   `await(h)` 逐个取回结果；不会出现句柄指向别的任务的 ABA。
 - **取消**：`cancel(h)` 置旗标，任务在下一个 `!T` 函数入口的 await 门、或循环回边
   收到 `error.cancelled`，沿 `!T` 传播链上冒到 `await` 方——纯计算循环也能取消。
+- **通信**：实例自带一条无缓冲 rendezvous（默认通道）。任务内 `send/recv` 真停靠、
+  配对直接握手；根上下文是非阻塞的协作式操作，没有对手就返回 `would_block`。
+  载荷是一个 `usize`，靠 `(usize)v` / `(T)bits` 往返 —— castable 表顺带做了
+  编译期约束：`[]T`(16 字节)、结构体等 cast 不到 usize 的类型直接 **E0300**，
+  要传大值用指针。浮点会走整数转换丢精度，请传位模式或指针。
+- **`select`**：`br` 每 2 个 usize 是 `[kind, arg]`，`SEL_AWAIT` 接任务句柄、
+  `SEL_RECV` 的 `arg = 0` 即实例默认通道。`which` 写胜者索引（超时 = n），
+  同时就绪时索引小者胜（确定性）。返回胜者的值；整体 `ms` 到点给
+  `error.timeout`。实现不挂任何等待者链，靠轮询 + 停靠一个 tick，
+  所以超时/取消不会留下「已恢复但仍在链上」的幽灵任务。
 - **内核线程组**：`t.group()` → `usize` 句柄；`t.groupSpawn(g, f, ctx)` /
   `t.groupWait(g)` / `t.groupClose(g)` / `t.groupRun(g, f, n)`。组不占实例
   资源（不建线程池、不建队列、零锁），但入口与其他能力一样挂在实例上，
@@ -656,82 +673,20 @@ try t.send(v);  const x = try t.recv();     // 实例自带 rendezvous 通道
 tell` 直接落到 libc，没有 hook、没有 offload、没有隐式线程。要并发就显式
 「task + io」—— `t.spawn` 一个任务，在任务里做 io；放进 `pool(n)` 实例就有
 独立 worker 承载阻塞，其它任务照常推进。编译器不替用户做调度决策。
+**没有自动 offload**：§122 的 `ZxIoJob` / `zx_io_hook` 方案已按用户裁定
+撤销。真异步 I/O（IOCP / io_uring）需要编译器把同步调用点变换成状态机或引入
+async/await，会丢掉 zx 的无函数着色，不做。
 
-**结构化并发**：`t.scope()` 返回 `usize` 句柄，成员登记 / 等待 / 清理都是实例方法：
-`scopeSpawn / scopeJoin / scopeJoinTimeout / scopeClose`；糖写法
-`t.withScope(body)` 自己登记 defer。
-
-```zx
-var t = std.task.Task.pool(0);
-defer t.close();                       // 先登记：defer 是 LIFO
-if (t.withScope(fn (t: *const Task, sc: usize) !usize {
-    var i: usize = 0;
-    while (i < 8) { _ = t.scopeSpawn(sc, job, i).?; i = i + 1; }
-    return try t.scopeJoin(sc);
-})) v { … } else e { … }               // 退出自动取消并等待所有成员
-```
-
-- `scopeSpawn` 登记成员；任一成员带错误结算时，运行时**立刻 cancel 其余兄弟**
-  （fail-fast），`scopeJoin` 回放的是**首个**错误而不是后来那些 `cancelled`。
-- `scopeJoin() !usize` 等全体收尾：全成功返回首个成员的返回值，有失败返回
-  首个错误。结果仍可用 `t.await(h)` 逐个取，与 `awaitAll` 的纯屏障用法一致。
-- `scopeClose()` 取消未完成成员并等全体收尾，幂等；关闭后 `scopeSpawn` 返回 null。
-- **退出必清理**：`defer t.scopeClose(sc)` 在正常返回和 `!T` 错误传播时都执行，
-  因此父任务被 cancel 时整棵子任务树被级联取消，不会漏任务或工作线程。
-  `withScope` 自己登记 defer。zx 没有闭包，body 已拿到实例与作用域句柄。
-- 边界同 §94：`scope() / scopeJoin() / scopeClose()` 由创建者串行使用，
-  `scopeSpawn` 可并发；defer 顺序必须让**作用域先于实例**关闭。
-
-**超时、select、命名通道**
-
-```zx
-try t.sleep(20);                                     // 协作式睡眠，不占 worker
-if (t.awaitTimeout(h, 50)) v { … } else e { … }      // 超时 error.timeout
-if (t.scopeJoinTimeout(sc, 100)) v { … } else e { … } // deadline：到点 cancel 全体
-
-let ch = t.chan();  defer t.chanClose(ch);           // usize 句柄
-try t.chanSend(ch, 42);  const v = try t.chanRecv(ch);
-
-var which: usize = 0;
-let br = &.{ Task.SEL_AWAIT, h, Task.SEL_RECV, ch };
-if (t.select(br, 2, 200, &which)) v { … } else e { … }
-```
-
-- **timer 不建后台线程**：`zx_now_ms()` 单调毫秒钟 + 实例 timer 链，worker 的
-  `cv_wait`(5ms 心跳) 与根上下文 drive 循环轮询触发。所有新等待 API 统一走
-  「轮询 + 停靠一个 tick」，**不挂任何等待者链** —— 超时/取消不会留下
-  「已恢复但仍在链上」的幽灵任务。精度是心跳级（毫秒），不是硬实时。
-- `ZxSlot.done_ms` 记结算时刻：`awaitTimeout` / `scopeJoinTimeout` 用它判「按时
-  完成」，不能只看「现在是否已完成」——纯计算任务可能在一次调度里跑过截止
-  时间才结算。
-- `sleep(ms) !void` 任务上下文停靠（worker 空出来），根上下文推进就绪队列；
-  被 cancel 返回 `error.cancelled`。`awaitTimeout(h, ms)` 超时**不取消任务**，
-  句柄之后照常 `await`。`scopeJoinTimeout(sc, ms)` 是 deadline：到点返回
-  `error.timeout` 并 cancel 全体成员。
-- **`select`**：`br` 每 2 个 usize 是 `[kind, arg]`，`SEL_AWAIT` 接任务句柄、
-  `SEL_RECV` 接通道 id（0 = 实例默认通道）。`which` 写胜者索引（超时 = n），
-  同时就绪时索引小者胜（确定性）。返回胜者的值；整体 `ms` 到点给
-  `error.timeout`。
-- **命名通道**：`t.chan()` 返回 `usize` 句柄，多条独立无缓冲 rendezvous，与
-  实例自带的默认通道互不影响。载荷是一个 `usize`，靠 `(usize)v` / `(T)bits`
-  往返 —— castable 表顺带做了编译期约束：`[]T`(16 字节)、结构体等 cast 不到
-  usize 的类型直接 **E0300**，要传大值用指针。浮点会走整数转换丢精度，请传
-  位模式或指针。`chanSend / chanRecv / chanTrySend / chanTryRecv` 与
-  `t.send/recv` 对称；单独 `chanClose` 只封口并唤醒停靠者，壳由实例
-  `close` 统一回收。`ch = 0` 表示实例自带的默认通道。
-- **没有自动 offload**：§122 的 `ZxIoJob` / `zx_io_hook` 方案已按用户裁定
-  撤销（decisions §123）。`std.io` 就是同步 libc 调用，要并发用 task + io。
-  真异步 I/O（IOCP / io_uring）需要编译器把同步调用点变换成状态机或引入
-  async/await，会丢掉 zx 的无函数着色，不做。
 - **运行时分层**：C（`src/backend.c` 的 `emit_task_runtime`）是内部机制层，
   分「原语层」与「调度层」：
   - 原语层 `zx_rt_*`：CPU 数、OS 线程、纤程栈的创建/切换/回收、锁与条件
     变量、单调钟、`__thread` 当前纤程、让步退避 —— zx 表达不了的平台机制。
-  - 调度层：实例表、就绪队列、结果槽、等待链、timer、Scope 记账、select
-    轮询。只通过原语层碰平台。
+  - 调度层：实例表、就绪队列、结果槽、等待链、timer 链、通道唤醒记账、
+    select 轮询。只通过原语层碰平台。`zx_task_close` 要遍历通道与作用域的
+    停靠者链逐个唤醒，这些链表是 C 内部状态，不对应任何 zx 类型。
   - 库层 `std/task.zx`：对外只有 `Task`，4 个静态构造器生成实例，其余能力
-    全是 `t.` 实例方法；句柄组合、作用域清理、批量组、select 分支、载荷
-    转换这些策略写在 zx 里，私有 `extern` 声明是唯一跨界点。
+    全是 `t.` 实例方法；句柄组合、批量组、select 分支、载荷转换这些策略写在
+    zx 里，私有 `extern` 声明是唯一跨界点。
   竞态密集的纤程调度与等待链仍留在 C 机制层 —— 这是用户认可的「最后还是要
   C 的运行时」，不是对外暴露的类。
 

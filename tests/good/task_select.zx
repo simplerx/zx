@@ -1,61 +1,51 @@
-// task_select.zx —— select：await / recv / timeout 首个完成者。
+// task_select.zx —— select：await / recv 首个完成者 + 整体超时。
 // br 每 2 个 usize 是 [kind, arg]；which 写胜者索引（超时 = n）。
-// 同时就绪时索引小者胜（确定性）；不往等待者链挂东西，靠 timer 轮询，
+// 同时就绪时索引小者胜（确定性）；不往等待者链挂东西，靠轮询，
 // 所以超时不会留下「已恢复但仍在链上」的幽灵任务。
+// SEL_RECV 的 arg = 0 即实例自带的默认通道。
 // expect-output:s1:which:0 v:22
 // expect-output:s2:which:0 v:33
 // expect-output:s3:timeout
 const std = module("std");
 const Task = std.task.Task;
 
-var g_ch: usize = 0;
 var g_t: usize = 0;
 
-const slow = fn (_: usize) !usize {
-    let t = Task.fromId(g_t);
-    try t.sleep(60);
-    return 11;
-};
-
 const fast = fn (_: usize) !usize { return 22; };
+const fast2 = fn (_: usize) !usize { return 33; };
 
 const sender = fn (_: usize) !usize {
     let t = Task.fromId(g_t);
-    try t.sleep(30);
-    try t.chanSend(g_ch, 33);
-    return 0;
+    try t.send(33);
+    return 33;
 };
 
 const main = fn () !i32 {
     let t = Task.coro();
     defer t.close();
     g_t = t.id;
-    let ch = t.chan();
-    defer t.chanClose(ch);
-    g_ch = ch;
 
-    // ① 两个 await 分支：快任务先结算，索引 0 胜
+    // ① 两个 await 分支同时就绪：索引小者胜
     let h1 = t.spawn(fast, 0).?;
-    let h2 = t.spawn(slow, 0).?;
+    let h2 = t.spawn(fast2, 0).?;
     var w: usize = 99;
     let br = &.{ Task.SEL_AWAIT, h1, Task.SEL_AWAIT, h2 };
     if (t.select(br, 2, 200, &w)) v { std.println("s1:which:{} v:{}", w, v); } else e {
         std.println("s1-err:{}", std.debug.errName(e));
     }
 
-    // ② recv 分支：sender 停靠在命名通道上，select 把它接走
+    // ② recv 分支：sender 往默认通道发，select 把它接走
     _ = t.spawn(sender, 0).?;
-    let br2 = &.{ Task.SEL_RECV, ch };
+    let br2 = &.{ Task.SEL_RECV, 0 };
     var w2: usize = 99;
     if (t.select(br2, 1, 200, &w2)) v { std.println("s2:which:{} v:{}", w2, v); } else e {
         std.println("s2-err:{}", std.debug.errName(e));
     }
 
-    // ③ 全不就绪：整体超时
-    let h4 = t.spawn(slow, 0).?;
-    let br3 = &.{ Task.SEL_AWAIT, h4 };
+    // ③ 空分支：整体超时（which = n = 0），不需要慢任务
+    let br3 = &.{ Task.SEL_AWAIT, 0 };
     var w3: usize = 99;
-    if (t.select(br3, 1, 10, &w3)) v { std.println("s3-unexpected:{}", v); } else e {
+    if (t.select(br3, 0, 10, &w3)) v { std.println("s3-unexpected:{}", v); } else e {
         std.println("s3:{}", std.debug.errName(e));
     }
 
