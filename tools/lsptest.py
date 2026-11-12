@@ -37,9 +37,9 @@ pub const main = fn () i32 {
     var s = Shape{ .circle = 1.0 };
     push(.{ .a = 1010, .msg = "hi" });
     let t = std.task.Task.single();
-    let g = t.group();
-    t.groupWait(g);
-    t.groupClose(g);
+    let g = std.task.Task.group();
+    g.wait();
+    g.close();
     t.close();
     std.println("{}", n);
     return 0;
@@ -447,9 +447,9 @@ send({"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {
     "textDocument": {"uri": uri, "version": 14},
     "contentChanges": [{"text": MAIN}]}})
 
-# 3e std.task.Task 静态面：用户 2026-11-12 拍板「用 task 做接口，生成实例
-# 做动态分发，不是都变成关联函数」。类型命名空间只允许 4 个静态构造器 +
-# 2 个编译期分支常量；group* 与所有能力都是实例方法，不许出现在 `Task.`。
+# 3e std.task.Task 静态面（§129 / b620057 形态）：类型命名空间只允许
+# 4 个静态构造器 + 2 个编译期分支常量 + `group` 工厂（返回 Group 实例）。
+# 任务能力全是实例方法，不许出现在 `Task.`；group* 已从实例上删去。
 # `pub const K: T = v` 正确归为关联常量、方法（首参 self）不进类型空间、
 # 形参名 f/ctx/h/v 不混入（extractBraceMembers 圆括号深度守卫）。
 off = MAIN.index("std.task.Task.") + len("std.task.Task.")
@@ -459,14 +459,15 @@ r, _ = recv_id("completion.stdTask", 12)
 labels = {i["label"] for i in r["result"]["items"]} if r and r.get("result") else set()
 check("completion.stdTask",
       labels == {"coro", "single", "pool", "fromId",
-                 "SEL_AWAIT", "SEL_RECV"}
+                 "SEL_AWAIT", "SEL_RECV", "group"}
       and not labels & {"ctx", "f", "h", "v", "spawn", "await",
-                        "group", "groupSpawn", "groupWait", "groupClose",
-                        "groupRun"}, str(sorted(labels)))
+                        "groupSpawn", "groupWait", "groupClose",
+                        "groupRun", "wait", "run", "close"}, str(sorted(labels)))
 
-# 3f 统一对外接口（§123/§125/§128）：接口只留任务调度、默认通道、
-# select 与内核线程组；group* 是实例方法。t. 必须给齐这套能力，静态
-# 构造器与编译期常量不得混入，被删的 scope/chan/timer 不许再出现。
+# 3f 统一对外接口（§123/§125/§128/§129）：t. 只留任务调度、默认通道、
+# select 与 close。内核线程组改由 Task.group() 工厂生成 Group 实例，
+# group* 一律不进实例命名空间；静态构造器与编译期常量不得混入，
+# 被删的 scope/chan/timer 不许再出现。
 off = MAIN.index("    t.close();") + len("    t.")
 send({"jsonrpc": "2.0", "id": 13, "method": "textDocument/completion", "params": {
     "textDocument": {"uri": uri}, "position": pos(MAIN, off)}})
@@ -474,10 +475,10 @@ r, _ = recv_id("completion.unifiedApi", 13)
 labels = {i["label"] for i in r["result"]["items"]} if r and r.get("result") else set()
 check("completion.unifiedApi",
       {"spawn", "await", "awaitAll", "cancel", "yield",
-       "send", "recv", "trySend", "tryRecv", "close", "select",
-       "group", "groupSpawn", "groupWait", "groupClose", "groupRun"} <= labels
+       "send", "recv", "trySend", "tryRecv", "close", "select"} <= labels
       and not labels & {"coro", "single", "pool", "fromId",
-                        "SEL_AWAIT", "SEL_RECV"},
+                        "SEL_AWAIT", "SEL_RECV", "group", "groupSpawn",
+                        "groupWait", "groupClose", "groupRun"},
       str(sorted(labels)))
 
 # §128：scope / chan / timer 不做对外 API，t. 上不许再冒出这些名字。
@@ -487,6 +488,18 @@ _removed = {"scope", "scopeSpawn", "scopeJoin", "scopeJoinTimeout",
             "awaitTimeout"}
 check("completion.unifiedApi.noRemoved",
       not (_removed & labels), str(sorted(_removed & labels)))
+
+# §129：Task.group() 工厂生成 Group 实例，g. 必须补出 Group 自己的方法，
+# 且不能混入 Task 的静态面或实例方法（命名空间三分对新类型同样成立）。
+off = MAIN.index("    g.wait();") + len("    g.")
+send({"jsonrpc": "2.0", "id": 998, "method": "textDocument/completion", "params": {
+    "textDocument": {"uri": uri}, "position": pos(MAIN, off)}})
+r, _ = recv_id("completion.groupInstance", 998)
+glabels = {i["label"] for i in r["result"]["items"]} if r and r.get("result") else set()
+check("completion.groupInstance.methods",
+      {"spawn", "wait", "run", "close"} <= glabels
+      and not ({"group", "SEL_AWAIT", "coro", "await", "select"} & glabels),
+      str(sorted(glabels)))
 
 # 3f2 同名成员跨容器不串签名（用户 2026-11-10 截图：实例上"显示关联函数"）：
 #   `Task.spawn` 与 `Group.spawn` 同名。t. 的 detail 必须是 Task 的 `?usize` 版，
@@ -501,10 +514,11 @@ check("completion.instance.sameNameMember",
       tmap.get("spawn") == "spawn(self: *const Task, f: fn (usize) !usize, ctx: usize) ?usize"
       and tmap.get("awaitAll") == "awaitAll(self: *const Task) !void"
       and tmap.get("close") == "close(self: *const Task) void"
-      # 关联函数（首参不是 self）一律不进实例补全。group 2026-11-12 起
-      # 是实例方法（Task 是接口，能力全走 t.），不再是污染。
-      and tmap.get("group") == "group(self: *const Task) usize"
-      and not ({"coro", "single", "pool", "fromId"} & set(tmap)),
+      # 关联函数（首参不是 self）一律不进实例补全。§129 起 group 是
+      # Task. 上的工厂，group* 已从实例命名空间删去。
+      and not ({"coro", "single", "pool", "fromId", "group",
+                "groupSpawn", "groupWait", "groupClose",
+                "groupRun"} & set(tmap)),
       str(tmap)[:300])
 
 # 3g hover 变量 → 推断类型（var p = Person{…} 式结构体字面量也要出类型）
@@ -1573,10 +1587,9 @@ gt = {i["label"]: i.get("insertText") for i in git}
 gk = {i["label"]: i.get("kind") for i in git}
 # 用户 2026-11-10："Task 命名空间污染了"。`g.single()` 编译报 E0303
 #（首参不是 self，不是方法），静态构造器只属于 `Task.`，不许混进实例补全。
-# 2026-11-12：group 现在是实例方法（接口统一走 t.），应出现在实例补全里。
+# §129：group 是 Task. 上的工厂，不进实例补全。
 check("completion.stdInstance.staticSnippet",
-      not ({"single", "coro", "pool", "fromId"} & set(gk)) and "id" in gk
-      and "group" in gk,
+      not ({"single", "coro", "pool", "fromId", "group"} & set(gk)) and "id" in gk,
       str(sorted(gk)))
 check("completion.stdInstance.methodSig",
       (gd.get("await") or "") == "await(self: *const Task, h: usize) !usize"
@@ -3563,14 +3576,17 @@ _t = comp_at("    std.task.Task.", "nest.taskTy")
 check("completion.nest.taskTy.assocConst",
       {"SEL_AWAIT", "SEL_RECV"} <= set(_t) and "await" not in _t,
       str(sorted(_t)))
-# 2026-11-12 用户裁定：Task 是接口，能力全走实例；类型空间不许再有任何
-# 行为函数（group* 曾被降级成关联函数，这里守死）。
+# §129：内核线程组是 Task.group() 工厂（唯一的静态入口），group* 一律
+# 不进实例命名空间；类型空间也不许混入实例方法。
 check("completion.nest.taskTy.noBehavior",
-      not ({"group", "groupSpawn", "groupWait", "groupClose", "groupRun",
+      not ({"groupSpawn", "groupWait", "groupClose", "groupRun",
             "spawn", "await", "select", "scope"} & set(_t)),
       str(sorted(_t)))
-check("completion.nest.taskInst.groupDispatch",
-      {"group", "groupSpawn", "groupWait", "groupClose", "groupRun"} <= set(_c),
+check("completion.nest.taskTy.groupFactory",
+      "group" in _t, str(sorted(_t)))
+check("completion.nest.taskInst.noGroup",
+      not ({"group", "groupSpawn", "groupWait", "groupClose",
+            "groupRun"} & set(_c)),
       str(sorted(_c)))
 _w = comp_at("    w.", "nest.localInst")
 check("completion.nest.localInst.clean",
@@ -4090,17 +4106,20 @@ check("completion.mchain.genericAliasInstance",
 _mt = mcomp(MUSE, muri, "    t.", "mchain.taskInstance")
 check("completion.mchain.taskInstanceCapabilities",
       {"spawn", "await", "awaitAll", "cancel", "yield", "send", "recv",
-       "trySend", "tryRecv", "select", "group", "groupRun",
-       "close"} <= set(_mt),
+       "trySend", "tryRecv", "select", "close"} <= set(_mt),
       str(sorted(_mt)))
 check("completion.mchain.taskInstance.noRemoved",
       not ({"scope", "scopeSpawn", "scopeJoin", "scopeJoinTimeout",
             "scopeClose", "withScope", "chan", "chanSend", "chanRecv",
             "chanTrySend", "chanTryRecv", "chanClose", "sleep",
             "awaitTimeout"} & set(_mt)), str(sorted(_mt)))
+check("completion.mchain.taskInstance.noGroup",
+      not ({"group", "groupSpawn", "groupWait", "groupClose",
+            "groupRun"} & set(_mt)), str(sorted(_mt)))
 _mtt = mcomp(MUSE, muri, "    std.task.Task.", "mchain.taskType")
 check("completion.mchain.taskTypeNamespace",
-      set(_mtt) == {"coro", "single", "pool", "fromId", "SEL_AWAIT", "SEL_RECV"},
+      set(_mtt) == {"coro", "single", "pool", "fromId", "SEL_AWAIT",
+                    "SEL_RECV", "group"},
       str(sorted(_mtt)))
 _ms = mcomp(MUSE, muri, "    if", "mchain.snippet")
 check("completion.mchain.snippet",

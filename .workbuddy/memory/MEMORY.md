@@ -56,10 +56,12 @@
 - 泛型类型值别名要跟**别名链**：`const G = t.GG; const g: type = G(T: i32);` 的 `finalCalleeOf` 只拿到 `G` → `genericCalleeOf` 沿 `const 别名 = 限定路径` 剥末段，三处调用点都要接。`appendGenericSynthetics` 只放行 `: type` 标注合成 `const g = struct{…}`，否则 `g{ .` / `var x: g; x.` 按名字找容器体是 0 项。
 - 守门：lsptest ⑪ 段 13 条（8z 短命会话，⑩ 后 shutdown 前）。
 
-## Task 并发接口（§125 / §128 最终口径，2026-11-12）
-- `std.task.Task.` **只有 6 项**：4 个构造器 `coro/single/pool/fromId` + `SEL_AWAIT/SEL_RECV`。这是类型命名空间语义，**不是没实现**；别为了"好找"把实例方法塞回类型空间。用户 §125 明确：Task 是接口、生成实例后走 `t.` 分发，不是关联函数集合；不引入 vtable、不动 C 运行时。
+## Task 并发接口（§125 / §128 / §129，2026-11-12）
+- `std.task.Task.` **7 项**：4 个构造器 `coro/single/pool/fromId` + `SEL_AWAIT/SEL_RECV` + `group` 工厂（§129）。这是类型命名空间语义，**不是没实现**；别为了"好找"把实例方法塞回类型空间。用户 §125 明确：Task 是接口、生成实例后走 `t.` 分发，不是关联函数集合；不引入 vtable、不动 C 运行时。
 - **§128 用户拍板**：scope/chan/timer 本想做成"都是 Task 的多态类型"，但 zx 无 interface/子类型、契约不匹配（Task 是调度器、Scope 是任务树、Chan 是端点、Timer 无独立对象）、E0701 挡住 `Chan(T)`，做不成 → 按条件**删去**，`Task` 回到紧凑接口。
-- 现行 `t.` **20 个实例方法**：`spawn/await/awaitAll/cancel/yield` + `send/recv/trySend/tryRecv`（默认通道）+ `select` + `group/groupSpawn/groupWait/groupClose/groupRun` + `close`。删掉的 14 个：`scope*` 6、`chan*` 6、`sleep/awaitTimeout` 2。`completion.instance.sameNameMember` 仍断言 `group(self: *const Task) usize`。
+- **§129（用户最终拍板）**：恢复 b620057 的历史 `Group` 实例形态 —— `Task.group()` 是工厂方法，返回独立的 `pub const Group`（`g.spawn/wait/run/close` 走 `zx_tg_*`）；Task 实例上的 5 个 `group*` 全删。这是第二个对外类型，但不是"实现 Task 接口"（zx 无 interface/子类型）。C 运行时一字未改。
+- 现行 `t.` **12 项**（11 方法 + `id`）：`spawn/await/awaitAll/cancel/yield` + `send/recv/trySend/tryRecv` + `select` + `close`。`Group` 实例 `g.` 出 `spawn/wait/run/close`，hover `let g: Group = ...`、inlay `: Group` 都由 zxls 自动识别（未改 zxls 源码）。删掉的 14 个：`scope*` 6、`chan*` 6、`sleep/awaitTimeout` 2。
+- 守门：`completion.stdTask` 7 项等式、`unifiedApi`/`sameNameMember`/`stdInstance`/`nest.*`/`mchain.*` 按新语义改断言，新增 `groupInstance.methods` 与 `noGroup` 反向断言，冒烟 375 → 378。
 - **C 运行时一个字不改**：`zx_task_close` 遍历 `ZxScope`/`ZxChan` 停靠者链唤醒，`zx_sel_wait` 的 SEL_RECV 走 `zx_chan_recv(s,NULL,…)`，默认通道也走同一套 `zx_chan_*`；机制全被保留能力复用、按需整体发射。它们是内部实现，不是对外类型。
 - `std.io` 纯同步、无隐式 offload；要并发显式 `task + io`。无静态数据竞争防护、无真异步 I/O、通道载荷统一 usize 由调用点 cast；C 侧保留机制层。
 - 用例：删 `task_chan/task_scope*/task_timeout` 6 个；改写 `task_blocking`（sleep→yield，证据从"推进次数"改成"tick 有没有跑完"，因 `!T` 取消门本来会推进一次队列）、`task_select`（默认通道 `SEL_RECV,0` + 空分支 n=0 测超时）、`chan-wide`（t.send 守 E0300）。`chan_basic.zx` 是默认通道测试，保留。

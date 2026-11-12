@@ -6,8 +6,11 @@
 //   * 任务函数是普通 fn(usize) !usize，await 是普通方法。没有 async/await、
 //     没有函数着色、没有新语法、没有类型系统里的新概念。
 //   * Task 是接口：4 个静态构造器（coro/single/pool/fromId）生成实例，
-//     其余能力全是实例方法，通过 `t.` 分发 —— 没有 `Task.spawn()`
-//     这类关联函数调用。句柄（任务 / 组 / 分支）统一 usize。
+//     任务调度、默认 rendezvous、select 与生命周期都走 `t.` 分发；
+//     没有 `Task.spawn()` 这类关联函数调用。句柄统一 usize。
+//   * 唯一例外是内核线程组：`Task.group()` 是工厂方法，生成 `Group`
+//     实例（`g.spawn/wait/run/close`），与 Task 实例调度器互补。组不占
+//     实例资源，C 侧只是原子计数 + 裸 OS 线程，任务即发即忘。
 //   * 接口只保留四组：任务调度、实例自带的默认 rendezvous、select、
 //     内核线程组。**不导出**作用域 / 命名通道 / 定时器：zx 没有
 //     trait / interface / 子类型，Scope/Chan/Timer 无法「实现 Task 接口」
@@ -15,7 +18,8 @@
 //     而三者的能力集与 Task 也不构成同一契约（见 §128）。C 运行时里
 //     这些机制仍然存在，但只作内部实现，服务默认通道、select 超时与
 //     close 的唤醒链，不进对外 API。
-//   * 类型命名空间只剩编译期分支常量 SEL_AWAIT / SEL_RECV（值，不是行为）。
+//   * 类型命名空间：4 个静态构造器 + `group` 工厂 + 编译期分支常量
+//     SEL_AWAIT / SEL_RECV（值，不是行为）。
 //
 // 实例物理隔离：每个 Task 有自己的任务表、就绪队列、通道与一组线程。
 //   Task.coro()      协程实例：不建线程，await/awaitAll 时推进
@@ -53,7 +57,39 @@ extern fn zx_tg_close(g: usize) void;
 extern fn zx_sel_wait(t: usize, br: *const usize, n: usize, ms: usize, which: *usize) !usize;
 
 // ---------------------------------------------------------------------------
-// Task：唯一对外类型。
+// Group：内核调度线程组（Task.group() 生成的实例）。
+// ---------------------------------------------------------------------------
+pub const Group = struct {
+    id: usize,
+
+    // 起线程失败（句柄耗尽/内存不足）返回 false，计数不残留。
+    pub const spawn = fn (self: *const Self, f: fn (usize) !usize, ctx: usize) bool {
+        return zx_tg_spawn(self.id, f, ctx) == 1;
+    };
+
+    // 等本组任务全部收尾。组可复用（wait 后还能继续 spawn）。
+    pub const wait = fn (self: *const Self) void {
+        zx_tg_wait(self.id);
+    };
+
+    // 批量编排：起 n 条内核线程跑同一个函数，ctx 依次 0..n-1，等收尾。
+    pub const run = fn (self: *const Self, f: fn (usize) !usize, n: usize) void {
+        var i: usize = 0;
+        while (i < n) {
+            _ = zx_tg_spawn(self.id, f, i);
+            i = i + 1;
+        }
+        zx_tg_wait(self.id);
+    };
+
+    // 等收尾后释放计数器，之后句柄不可再用。
+    pub const close = fn (self: *const Self) void {
+        zx_tg_close(self.id);
+    };
+};
+
+// ---------------------------------------------------------------------------
+// Task：并发接口的主体（Group 是唯一的伴随类型）。
 // ---------------------------------------------------------------------------
 pub const Task = struct {
     pub id: usize,
@@ -138,40 +174,16 @@ pub const Task = struct {
         return zx_sel_wait(self.id, br, n, ms, which);
     };
 
-    // ---- 内核线程组：句柄化 ----
+    // ---- 内核线程组：工厂方法 ----
     //
     // 与实例形态互补：实例是「物理隔离的用户态调度器」，组是「零设施的
     // 内核调度」—— 不建线程池、不建队列、不锁任何东西，spawn 即起一条
     // OS 线程。适合即发即忘的批量工作；要结果、要取消、要通道用实例。
-    // 组不占实例资源，但入口与其他能力一样挂在实例上：先生成 Task，
-    // 再由 `t.group*()` 分发，保持唯一对外路径。
+    // 组不占实例资源：入口是 Task.group() 工厂，生成的 Group 实例自带
+    // spawn/wait/run/close，不在 Task 实例命名空间里。
 
-    pub const group = fn (self: *const Self) usize {
-        return zx_tg_new();
-    };
-
-    // 起线程失败返回 false，计数不残留。
-    pub const groupSpawn = fn (self: *const Self, g: usize, f: fn (usize) !usize, ctx: usize) bool {
-        return zx_tg_spawn(g, f, ctx) == 1;
-    };
-
-    pub const groupWait = fn (self: *const Self, g: usize) void {
-        zx_tg_wait(g);
-    };
-
-    pub const groupClose = fn (self: *const Self, g: usize) void {
-        zx_tg_close(g);
-    };
-
-    // 批量编排（纯 zx 侧策略）：起 n 条内核线程跑同一个函数，ctx 依次是
-    // 0..n-1，然后等全体收尾。组可复用，close 前可再 groupRun。
-    pub const groupRun = fn (self: *const Self, g: usize, f: fn (usize) !usize, n: usize) void {
-        var i: usize = 0;
-        while (i < n) {
-            _ = zx_tg_spawn(g, f, i);
-            i = i + 1;
-        }
-        zx_tg_wait(g);
+    pub const group = fn () Group {
+        return Group{ .id = zx_tg_new() };
     };
 
     // ---- 生命周期 ----
