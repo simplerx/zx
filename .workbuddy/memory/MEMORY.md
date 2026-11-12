@@ -185,3 +185,23 @@
   Group/Scope/Chan 独立类型。
 - `completion.instance.sameNameMember` 断言 `tmap["group"]` 是
   `group(self: *const Task) usize`；以前把 group 当污染的黑名单已按新语义改。
+- **编辑器里 `Task.` 只有 6 项（4 构造器 + SEL_AWAIT/SEL_RECV）不是"没实现"**：
+  `t.` 上有 31 个实例方法（scope*/chan*/group*/select/sleep/awaitTimeout/
+  withScope…）。用户看到 `Task.` 空会误判，docs/reference.md §14.10 已加
+  醒目说明。别为了"好找"把实例方法塞回类型命名空间。
+
+## 编辑期位置与泛型别名链（2026-11-12 §127，写补全代码前必看）
+- `anonParamTy` 必须同时认 `fn (` 和紧凑 `fn(`：用户真实代码常写
+  `fn(b:i32,data:struct{…})`。带空格 fixture 会掩盖这个断点（假绿）。
+- `.{` 后**还没输入点号**时 Zed 就会弹补全：光标前是 `{`，`dotted=false`
+  会落到全局标识符。用"虚拟点上下文" `brace_base` 把 `base_end` 指到
+  `{` 后一位，复用实参签名链；`struct{…}.` 那个编辑期位置同理按内联
+  类型出字段（点号前紧邻 `}` 才触发，别误伤普通 `x.`）。
+- 泛型类型值别名要跟**别名链**：`const G = t.GG; const g: type = G(T: i32);`
+  的 `finalCalleeOf` 只拿到 `G`，`genericBodyOf` 落空 → `genericCalleeOf`
+  沿 `const 别名 = 限定路径` 剥末段，三处调用点都要接。
+- `appendGenericSynthetics` 只放行 `: type` 标注合成 `const g = struct{…}`：
+  `inferExprType` 的别名展开只够 `g.`，`g{ .` 与 `var x: g; x.` 按名字找
+  容器体，缺合成声明就是 0 项。其他标注仍跳过。
+- 守门 `tools/lsptest.py` ⑪ 段 13 条（8z 短命会话，⑩ 后 shutdown 前），
+  冒烟 373 项。不许删用例变绿。

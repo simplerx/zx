@@ -4412,3 +4412,47 @@ t.S.Deeper.Leaf.` 全都能出常量——**路径解析是通的**，0 项只�
   LSP 冒烟 **360 项全过**（336 → 360）。**不许删用例来变绿**。
 - 行尾：`tools/zxls.zig`、`tools/lsptest.py` 全程 CRLF 字节级补丁；
   `spec/decisions.md`、memory 为 LF。
+
+## §127 编辑期位置与泛型别名链补齐（2026-11-12 18:xx 三张新截图）
+
+用户继续报「函数参数的匿名结构体的嵌套类型没有补全」「泛型类也没有」，
+另有 `std.task.Task.` 只出现 6 项、怀疑 scope/通道/timer 未实现。
+
+### 真断点（用 `.tmp/nest3/probe.py` 按截图精确光标位置复现）
+
+1. **紧凑 `fn(` 形参**：`anonParamTy` 的模式写死 `"const F = fn ("`，
+   截图里的 `fn(b:i32,data:struct{…})` 完全匹配不上 → 调用点 `.{ … }`
+   顶层与嵌套字段全部 0 项。旧 fixture 用带空格的 `fn (b: i32, …)`
+   所以 K-era 的 n6 守门是假绿。改为 `" = fn"` + 跳过空白再要求 `(`。
+2. **`.{` 刚开括号**：光标前是 `{` 不是 `.`，`dotted` 为假 → 落到 29 个
+   全局标识符 / 关键字。新增"虚拟点上下文"：紧贴在 `.{` 之后（允许中间
+   有空白）且前缀为空时强制 `dotted=true`，`base_end` 指到 `{` 后一位，
+   回扫第一步命中该 `{`，复用实参签名解析链。普通 `x.` 不受影响。
+3. **`struct{…}.` 编辑期位置**：类型字面量后刚敲下 `.`（还没接 `{`）
+   也是 0 项。只在点号前紧邻 `}`、回配到的 `{` 前是 `struct` 时，
+   把这段内联类型交给 `parseAnonTy` 出字段。
+4. **泛型别名链**：`const G = t.GG; const g: type = G(T: i32); g.` 里
+   `finalCalleeOf` 拿到别名 `G`，扫描集里没有 `const G = fn …`，
+   `genericBodyOf` 落空。新增 `genericCalleeOf()` 沿
+   `const 别名 = 限定路径` 剥到末段再找泛型函数体，接进
+   `isTypeValuedRecv` / `typeValuedContainer` / `appendGenericSynthetics`。
+5. **`: type` 绑定没有容器体**：`appendGenericSynthetics` 跳过所有带类型
+   标注的绑定，于是 `g{ .` 的字面量续字段与 `var x: g; x.` 的实例成员
+   按"名字找容器体"全部落空（虽然 `g.` 靠 `inferExprType` 别名展开能出）。
+   现在只放行 `: type` 标注，照样合成一份 `const g = struct{…};` 塞进扫描
+   集前部，三条链复用同一份声明。其他标注仍走老路。
+
+### 不是缺陷：Task 的能力全在实例上
+
+`std.task.Task.` 只有 `coro/single/pool/fromId` + `SEL_AWAIT/SEL_RECV`
+共 6 项，是 §125 的类型命名空间语义；探针实测 `t.` 有 **31 个实例方法**，
+`scope* / withScope / chan* / group* / select / sleep / awaitTimeout` 全在。
+已在 `docs/reference.md` §14.10 开头加醒目说明，避免"看不见 = 没实现"。
+
+### 守门与验证
+
+`tools/lsptest.py` ⑪ 段（仍在 8z 独立短命会话，⑩ 之后 shutdown 之前）
+新增 13 条：`.{` 立即 / 带空格 / 嵌套 / `struct{…}.` / 紧凑 `fn(` 函数体
+`data.` `data.data.` / 泛型别名链 `g.` / 模块限定别名 `h.` / `g{` / `gx.` /
+`t.` 的 11 个能力方法 / `Task.` 恰好 6 项 / `if` snippet。
+LSP 冒烟 **360 → 373 项全过**，守的是"不许删用例变绿"。

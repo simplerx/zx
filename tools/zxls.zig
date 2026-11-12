@@ -1059,7 +1059,21 @@ fn appendGenericSynthetics(text: []const u8, files: *std.ArrayList([]const u8)) 
         const name = text[ns..i];
         var j = i;
         while (j < text.len and (text[j] == ' ' or text[j] == '\t')) j += 1;
-        if (j >= text.len or text[j] == ':') continue; // 带类型标注：走别名展开
+        if (j >= text.len) continue;
+        if (text[j] == ':') {
+            // `: type` 标注的类型值绑定也要合成一份容器声明：光靠
+            // inferExprType 的别名展开只覆盖 `g.`，`g{ .` 的字面量续字段
+            // 与 `var x: g; x.` 的实例成员都按"名字找容器体"走，缺这份
+            // 声明就全空（用户 2026-11-12 截图）。其他标注仍走老路。
+            var tt = j + 1;
+            while (tt < text.len and (text[tt] == ' ' or text[tt] == '\t')) tt += 1;
+            const ts = tt;
+            while (tt < text.len and isIdentChar(text[tt])) tt += 1;
+            if (!std.mem.eql(u8, text[ts..tt], "type")) continue;
+            while (tt < text.len and (text[tt] == ' ' or text[tt] == '\t')) tt += 1;
+            if (tt >= text.len or text[tt] != '=') continue;
+            j = tt;
+        }
         if (text[j] != '=') continue;
         j += 1;
         const es = j;
@@ -1071,7 +1085,8 @@ fn appendGenericSynthetics(text: []const u8, files: *std.ArrayList([]const u8)) 
         var last = callee;
         if (std.mem.lastIndexOfScalar(u8, callee, '.')) |dd| last = callee[dd + 1 ..];
         if (last.len == 0 or !isIdentChar(last[0])) continue;
-        const body = genericBodyOf(files.items, last) orelse continue;
+        const gcal = genericCalleeOf(files.items, text, last) orelse continue;
+        const body = genericBodyOf(files.items, gcal) orelse continue;
 
         // 形参名：const <last> = fn (T: type) type { …
         var pname: []const u8 = "";
@@ -1079,7 +1094,7 @@ fn appendGenericSynthetics(text: []const u8, files: *std.ArrayList([]const u8)) 
             var pat: std.ArrayList(u8) = .empty;
             defer pat.deinit(gpa);
             pat.appendSlice(gpa, "const ") catch break;
-            pat.appendSlice(gpa, last) catch break;
+            pat.appendSlice(gpa, gcal) catch break;
             pat.appendSlice(gpa, " = fn") catch break;
             const hit = std.mem.indexOf(u8, ftext, pat.items) orelse continue;
             var p = hit + pat.items.len;
@@ -2799,7 +2814,7 @@ fn anonParamTy(files: []const []const u8, fname: []const u8, argi: usize) ?[]con
     defer pat.deinit(gpa);
     pat.appendSlice(gpa, "const ") catch return null;
     pat.appendSlice(gpa, fname) catch return null;
-    pat.appendSlice(gpa, " = fn (") catch return null;
+    pat.appendSlice(gpa, " = fn") catch return null;
     for (files) |ftext| {
         var idx: usize = 0;
         while (std.mem.indexOfPos(u8, ftext, idx, pat.items)) |hit| {
@@ -2807,7 +2822,13 @@ fn anonParamTy(files: []const []const u8, fname: []const u8, argi: usize) ?[]con
                 idx = hit + 1;
                 continue;
             }
-            var i = hit + pat.items.len; // 参数列表第一个字符
+            // `fn(` / `fn (` 都认：形参紧凑写法 `fn(b:i32,data:struct{…})`
+            // 旧模式写死 " = fn (" 直接落空（用户 2026-11-12 截图 1/2/3）。
+            var lp0 = hit + pat.items.len;
+            while (lp0 < ftext.len and (ftext[lp0] == ' ' or ftext[lp0] == '\t')) lp0 += 1;
+            if (lp0 >= ftext.len or ftext[lp0] != '(') { idx = hit + 1; continue; }
+            const pstart = lp0 + 1;
+            var i = pstart; // 参数列表第一个字符
             var depth: usize = 0;
             while (i < ftext.len) : (i += 1) {
                 if (ftext[i] == '(') depth += 1;
@@ -2825,7 +2846,7 @@ fn anonParamTy(files: []const []const u8, fname: []const u8, argi: usize) ?[]con
             defer segs.deinit(gpa);
             var d2: usize = 0;
             var in_str = false;
-            var start = hit + pat.items.len;
+            var start = pstart;
             var q = start;
             while (q < i) : (q += 1) {
                 const c = ftext[q];
@@ -7436,6 +7457,29 @@ fn fnRetExprOf(text: []const u8, name: []const u8) ?[]const u8 {
     return if (out.len == 0) null else out;
 }
 
+/// 泛型调用背后真正的泛型函数名。`const G = t.GG;` 之后写
+/// `const g: type = G(T: i32);`，finalCalleeOf 拿到的是别名 "G"，
+/// 而 `const G = fn …` 在扫描集里根本不存在——genericBodyOf 落空，
+/// 于是 `g.` / `g{ .` / `var x: g; x.` 三条链一起断（2026-11-12 截图）。
+/// 沿 `const 别名 = 限定路径` 剥到末段，再按名字找泛型函数体。
+fn genericCalleeOf(files: []const []const u8, text: []const u8, callee0: []const u8) ?[]const u8 {
+    var c = trimSl(callee0);
+    if (std.mem.lastIndexOfScalar(u8, c, '.')) |dd| c = c[dd + 1 ..];
+    if (c.len == 0 or !isIdentChar(c[0])) return null;
+    var hops: usize = 0;
+    while (hops < 4) : (hops += 1) {
+        if (genericBodyOf(files, c) != null) return c;
+        const st = findDeclStmt(text, c) orelse return null;
+        const ini = trimSl(declInitOf(st) orelse return null);
+        if (!isPurePath(ini)) return null;
+        var nx = ini;
+        if (std.mem.lastIndexOfScalar(u8, nx, '.')) |dd| nx = nx[dd + 1 ..];
+        if (nx.len == 0 or std.mem.eql(u8, nx, c)) return null;
+        c = nx;
+    }
+    return null;
+}
+
 /// 接收者是不是**类型值**而不是实例：`const HS: type = HashMap(V: i32);`、
 /// `const V = ArrayList(i32);`、`const T = Make(i32)`（Make 返回 type）、
 /// 以及它们的别名链。类型值上只有静态成员——判错就会把字段和方法全
@@ -7461,6 +7505,7 @@ fn isTypeValuedRecv(files: []const []const u8, doc: *const Document,
     }
     const last = finalCalleeOf(e) orelse return false;
     if (isContainerIn(files, last) or genericBodyOf(files, last) != null) return true;
+    if (genericCalleeOf(files, text, last) != null) return true;
     if (findDeclStmt(text, last)) |fst| {
         const sg = sigOfStmt(fst);
         if (sg.is_fn and std.mem.eql(u8, trimSl(sg.ret), "type")) return true;
@@ -7487,6 +7532,7 @@ fn typeValuedContainer(files: []const []const u8, doc: *const Document,
     }
     const last = finalCalleeOf(e) orelse return null;
     if (isContainerIn(files, last) or genericBodyOf(files, last) != null) return last;
+    if (genericCalleeOf(files, text, last)) |gc| return gc;
     if (fnRetExprOf(text, last)) |ret| return inferContainer(files, text, ret, depth + 1);
     return null;
 }
@@ -7523,7 +7569,21 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
     // 输入 std.p 时走的是关键字分支，std 成员一个都不出——现在
     // 空前缀（贴点）与带前缀（std.p / obj.fi）都走这条。
     const ps = off - full_prefix.len;
-    const dotted = ps > 0 and text[ps - 1] == '.';
+    var dotted = ps > 0 and text[ps - 1] == '.';
+    // KEEP — 匿名 struct 字面量刚开括号 `.{` 就要给字段：Zed 在 `{` 后
+    // 立刻弹补全时，光标前是 '{' 不是 '.'，旧链落到全局标识符（用户
+    // 2026-11-12 截图 1/2：`t.FF(…, .{ });` 里一个字段都不出）。把
+    // "光标紧贴在 `.{` 之后" 当成虚拟点上下文，base_end 指到 '{' 后一位，
+    // 回扫第一步即命中这个 '{'，复用实参签名解析链。
+    var brace_base: ?usize = null;
+    if (!dotted and prefix.len == 0 and !is_at_ctx) {
+        var b0 = off;
+        while (b0 > 0 and (text[b0 - 1] == ' ' or text[b0 - 1] == '\t')) b0 -= 1;
+        if (b0 > 1 and text[b0 - 1] == '{' and text[b0 - 2] == '.') {
+            brace_base = b0;
+            dotted = true;
+        }
+    }
 
     if (dotted) {
         // 取 '.' 之前的完整路径（可含多级点：std / std.heap / obj.field）。
@@ -7531,7 +7591,8 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
         //（中间隔空白也认：`Person{ .circle`）。已有字段的续补
         //（`Person{.age = 10, .n`）要跨过前面的字段初始化——回扫跟踪
         // 括号深度，顶层遇 '{' 即字面量开头；遇 ';' 说明已出字面量。
-        const base_end = ps - 1;
+        var base_end = ps - 1;
+        if (brace_base) |bb| base_end = bb;
         var base_start = base_end;
         var path_end = base_end; // lit_ctx 时止于 '{'（path=容器名），否则到光标
         var lit_ctx = false;
@@ -8368,6 +8429,45 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                             mem_body_fix = null;
                             owner = "";
                             anon_only = true;
+                        }
+                    }
+                }
+            }
+            // KEEP — 实参位置直接写类型字面量 `struct{…}.`（编辑期还没接
+            // `.{`）：按这个内联类型给字段，别退化成 0 项或全局噪音。
+            // 只在点号前紧邻 '}' 且回配到的 '{' 前是 struct 时触发，
+            // 普通 `x.` 不受影响（用户 2026-11-12 截图 1/2）。
+            if (!handled and !lit_ctx and dotted and base_end > 0 and
+                text[base_end - 1] == '}')
+            {
+                var q5 = base_end - 1;
+                var dep5: usize = 0;
+                var open5: ?usize = null;
+                while (q5 > 0) {
+                    q5 -= 1;
+                    if (text[q5] == '}') { dep5 += 1; continue; }
+                    if (text[q5] == '{') {
+                        if (dep5 == 0) { open5 = q5; break; }
+                        dep5 -= 1;
+                    }
+                }
+                if (open5) |ob5| {
+                    var k5 = ob5;
+                    while (k5 > 0 and (text[k5 - 1] == ' ' or text[k5 - 1] == '\t')) k5 -= 1;
+                    if (k5 >= 6 and std.mem.eql(u8, text[k5 - 6 .. k5], "struct")) {
+                        if (parseAnonTy(text[k5 - 6 .. base_end])) |flds| {
+                            decls.clearRetainingCapacity();
+                            for (flds.items) |f| {
+                                decls.append(gpa, .{ .name = f.name, .kind = .field, .ty = f.ty }) catch {};
+                            }
+                            if (decls.items.len > 0) {
+                                handled = true;
+                                recv_kind = .instance;
+                                mem_txt = null;
+                                mem_body_fix = null;
+                                owner = "";
+                                anon_only = true;
+                            }
                         }
                     }
                 }

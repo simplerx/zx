@@ -3975,6 +3975,126 @@ check("completion.kchain.snippet",
       _s2.get("if", {}).get("insertTextFormat") == 2, str(sorted(_s2)))
 
 
+
+# ⑪ 2026-11-12 18:xx 三张新截图（KEEP：与 ⑩ 同一条 8z 短命会话）
+#   A 形参紧凑写法 `fn(b:i32,data:struct{…})` 与 `.{` 刚开括号就要有字段；
+#   C `const G = m.MM; const g: type = G(T: i32);` 的别名链、g{ 与 gx.；
+#   B Task 的能力全在实例 t. 上，类型空间只留 4 构造器 + 2 编译期常量。
+MLIB = """pub const MM = fn (T: type) type {
+    return struct {
+        pub val: T,
+        pub name: i32,
+        pub const Inner = struct { pub z: i32 };
+        pub const K: i32 = 9;
+        pub const mk = fn (v: i32) i32 { return v; };
+    };
+};
+pub const FC = fn(b:i32,data:struct{b:i32,data:struct{b:i32,i:i32}}) void {
+    _ = b;
+    data.
+    data.data.
+    _ = data;
+};
+"""
+_mlib_path = os.path.join(TESTDIR, "vendor", "zxls8zm.zx")
+open(_mlib_path, "w", encoding="utf-8").write(MLIB)
+mliburi = "file:///" + _mlib_path.replace("\\", "/")
+
+MUSE = """const std = module("std");
+const m = module("zxls8zm");
+const GA = m.MM;
+pub const main = fn () i32 {
+    m.FC(b: 0, data: struct{b:i32,data:struct{b:i32,i:i32}}.{ });
+    m.FC(b: 0, data: struct{b:i32,data:struct{b:i32,i:i32}}.{ .b = 1, .data = .{ . } });
+    m.FC(b: 0, data: struct{b:i32,data:struct{b:i32,i:i32}}.);
+    const g: type = GA(T: i32);
+    g.
+    const h: type = m.MM(T: i32);
+    h.
+    var gx: g = g{ .name = 1, . };
+    gx.
+    var t = std.task.Task.single();
+    t.
+    std.task.Task.
+    if
+    return 0;
+};
+"""
+_muse_path = os.path.join(SRC_DIR, "mchain.zx")
+open(_muse_path, "w", encoding="utf-8").write(MUSE)
+muri = "file:///" + _muse_path.replace("\\", "/")
+
+for _u, _txt in ((muri, MUSE), (mliburi, MLIB)):
+    s8({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+        "textDocument": {"uri": _u, "languageId": "zx", "version": 1, "text": _txt}}})
+
+
+def mcomp(src, uri_, needle, tag, occurrence=0, back=0):
+    global _rid
+    _rid += 1
+    idx, start = -1, 0
+    for _ in range(occurrence + 1):
+        idx = src.find(needle, start)
+        if idx < 0:
+            break
+        start = idx + 1
+    if idx < 0:
+        print(f"FAIL {tag}: needle {needle!r} not found"); return {}
+    off = idx + len(needle) - back
+    s8({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/completion", "params": {
+        "textDocument": {"uri": uri_}, "position": pos(src, off)}})
+    r, _ = r8(tag, _rid)
+    items = (r["result"]["items"] if r and r.get("result") and isinstance(r["result"], dict)
+             else (r["result"] if r and isinstance(r.get("result"), list) else []))
+    return {i["label"]: i for i in items}
+
+
+# A1 `.{` 后立刻触发（Zed 在 '{' 后就弹，光标前不是 '.'）
+_m1 = mcomp(MUSE, muri, "i:i32}}.{", "mchain.litImmediate", 0)
+check("completion.mchain.litImmediate",
+      set(_m1) == {"b", "data"} and "struct" in (_m1.get("data", {}).get("detail") or ""),
+      str(sorted(_m1)))
+_m2 = mcomp(MUSE, muri, "i:i32}}.{ ", "mchain.litImmediateSpace", 0)
+check("completion.mchain.litImmediateSpace", set(_m2) == {"b", "data"}, str(sorted(_m2)))
+
+# A2 嵌套字面量 / 类型字面量后刚敲下 '.' / 紧凑 fn( 的函数体
+_m3 = mcomp(MUSE, muri, ".data = .{ .", "mchain.litNested", 0)
+check("completion.mchain.litNested", set(_m3) == {"b", "i"}, str(sorted(_m3)))
+_m4 = mcomp(MUSE, muri, "i:i32}}.);", "mchain.typeLiteralDot", 0, 2)
+check("completion.mchain.typeLiteralDot", set(_m4) == {"b", "data"}, str(sorted(_m4)))
+_md = mcomp(MLIB, mliburi, "    data.", "mchain.fnBodyCompact")
+check("completion.mchain.fnBodyCompact", set(_md) == {"b", "data"}, str(sorted(_md)))
+_mdd = mcomp(MLIB, mliburi, "    data.data.", "mchain.fnBodyCompactDeep")
+check("completion.mchain.fnBodyCompactDeep", set(_mdd) == {"b", "i"}, str(sorted(_mdd)))
+
+# C 泛型类型值别名的别名链 / 字面量 / 实例
+_mg = mcomp(MUSE, muri, "    g.", "mchain.genericAliasChain")
+check("completion.mchain.genericAliasChain",
+      {"Inner", "K", "mk"} <= set(_mg) and not ({"name", "val"} & set(_mg)),
+      str(sorted(_mg)))
+_mh = mcomp(MUSE, muri, "    h.", "mchain.genericModuleAlias")
+check("completion.mchain.genericModuleAlias",
+      {"Inner", "K", "mk"} <= set(_mh), str(sorted(_mh)))
+_mgl = mcomp(MUSE, muri, "var gx: g = g{ .name = 1, .", "mchain.genericAliasLiteral")
+check("completion.mchain.genericAliasLiteral", "val" in _mgl, str(sorted(_mgl)))
+_mgi = mcomp(MUSE, muri, "    gx.", "mchain.genericAliasInstance")
+check("completion.mchain.genericAliasInstance",
+      {"val", "name"} <= set(_mgi), str(sorted(_mgi)))
+
+# B Task：scope / 通道 / timer / group / select 都在实例上
+_mt = mcomp(MUSE, muri, "    t.", "mchain.taskInstance")
+check("completion.mchain.taskInstanceCapabilities",
+      {"scope", "scopeSpawn", "scopeJoin", "scopeJoinTimeout", "chan", "chanSend",
+       "sleep", "awaitTimeout", "select", "group", "withScope"} <= set(_mt),
+      str(sorted(_mt)))
+_mtt = mcomp(MUSE, muri, "    std.task.Task.", "mchain.taskType")
+check("completion.mchain.taskTypeNamespace",
+      set(_mtt) == {"coro", "single", "pool", "fromId", "SEL_AWAIT", "SEL_RECV"},
+      str(sorted(_mtt)))
+_ms = mcomp(MUSE, muri, "    if", "mchain.snippet")
+check("completion.mchain.snippet",
+      _ms.get("if", {}).get("insertTextFormat") == 2, str(sorted(_ms)))
+
 try:
     p8.kill()
 except Exception:

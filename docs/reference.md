@@ -611,6 +611,14 @@ alloc 是 O(1) bump、16 对齐；free 是 no-op（arena 语义）。**不是线
 `fn (usize) !usize`，`await` 是普通方法 —— 没有 async/await、没有函数着色、
 没有新语法。
 
+> **在编辑器里找不到 scope / 通道 / timer？** 在 `std.task.Task.` 后敲补全
+> 只会看到 6 项：4 个静态构造器 + `SEL_AWAIT` / `SEL_RECV`。这不是「没实现」，
+> 而是类型命名空间按语义只列静态面。全部 **31 个能力方法都在实例上**：先写
+> `var t = std.task.Task.single();`，再敲 `t.` 就能看到
+> `spawn / await* / cancel / sleep / select / scope* / withScope / chan* /
+> group* / send / recv / close` 等。分组清单见下面「实例方法」与
+> 「结构化并发」「超时、select、命名通道」「内核线程组」四节。
+
 ```zx
 const job = fn (ctx: usize) !usize { … };    // 任务函数形状固定
 
