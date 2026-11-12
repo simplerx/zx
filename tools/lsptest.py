@@ -4045,7 +4045,34 @@ _muse_path = os.path.join(SRC_DIR, "mchain.zx")
 open(_muse_path, "w", encoding="utf-8").write(MUSE)
 muri = "file:///" + _muse_path.replace("\\", "/")
 
-for _u, _txt in ((muri, MUSE), (mliburi, MLIB)):
+# §136 泛型**值参数**容器（`fn (N: u64) type`，没有 `T: type`）：三条入口
+# 都要出字段——实例 `v.`、别名字面量 `L{ .`、直接构造 `List(2){ .`。
+# 2026-11-13 用户截图：`const L: type = List(2); L.` 只有构造骨架，
+# 根因是 inferContainer 把返回类型 "type" 当容器名继续解析。
+MGV = """const List = fn (N: u64) type {
+    return struct {
+        pub genId: *[N]u64,
+        pub ptr: *[N]*void,
+        pub const len = fn (self: *const Self) u64 { return N; };
+    };
+};
+
+const L: type = List(2);
+
+pub const main = fn () void {
+    var v: L = L{ .genId = null, .ptr = null };
+    v.
+    var w = L{ .
+    var z = List(2){ .
+    var y = List(2){ .genId = null, .ptr = null };
+    y.
+};
+"""
+_mgv_path = os.path.join(SRC_DIR, "gval.zx")
+open(_mgv_path, "w", encoding="utf-8").write(MGV)
+mgvuri = "file:///" + _mgv_path.replace("\\", "/")
+
+for _u, _txt in ((muri, MUSE), (mliburi, MLIB), (mgvuri, MGV)):
     s8({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
         "textDocument": {"uri": _u, "languageId": "zx", "version": 1, "text": _txt}}})
 
@@ -4101,6 +4128,21 @@ check("completion.mchain.genericAliasLiteral", "val" in _mgl, str(sorted(_mgl)))
 _mgi = mcomp(MUSE, muri, "    gx.", "mchain.genericAliasInstance")
 check("completion.mchain.genericAliasInstance",
       {"val", "name"} <= set(_mgi), str(sorted(_mgi)))
+
+# D 泛型值参数容器（§136）：实例 / 别名字面量 / 直接构造字面量
+_gv1 = mcomp(MGV, mgvuri, "    v.", "gval.instance")
+check("completion.gval.instanceMembers",
+      {"genId", "ptr", "len"} <= set(_gv1), str(sorted(_gv1)))
+_gv2 = mcomp(MGV, mgvuri, "var w = L{ .", "gval.aliasLiteral")
+check("completion.gval.aliasLiteral",
+      {"genId", "ptr"} <= set(_gv2), str(sorted(_gv2)))
+_gv3 = mcomp(MGV, mgvuri, "var z = List(2){ .", "gval.ctorLiteral")
+check("completion.gval.ctorLiteral",
+      {"genId", "ptr"} <= set(_gv3), str(sorted(_gv3)))
+# 实例来自构造字面量本身（用户截图的正规写法）——字段**和**方法都要出
+_gv4 = mcomp(MGV, mgvuri, "    y.", "gval.ctorInstance")
+check("completion.gval.ctorInstance",
+      {"genId", "ptr", "len"} <= set(_gv4), str(sorted(_gv4)))
 
 # B Task（§128）：t. 只列保留的实例方法；scope/chan/timer 已不导出
 _mt = mcomp(MUSE, muri, "    t.", "mchain.taskInstance")

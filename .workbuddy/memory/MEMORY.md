@@ -38,6 +38,18 @@
 - 内建类型 Allocator 无源文件声明：`builtinTyMembers` 硬编码 ctx/alloc/free，与 `sema_allocator_type` 对齐；`isBuiltinTy` 认 `init(...) ?Allocator`。`std.heap.page` 是**值**不是命名空间。
 - 关联常量/嵌套类型：`static_member_ty()` 把 `c.K` 折成值；后端物化静态成员跳过 TY_TYPE；类型成员挂 `dflt->type_val`；静态切片常量显式发 `{ptr,len}`。守门 `tests/good/assoc-const.zx`。
 
+### 同名容器串味的两条铁律（§136，2026-11-13）
+- **泛型构造函数不能提到全局最前**：`containerMembersAny` 必须按 `scanFiles`
+  的文件优先级**逐文件**试，同一文件内泛型在前。全局泛型优先会让同会话别的
+  文档 `const Box = fn (T: type) type` 抢走 leaklib 的普通 `Box`（挂 26 条守卫）。
+- **裸名字推断只接泛型构造函数**：`completeAt` 放开单段裸名字后，若不加
+  `genericBodyOf(ty0) != null` 的闸门，`vp.Cfg{…}` / `std.json.Obj{…}` /
+  `m.A.B.Cfg{…}` 三类限定路径实例会被抢（挂 3 条）。限定路径实例有专门的
+  链，别在推断里二次猜。
+- 语义：`List = fn (N: u64) type` 只有值参数也算泛型（§135 `fn_is_generic`）；
+  `var x = List(2)` 的 x 是**类型**（只出构造骨架），字段/方法要 `L{…}` 实例
+  或 `var v: L` 标注。
+
 ### 解析链优先级与守门会话
 - `scanFiles()` 按**裸名字**找容器（`files[0]` 是当前文档，其后文档目录、std、模块目录）。限定路径必须走 `modContainerOf / resolveContainerPath` 锁模块文件，不能靠裸名兜底；`appendGenericSynthetics` 合成声明要 `insertSlice(gpa,1,…)` 排前部，否则被同名容器抢走。
 - 多段路径不许"拿末段名字配容器"：`resolveContainerPath` 每段只在上一层体里 `findMemberStmt`（深度感知）。三处入口：限定类型路径、`instancePathContainer`、`isTypeValuedRecv/typeValuedContainer`。emit 用 `mem_body_fix`；hover 实例分支同源。守门 `completion.deep.*` 6 条 + `hover.deepNestField`。

@@ -5091,3 +5091,52 @@ at compile time」是同一族，只是「编译期已知为 null」的来源从
   `tests/good/generic-value-param.zx`。
 - §130 / §132 / §133 里「运行时 side table」「按点擦除双发射」的段落
   按本节作废；**编译期那半（状态机、预分配、账本、E0509）一字不动**。
+
+## §136 泛型值参数容器的补全：四条断点 + 两处"同名串味"（2026-11-13 用户截图）
+
+**用户原话**：「这个泛型查不到字段、方法等；记得有两条链路解析，还有各种
+容器，嵌套类会有这个问题」。截图里 `const L: type = List(2);`，`List` 是
+`fn (N: u64) type` 这种**只有值参数**的类型构造函数（没有 `T: type`），
+`v.` 一个成员都不出。随后用户澄清：inlay 里显示的是 `List(2)`，截图里的
+`List(n: 2)` 是笔误。所以不是大小写，是**类型构造调用**这条链断了。
+
+编译器侧（§135 顺带修的 `fn_is_generic`）早就认这种函数是泛型了，断的
+全在 zxls 的文本补全链上，一共四处：
+
+1. **`inferContainer` 把返回类型 `type` 当容器名**。`X(2)` 命中裸调用分支，
+   取出 `sig.ret = "type"` 又递归下去，`isContainerIn("type")` 永远假 →
+   返回 null。现在返回 `type` 的函数直接认成类型构造函数：`genericBodyOf`
+   有体就返回函数名（真正的容器），没有就 null。顺带补两条兜底
+   （`genericBodyOf(files, head)`、`moduleFnContainerRet`），别名/模块里的
+   构造函数也能认出来。
+2. **`lit_ctx` 不认 `List(2){ .`**：`'{'` 前是 `')'` 而不是标识符，两条分支
+   全不命中 → 退回全局（空）列表。加括号配平反扫，取出被调表达式再问
+   `inferContainer`。
+3. **`lit_ctx` 只认 `isContainerIn`**：`L{ .`（L 是 `const L: type = List(2)`）
+   不是 `const L = struct`，落空。现在 `isContainerIn or genericBodyOf`。
+4. **单段裸名字进不了推断**：`var x = List(2); x.` 的 path 是 `"x"`，老条件
+   要求"接收者含 `(`"；而实例兜底的链只认 `A.B.C` 这种纯路径初值，
+   `List(2)` 落空。现在单段裸名字也走推断，但**只在推断出泛型构造函数时**
+   接管，失败照旧往下走（切片 `b.`、错误集 `Err.`、内联匿名字段、普通实例
+   都在后面的分支里）。
+
+### 两处"同名串味"（都是这次踩出来的，写死别再犯）
+
+- **泛型不能提到全局最前**。`containerMembersAny` 第一版改成"泛型优先"，
+  立刻挂 26 条既有守卫：同会话里别的文档 `const Box = fn (T: type) type`
+  抢走 vendor 文件里的 `Box`，`b.` 弹出别人的 `meta/v`。正确口径是
+  **按 `scanFiles` 的文件优先级逐文件试，同一文件内泛型在前**——本文件的
+  泛型能压过 std 的同名 `struct`，别人的泛型抢不走本文件的普通容器。
+- **裸名字只接泛型构造函数**。第一版让所有裸名字都进推断，`vp.Cfg{…}` /
+  `std.json.Obj{…}` / `m.A.B.Cfg{…}` 三类实例全被抢走（`Cfg`/`Obj` 在别的
+  文档里同名），vendor / 逐段解析分支再也走不到。限定路径的实例有专门的
+  链，别在推断里二次猜。
+
+### 守门
+
+`tools/lsptest.py` 的 `gval.zx`（`MGV`）四条：`gval.instanceMembers`
+（`var v: L = L{…}; v.` 出 genId/ptr/len）、`gval.aliasLiteral`（`L{ .`）、
+`gval.ctorLiteral`（`List(2){ .`）、`gval.ctorInstance`
+（`var y = List(2){…}; y.` 字段**和**方法都要出）。LSP 冒烟 380 → 384 项。
+`const L: type = List(2); L.` 属于类型命名空间，只出构造骨架 `L{...}`，
+不出字段——`L.genId` 编译不过。

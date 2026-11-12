@@ -1487,6 +1487,14 @@ static Type *resolve_type(Node *n) {
         uint64_t len = 0;
         if (has_len) {
             IntV v = ev_int(n->b);
+            /* 标识符压根不存在时不要落成「长度不是编译期整数」：真实原因是
+             * 拼写 / 大小写（`N: u64` 却写 `*[n]u64` 会踩中），那句提示把人
+             * 引到错误的修法上。 */
+            if (!v.ok && n->b->kind == NK_IDENT && !n->b->sym)
+                return BAD(n->b, "unknown identifier '%s' in array length -- check "
+                          "spelling/case; a generic value parameter like `N: u64` "
+                          "is a compile-time constant",
+                          n->b->name ? n->b->name : "?");
             if (!v.ok || v.neg) { BAD(n->b, "array length must be a non-negative compile-time integer"); has_len = false; }
             else len = v.v;
         }

@@ -866,12 +866,20 @@ fn containerMembers(files: []const []const u8, base: []const u8, fields: *std.Ar
 /// 0 成员，就是因为只走了形态 1。
 fn containerMembersAny(files: []const []const u8, base: []const u8,
                        fields: *std.ArrayList(Decl)) ?[]const u8 {
-    if (containerMembers(files, base, fields)) return containerSrcOf(files, base);
+    // KEEP — 同一文件内**泛型构造函数优先**（2026-11-13）：`const X = fn (…)
+    // type {…}` 的返回体才是实例成员表，次序反过来会让 std 里同名容器
+    //（`const List = struct`）抢先，`var x = List(2); x.` 弹出那个 List 的
+    // push/take/deinit，用户自己写的一个不弹。但泛型**不能**提到全局最前：
+    // 同会话里别的文档同名泛型（mchain 的 `Box(T)`）会抢走本文件的普通容器
+    //（leaklib 的 `Box`）。所以按 scanFiles 的文件优先级逐文件试，文件内
+    // 泛型在前、普通容器在后。
     for (files) |ftext| {
-        if (genericBodyOf(&[_][]const u8{ftext}, base)) |gb| {
+        const one = [_][]const u8{ftext};
+        if (genericBodyOf(&one, base)) |gb| {
             extractBraceMembers(gb, false, fields);
             return ftext;
         }
+        if (containerMembers(&one, base, fields)) return ftext;
     }
     return null;
 }
@@ -5520,11 +5528,26 @@ fn inferContainer(files: []const []const u8, text: []const u8, expr: []const u8,
         return if (isContainerIn(files, head) or genericBodyOf(files, head) != null) head else null;
     }
     if (e[k] == '(') {
-        // 裸调用 f(…)：同文件函数的返回类型
+        // 裸调用 f(…)：同文件函数的返回类型。返回 `type` 的是**类型构造
+        // 函数**（`List(2)`、`Make(i32)`）——"容器"就是它构造的 struct 体，
+        // 交给 containerMembersAny 的 genericBodyOf 分支。注：以前把 "type"
+        // 当容器名继续解析，`List(2).` 与 `var x = List(2); x.` 一起返回
+        // null（用户 2026-11-13 截图：泛型实例查不到字段/方法）。
         if (findDeclStmt(text, head)) |s2| {
             const sig = sigOfStmt(s2);
-            if (sig.is_fn and sig.ret.len > 0) return inferContainer(files, text, sig.ret, depth + 1);
+            if (sig.is_fn and sig.ret.len > 0) {
+                const rt0 = trimSl(sig.ret);
+                if (std.mem.eql(u8, rt0, "type")) {
+                    return if (genericBodyOf(files, head) != null) head else null;
+                }
+                return inferContainer(files, text, rt0, depth + 1);
+            }
         }
+        // 别名 / 模块函数（模板里没有声明文本，vendor 也一样）：返回 `type`
+        // 的类型构造函数只能靠 genericBodyOf 认出来；普通函数返回的容器类型
+        // 再沿模块路径接一层。
+        if (genericBodyOf(files, head) != null) return head;
+        if (moduleFnContainerRet(files, head)) |rt3| return rt3;
         return null;
     }
     if (e[k] != '.') return null;
@@ -7646,7 +7669,11 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                                 if (std.mem.lastIndexOfScalar(u8, nm, '.')) |d| nm = nm[d + 1 ..];
                                 var sfv = scanFiles(doc, text);
                                 defer sfv.deinit(gpa);
-                                ok = isContainerIn(sfv.items, nm);
+                                // 泛型构造函数的名字也是容器名（`L{ .` 里
+                                // L 是 `: type` 别名）：只按 isContainerIn
+                                // 找 `const L = struct` 会漏。
+                                ok = isContainerIn(sfv.items, nm) or
+                                    genericBodyOf(sfv.items, nm) != null;
                                 // KEEP: vendor/deps 导入的容器 `vp.Cfg{`——
                                 // 本文件/std 目录扫不到，按模块绑定进模块
                                 // 文件确认（2026-11-08：vendor struct 也要查）。
@@ -7657,6 +7684,39 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                                 // 变 false，续字段补全退化成 0 项。
                                 if (!ok and isPurePath(name)) {
                                     if (resolveContainerPath(sfv.items, doc, text, name) != null) ok = true;
+                                }
+                            } else if (q2 > 0 and text[q2 - 1] == ')') {
+                                // KEEP — 编辑期位置 `List(2){ .`（用户
+                                // 2026-11-13）：'{' 前是 ')' 而不是标识符，上面
+                                // 两条都不命中 → lit_ctx=false → 续字段退化成
+                                // 全局（空）列表。反扫配平括号取出被调表达式，
+                                // 交给 inferContainer 判它是不是返回 `type`
+                                // 的类型构造函数。
+                                var d5: usize = 0;
+                                var cs: usize = q2;
+                                while (cs > 0) {
+                                    cs -= 1;
+                                    if (text[cs] == ')') {
+                                        d5 += 1;
+                                    } else if (text[cs] == '(') {
+                                        if (d5 == 0) break; // 不配对的 '('
+                                        d5 -= 1;
+                                        if (d5 == 0) break; // 配到被调的 '('
+                                    }
+                                }
+                                if (cs < q2 and text[cs] == '(') {
+                                    var cs2: usize = cs;
+                                    while (cs2 > 0 and (isIdentChar(text[cs2 - 1]) or
+                                        text[cs2 - 1] == '.')) cs2 -= 1;
+                                    if (cs2 < q2) {
+                                        const cx = trimSl(text[cs2..q2]);
+                                        var sfx = scanFiles(doc, text);
+                                        defer sfx.deinit(gpa);
+                                        if (inferContainer(sfx.items, text, cx, 0) != null) {
+                                            ok = true;
+                                            qs = cs2;
+                                        }
+                                    }
                                 }
                             }
                             if (ok) {
@@ -8056,10 +8116,30 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                     }
                 }
             }
-            if (!handled and std.mem.indexOfScalar(u8, path, '(') != null) {
+            // KEEP — 2026-11-13 扩到**单段裸名字**：`var x = List(2); x.` 的
+            // path 是 "x"，此前不满足"含 '('"，整条推断被跳过；而实例兜底
+            // 那条链只认 `A.B.C` 这种纯路径初值，`List(2)` 落空 → 只剩全局
+            // 标识符（用户截图：泛型实例查不到字段/方法）。含点的路径仍交给
+            // 下面的 resolveContainerPath（逐段下钻），不在这里抢。
+            if (!handled and path.len > 0 and
+                (std.mem.indexOfScalar(u8, path, '(') != null or
+                 std.mem.indexOfScalar(u8, path, '.') == null))
+            {
+                const expr_recv = std.mem.indexOfScalar(u8, path, '(') != null;
                 var cf = scanFiles(doc, text);
                 defer cf.deinit(gpa);
-                if (inferContainer(cf.items, text, path, 0)) |ty0| {
+                // 单段裸名字只在**不是容器/类型名**时才当值推断：`Kind.` /
+                // `Color.` 属类型命名空间，交给下面的容器分支出变体与关联
+                // 常量（recv_kind=.ty），误当实例会把它们整批过滤掉。
+                const bare_ok = expr_recv or
+                    (!isContainerIn(cf.items, path) and genericBodyOf(cf.items, path) == null);
+                if (bare_ok) infer_blk: {
+                    const ty0 = inferContainer(cf.items, text, path, 0) orelse break :infer_blk;
+                    // 裸名字只接**泛型类型构造函数**（`List(2)`）这一种：
+                    // `vp.Cfg{…}` / `std.json.Obj{…}` / `m.A.B.Cfg{…}` 这些
+                    // 限定路径实例有专门的 vendor/逐段分支，抢过来只会让
+                    // 同名容器串味（同会话别的文档里的 Cfg 抢先）。
+                    if (!expr_recv and genericBodyOf(cf.items, ty0) == null) break :infer_blk;
                     if (containerMembersAny(cf.items, ty0, &decls)) |ctxt0| {
                         handled = decls.items.len > 0;
                         if (handled) {
@@ -8075,14 +8155,20 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                                 if (isContainerIn(cf.items, last3) or
                                     genericBodyOf(cf.items, last3) != null) recv_kind = .ty;
                             }
+                            // 单段裸名字也可能是**类型值**（`const L: type =
+                            // List(2)` 的 `L.`）：那种接收者只有静态成员，
+                            // 摆出字段会写成编译不过的 `L.genId`。
+                            if (isTypeValuedRecv(cf.items, doc, text, path, 0)) recv_kind = .ty;
                             mem_txt = ctxt0;
                             markContainerFns(ctxt0, &decls);
                             owner = ty0;
                         }
                     }
                 }
-                // 解析不出也保持空列表——绝不回落成全局关键字噪音
-                handled = true;
+                // 表达式接收者解析不出也保持空列表——绝不回落成全局关键字
+                // 噪音；单段裸名字必须继续往下走（切片 `b.`、错误集 `Err.`、
+                // 内联匿名字段、实例变量都在后面的分支里）。
+                if (expr_recv) handled = true;
             }
             // KEEP — 切片/字符串接收者的编译器成员（用户 2026-11-09 踩中：
             // `"hello".` 与 `var b: []const u8; b.` 都是空列表）。sema 的
