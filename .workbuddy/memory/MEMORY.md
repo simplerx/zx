@@ -73,5 +73,11 @@
 - **诊断码由 `src/zxc.c` 的 `g_rules` strstr 顺序决定**：新规则要放在 `found \``（E0301）这类笼统规则**之前**，否则帮助文案不对路。
 - 守门：`demo/snake.zx --sim` 300 局、`tests/good/casts-one-way.zx`、`tests/bad/removed-*.zx`（4 个 E0211）、`tests/multibad/private-member`、`tests/good/addr-array.zx`。
 
+## 句柄检查只在编译期（§135，2026-11-13 用户裁定）
+- **运行时 side table 已撤掉**，`std.slot` 删除（用户：抹源靠它兜底是假安全）。`get` 能证明 LIVE 就改写成私有 `getUnchecked`（dev/release 同形态），证明不了报 **E0511**；free 二次释放 E0509、表已关闭 E0510。E0510 定位从「`.?` 强制解包」扩大到「读失效句柄」；`handle_dead_get` / `ZX_HANDLE_CHECKS` 已删。
+- opt-in 契约（没有 std 库后的唯一入口）：容器有 `create` + `get` + **私有** `getUnchecked`。`get` 的函数体不进生成代码（要么被改写、要么报错）；`Handle` 类型本身不被识别，**方法名才是契约**。抹源（cast / 存字段 / 跨函数传参 / 控制流里发行）→ E0511，没有运行时候补。
+- 守门：`tests/good/handle-erase.zx`（自写容器样板）、`tests/bad/handle-provenance-lost.zx`、`tests/good/generic-value-param.zx`、lsptest 的 `e0510/e0511CodeDescription`、test.sh §135 两段。
+- **`fn (N: u64) type` 是泛型**：返回 `type` 的函数即类型构造函数，值参数可当数组长度（`*[N]u64`、`*[N + 1]u64`）。`fn_is_generic` 曾只认 `T: type`，是会复发的坑。
+
 ## 文档范围（用户 2026-11-10 最终裁定）
 - 删的是**手册与离线文档站**（manual.md / guide.md / site/ / mksite.py 与 test.sh 离线站检查），理由 std 未定型、写出来就是错。**`docs/errors.md` 保留**，`zxc explain` 的 `details:` 链接、zxls 的 codeDescription、test.sh 的「errors.md 覆盖全部码 / 每码有锚点 / C-Zig 地址漂移」三段都保留。lsptest 的 `diagnostics.codeDescription` 守 `href` 以 `docs/errors.md#e0304` 结尾。README 写明"std/ 源码 + 补全就是文档"。以后重写手册是独立任务，别把 errors.md 一起删。
