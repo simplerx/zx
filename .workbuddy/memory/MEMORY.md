@@ -2,6 +2,7 @@
 
 ## 元规则
 - 能力线以 **git commit + 守门用例** 保存；实现被删会连挂，**不许删用例来变绿**（用户明确要求）。历次定位：`git log --oneline --grep=inlayHint`。
+- **`// expect-output` 两种写法 runner 都认**（2026-11-12 修）：裸标记 + 连续 `// ` 行，或 `// expect-output:一行` 多行。此前只认裸标记 → 16 个用例（全部 `task_*`/`chan_*`/`errdefer` 等）stdout 断言长期假绿，改期望仍 passed；修后文件用例 321→337。runner **合并 stdout/stderr** 比对，`printTrace()` 的 trace 两行也要写进期望，文本含**相对路径+行号** → 编译必须传相对路径，且别改用例前部行数。`// expect-` 指令行不进期望。
 - 改动完成即提交、工作区干净；精确指定路径，不捎带并行任务的工作区改动。每轮只测本轮结果，不重复跑全量测试。用户偏好实际运行验证交付。
 - 行尾：`src/main.c|parse.c|sema.c`、`tools/zxls.zig`、`tools/lsptest.py`、`std/std.zx` 是 CRLF；`src/errors.c`、`std/task.zx`、`docs/`、`spec/`、`README.md`、memory 是 LF。Python 文本读写会把 CRLF 变 LF，git diff 炸成上万行 → 用 bytes 二进制读写或保留 newline。
 - 控制台输出（进度、诊断、help、usage、explain）只用 ASCII；中文只在注释与写进文件的模板里。GBK 控制台会把 UTF-8 的 `—`/`…` 渲成乱码。

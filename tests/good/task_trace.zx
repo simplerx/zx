@@ -1,8 +1,8 @@
 // task_trace.zx —— 捕获环随任务走：任务的捕获记录在任务自己的环里，
 // 与根上下文的环天然隔离。
-// expect-output:root caught:too_big
-// expect-output:task caught:too_big
-// expect-output:task ret:7
+// 期望 stdout 见文件末尾的 expect-output 块：printTrace 走 stderr，runner
+// 合并 stdout/stderr 比对，所以 trace 两行也在断言里。放末尾是为了不改动
+// 前面代码的行号 —— trace 文本里含 tests/good/task_trace.zx:15:5。
 const std = module("std");
 const Task = std.task.Task;
 
@@ -31,3 +31,10 @@ const main = fn () !i32 {
     co.close();
     return 0;
 };
+
+// expect-output
+// zx trace (oldest first):
+//   too_big at tests/good/task_trace.zx:15:5 in probe
+// root caught:too_big
+// task caught:too_big
+// task ret:7

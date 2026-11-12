@@ -334,26 +334,42 @@ static const char *directive(Line *ls, int n, const char *key, size_t *out_len) 
     return NULL;
 }
 
-static bool line_is(Line *l, const char *s) {
-    size_t n = strlen(s);
-    return l->len == n && !memcmp(l->s, s, n);
-}
-
-/* `// expect-output` 之后连续的 `// ` 行拼成期望的 stdout。
+/* 期望 stdout 三种写法都认：
+ *   // expect-output           后面连续的 `// ` 行是期望（裸标记）
+ *   // expect-output:一行       冒号后内容直接是一行期望，可连写多行
+ *   // expect-output:          等价于裸标记，后面连续的 `// ` 行是期望
+ *
+ * 早期用例写成 `// expect-output:xxx` 时 runner 只认裸标记，那 16 个用例的
+ * stdout 断言从未生效（2026-11-12 压测发现：把期望改成 group:999 仍 passed）。
+ * `// expect-exit:` 之类的指令行不算期望内容。
  * 裸写标记而后面没有内容 = "这个程序什么都不打印"，也是一条断言 ——
  * 所以用 present 表示"写了没写"，不能拿"行数为 0"代替。 */
 static void expect_output(Line *ls, int n, bool *present, Buf *out) {
+    static const char tag[] = "// expect-output";
+    const size_t tn = sizeof(tag) - 1;
     *present = false;
     bool on = false;
     int cnt = 0;
     for (int i = 0; i < n; i++) {
-        if (!on) {
-            if (line_is(&ls[i], "// expect-output")) { on = true; *present = true; }
+        const char *s = ls[i].s;
+        size_t len = ls[i].len;
+        if (len >= tn && !memcmp(s, tag, tn) &&
+            (len == tn || s[tn] == ':' || s[tn] == ' ' || s[tn] == '\t')) {
+            *present = true;
+            on = true;
+            if (len > tn && s[tn] == ':') {
+                const char *v = s + tn + 1;
+                size_t vl = len - tn - 1;
+                while (vl && (*v == ' ' || *v == '\t')) { v++; vl--; }
+                if (vl) { if (cnt++) buf_putc(out, '\n'); buf_add(out, v, vl); }
+            }
             continue;
         }
-        if (!(ls[i].len >= 3 && !memcmp(ls[i].s, "// ", 3))) { on = false; continue; }
+        if (!on) continue;
+        if (!(len >= 3 && !memcmp(s, "// ", 3))) { on = false; continue; }
+        if (len >= 10 && !memcmp(s, "// expect-", 10)) continue;  /* 指令行 */
         if (cnt++) buf_putc(out, '\n');
-        buf_add(out, ls[i].s + 3, ls[i].len - 3);
+        buf_add(out, s + 3, len - 3);
     }
 }
 
