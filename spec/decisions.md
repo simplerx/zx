@@ -5533,6 +5533,12 @@ zx 没有生命周期检查，`ctx` 是裸指针，所以：
 
 ## §142 Pool 线程安全构造器 + `return <expr>;` 的 defer 错序（2026-11-13 用户提问）
 
+> **本节加锁方案已被 §143 推翻**：`initThreadSafe` 与 `Pool.guard` 已从代码里
+> 删除，改成独立的 `SyncPool` 类型（内含 `Pool` + `guard`）。下面第 1、2、
+> 4、5、6 节关于「同一个类型 + guard 字段」的描述仅作历史存档；**第 3 节
+> 的 `defer` 求值顺序修复仍然有效**，守门 `defer-return-order.zx` 保留，
+> 竞态对照实验的结论也仍成立。
+
 用户：「现在的 std.pool.Pool 不是线程安全的吧，添加一个线程安全的构造器」。
 
 **确认不安全**：`Class.head`（空闲链）、`count`、`region` 链、块头 `flags` 全是
@@ -5649,3 +5655,101 @@ errdefer → 返回临时量」；`want` 是 `void` 时没法存值，就先发�
 - 既有 `std-pool.zx` / `pool-allocator.zx` / `pool-header-layout.zx` 全部保持
   通过（无锁路径行为不变）。
 
+
+
+## §143 职责分开：SyncPool 取代 Pool.initThreadSafe（2026-11-13 用户裁定）
+
+用户：「线程安全是实现在 allocator 上，那如果直接用 pool 上面的方法，
+其实会不安全是吧……应该职责分开，新建一个线程安全的类型，里面有 pool
+和 guard」。
+
+### 1. 上一轮做错了什么
+
+§142 把锁塞进 `Pool`：加一个 `guard: usize` 字段（0 = 无锁），新增
+`initThreadSafe` 构造器，公开入口改薄包装。当时把「不造 SyncPool 之类的
+平行类型」当成了简约，实际是混淆职责：
+
+| 问题 | 后果 |
+|---|---|
+| 同一个 `Pool` 值是否线程安全只取决于构造器 | 类型上看不出来，读代码 / 传参时无法判断 |
+| `init()` 造出来的 `Pool` 仍有 `pub alloc/free` | 误导入口始终存在，多线程一用就踩坏空闲链 |
+| 每次无锁操作多一次 `guard != 0` 判断 | 无锁路径也要为加锁路径付费 |
+
+用户同时否掉了另一个方案：**把 `alloc`/`free` 设私有、只留 `allocator()`
+对外**——那会给每次直接操作凭空加一层函数转发。
+
+### 2. 新形状
+
+`Pool` 回到 §141 的纯无锁实现（删 `guard` 字段、删 `initThreadSafe`、删
+`allocImpl`/`freeImpl`/`usedImpl` 分层、删 `deinit` 里的锁字归还）。新增
+`std.pool.SyncPool`，仍挂在同一个 `std.pool` 命名空间，不新增模块 / 运行时：
+
+```zx
+pub const SyncPool = struct {
+    pool: Pool,
+    guard: *u64,      // 堆上锁字的地址
+    gpa: Allocator,   // 归还锁字用
+    ...
+};
+```
+
+- `init(gpa)`：`Pool.init(gpa)` + 单独要一个 `u64` 锁字；锁字失败就把刚铺好
+  的档位表整个还回去。
+- `alloc` / `free` / `used`：`guardTake` → `self.pool.xxx()` → `guardGive`
+  → 显式单一出口。不依赖 §142 修好的 defer 求值顺序。
+- `allocator()`：`ctx = *SyncPool`，配自己的 `syncPoolAlloc` / `syncPoolFree`
+  转发函数；锁在转发目标里，视图不必知道锁。直接调 `sp.alloc()` 没有这层转发。
+- `deinit()`：`pool.deinit()` + 按原长度归还锁字；不加锁。
+
+**`guard` 存指针而不是值里的 u64**：`SyncPool` 也是值类型，`?SyncPool`
+unwrap、复制、传参都可能产生副本；堆上那一个 `u64` 由所有副本共享。
+守门里专门验了「复制一份值后交叉释放仍走同一把锁」。
+
+### 3. 关于「不造平行系统」
+
+上一轮把「不新增类型」当简约是错的。这里两个类型承载两种**契约**（单线程
+无锁 / 多线程加锁），不是两套重复实现：`SyncPool` 不含任何池算法，只做
+组合 + 加锁。判断标准不是「有没有新增类型」，而是「有没有重复的逻辑或格式」。
+这与用户反复强调的「简约必须让位于规范」一致。
+
+### 4. 守门与实测
+
+| | 结果 |
+|---|---|
+| `pool-threadsafe.zx` x10 | 10/10 `ok:3000 bad:0 views:6 used64:0 poolused:0 live:0` |
+| 同一份用例把 `SyncPool` 换成无锁 `Pool` | 3/3 段错误（exit 139） |
+| 既有 `std-pool` / `pool-allocator` / `pool-header-layout` | 全部保持通过 |
+| LSP 冒烟 | `SMOKE ALL PASS`（`completion.typePath.poolMethods` 断言回到 `{init}`） |
+
+`pool-threadsafe.zx` 六条 `expect-output`，另加两段：验 `Pool` 仍保留公开
+的无锁 `alloc`/`free`/`used`（没被私有化），验 `SyncPool` 值副本共享锁与池
+状态、`deinit` 用 DebugAllocator 核锁字归还。
+
+### 5. 顺带查证：heapAlloc 的形状与编译期合并（用户问询，结论是不改）
+
+用户问「`std.heapAlloc` 返回 `*[N]T`，N 若不是编译期值这个类型就不存在，
+是不是该返回切片；会不会影响编译期合并 heapAlloc，有影响就删掉合并」。
+
+查证结论：**N 必须编译期常量**。`src/sema.c` 的 `check_expr` 对
+`BI_STACKALLOC` / `BI_HEAPALLOC` 走 `ev_int(n->items[base+1])`，取不到常量
+直接报 **E0501 `std.heapAlloc count must be known at compile time`**（实跑
+`.tmp/heaprt.zx` 复现）。所以 `*[N]T` 这个类型是存在的：N 写进类型，只用于
+编译期界检查与 `.len`，运行期表示就是 8 字节指针（`TY_PTR` + `has_len`）。
+运行期长度走另一条既有通道：`Allocator.alloc(a.ctx, n * @type(T).size)`
+→ `?*u8` → `(*T)` 裸指针用 `[]` 下标，或 `p[0..n]` 组 `[]T`（运行期 len）。
+这是 decisions §44 第 2 点有意划的界，不是类型系统缺口。
+
+§130 的「编译期合并 / 预分配」**正是依赖 N 编译期常量**：`RegionSlot.size`、
+`align` 与 `reg_off` 静态偏移都要在编译期算布局（`ZX_REGION=1` 实测
+`region merged: gid=1 slots=2 total=64`）。保持现状时两者同源、零冲突，
+**不需要删合并**；反倒是把 `heapAlloc` 改成运行期 `[]T`，布局无从计算，
+合并必然作废，同时要推翻 §44「两个 API 一个形状」、`slices.zx` /
+`alloc.zx` / `region-alloc.zx` 等十余份用例、逃逸检查与 RegionSlot 账本
+—— 那是「搞复杂」。按用户「如果有影响就删」的条件，条件不成立，本轮
+**没有改动 `heapAlloc`、也没有删合并**。真要补运行期长度的便利，应另加
+一个 `[]T` 形状的新 API，不动既有两条链。
+
+### 6. 文档同步
+
+`zx-spec.md` §8.6（示例引用）、§13.1（表）、§13.3（整节重写）；
+`std/std.zx` 模块注释；`tools/lsptest.py` 的 Pool 类型补全断言。

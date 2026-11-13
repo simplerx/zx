@@ -20,25 +20,22 @@
 //     var p = std.pool.Pool.init(std.heap.page);
 //     let q = p.alloc(64);              // ?*u8
 //     if (q) b { p.free(b); }           // false = 拒绝（已释放/非法块）
-//     let n = p.create(Node);           // ?*Node，按 @type(Node).size 归档
 //     let a = p.allocator();             // Allocator 视图，喂给 ArrayList / json / fs
 //
 // allocator() 的 ctx 就是这个 *Pool：返回的是值，Pool 必须活得比它久，
 // deinit 之后立刻失效（zx 无生命周期检查，这是调用方的责任）。
 //
-// 多线程共享一个池时用 initThreadSafe(gpa)：同一个 Pool 类型、同一套
-// alloc / free / allocator API，只是每次操作进出一把原子自旋锁。init()
-// 保持无锁零开销。两条边界：backing 分配器自己也得是线程安全的；deinit
-// 只能在所有线程收工之后调用（它是销毁，不是加锁操作）。
-
+// Pool 永远无锁、只给单线程用。多线程共享一个池请用 SyncPool（本文件末尾）：
+// 那是另一个类型，内含一个 Pool 和一把锁，是不是线程安全看类型就知道。
+//
 // std.atomic 是编译器内建的纯函数（SEQ_CST），M58 起 mutex/cond 运行时
-// 已经收掉。这里直接借它造一把自旋锁：不新增类型、不新增命名空间、
-// 不往 C 运行时里加东西，按需发射的原子运行时本来就有。
+// 已经收掉。SyncPool 直接借它造一把自旋锁：不往 C 运行时里加东西，
+// 按需发射的原子运行时本来就有。
 const std = module("std");
 
-// 锁字单独从 gpa 分配，不放在 Pool 值里。Pool 是值类型：unwrap ?Pool、
-// 把值传进线程、或者复制一份出去都不该复制出第二把锁。8 字节锁字在
-// 堆上，所有副本看到的都是同一个地址。
+// 锁字单独从 gpa 分配，不放在任何值类型里。SyncPool 也是值类型：
+// unwrap ?SyncPool、复制、传参都可能产生副本；值里放锁字会复制出第二把
+// 互不相干的锁。堆上那一个 u64 由所有副本共享。
 const guardTake = fn (w: *u64) void {
     // TTAS：自旋时只读，避免反复写同一条 cache line。临界区只有几十条
     // 指令（空闲链出入栈 / 块头改 flags），自旋比阻塞更划算。
@@ -51,14 +48,6 @@ const guardTake = fn (w: *u64) void {
 
 const guardGive = fn (w: *u64) void {
     std.atomic.atomicStore(w, 0);
-};
-
-const poolLock = fn (pl: *Pool) void {
-    if (pl.guard != 0) { guardTake((*u64)pl.guard); }
-};
-
-const poolUnlock = fn (pl: *Pool) void {
-    if (pl.guard != 0) { guardGive((*u64)pl.guard); }
 };
 
 // 块状态：LIVE=在用，FREED=在空闲链上，EXTERNAL=绕过池的大块。
@@ -195,7 +184,6 @@ const poolFree = fn (ctx: ?*u8, p: *u8, _: usize) void {
 pub const Pool = struct {
     gpa: Allocator,
     classes: *Class,  // classCount 个连续的 Class
-    guard: usize,     // 0 = 无锁；否则是锁字地址（initThreadSafe 分配）
 
     // 档位表运行期铺出来（线性段 + 2 的幂段）。
     pub const init = fn (gpa: Allocator) ?Pool {
@@ -226,24 +214,7 @@ pub const Pool = struct {
                 idx = idx + 1;
                 s = s * 2;
             }
-            return Pool{ .gpa = gpa, .classes = cs, .guard = 0 };
-        }
-        return null;
-    };
-
-    // 线程安全构造器。返回的是同一个 Pool 类型，所以 alloc / free / used /
-    // create / allocator 一概不用改，Allocator 视图自动继承这把锁。
-    // 锁字分配失败要把刚铺好的档位表还回去，不能泄漏。
-    pub const initThreadSafe = fn (gpa: Allocator) ?Pool {
-        if (Self.init(gpa)) p {
-            var pl = p;
-            if (gpa.alloc(gpa.ctx, @type(u64).size)) w {
-                let wp = (*u64)w;
-                std.atomic.atomicStore(wp, 0);
-                pl.guard = (usize)w;
-                return pl;
-            }
-            pl.deinit();
+            return Pool{ .gpa = gpa, .classes = cs };
         }
         return null;
     };
@@ -267,12 +238,6 @@ pub const Pool = struct {
             }
         }
         self.gpa.free(self.gpa.ctx, (*u8)self.classes, classCount * @type(Class).size);
-        // 销毁路径：不能在还有线程持锁时调用，所以这里不加锁、直接把锁字
-        // 一并还给 backing（长度与 initThreadSafe 要的完全一致）。
-        if (self.guard != 0) {
-            self.gpa.free(self.gpa.ctx, (*u8)self.guard, @type(u64).size);
-            self.guard = 0;
-        }
         self.classes = undefined;
     };
 
@@ -288,17 +253,8 @@ pub const Pool = struct {
         return lo;
     };
 
-    // 按字节分配。失败返回 null。锁只在 guard != 0 时进出一次；
-    // 无锁构造器多付的只是这一次 != 0 判断。这里刻意用单一出口 + 显式
-    // 临时量，不写 defer：锁必须罩住 impl 的整段求值，一眼能核对。
+    // 按字节分配。失败返回 null。无锁，单线程用；并发请用 SyncPool。
     pub const alloc = fn (self: *Pool, size: usize) ?*u8 {
-        poolLock(self);
-        let r = self.allocImpl(size);
-        poolUnlock(self);
-        return r;
-    };
-
-    const allocImpl = fn (self: *Pool, size: usize) ?*u8 {
         let ci = self.classOf(size);
         if (ci == classCount) {
             // 大块：直接向分配器要 [头][负载]，格式与池内块一致
@@ -327,16 +283,8 @@ pub const Pool = struct {
     };
 
     // 释放。返回 false = 拒绝：重复释放、或不像本池的块。
-    // 拒绝时不做任何写入——空闲链不会被踩坏。flags 的读与改都在锁内，
-    // 两个线程同时 free 同一块也只会有一个成功。
+    // 拒绝时不做任何写入——空闲链不会被踩坏。
     pub const free = fn (self: *Pool, p: *u8) bool {
-        poolLock(self);
-        let r = self.freeImpl(p);
-        poolUnlock(self);
-        return r;
-    };
-
-    const freeImpl = fn (self: *Pool, p: *u8) bool {
         let a = (usize)p;
         if (a < HDR) { return false; }
         let ha = a - HDR;
@@ -356,15 +304,8 @@ pub const Pool = struct {
         return true;
     };
 
-    // 某一档当前在用块数（测试与诊断用）。读 count 也要在锁内。
+    // 某一档当前在用块数（测试与诊断用）。
     pub const used = fn (self: *Pool, size: usize) usize {
-        poolLock(self);
-        let r = self.usedImpl(size);
-        poolUnlock(self);
-        return r;
-    };
-
-    const usedImpl = fn (self: *Pool, size: usize) usize {
         let ci = self.classOf(size);
         if (ci == classCount) { return 0; }
         let c = self.classes + ci;
@@ -378,13 +319,105 @@ pub const Pool = struct {
     //
     // 容器方法工厂目前还不在 §138 的去虚拟化证明链里（§141 已定位），
     // 所以调用点仍是间接分发；需要零分发就直接写 Allocator{...} 字面量。
-    // 线程安全构造器不影响这层：poolAlloc / poolFree 转发到 pl.alloc /
-    // pl.free，锁在转发的目标里，视图本身不需要知道有没有锁。
+    // 这里永远转发到无锁的 Pool.alloc / Pool.free；SyncPool 有自己的一套
+    // 转发函数，不会绕回这里。
     pub const allocator = fn (self: *Pool) Allocator {
         return Allocator{
             .ctx = (*u8)self,
             .alloc = poolAlloc,
             .free = poolFree,
+        };
+    };
+};
+
+// ---- SyncPool（§143）：线程安全的池，职责与 Pool 分开 ----
+//
+// 用户裁定：不要把锁塞进 Pool。同一个 Pool 值是否线程安全取决于用哪个
+// 构造器造的，类型上看不出来；init() 造出来的 Pool 仍然有 pub 的
+// alloc/free，多线程一用就踩坏空闲链。反过来把 alloc/free 设私有、只留
+// allocator() 对外，又要给每次操作凭空多一层函数转发。
+//
+// 所以另立一个类型：Pool 永远无锁、永远单线程；SyncPool 内含一个 Pool
+// 和一把锁，对外提供自己的 alloc / free / used / allocator，全部加锁。
+// 是不是线程安全看类型就知道，不用记构造器。直接调 sp.alloc() 没有
+// Allocator 视图那层转发；只有走视图时才有一次（那是契约决定的）。
+//
+// guard 存的是「堆上锁字的地址」，不是值里的一个 u64：SyncPool 也是值
+// 类型，?SyncPool unwrap、复制、传参都可能产生副本；值里放锁字会复制出
+// 第二把互不相干的锁。堆上那一个 u64 由所有副本共享。
+//
+// 三条边界：backing 自己得线程安全（std.heap.page 是，DebugAllocator
+// 不是）；deinit 只能在所有线程收工后调用（销毁不加锁）；自旋锁只适合
+// 极短临界区，别在持锁时跑长任务。
+
+// Allocator 视图的转发。ctx 是 *SyncPool，锁在 SyncPool.alloc / free 里，
+// 视图本身不必知道锁的存在。
+const syncPoolAlloc = fn (ctx: ?*u8, n: usize) ?*u8 {
+    if (ctx) c {
+        let sp = (*SyncPool)c;
+        return sp.alloc(n);
+    }
+    return null;
+};
+
+const syncPoolFree = fn (ctx: ?*u8, p: *u8, _: usize) void {
+    if (ctx) c {
+        let sp = (*SyncPool)c;
+        _ = sp.free(p);
+    }
+};
+
+pub const SyncPool = struct {
+    pool: Pool,
+    guard: *u64,      // 从 gpa 单独分配的一个 u64，所有副本共享
+    // gpa: Allocator,   // 归还锁字用（与 pool.gpa 是同一个分配器）
+
+    pub const init = fn (gpa: Allocator) ?SyncPool {
+        if (Pool.init(gpa)) p {
+            if (gpa.alloc(gpa.ctx, @type(u64).size)) w {
+                let wp = (*u64)w;
+                std.atomic.atomicStore(wp, 0);
+                return SyncPool{ .pool = p, .guard = wp };
+            }
+            var pl = p;
+            pl.deinit();   // 锁字分配失败：把刚铺好的档位表还回去
+        }
+        return null;
+    };
+
+    // 销毁路径不持锁：调用方必须保证所有线程已经收工。
+    pub const deinit = fn (self: *SyncPool) void {
+        self.pool.deinit();
+        self.pool.gpa.free(self.pool.gpa.ctx, (*u8)self.guard, @type(u64).size);
+    };
+
+    // 单一出口 + 显式临时量：锁罩住整段求值，一眼能核对（不写 defer）。
+    pub const alloc = fn (self: *SyncPool, size: usize) ?*u8 {
+        guardTake(self.guard);
+        let r = self.pool.alloc(size);
+        guardGive(self.guard);
+        return r;
+    };
+
+    pub const free = fn (self: *SyncPool, p: *u8) bool {
+        guardTake(self.guard);
+        let r = self.pool.free(p);
+        guardGive(self.guard);
+        return r;
+    };
+
+    pub const used = fn (self: *SyncPool, size: usize) usize {
+        guardTake(self.guard);
+        let r = self.pool.used(size);
+        guardGive(self.guard);
+        return r;
+    };
+
+    pub const allocator = fn (self: *SyncPool) Allocator {
+        return Allocator{
+            .ctx = (*u8)self,
+            .alloc = syncPoolAlloc,
+            .free = syncPoolFree,
         };
     };
 };

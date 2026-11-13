@@ -1,30 +1,37 @@
-// pool-threadsafe.zx —— initThreadSafe：多条内核线程共享同一个池（§142）。
+// pool-threadsafe.zx —— SyncPool：多条内核线程共享同一个池（§143）。
 //
-// 对照面：init() 是无锁的，跑这段会踩坏空闲链（flags/count/head 全是
-// 共享可变状态）。initThreadSafe 用一把原子自旋锁罩住每次 alloc/free/used。
-// 每线程拿到块后写入自己的标记、做几次原子加拉开窗口、再读回校验：
-// 两条线程若拿到同一块（classPop 竞态），后写的会盖掉先写的，g_bad 上涨。
+// 职责分开：Pool 永远无锁（单线程），SyncPool 内含 Pool + guard，对外提供
+// 自己的 alloc / free / used / allocator，全部加锁。是不是线程安全看类型
+// 就知道，不用记当初用了哪个构造器。
 //
-// 还验两件事：同一个池的 Allocator 视图可以喂给多条线程各自的 ArrayList；
-// 锁字在 deinit 时按原长度还给 backing（用 DebugAllocator 当账本核）。
+// 对照面：把 SyncPool 换成无锁 Pool 跑这段会踩坏空闲链（flags/count/head
+// 全是共享可变状态），实测段错误。每线程拿到块后写入自己的标记、做几次
+// 原子加拉开窗口、再读回校验：两条线程若拿到同一块（classPop 竞态），
+// 后写的会盖掉先写的，g_bad 上涨。
+//
+// 还验三件事：同一个 SyncPool 的 Allocator 视图可以喂给多条线程各自的
+// ArrayList；Pool 本身仍保留公开的无锁 alloc/free/used（没有被私有化）；
+// 复制一份 SyncPool 值后仍共享同一把锁与同一片池状态，deinit 把锁字按
+// 原长度还给 backing（用 DebugAllocator 当账本核）。
 // expect-output:ok:3000
 // expect-output:bad:0
 // expect-output:views:6
 // expect-output:used64:0
+// expect-output:poolused:0
 // expect-output:live:0
 const std = module("std");
 
-var g_pool: usize = 0;    // *Pool（主线程设好，Group 的任务只能带一个 usize）
+var g_pool: usize = 0;    // *SyncPool（主线程设好，Group 的任务只能带一个 usize）
 var g_ok: usize = 0;
 var g_bad: usize = 0;
 var g_view: usize = 0;
 var g_spin: usize = 0;    // 纯用来拉开写/读之间的窗口
 
 const work = fn (id: usize) !usize {
-    let pl = (*std.pool.Pool)g_pool;
+    let sp = (*std.pool.SyncPool)g_pool;
     var i: usize = 0;
     while (i < 500) {
-        if (pl.alloc(64)) b {
+        if (sp.alloc(64)) b {
             let mark = (u64)(id + 1) * 1000000 + (u64)i;
             let w = (*u64)b;
             w.0 = mark;
@@ -32,7 +39,7 @@ const work = fn (id: usize) !usize {
             while (k < 16) { _ = std.atomic.atomicAdd(&g_spin, 1); k = k + 1; }
             if (w.0 == mark) { _ = std.atomic.atomicAdd(&g_ok, 1); }
             else { _ = std.atomic.atomicAdd(&g_bad, 1); }
-            if (!pl.free(b)) { _ = std.atomic.atomicAdd(&g_bad, 1); }
+            if (!sp.free(b)) { _ = std.atomic.atomicAdd(&g_bad, 1); }
         } else {
             _ = std.atomic.atomicAdd(&g_bad, 1);
         }
@@ -40,7 +47,7 @@ const work = fn (id: usize) !usize {
     }
 
     // 每线程自己的 ArrayList，但共用池的 Allocator 视图。
-    let a = pl.allocator();
+    let a = sp.allocator();
     var list = std.ArrayList(i32).init(a);
     var j: usize = 0;
     while (j < 100) { _ = list.push((i32)j); j = j + 1; }
@@ -52,10 +59,10 @@ const work = fn (id: usize) !usize {
 };
 
 pub const main = fn () i32 {
-    let p = std.pool.Pool.initThreadSafe(std.heap.page);
+    let p = std.pool.SyncPool.init(std.heap.page);
     if (p) pv {
-        var pp = pv;
-        g_pool = (usize)(*u8)&pp;
+        var sp = pv;
+        g_pool = (usize)(*u8)&sp;
         let g = std.task.Task.group();
         var i: usize = 0;
         while (i < 6) { _ = g.spawn(work, i); i = i + 1; }
@@ -64,7 +71,19 @@ pub const main = fn () i32 {
         std.println("ok:{}", std.atomic.atomicLoad(&g_ok));
         std.println("bad:{}", std.atomic.atomicLoad(&g_bad));
         std.println("views:{}", std.atomic.atomicLoad(&g_view));
-        std.println("used64:{}", pp.used(64));
+        std.println("used64:{}", sp.used(64));
+        sp.deinit();
+    }
+
+    // Pool 没有被私有化也没有被加锁：它仍有公开的无锁 alloc/free/used。
+    let raw = std.pool.Pool.init(std.heap.page);
+    if (raw) rv {
+        var pp = rv;
+        if (pp.alloc(64)) b {
+            b.0 = 5;
+            _ = pp.free(b);
+        }
+        std.println("poolused:{}", pp.used(64));
         pp.deinit();
     }
 
@@ -72,14 +91,15 @@ pub const main = fn () i32 {
     // DebugAllocator 本身不是线程安全的，所以只在单线程这一段用它当 backing。
     let da = std.debug_alloc.DebugAllocator.init(std.heap.page);
     if (da) a {
-        let p2 = std.pool.Pool.initThreadSafe(a);
+        let p2 = std.pool.SyncPool.init(a);
         if (p2) pv2 {
-            var pp2 = pv2;
-            if (pp2.alloc(32)) b2 {
+            var sp2 = pv2;
+            var copy = sp2;          // 值副本：共享 guard 地址与 pool.classes
+            if (copy.alloc(32)) b2 {
                 b2.0 = 7;
-                _ = pp2.free(b2);
+                _ = sp2.free(b2);    // 交叉释放，走的是同一把锁
             }
-            pp2.deinit();
+            sp2.deinit();
         }
         std.println("live:{}", std.debug_alloc.DebugAllocator.liveBytes(a));
         std.debug_alloc.DebugAllocator.deinit(a);

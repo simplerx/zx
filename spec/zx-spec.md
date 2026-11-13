@@ -1636,7 +1636,7 @@ const locked = fn (m: *Mutex, f: fn() void) void {
 ```
 
 示例里的 `Mutex` 是伪代码占位：M58 起 zx 没有内建 mutex 类型，只有
-`std.atomic.*`（§13.1）。真实可用的成对写法见 `Pool.initThreadSafe`——它
+`std.atomic.*`（§13.1）。真实可用的成对写法见 `std.pool.SyncPool`——它
 刻意用「先存临时量、再解锁、再返回」的单一出口，不依赖 defer。
 
 ```zx
@@ -2129,7 +2129,7 @@ if (raw) p {
 | `std.arena.ArenaAllocator` | `init(backing)` → `?Allocator` | 一次性批量释放：`alloc` 推指针，`free` 空操作，`deinit(a)` 全还 |
 | `std.debug_alloc.DebugAllocator` | `init(backing)` → `?Allocator` | 记账分配器：泄漏 / 重复释放 / 长度不符当场报（§13.2） |
 | `std.pool.Pool` | `init(backing)` → `?Pool` | 尺寸分级池：`alloc(n)` → `?*u8` 指向**负载起点**（块头在它之前 16B），`free(p)` 收同一个指针自己反查头；`allocator()` → `Allocator` 视图（ctx 指 this，Pool 必须活得比它久），`deinit()` 整批归还 |
-| `std.pool.Pool.initThreadSafe(backing)` | `?Pool` | 同一个 `Pool` 类型、同一套 API，只是每次 `alloc` / `free` / `used` 进出一把原子自旋锁。`init()` 保持无锁零开销；`allocator()` 视图自动继承锁（§13.3） |
+| `std.pool.SyncPool` | `init(backing)` → `?SyncPool` | 线程安全版：内含 `Pool` + 锁，`alloc` / `free` / `used` / `allocator` 全部加锁；`Pool` 仍是公开的无锁单线程类型（§13.3） |
 | `std.print` / `std.println` / `std.format` | 内建 | 见 §11.1 |
 | `std.file.read(alloc, path)` | `?[]const u8` | 整个文件读进分配器给的缓冲，末尾补 0 |
 | `std.file.write(path, data)` / `append` | `bool` | 覆盖写 / 追加写 |
@@ -2250,39 +2250,44 @@ dev 档（`-O0`）也会展开。**没有 `inline` 关键字**：该不该内联
 
 ### 13.3 多线程共用一个分配器
 
-`init(backing)` 造出来的 `Pool` **不是线程安全的**：空闲链 `Class.head`、
+`Pool.init(backing)` 造出来的 `Pool` **不是线程安全的**：空闲链 `Class.head`、
 在用计数 `count`、槽区链 `region`、块头 `flags` 全是共享可变状态，两条线程
 同时 `alloc` 会从同一条链上摘下同一块。
 
-`initThreadSafe(backing)` 返回的是**同一个 `Pool` 类型**，因此 `alloc` /
-`free` / `used` / `deinit` / `allocator()` 一概不用改：
+线程安全能力放在**另一个类型** `std.pool.SyncPool` 上，不给 `Pool` 加
+`initThreadSafe` 之类的构造器。理由：同一个 `Pool` 值是否线程安全若只由
+当初用了哪个构造器决定，从类型上完全看不出来；而 `init()` 造出来的 `Pool`
+照样有公开的 `alloc` / `free`，多线程一用就踩坏空闲链。把 `alloc` / `free`
+设成私有、只留 `allocator()` 对外也不合适——那会给每次直接操作凭空加一层
+函数转发。职责分开之后看类型就知道，且 `SyncPool.alloc` 与 `Pool.alloc`
+一样是直接调用。
 
 ```zx
-let p = std.pool.Pool.initThreadSafe(std.heap.page);
-if (p) pv {
-    var pp = pv;                 // 把 &pp 交给各线程
-    let a = pp.allocator();      // 多条线程可以各持一份，锁在池里
-    // … 各线程收工后再 pp.deinit()
+let sp = std.pool.SyncPool.init(std.heap.page);
+if (sp) pv {
+    var s = pv;                  // 把 &s 交给各线程
+    let a = s.allocator();       // 多条线程可以各持一份，锁在 SyncPool 里
+    // ... 各线程收工后再 s.deinit()
 }
 ```
 
-实现上给池加一个 `guard: usize` 字段（`0` = 无锁），锁字是**单独从 backing
-分配的一个 `u64`**，不在 `Pool` 值里。`Pool` 是值类型，unwrap `?Pool`、把值
-传进线程、或者复制一份出去都不该复制出第二把锁——所以所有副本看到的必须
-是同一个锁字地址。公开入口是薄包装，内部 `allocImpl` / `freeImpl` /
-`usedImpl` 原封不动：
+`SyncPool` 内含一个 `Pool` 字段和一个 `guard`。`guard` 存的是**单独从 backing
+分配的一个 `u64` 锁字的地址**，不是值里的一个 `u64`：`SyncPool` 也是值类型，
+unwrap `?SyncPool`、复制、传参都可能产生副本，值里放锁字会复制出第二把
+互不相干的锁。公开入口是「加锁 → 调内嵌 `Pool` → 解锁 → 单一出口」：
 
 ```zx
-poolLock(self);
-let r = self.allocImpl(size);
-poolUnlock(self);
+guardTake(self.guard);
+let r = self.pool.alloc(size);
+guardGive(self.guard);
 return r;
 ```
 
 锁是 `std.atomic.atomicCAS` / `atomicLoad` / `atomicStore` 造的 TTAS 自旋锁
-（SEQ_CST）。M58 起 mutex/cond 运行时已收掉，这里不新增类型、不新增
-命名空间、不往 C 运行时加东西；临界区只有几十条指令，自旋比阻塞更划算。
-`init()` 路径多付的只是一次 `guard != 0` 判断。
+（SEQ_CST）。M58 起 mutex/cond 运行时已收掉，这里不往 C 运行时加东西；
+临界区只有几十条指令，自旋比阻塞更划算。`Allocator` 视图走自己的一对
+转发函数（`syncPoolAlloc` / `syncPoolFree`），锁在转发目标里，视图本身
+不必知道锁的存在。
 
 **三条边界**（调用方责任，语言不做检查）：
 
@@ -2291,11 +2296,14 @@ return r;
 - **`deinit()` 只能在所有线程收工之后调用**。它是销毁（把档位表和锁字一起
   还给 backing），不是加锁操作，此刻不能还有人持锁。
 - 自旋锁在**临界区极短**时合适；如果将来把长操作放进锁里，高竞争会空转
-  占 CPU。要阻塞语义得另议，不能靠这个构造器。
+  占 CPU。要阻塞语义得另议，不能靠这个类型。
 
-全量守门见 `tests/good/pool-threadsafe.zx`：6 条内核线程 × 500 次
-alloc/写标记/读回/free + 各自的 `ArrayList` 共用一个视图；把构造器换成
-无锁的 `init` 跑同一份用例会直接段错误。
+全量守门见 `tests/good/pool-threadsafe.zx`：6 条内核线程 x 500 次
+alloc/写标记/读回/free + 各自的 `ArrayList` 共用一个视图；另外验 `Pool`
+仍保留公开的无锁 `alloc`/`free`/`used`、`SyncPool` 值副本共享同一把锁、
+`deinit` 把锁字按原长度还给 backing。把 `SyncPool` 换成无锁 `Pool` 跑
+同一份用例会直接段错误。
+
 
 ---
 
