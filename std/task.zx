@@ -63,17 +63,17 @@ pub const Group = struct {
     id: usize,
 
     // 起线程失败（句柄耗尽/内存不足）返回 false，计数不残留。
-    pub const spawn = fn (self: *const Self, f: fn (usize) !usize, ctx: usize) bool {
+    pub const spawn = fn (self: Self, f: fn (usize) !usize, ctx: usize) bool {
         return zx_tg_spawn(self.id, f, ctx) == 1;
     };
 
     // 等本组任务全部收尾。组可复用（wait 后还能继续 spawn）。
-    pub const wait = fn (self: *const Self) void {
+    pub const wait = fn (self: Self) void {
         zx_tg_wait(self.id);
     };
 
     // 批量编排：起 n 条内核线程跑同一个函数，ctx 依次 0..n-1，等收尾。
-    pub const run = fn (self: *const Self, f: fn (usize) !usize, n: usize) void {
+    pub const run = fn (self: Self, f: fn (usize) !usize, n: usize) void {
         var i: usize = 0;
         while (i < n) {
             _ = zx_tg_spawn(self.id, f, i);
@@ -83,7 +83,7 @@ pub const Group = struct {
     };
 
     // 等收尾后释放计数器，之后句柄不可再用。
-    pub const close = fn (self: *const Self) void {
+    pub const close = fn (self: Self) void {
         zx_tg_close(self.id);
     };
 };
@@ -116,24 +116,24 @@ pub const Task = struct {
 
     // ---- 任务 ----
 
-    pub const spawn = fn (self: *const Self, f: fn (usize) !usize, ctx: usize) ?usize {
+    pub const spawn = fn (self: Self, f: fn (usize) !usize, ctx: usize) ?usize {
         return zx_task_spawn(self.id, f, ctx);
     };
 
-    pub const await = fn (self: *const Self, h: usize) !usize {
+    pub const await = fn (self: Self, h: usize) !usize {
         return zx_task_await(self.id, h);
     };
 
     // 等本实例名下全部任务完成。纯屏障：结果仍用 await(h) 逐个取。
-    pub const awaitAll = fn (self: *const Self) !void {
+    pub const awaitAll = fn (self: Self) !void {
         return zx_task_await_all(self.id);
     };
 
-    pub const cancel = fn (self: *const Self, h: usize) void {
+    pub const cancel = fn (self: Self, h: usize) void {
         zx_task_cancel(self.id, h);
     };
 
-    pub const yield = fn (self: *const Self) void {
+    pub const yield = fn (self: Self) void {
         zx_task_yield(self.id);
     };
 
@@ -142,19 +142,19 @@ pub const Task = struct {
     // 没有对手就返回 would_block。载荷是 usize：大值传指针，由调用点
     // (usize)v / (T)bits 自己 cast，castable 表当编译期约束。
 
-    pub const send = fn (self: *const Self, v: usize) !void {
+    pub const send = fn (self: Self, v: usize) !void {
         return zx_task_send(self.id, v);
     };
 
-    pub const recv = fn (self: *const Self) !usize {
+    pub const recv = fn (self: Self) !usize {
         return zx_task_recv(self.id);
     };
 
-    pub const trySend = fn (self: *const Self, v: usize) !void {
+    pub const trySend = fn (self: Self, v: usize) !void {
         return zx_task_try_send(self.id, v);
     };
 
-    pub const tryRecv = fn (self: *const Self) !usize {
+    pub const tryRecv = fn (self: Self) !usize {
         return zx_task_try_recv(self.id);
     };
 
@@ -170,7 +170,7 @@ pub const Task = struct {
     pub const SEL_AWAIT: usize = 0;   // arg = 任务句柄
     pub const SEL_RECV: usize = 1;    // arg = 0 即实例默认通道
 
-    pub const select = fn (self: *const Self, br: *const usize, n: usize, ms: usize, which: *usize) !usize {
+    pub const select = fn (self: Self, br: *const usize, n: usize, ms: usize, which: *usize) !usize {
         return zx_sel_wait(self.id, br, n, ms, which);
     };
 
@@ -188,7 +188,7 @@ pub const Task = struct {
 
     // ---- 生命周期 ----
 
-    pub const close = fn (self: *const Self) void {
+    pub const close = fn (self: Self) void {
         zx_task_close(self.id);
     };
 };

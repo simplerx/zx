@@ -134,6 +134,8 @@ const char *sema_module_stem(int i);
 bool sema_fn_is_generic(Node *fn);
 /* 这个符号在生成的 C 里有自己的存储吗？泛型实参、运行时形参都没有。 */
 bool sema_sym_has_storage(struct Symbol *s);
+/* §151：Self 接收者按大小升级成 const 指针时，后端要发 (*self)。 */
+bool sema_sym_self_by_ptr(struct Symbol *s);
 /* 符号上挂的编译期值（泛型实参用得到） */
 struct Value *sema_sym_ct(struct Symbol *s);
 /* 这个类型只在编译期存在吗？（std.TypeInfo / std.FieldInfo——里面装着

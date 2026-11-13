@@ -1,7 +1,7 @@
 // methods.zx —— 结构体/联合体体里的 fn
 //
 // 方法就是"第一个参数是接收者的普通函数"：p.f(a) 等价于 f(p, a)。
-// 接收者写 `Self` / `*Self` / `*const Self`，泛型类型体里也一样（不用重写 T）。
+// 接收者只有 `Self` / `*Self` 两种，泛型类型体里也一样（不用重写 T）。
 const std = @mod("std");
 
 const Vec = struct {
@@ -25,7 +25,7 @@ const Vec = struct {
     };
 
     // 只读接收者：常量也能直接调
-    const len2 = fn (self: *const Self) i32 { return self.x * self.x + self.y * self.y; };
+    const len2 = fn (self: Self) i32 { return self.x * self.x + self.y * self.y; };
 };
 
 const Tag = enum { circle, rect };
@@ -33,7 +33,7 @@ const Shape = union {
     circle: {Tag.circle, f64},
     rect:   {Tag.rect, {f64, f64}},
 
-    const area = fn (self: *const Self) f64 {
+    const area = fn (self: Self) f64 {
         switch (self.tag) {
             .circle: { return 3.0 * self.circle * self.circle; };
             .rect:   { return self.rect.0 * self.rect.1; };
@@ -46,7 +46,7 @@ const Node = struct {
     value: i32,
     next: ?*Self,
 
-    const sum = fn (self: *const Self) i32 {
+    const sum = fn (self: Self) i32 {
         var total = self.value;
         if (self.next) n { total = total + n.sum(); }
         return total;
@@ -66,7 +66,7 @@ const List = fn (T: type, cap: usize) type {
             return true;
         };
 
-        const get = fn (self: *const Self, i: usize) ?T {
+        const get = fn (self: Self, i: usize) ?T {
             if (i >= self.len) { return null; }
             return self.buf[i];
         };

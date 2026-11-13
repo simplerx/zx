@@ -9,9 +9,9 @@ const List = fn (N: u64) type {
         pub ptr: *[N]*u8,
 
         // N 进了类型，也能当值用：这两个方法都读编译期那个 N。
-        pub const len = fn (self: *const Self) u64 { return N; };
+        pub const len = fn (self: Self) u64 { return N; };
 
-        pub const slot = fn (self: *const Self, i: usize) u64 {
+        pub const slot = fn (self: Self, i: usize) u64 {
             return self.genId[i];
         };
     };
@@ -22,7 +22,7 @@ const Tail = fn (N: u64) type {
     return struct {
         pub extra: *[N + 1]u64,
 
-        pub const cap = fn (self: *const Self) u64 { return N + 1; };
+        pub const cap = fn (self: Self) u64 { return N + 1; };
     };
 };
 

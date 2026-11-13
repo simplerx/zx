@@ -511,9 +511,9 @@ send({"jsonrpc": "2.0", "id": 991, "method": "textDocument/completion", "params"
 r, _ = recv_id("completion.instance.sameNameMember", 991)
 tmap = {i["label"]: i.get("detail") for i in r["result"]["items"]} if r and r.get("result") else {}
 check("completion.instance.sameNameMember",
-      tmap.get("spawn") == "spawn(self: *const Task, f: fn (usize) !usize, ctx: usize) ?usize"
-      and tmap.get("awaitAll") == "awaitAll(self: *const Task) !void"
-      and tmap.get("close") == "close(self: *const Task) void"
+      tmap.get("spawn") == "spawn(self: Task, f: fn (usize) !usize, ctx: usize) ?usize"
+      and tmap.get("awaitAll") == "awaitAll(self: Task) !void"
+      and tmap.get("close") == "close(self: Task) void"
       # 关联函数（首参不是 self）一律不进实例补全。§129 起 group 是
       # Task. 上的工厂，group* 已从实例命名空间删去。
       and not ({"coro", "single", "pool", "fromId", "group",
@@ -1592,7 +1592,7 @@ check("completion.stdInstance.staticSnippet",
       not ({"single", "coro", "pool", "fromId", "group"} & set(gk)) and "id" in gk,
       str(sorted(gk)))
 check("completion.stdInstance.methodSig",
-      (gd.get("await") or "") == "await(self: *const Task, h: usize) !usize"
+      (gd.get("await") or "") == "await(self: Task, h: usize) !usize"
       and gk.get("await") == 15 and gt.get("await") == "await(${1:h})$0",
       "%r %r" % (gd.get("await"), gk.get("await")))
 
@@ -1606,7 +1606,7 @@ check("completion.genericInstance.members",
 
 # 3c 实例方法 hover（std 类型 + 泛型）
 check("hover.stdInstance.method",
-      std_hover("g.await(1);", "await", 505) == "```zx\nawait(self: *const Self, h: usize) !usize\n```",
+      std_hover("g.await(1);", "await", 505) == "```zx\nawait(self: Self, h: usize) !usize\n```",
       std_hover("g.await(1);", "await", 505))
 check("hover.genericInstance.method",
       std_hover("l.push(1);", "push", 506) == "```zx\npush(self: *Self, v: T) bool\n```",
@@ -2742,7 +2742,7 @@ const EuShape = union(enum) {
     circle: f64,
     rect: { f64, f64 },
 
-    const describe = fn (self: *const Self) []const u8 {
+    const describe = fn (self: Self) []const u8 {
         switch (self.tag) {
             .circle: { return "circle"; };
             .rect: { return "rect"; };
@@ -4039,7 +4039,7 @@ UNIONSRC = """const U = union {
     pub a: i32,
     pub opts: struct { pub w: i32, pub h: i32 },
     pub const MAX: usize = 7;
-    pub const name = fn (self: *const Self) i32 { return 1; };
+    pub const name = fn (self: Self) i32 { return 1; };
     pub const make = fn () U { return U{ .a = 1, .opts = .{ .w = 1, .h = 2 } }; };
 };
 const UE = union(enum) {
@@ -4127,7 +4127,7 @@ pub const GG = fn (T: type) type {
 };
 pub const BX = struct {
     pub id: i32,
-    pub const take = fn (self: *const Self, cfg: struct { a: i32, nest: struct { b: i32, c: i32 } }) i32 {
+    pub const take = fn (self: Self, cfg: struct { a: i32, nest: struct { b: i32, c: i32 } }) i32 {
         cfg.
         cfg.nest.
         self.
@@ -4339,7 +4339,7 @@ MGV = """const List = fn (N: u64) type {
     return struct {
         pub genId: *[N]u64,
         pub ptr: *[N]*void,
-        pub const len = fn (self: *const Self) u64 { return N; };
+        pub const len = fn (self: Self) u64 { return N; };
     };
 };
 

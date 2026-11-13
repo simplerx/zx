@@ -37,7 +37,7 @@ const Vec = struct {
     const shift = fn (self: *Self, d: i32) void {
         self.x = self.x + d;
     };
-    const len2 = fn (self: *const Self) i32 {
+    const len2 = fn (self: Self) i32 {
         return self.x * self.x + self.y * self.y;
     };
 };
@@ -91,7 +91,7 @@ const main = fn () u8 {
     var a = Vec{ .x = 1, .y = 2 };
     a.shift(10);
     let b = a.add(a);
-    std.println("len2={}", b.len2());   // 右值要先绑 let 才能调 *const Self 方法
+    std.println("len2={}", b.len2());   // Self 只读，按大小自动选传值/传址
 
     // §7.2 while 带值
     var nn: i32 = 0;

@@ -12,7 +12,7 @@ const List = fn (T: type, cap: usize) type {
     return struct {
         buf: *[cap]T,
         len: usize,
-        const full = fn (self: *const Self) bool { return self.len == cap; };
+        const full = fn (self: Self) bool { return self.len == cap; };
     };
 };
 

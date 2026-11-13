@@ -151,6 +151,9 @@ struct Symbol {
      * 引用点就能给后端同一个实例节点，见 check_expr 的 NK_IDENT。
      * 模块级函数为 NULL。 */
     Node        *in_agg;
+    /* §151：`Self` 接收者按编译期大小升级成 const 指针时，形参符号的 ty
+     * 仍是 `Self`（值语义），后端发射这个标识符要补 `(*self)`。 */
+    bool         self_by_ptr;
     Symbol     *next;
 };
 
@@ -248,6 +251,7 @@ bool sema_sym_is_extern(Symbol *s) {
 Node *sema_sym_decl(Symbol *s) { return s ? s->decl : NULL; }
 bool sema_sym_in_fn(Symbol *s) { return s ? s->in_fn : false; }
 bool sema_sym_has_storage(Symbol *s) { return !(s && s->ct_bind); }
+bool sema_sym_self_by_ptr(Symbol *s) { return s && s->self_by_ptr; }
 Value *sema_sym_ct(Symbol *s) { return s ? s->ct : NULL; }
 
 static void scope_push(Scope *s) {
@@ -1664,6 +1668,12 @@ static bool mrecv_dup(Node *it) {
     return false;
 }
 
+/* §151：`Self` 接收者的按值上限。不大于它的按值复制，大于它的按
+ * `const Self *` 传地址（只读、零拷贝）。16 = 两个寄存器能装下的聚合
+ * 上限，与 C 的大结构体传参习惯一致。0 大小类型落在按值档——后端给
+ * 空聚合补 1 字节占位保证 C 合法，不退化成关联函数。 */
+#define ZX_SELF_VALUE_MAX 16
+
 /* 方法表：函数体里的第一个参数就是接收者。表先填满签名再查体，
  * 这样方法之间互相调用（self.other()）不用关心谁先谁后。
  * 结构体 / 联合体 / 枚举共用这一份——方法本来就是"第一个参数是接收者的函数"。 */
@@ -1680,8 +1690,9 @@ static void collect_methods(Node *n, Type *agg, const char *what) {
         Type *ft = resolve_fn_type(it);
         if (!ft || ft->kind != TY_FN) continue;
 
-        /* 第一参数叫 `self` 就是方法（必须是 Self / *Self / *const Self）；
-         * 不叫 self 就是挂在类型上的普通函数（`Ints.init(alloc)`）。 */
+        /* 第一参数叫 `self` 就是方法（只认 `Self` / `*Self`；`*const Self`
+         * 是 §151 合并前的写法，按 `Self` 归一化）；不叫 self 就是挂在
+         * 类型上的普通函数（`Ints.init(alloc)`）。 */
         Node *p0 = it->nitems > 0 ? it->items[0] : NULL;
         bool has_self = p0 && p0->name && !strcmp(p0->name, "self");
 
@@ -1702,8 +1713,24 @@ static void collect_methods(Node *n, Type *agg, const char *what) {
         if (base != agg && base->kind != TY_INVALID && r0->kind != TY_INVALID && !mrecv_dup(it))
             err_at(it->line, it->col,
                    "method '%s' must take the %s as its first parameter "
-                   "(`Self`, `*Self` or `*const Self`), found `%s`",
+                   "(`Self` or `*Self`), found `%s`",
                    it->name ? it->name : "?", what, ty_str(r0));
+
+        /* §151：接收者只有两种语义形态。
+         *   `Self`  —— 不可变；编译器按 `ty_size(Self)` 选按值 / const 指针；
+         *   `*Self` —— 可变，改的就是调用者本身。
+         * 合并前的 `*const Self` 当成 `Self` 归一化。判定只落在函数类型上：
+         * 形参节点 ty 恒为 `Self`，所以方法体里 self 始终是值语义；后端在
+         * 发射 self 标识符时按 `sema_sym_self_by_ptr` 补 `(*self)`。 */
+        bool mutable_self = r0->kind == TY_PTR && !r0->has_len && !r0->is_const;
+        if (!mutable_self) {
+            int z = ty_size(agg);
+            if (z < 0) z = 0;
+            ft->params[0] = (z > ZX_SELF_VALUE_MAX)
+                          ? ty_ptr(agg, true, false, 0) : agg;
+            p0->ty = agg;
+        }
+
         if (ty_field(agg, it->name) || ty_static_member(agg, it->name))
             err_at(it->line, it->col,
                    "'%s' is already a member; a method cannot share its name",
@@ -4080,9 +4107,23 @@ static Type *check_method_call(Node *n) {
         if (n->nitems != mft->nparams)
             return BAD(n, "method takes %d argument(s) (receiver included), %d given",
                        mft->nparams, n->nitems);
-        for (int i = 0; i < n->nitems; i++)
-            coerce_node(n->items[i], check_expr(n->items[i], mft->params[i]),
-                        mft->params[i], "argument");
+        /* §151：源码写 `Type.f(a, ...)`，但 `Self` 接收者可能已按大小升级成
+         * `const Self *`。显式调用不必知道这个判定——实参是值时自动补 `&`。*/
+        Type *w0 = mft->nparams > 0 ? mft->params[0] : NULL;
+        for (int i = 0; i < n->nitems; i++) {
+            Type *got = check_expr(n->items[i], mft->params[i]);
+            if (i == 0 && w0 && w0->kind == TY_PTR && !w0->has_len &&
+                w0->is_const && got && got->kind != TY_PTR &&
+                ty_eq(got, w0->elem) && addr_ok(n->items[i])) {
+                Node *addr = node_new(NK_UN, n->items[i]->line, n->items[i]->col);
+                addr->op = (int)TOK_AMP;
+                addr->a  = n->items[i];
+                addr->ty = ty_ptr(got, true, false, 0);
+                n->items[i] = addr;
+                got = addr->ty;
+            }
+            coerce_node(n->items[i], got, mft->params[i], "argument");
+        }
         n->inst = fld->inst;
         n->ival = 0;
         return type_of(n, ret);
@@ -4117,6 +4158,16 @@ static Type *check_method_call(Node *n) {
             return BAD(recv, "method receiver is `%s`, but this method takes `%s`",
                        ty_str(rt), ty_str(want));
         }
+    } else if (want->kind != TY_PTR && rt && rt->kind == TY_PTR &&
+               !rt->has_len && ty_eq(rt->elem, want)) {
+        /* §151：按值形态的 `Self` 方法遇到指针接收者时自动解引用。
+         * 大类型走 const 指针、小类型按值，两种 ABI 下 `p.f()` 写法一致，
+         * 调用点不必知道编译期的大小判定。 */
+        Node *deref = node_new(NK_FIELD, recv->line, recv->col);
+        deref->a    = recv;
+        deref->ival = 0;      /* `.0` 就是指针解引用，后端发 `(*p)` */
+        deref->ty   = want;
+        arg0 = deref;
     }
     if (coerce_node(arg0, arg0->ty, want, "receiver")->kind == TY_INVALID)
         return type_of(n, ty_invalid());
@@ -5811,6 +5862,13 @@ static Type *check_fn_body(Node *fn) {
         s->ty = pm->ty;
         s->state = 2;
         s->in_fn = true;      /* 形参槽位也在被调方的栈帧上：&pm 不可返回 */
+        /* §151：函数类型上的 self 被升级成 `const Self *`，而形参节点的
+         * ty 仍是 `Self`。给符号打标记，后端发射时补 `(*self)`。 */
+        Type *w0 = (ft && ft->kind == TY_FN && ft->nparams > 0) ? ft->params[0] : NULL;
+        if (i == 0 && pm->name && !strcmp(pm->name, "self") &&
+            w0 && w0->kind == TY_PTR && !w0->has_len && w0->is_const &&
+            pm->ty && pm->ty->kind != TY_PTR && ty_eq(w0->elem, pm->ty))
+            s->self_by_ptr = true;
         local_track(s, pm->line, pm->col);
         pm->sym = s;
     }

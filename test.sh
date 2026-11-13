@@ -1192,6 +1192,24 @@ for dt in removed-dot-tuple removed-dot-pattern; do
     fi
 done
 
+# §151：方法接收者只有 Self / *Self；Self 恒不可变，编译期按大小选 ABI。
+# 8B 按值、20B 按指针、方法体 self 发 (*self)、指针接收者自动解引用、
+# 0 大小空聚合带 1 字节占位。
+$ZXC tests/good/self-recv-abi.zx --emit-c > "$TPFX.s151.c" 2>/dev/null
+if grep -Eq 'sum_[A-Za-z0-9_]+\(ZxS[0-9]+ self\)' "$TPFX.s151.c" \
+   && grep -Eq 'total_[A-Za-z0-9_]+\(ZxS[0-9]+ \* self\)' "$TPFX.s151.c" \
+   && ! grep -Eq 'sum_[A-Za-z0-9_]+\(ZxS[0-9]+ \*' "$TPFX.s151.c" \
+   && grep -qF '(*self).a' "$TPFX.s151.c" \
+   && grep -Eq '_dr[0-9]+ = \(\*self\)' "$TPFX.s151.c" \
+   && grep -Eq '\(\*ps_[0-9_]+\)' "$TPFX.s151.c" \
+   && grep -qF 'uint8_t _zx_pad;' "$TPFX.s151.c"; then
+    printf "  ok   §151 Self 按大小选 ABI（值/指针/(*self)/auto-deref/空聚合占位）\n"
+else
+    printf "  FAIL §151 Self 接收者 ABI 判定\n"
+    grep -nE 'sum_|total_|copy_|zero_|_zx_pad' "$TPFX.s151.c" | head -20
+    fail=1
+fi
+
 # 用例会在仓库根留下自己的临时文件：io_fmt.zx 写 io_fmt.tmp，stdfs.zx 建
 # fs_t_dir / fs_t_dir2。跑完统一带走——测试不该往工作区里堆东西。
 rm -rf io_fmt.tmp fs_t_dir fs_t_dir2 2>/dev/null || true

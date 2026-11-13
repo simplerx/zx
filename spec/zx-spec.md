@@ -791,7 +791,7 @@ const Vec = struct {
 
     const add = fn (self: Self, o: Self) Self { return Self{ .x = self.x + o.x, .y = self.y + o.y }; };
     const shift = fn (self: *Self, d: i32) void { self.x = self.x + d; };
-    const len2 = fn (self: *const Self) i32 { return self.x * self.x + self.y * self.y; };
+    const len2 = fn (self: Self) i32 { return self.x * self.x + self.y * self.y; };
 };
 
 var a = Vec{ .x = 1, .y = 2 };
@@ -802,14 +802,18 @@ a.add(a).len2();  // 链式就是普通调用链
 
 **两种写法完全等价**：`a.f(x)` 与 `Vec.f(a, x)`。所以「方法」不引入新的调用机制，只引入一点语法糖（把接收者补成第一个实参）和一条查表（`a.f` 这个名字先在字段里找，再到方法表里找）。
 
-接收者三选一：
+接收者只有两种（§151）：
 
 | 写法 | 含义 | 调用时要求 |
 |---|---|---|
-| `self: Self` | 按值拿到一份拷贝 | 什么都能传 |
+| `self: Self` | **不可变**；编译期按大小自动选按值复制或 const 指针 | 值与指针接收者都行 |
 | `self: *Self` | 改的就是调用者本身 | 接收者必须是可变绑定，且能取地址 |
-| `self: *const Self` | 只读、不拷贝 | 能取地址即可，`const` 绑定也行 |
 
+- `Self` 的传递方式在**编译期**由 `@type(Self).size` 决定：`size <= 16` 按值复制一份，`size > 16` 按 `const Self *` 传地址（只读、零拷贝）。判定只影响 ABI，源码里 `self` 始终是值语义——`self.x`、`return self;` 照写；`p.f()` 对指针接收者自动解引用，两种形态下调用写法一致。
+- **`Self` 不可变**：方法体内对 `self` 或其字段赋值报 E0403；要改调用者必须写 `*Self`。
+- `size == 0` 落在按值档，**不退化成关联函数**：方法仍是方法、`x.f()` 合法；后端给空聚合补 1 字节占位保证 C 布局跨平台稳定。
+- 按指针形态（大类型）时接收者要能取地址，右值先绑到 `let`；按值形态没有这条限制。
+- 合并前的 `*const Self` 仍被接受，语义等同于 `Self`；新代码只写 `Self` / `*Self`。
 - `p.f()` 需要 `*Self` 而 `p` 是值时，编译器自动补 `&p`——所以 `a.shift(10)` 里的 `a` 必须是 `var`；对右值（`Vec{…}.shift(1)`）报错，先绑到 `let`。
 - **`Self` 是体里的类型别名**，等于这个聚合体本身。自引用写 `next: ?*Self`，泛型体里也一样（见 §10.2）。
 - **第一参数不叫 `self` 就是关联函数**：`const count = fn () u32` 写在体里，用 `Color.count()` / `Ints.init(al)` 调，没有接收者。代码生成上没有区别，区别只在怎么调——`x.f()` 找不到接收者可补。

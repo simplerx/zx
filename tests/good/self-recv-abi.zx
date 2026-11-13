@@ -1,0 +1,51 @@
+// self-recv-abi.zx —— §151：方法接收者只有 `Self` / `*Self` 两种语义形态。
+//
+// `Self` 恒不可变；传递方式由编译期 `ty_size(Self)` 决定：<=16B 按值复制，
+// >16B 按 `const Self *` 传地址（只读、零拷贝）。0 大小类型落在按值档，
+// 不退化成关联函数。无论哪种 ABI，源码里 self 都是值语义 —— `return self;`
+// / `self.x` 照写，`p.f()` 对指针接收者也照常可用。
+//
+// 生成 C 的形态由 test.sh §151 断言钉住：Small 按值、Big 按 const 指针、
+// Big 方法体里 self 发成 `(*self)`、Empty 带 1 字节占位。
+// expect-exit: 0
+// expect-output
+// small: 13 13
+// big: 15 15 15
+// empty: 0
+// explicit: 15
+const std = @mod("std");
+
+const Small = struct {
+    x: i32,
+    y: i32,
+    const sum = fn (self: Self) i32 { return self.x + self.y; };
+    const bump = fn (self: *Self, d: i32) void { self.x = self.x + d; };
+};
+
+const Big = struct {
+    a: i32, b: i32, c: i32, d: i32, e: i32,
+    const total = fn (self: Self) i32 {
+        return self.a + self.b + self.c + self.d + self.e;
+    };
+    // 按指针传时 self 仍是值语义：整体返回不用改写法
+    const copy = fn (self: Self) Self { return self; };
+};
+
+const Empty = struct {
+    const zero = fn (self: Self) i32 { return 0; };
+};
+
+pub const main = fn () i32 {
+    var s = Small{ .x = 1, .y = 2 };
+    s.bump(10);                       // *Self 改的是调用者本身
+    let ps = &s;
+    var b = Big{ .a = 1, .b = 2, .c = 3, .d = 4, .e = 5 };
+    let pb = &b;
+    let e = Empty{};
+    let bc = b.copy();
+    std.println("small: {} {}", s.sum(), ps.sum());
+    std.println("big: {} {} {}", b.total(), pb.total(), bc.total());
+    std.println("empty: {}", e.zero());
+    std.println("explicit: {}", Big.total(b));  // 显式调用传值，编译器补 &
+    return 0;
+};

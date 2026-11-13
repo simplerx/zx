@@ -12,7 +12,7 @@ const Shape = union(enum) {
     rect: { f64, f64 },
     labeled: struct { x: i32, y: i32 },
 
-    const describe = fn (self: *const Self) []const u8 {
+    const describe = fn (self: Self) []const u8 {
         switch (self.tag) {
             .circle:  { return "circle"; };
             .rect:    { return "rect"; };
@@ -20,7 +20,7 @@ const Shape = union(enum) {
         }
     };
 
-    const value = fn (self: *const Self) f64 {
+    const value = fn (self: Self) f64 {
         switch (self.tag) {
             .circle:  { return self.circle; };
             .rect:    { return self.rect.0 * self.rect.1; };

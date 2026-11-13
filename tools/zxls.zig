@@ -2268,7 +2268,7 @@ fn namedTypeNear(text: []const u8, name: []const u8, off: usize) ?[]const u8 {
 }
 
 /// 去掉类型前的指针与修饰：`*T` / `*const T` / `*var T` / `**T` → `T`。
-/// 形参几乎都写成 `t: *T`（实例方法还有 `*const Self`），解析容器前必须剥掉，
+/// 形参几乎都写成 `t: *T`（实例方法还有 `Self`），解析容器前必须剥掉，
 /// 否则 `isPurePath` 直接判否、整条链断在第一个标识符上。
 fn stripPtrPrefix(e0: []const u8) []const u8 {
     var e = trimSl(e0);
@@ -4262,7 +4262,7 @@ fn declStmtAt(text: []const u8, c: usize, kw: []const u8, name: []const u8) ?[]c
     return null;
 }
 
-/// 容器体**内部**的成员声明：`const spawn = fn (self: *const Self, …) …;`。
+/// 容器体**内部**的成员声明：`const spawn = fn (self: Self, …) …;`。
 ///
 /// 拼签名 / 判 self / 出调用骨架都必须用它，不能拿整个声明文件去
 /// findDeclStmt(名字)：两个结构体有同名成员时（`Task.spawn` 与
@@ -7147,7 +7147,7 @@ fn addSnippetRaw(list: *Json, seen: *std.StringHashMapUnmanaged(void),
 /// 成员签名的 detail：`name(params) ret`。首参 self 是隐含接收者，不摆给
 /// 用户看；返回类型里的 `Self` 换成容器真名（owner）。普通项与骨架项共用
 /// 这一份，弹窗里两条显示一致。
-/// 把文本里的 `Self` 换成接收者容器名（`*const Self` → `*const Task`）。
+/// 把文本里的 `Self` 换成接收者容器名（`Self` → `Task`）。
 fn appendSelfSub(sb: *std.ArrayList(u8), txt: []const u8, owner: []const u8) void {
     if (owner.len == 0 or std.mem.indexOf(u8, txt, "Self") == null) {
         sb.appendSlice(gpa, txt) catch return;
@@ -7162,7 +7162,7 @@ fn appendSelfSub(sb: *std.ArrayList(u8), txt: []const u8, owner: []const u8) voi
     sb.appendSlice(gpa, txt[sp..]) catch return;
 }
 
-/// 成员补全的 detail 签名。`keep_self` 为真时保留首个 `self: *const Self`
+/// 成员补全的 detail 签名。`keep_self` 为真时保留首个 `self: Self`
 /// 形参——**实例**补全必须保留：不写出来，`spawn(f: …) ?usize` 这种串
 /// 看着和关联函数一模一样，用户 2026-11-10 截图两次把它当成污染。
 fn appendMemberSig(sb: *std.ArrayList(u8), name: []const u8, sig: FnSig,

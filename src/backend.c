@@ -366,6 +366,9 @@ static void ensure_type(Type *t) {
     case TY_TUPLE: {
         for (int k = 0; k < t->nfields; k++) ensure_type(t->fields[k].ty);
         buf_printf(g_out, "typedef struct { ");
+        /* §151：0 大小聚合在 C 里是编译器扩展（GCC sizeof=0 / MSVC =1），
+         * 补一个占位成员让布局跨平台稳定；zx 侧 ty_size 仍是 0。 */
+        if (!t->nfields) buf_puts(g_out, "uint8_t _zx_pad; ");
         for (int k = 0; k < t->nfields; k++) {
             ctype(g_out, t->fields[k].ty);
             buf_printf(g_out, " f%d; ", k);
@@ -423,6 +426,11 @@ static void ensure_type(Type *t) {
                 mname(g_out, f->name);
                 buf_puts(g_out, ";\n");
             }
+            int ndata = 0;
+            for (int k = 0; k < t->nfields; k++)
+                if (!t->fields[k].is_static) ndata++;
+            /* §151：空 struct 是 C 编译器扩展，补占位成员。 */
+            if (!ndata) buf_puts(g_out, "    uint8_t _zx_pad;\n");
             buf_puts(g_out, "};\n");
 
             /* 静态成员：结构体体里声明的 var / const，全程序一份 */
@@ -481,6 +489,13 @@ static void ensure_type(Type *t) {
             buf_puts(g_out, "};\n");
         } else {
             buf_printf(g_out, "union %s {\n", n.data);
+            /* §151：空 union 是 C 编译器扩展，补占位成员。 */
+            {
+                int ndata = 0;
+                for (int k = 0; k < t->nfields; k++)
+                    if (!t->fields[k].is_static) ndata++;
+                if (!ndata) buf_puts(g_out, "    uint8_t _zx_pad;\n");
+            }
             for (int k = 0; k < t->nfields; k++) {
                 Field *f = &t->fields[k];
                 if (f->is_static) continue;
@@ -5168,6 +5183,16 @@ static void ex(Buf *b, Node *n) {
         /* 容器体内裸名引用同容器的静态函数（§139）：定义发的是实例名
          * `a_i<n>`，引用点必须发同一个，否则 C 那边就是"未声明的函数"。 */
         if (n->inst) { buf_puts(b, inst_name(n->inst, n->name)); return; }
+        /* §151：编译期判定为「大类型」的 `Self` 接收者，C 形参发的是
+         * `const T *self`，而方法体里 self 仍是值语义（sema 保留形参符号的
+         * ty 为 `Self`）。补一层解引用，`self.x` 就落成 `(*self).x`。 */
+        if (n->sym && sema_sym_self_by_ptr(n->sym)) {
+            need_by_cname(sym_cname(n));
+            buf_puts(b, "(*");
+            emit_sym_name(b, n);
+            buf_putc(b, ')');
+            return;
+        }
         need_by_cname(sym_cname(n));
         emit_sym_name(b, n);
         return;

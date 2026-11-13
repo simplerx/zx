@@ -1,0 +1,11 @@
+// expect: cannot assign through a read-only path
+const P = struct {
+    x: i32,
+    const bump = fn (self: Self) void { self.x = 1; };
+};
+
+const main = fn () u8 {
+    var p = P{ .x = 0 };
+    p.bump();
+    return 0;
+};

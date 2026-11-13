@@ -6035,3 +6035,49 @@ NK_FIELD；第一次证明不了、此刻能证明的补上直调；仍能证明
 载体，实跑 `page: ok`）；`test.sh` §150 五条断言（生成代码 + 实跑 + 双前端
 E0401 复核）。用 `git show HEAD:src/{sema,backend}.c` 编的 §149 版对照 exe：
 前者段错误、后者报 E0401；新 exe 全过。`sh test.sh` 全绿。
+
+## §151 方法接收者收成两种、`Self` 按大小选 ABI（2026-11-13 用户裁定）
+
+**裁定**：方法第一参数只有 `Self` 与 `*Self`；旧的 `Self`（按值副本）与
+`*const Self`（只读、不拷贝）合并到 `Self`。`Self` **恒不可变**，传值还是
+传指针由**编译期 `ty_size(Self)`** 决定；`*Self` 仍是唯一能改调用者的形态。
+
+**阈值 16B**（`ZX_SELF_VALUE_MAX`，`src/sema.c`）：两个寄存器能装下的聚合
+上限，与 C 的大结构体传参习惯一致。`size <= 16` 按值复制，`size > 16`
+按 `const Self *` 传地址。阈值集中在一个宏里，要调只改一处。
+
+**实现：只改 sema 的函数类型，方法体仍是值语义。**
+`collect_methods()` 在字段表算完后 `ty_size(agg)` 可算（泛型实例会重新
+resolve body，此刻 T/cap 已绑定），把 `ft->params[0]` 改成 `Self` 或
+`*const Self`，但**形参节点的 ty 恒留 `Self`**。于是：
+
+- 调用点 `check_method_call` 看到指针形态就按既有 `*const Self` 通道补 `&`；
+- 后端签名按 `ft->params[i]` 发 `T self` / `T *self`（`backend.c` 的
+  `gen_fn_params`），**后端零改动**；
+- `check_fn_body` 给这个形参符号打 `self_by_ptr`，后端 NK_IDENT 发 `(*self)`
+  ——`self.x` 落成 `(*self).x`，`return self;` 落成 `return (*self);`，
+  源码完全不用知道 ABI 形态；
+- 显式调用 `Type.f(a, ...)` 的第一实参是值时自动补 `&`；`p.f()`（p 是
+  `*Self`）在按值形态下自动解引用（复用既有的 `.0` 节点，后端发 `(*p)`）。
+  这两条保证**两种 ABI 下调用写法一致**，判定不泄漏到源码。
+
+`*const Self` 仍被接受为 `Self` 的兼容写法并走同一套归一化，但全库
+（`std/task.zx`、tests、LSP fixture）已迁到 `Self`，文档与补全只列两种。
+
+**边界：`size == 0` 不退化成关联函数。** 方法 / 关联函数的分界是「第一参数
+是否叫 `self`」（§29：名字是唯一稳定的信号）；再按大小加一条判据会让
+`Box(T)` 的同一份源码在不同实例下 `x.f()` 一会儿合法一会儿不合法，
+LSP 也得按实例大小动态决定列不列方法。0 大小落在按值档，后端给空聚合
+（`TY_STRUCT` / `TY_UNION` / `TY_TUPLE` 无数据字段）补 `uint8_t _zx_pad;`，
+避开 C 空结构体在 GCC/Clang（0 字节）与 MSVC（1 字节）上的 ABI 分歧。
+
+**`Self` 不可变**：形参是 SK_PARAM，`self.x = 1` 由 `lvalue_mutable` 拦成
+E0403；C 层的 `const` 后端本来就不发（`ctype` 的 TY_PTR 分支），只读由
+sema 保证。`tests/bad/self-immutable.zx` 钉住。
+
+守门：`tests/good/self-recv-abi.zx`（8B 按值 / 20B 按指针 / `return self` /
+指针接收者 auto-deref / 显式调用 / 0 大小空聚合，实跑
+`small: 13 13` / `big: 15 15 15` / `empty: 0` / `explicit: 15`）；
+`test.sh` §151 用 `--emit-c` 断言两种签名、`(*self).a`、`(*ps_…)`、
+`_zx_pad` 以及小类型没走指针；`tests/bad/self-immutable.zx`。
+LSP hover / completion 断言随 fixture 迁移同步更新。
