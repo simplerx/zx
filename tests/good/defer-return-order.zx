@@ -1,0 +1,40 @@
+// defer-return-order.zx —— return 表达式必须先求值，再展开 defer（§142）。
+//
+// 从 Pool 的锁包装里撞出来的：`return f();` 配 defer 原来会发成
+// 「defer 语句在前、f() 留在 return 里才求值」，于是返回值被 defer 改掉，
+// 锁也会在临界区之前就放开。控制流表达式（if/switch）那条路径一直是对的，
+// 这里守的是普通表达式和 void 表达式两条。
+// expect-output:ret:1
+// expect-output:log:101
+// expect-output:vside:0
+// expect-output:vlog:10
+const std = module("std");
+
+var log: i32 = 0;
+var vlog: i32 = 0;
+var vside: i32 = 0;
+
+const bump = fn () i32 { log = log + 1; return log; };
+
+// 记录「调用那一刻」的 vlog。正确顺序下 defer 还没跑，读到的应该是 0。
+const touch = fn () void { vside = vlog; };
+
+const valueReturn = fn () i32 {
+    defer log = log + 100;
+    return bump();
+};
+
+const voidReturn = fn () void {
+    defer vlog = vlog + 10;
+    return touch();
+};
+
+pub const main = fn () i32 {
+    let r = valueReturn();
+    std.println("ret:{}", r);
+    std.println("log:{}", log);
+    voidReturn();
+    std.println("vside:{}", vside);
+    std.println("vlog:{}", vlog);
+    return 0;
+};

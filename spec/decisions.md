@@ -5528,3 +5528,124 @@ zx 没有生命周期检查，`ctx` 是裸指针，所以：
 
 - `tests/good/pool-allocator.zx`：`expect-output` 十行，覆盖上面五组场景。
 - `test.sh` §138 断言改为查调用点（不再只看函数名）。
+
+---
+
+## §142 Pool 线程安全构造器 + `return <expr>;` 的 defer 错序（2026-11-13 用户提问）
+
+用户：「现在的 std.pool.Pool 不是线程安全的吧，添加一个线程安全的构造器」。
+
+**确认不安全**：`Class.head`（空闲链）、`count`、`region` 链、块头 `flags` 全是
+共享可变状态；两条线程同时 `alloc` 会从同一条链摘下同一块，同时 `free` 会把
+同一块挂两次。不是"理论上不安全"，见下面的对照实验。
+
+### 1. 选型：同一个类型，不造平行系统
+
+没有新加 `SyncPool` / `LockedPool` 类型，也没有新命名空间。做法是给 `Pool`
+加一个 `guard: usize` 字段并新增一个构造器：
+
+| 构造器 | guard | 代价 |
+|---|---|---|
+| `init(backing)` | `0` | 每次操作多一次 `guard != 0` 判断，其余零开销 |
+| `initThreadSafe(backing)` | 锁字地址 | 每次 `alloc`/`free`/`used` 进出一次原子自旋锁 |
+
+返回的是**同一个 `Pool` 类型**，所以 `alloc` / `free` / `used` / `deinit` /
+`allocator()` 一概不用改，`Allocator` 视图自动继承锁（`poolAlloc` / `poolFree`
+转发到 `pl.alloc` / `pl.free`，视图本身不需要知道有没有锁）。这正是 §141
+「复用既有通道」的延续。
+
+**锁字单独从 backing 分配一个 `u64`，不放进 `Pool` 值里**。这是本轮最关键的
+一个决定：`Pool` 是值类型，unwrap `?Pool`、把值传进线程、复制一份出去都不该
+复制出第二把锁。锁在堆上，所有副本看到同一个地址，于是"每个线程拿一份
+Pool 副本"这种写法也是安全的（尽管不推荐）。锁字分配失败要把刚铺好的档位表
+整个还回去。
+
+公开入口改成薄包装，内部逻辑原样搬进私有 `allocImpl` / `freeImpl` /
+`usedImpl`：
+
+```zx
+poolLock(self);
+let r = self.allocImpl(size);
+poolUnlock(self);
+return r;
+```
+
+`deinit` 是销毁路径：不加锁，把档位表和锁字按原长度一起还给 backing。
+`classOf` 只读不可变的 `payload`，不需要锁。
+
+### 2. 为什么是自旋锁
+
+M58 起 `mutex` / `cond` / `thread` 的 C 运行时已收掉（§128 的裁定），对外
+只剩 `Task` 实例，加上 `std.atomic.*` 六个纯函数（编译器内建、SEQ_CST、按需
+发射运行时）。恢复阻塞 mutex 等于造一套平行系统 + 改 C 侧，不划算。
+
+于是用 `atomicCAS` / `atomicLoad` / `atomicStore` 造一把 **TTAS 自旋锁**：自旋时
+只读（`atomicLoad(w) == 0`），看到空才尝试 CAS，避免反复写同一条 cache line。
+临界区只有几十条指令（空闲链出入栈、块头改 flags），自旋比阻塞更合适。
+**零新增运行时、零新增类型、零新增命名空间**。
+
+`pool.zx` 首行加 `const std = module("std")` 反向 import 拿 `std.atomic`（§138
+`debug_alloc.zx` 已经验证过这条路）。
+
+### 3. 三条边界（写进 zx-spec §13.3）
+
+- **backing 自己得是线程安全的**。`std.heap.page` 是；`DebugAllocator` 不是，
+  不能在并发段里当 backing（守门用例只在单线程那一段用它核锁字归还）。
+- **`deinit` 只能在所有线程收工之后调用**，此刻不能还有人持锁。
+- 自旋锁只适合极短临界区；长临界区 + 高竞争会空转占 CPU。
+
+### 4. 撞出来的语言级 bug：`return <expr>;` 时 defer 跑早了
+
+第一版包装层写的是 `defer poolUnlock(self); return self.allocImpl(size);`。
+看 `--emit-c` 吓了一跳：
+
+```c
+pool_poolLock(self);
+pool_poolUnlock(self);          // 锁在 impl 之前就放了
+return allocImpl_i4(self, size);
+pool_poolUnlock(self);          // 不可达
+```
+
+根因在 `src/backend.c` 的 `gen_return`：普通分支拿 `char *v = cxs(n->a, want)`
+（一段**表达式源码字符串**），先 `run_defers(0)` 发 defer 语句，再
+`line("return %s;", v)` —— 于是 `v` 直到 `return` 才求值，顺序整个反了。
+`is_ctl` 分支（控制流表达式）一直用 `gen_value(..., tmp, ...)` 先存临时量，
+`errdefer` 分支也存了，唯独普通分支漏了。
+
+最小复现（修前 `ret=101 log=101`，修后 `ret=1 log=101`）：
+
+```zx
+var log: i32 = 0;
+const bump = fn () i32 { log = log + 1; return log; };
+const f = fn () i32 { defer log = log + 100; return bump(); };
+```
+
+**修法**：把普通分支也统一成「先求值进 `_dr%d` 临时量 → 展开 defer /
+errdefer → 返回临时量」；`want` 是 `void` 时没法存值，就先发一句 `v;`
+让副作用发生，再 defer、再 `return;`。控制流分支保持原样。既有
+`defer` / `errdefer` / `errcatch` / `returns` / `jumps` 五份用例输出逐字不变。
+
+**Pool 的包装层仍然保留显式单一出口**，不依赖这个修复：锁要罩住整段 impl
+求值，写成一个入口一个出口一眼能核对。两层保险。
+
+### 5. 实测（dev 档，Windows x64）
+
+| | 结果 |
+|---|---|
+| `pool-threadsafe.zx` 加锁版 ×10 | 10/10 `ok:3000 bad:0 views:6 used64:0 live:0`，单次约 0.12 s |
+| 同一份用例把构造器换成无锁 `init` | **3/3 段错误（exit 139）**，stdout 整块丢失 |
+
+对照实验说明这个守门真的能抓竞态，不是"碰巧跑过"。用例形状：6 条内核线程
+（Task.group）× 500 次 `alloc(64)` / 写唯一标记 / 16 次原子加拉开窗口 /
+读回校验 / `free`；再各建一个 `ArrayList(i32)` 共用一个 `allocator()` 视图；
+最后用 DebugAllocator 当 backing 顺序跑一段，核 `deinit` 把锁字还清
+（`live:0`，不 panic）。
+
+### 6. 守门
+
+- `tests/good/pool-threadsafe.zx`：上面五条 `expect-output`。
+- `tests/good/defer-return-order.zx`：`ret:1 / log:101 / vside:0 / vlog:10`，
+  同时守普通返回表达式与 `return voidCall();` 两条路径的求值顺序。
+- 既有 `std-pool.zx` / `pool-allocator.zx` / `pool-header-layout.zx` 全部保持
+  通过（无锁路径行为不变）。
+

@@ -25,6 +25,41 @@
 //
 // allocator() 的 ctx 就是这个 *Pool：返回的是值，Pool 必须活得比它久，
 // deinit 之后立刻失效（zx 无生命周期检查，这是调用方的责任）。
+//
+// 多线程共享一个池时用 initThreadSafe(gpa)：同一个 Pool 类型、同一套
+// alloc / free / allocator API，只是每次操作进出一把原子自旋锁。init()
+// 保持无锁零开销。两条边界：backing 分配器自己也得是线程安全的；deinit
+// 只能在所有线程收工之后调用（它是销毁，不是加锁操作）。
+
+// std.atomic 是编译器内建的纯函数（SEQ_CST），M58 起 mutex/cond 运行时
+// 已经收掉。这里直接借它造一把自旋锁：不新增类型、不新增命名空间、
+// 不往 C 运行时里加东西，按需发射的原子运行时本来就有。
+const std = module("std");
+
+// 锁字单独从 gpa 分配，不放在 Pool 值里。Pool 是值类型：unwrap ?Pool、
+// 把值传进线程、或者复制一份出去都不该复制出第二把锁。8 字节锁字在
+// 堆上，所有副本看到的都是同一个地址。
+const guardTake = fn (w: *u64) void {
+    // TTAS：自旋时只读，避免反复写同一条 cache line。临界区只有几十条
+    // 指令（空闲链出入栈 / 块头改 flags），自旋比阻塞更划算。
+    while (true) {
+        if (std.atomic.atomicLoad(w) == 0) {
+            if (std.atomic.atomicCAS(w, 0, 1)) { return; }
+        }
+    }
+};
+
+const guardGive = fn (w: *u64) void {
+    std.atomic.atomicStore(w, 0);
+};
+
+const poolLock = fn (pl: *Pool) void {
+    if (pl.guard != 0) { guardTake((*u64)pl.guard); }
+};
+
+const poolUnlock = fn (pl: *Pool) void {
+    if (pl.guard != 0) { guardGive((*u64)pl.guard); }
+};
 
 // 块状态：LIVE=在用，FREED=在空闲链上，EXTERNAL=绕过池的大块。
 const F_LIVE: u32 = 1;
@@ -160,6 +195,7 @@ const poolFree = fn (ctx: ?*u8, p: *u8, _: usize) void {
 pub const Pool = struct {
     gpa: Allocator,
     classes: *Class,  // classCount 个连续的 Class
+    guard: usize,     // 0 = 无锁；否则是锁字地址（initThreadSafe 分配）
 
     // 档位表运行期铺出来（线性段 + 2 的幂段）。
     pub const init = fn (gpa: Allocator) ?Pool {
@@ -190,7 +226,24 @@ pub const Pool = struct {
                 idx = idx + 1;
                 s = s * 2;
             }
-            return Pool{ .gpa = gpa, .classes = cs };
+            return Pool{ .gpa = gpa, .classes = cs, .guard = 0 };
+        }
+        return null;
+    };
+
+    // 线程安全构造器。返回的是同一个 Pool 类型，所以 alloc / free / used /
+    // create / allocator 一概不用改，Allocator 视图自动继承这把锁。
+    // 锁字分配失败要把刚铺好的档位表还回去，不能泄漏。
+    pub const initThreadSafe = fn (gpa: Allocator) ?Pool {
+        if (Self.init(gpa)) p {
+            var pl = p;
+            if (gpa.alloc(gpa.ctx, @type(u64).size)) w {
+                let wp = (*u64)w;
+                std.atomic.atomicStore(wp, 0);
+                pl.guard = (usize)w;
+                return pl;
+            }
+            pl.deinit();
         }
         return null;
     };
@@ -214,6 +267,12 @@ pub const Pool = struct {
             }
         }
         self.gpa.free(self.gpa.ctx, (*u8)self.classes, classCount * @type(Class).size);
+        // 销毁路径：不能在还有线程持锁时调用，所以这里不加锁、直接把锁字
+        // 一并还给 backing（长度与 initThreadSafe 要的完全一致）。
+        if (self.guard != 0) {
+            self.gpa.free(self.gpa.ctx, (*u8)self.guard, @type(u64).size);
+            self.guard = 0;
+        }
         self.classes = undefined;
     };
 
@@ -229,8 +288,17 @@ pub const Pool = struct {
         return lo;
     };
 
-    // 按字节分配。失败返回 null。
+    // 按字节分配。失败返回 null。锁只在 guard != 0 时进出一次；
+    // 无锁构造器多付的只是这一次 != 0 判断。这里刻意用单一出口 + 显式
+    // 临时量，不写 defer：锁必须罩住 impl 的整段求值，一眼能核对。
     pub const alloc = fn (self: *Pool, size: usize) ?*u8 {
+        poolLock(self);
+        let r = self.allocImpl(size);
+        poolUnlock(self);
+        return r;
+    };
+
+    const allocImpl = fn (self: *Pool, size: usize) ?*u8 {
         let ci = self.classOf(size);
         if (ci == classCount) {
             // 大块：直接向分配器要 [头][负载]，格式与池内块一致
@@ -259,8 +327,16 @@ pub const Pool = struct {
     };
 
     // 释放。返回 false = 拒绝：重复释放、或不像本池的块。
-    // 拒绝时不做任何写入——空闲链不会被踩坏。
+    // 拒绝时不做任何写入——空闲链不会被踩坏。flags 的读与改都在锁内，
+    // 两个线程同时 free 同一块也只会有一个成功。
     pub const free = fn (self: *Pool, p: *u8) bool {
+        poolLock(self);
+        let r = self.freeImpl(p);
+        poolUnlock(self);
+        return r;
+    };
+
+    const freeImpl = fn (self: *Pool, p: *u8) bool {
         let a = (usize)p;
         if (a < HDR) { return false; }
         let ha = a - HDR;
@@ -280,8 +356,15 @@ pub const Pool = struct {
         return true;
     };
 
-    // 某一档当前在用块数（测试与诊断用）。
+    // 某一档当前在用块数（测试与诊断用）。读 count 也要在锁内。
     pub const used = fn (self: *Pool, size: usize) usize {
+        poolLock(self);
+        let r = self.usedImpl(size);
+        poolUnlock(self);
+        return r;
+    };
+
+    const usedImpl = fn (self: *Pool, size: usize) usize {
         let ci = self.classOf(size);
         if (ci == classCount) { return 0; }
         let c = self.classes + ci;
@@ -293,8 +376,10 @@ pub const Pool = struct {
     // ctx 指向 this，所以 Pool 必须活着、且别再被复制/移动；deinit
     // 之后这个 Allocator 立即失效。多个视图指向同一个池是安全的。
     //
-    // 这个函数体里恰好一条 return Allocator{...}，正好落在 §138 的
-    // 工厂证明链上——调用点能去虚拟化成 poolAlloc / poolFree 直调。
+    // 容器方法工厂目前还不在 §138 的去虚拟化证明链里（§141 已定位），
+    // 所以调用点仍是间接分发；需要零分发就直接写 Allocator{...} 字面量。
+    // 线程安全构造器不影响这层：poolAlloc / poolFree 转发到 pl.alloc /
+    // pl.free，锁在转发的目标里，视图本身不需要知道有没有锁。
     pub const allocator = fn (self: *Pool) Allocator {
         return Allocator{
             .ctx = (*u8)self,

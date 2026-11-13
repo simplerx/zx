@@ -1826,14 +1826,15 @@ vit = std_items(off, 421)
 vlab = {i["label"] for i in vit}
 check("completion.typePath.unionVariants",
       {"nul", "int", "float", "str", "arr", "obj"} <= vlab, str(sorted(vlab)))
-#  6i 三段路径的 Pool：类型上只有静态 init，实例方法（alloc/free/create/
-#     deinit）不进类型命名空间（用户 2026-11-10 命名空间分离）。
+#  6i 三段路径的 Pool：类型上只有静态工厂（init / initThreadSafe），实例
+#     方法（alloc/free/deinit）不进类型命名空间（用户 2026-11-10 命名空间分离）。
 off = STDUSE.index("    std.pool.Pool.") + len("    std.pool.Pool.")
 pit = std_items(off, 422)
 pd = {i["label"]: (i.get("detail"), i.get("insertText")) for i in pit}
 check("completion.typePath.poolMethods",
-      set(pd) == {"init"}
-      and pd.get("init", (None, None))[1] == "init(${1:gpa})$0",
+      set(pd) == {"init", "initThreadSafe"}
+      and pd.get("init", (None, None))[1] == "init(${1:gpa})$0"
+      and pd.get("initThreadSafe", (None, None))[1] == "initThreadSafe(${1:gpa})$0",
       str(sorted(pd))[:200])
 
 # 4/1 复核：std. 顶层暴露 Allocator/stackAlloc/heapAlloc（带 snippet），

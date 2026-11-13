@@ -15,7 +15,8 @@ pub const str = module("str.zx");
 pub const map = module("map.zx");
 
 // 内存池（pool.zx）。`var p = std.pool.Pool.init(std.heap.page)` 之后
-// `p.alloc(n)` / `p.free(ptr)` / `p.create(T)`；重复释放会被拦下。
+// `p.alloc(n)` / `p.free(ptr)`；重复释放会被拦下。多线程共用一个池改用
+// `Pool.initThreadSafe(...)`：同一个类型、同一套 API，只是每次操作加锁。
 pub const pool = module("pool.zx");
 
 // 文件系统（fs.zx）。路径操作零分配；DirIter 流式遍历；stat/exists 元数据。

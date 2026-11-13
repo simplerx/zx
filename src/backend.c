@@ -5964,19 +5964,28 @@ static void gen_stmt(Node *n) {
         }
 
         char *v = cxs(n->a, want);
-        if (errcheck) {
-            static int rvn;
-            char tmp[32], cond[80];
-            snprintf(tmp, sizeof tmp, "_rv%d", rvn++);
-            line("{ %s %s = %s;", cty(want), tmp, v);
-            snprintf(cond, sizeof cond, "(%s).tag != 0", tmp);
-            run_defers_m(0, 1, cond);
-            if (g_is_main) main_exit(tmp); else line("return %s;", tmp);
-            line("}");
+        /* 返回表达式必须先求值进临时量，再展开 defer。原来把 cxs() 的
+         * 字符串直接塞进 `return %s;`，defer 语句却排在它前面发 ——
+         * `return f();` 配 defer 会变成「先跑 defer，再调 f」：返回值可能
+         * 被 defer 改掉，锁也会在临界区之前就放开。is_ctl 分支早就按
+         * 「先存临时量」处理，这里补齐普通表达式（§142 撞出来的）。 */
+        if (want && want->kind == TY_VOID) {
+            /* void 表达式没有可存的值，但仍要先让它求值（副作用在前）。 */
+            line("%s;", v);
+            run_defers(0);
+            if (g_is_main) main_exit(NULL); else line("return;");
             return;
         }
-        run_defers(0);
-        if (g_is_main) main_exit(v); else line("return %s;", v);
+        static int drn;
+        char tmp[32], cond[80];
+        snprintf(tmp, sizeof tmp, "_dr%d", drn++);
+        line("{ %s %s = %s;", cty(want), tmp, v);
+        if (errcheck) {
+            snprintf(cond, sizeof cond, "(%s).tag != 0", tmp);
+            run_defers_m(0, 1, cond);
+        } else run_defers(0);
+        if (g_is_main) main_exit(tmp); else line("return %s;", tmp);
+        line("}");
         return;
     }
 

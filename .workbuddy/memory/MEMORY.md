@@ -31,6 +31,7 @@
 - `std.debug_alloc.DebugAllocator`：块头记 `prev/next/size/seq/magic`，活跃双向链；泄漏 `deinit` 逐块（序号/字节/地址）报告后 panic，`deinitQuiet` 只报告返回块数；double free / 野指针 / 长度不符都打印现场摘要后 panic。`HDR` 由 `@type(Header).size` 上取整，别写死。
 - **`std.pool.Pool` 两个地址空间（§140）**：内部 `classPush/classPop/classGrow` 流转**块头地址** `a`；`alloc` 对外返回 `a + HDR`（负载起点），`free` 入参也是负载、`ha = a - HDR` 反查头。块头在返回指针**之前**，解引用不会读到头。HDR 现按 `@type(Header).size` 上取整（与 debug_alloc 同公式，`std/pool.zx` 是 CRLF）。负载 16 对齐靠 backing 基址 + slotSize 都是 16 倍数。守门 `tests/good/pool-header-layout.zx`（含 Pool over DebugAllocator 两层头归还校验）。
 - **`Pool.allocator()`（§141）**：`Allocator{ .ctx = (*u8)self, .alloc = poolAlloc, .free = poolFree }`，ctx 直接装 `*Pool`、不另造堆上 State。差异：`free` 的 bool 吞掉、`n` 绑 `_` 忽略（池从块头反查档位）。zx 无生命周期 → Pool 必须比视图活得久、`deinit` 后视图失效。守门 `tests/good/pool-allocator.zx`。
+- **`Pool.initThreadSafe`（§142）**：`init()` 不是线程安全的（`Class.head`/`count`/`region`/块头 flags 全共享）。新构造器返回**同一个 `Pool` 类型**，只加 `guard: usize`（0=无锁）；锁字是**单独从 backing 分配的一个 `u64`**，绝不放在 `Pool` 值里（Pool 是值类型，unwrap/复制/传进线程都不该复制出第二把锁）。锁 = `std.atomic` 的 TTAS 自旋锁（M58 起 mutex/cond 运行时已收掉，不新增类型/命名空间/C 运行时）。`alloc`/`free`/`used` 改薄包装，内部逻辑原样搬进私有 `*Impl`；`allocator()` 视图自动继承。三条边界：backing 自己得线程安全（DebugAllocator **不是**）、`deinit` 只能在线程收工后（销毁不加锁）、只适合极短临界区。守门 `tests/good/pool-threadsafe.zx`（6 线程×500，加锁 10/10 绿；把构造器换成 `init` 的对照组 3/3 段错误 exit 139）。
 - **§138 工厂链去虚拟化是假绿（§141 定位，未修）**：`DebugAllocator.init` / `ArenaAllocator.init` / `Pool.allocator()` 这类**容器方法工厂**返回的 Allocator 仍是间接调用。两层根因：`allocator_target` 的 NK_CALL 只认 `fs->decl == NK_DECL`（容器方法 decl 是 NK_FN，NK_FIELD callee 常无 sym、只有 `->inst = Method.fn`）；且工厂体 `schedule_body` 延迟检查，`return Allocator{…}` 的字面量 `ty` 为空、`.alloc = f` 标识符 `sym` 也为空，拿不到可直调目标。彻底修要改检查顺序或跨模块符号解析，本轮回退了 sema 实验。`Allocator{…}` 字面量链不受影响。`test.sh` §138 已改成按**调用点**断言（含刻意断言工厂链仍间接），别再只 grep 函数名。
 - **容器体内裸名互调（§139 已修）**：`struct { pub const a = fn () i32 {…}; pub const b = fn () i32 { return a() + 1; }; }` 曾经编不过（B1001 `call to undeclared 'a'`：定义发 `a_i0`，裸名发 `a`）。修法：`Symbol.in_agg` 记容器体节点，`check_expr` 的 NK_IDENT 遇到体里的 NK_FN 就填 `n->inst = s->decl`，后端 NK_IDENT 分支看到 `inst` 就发 `inst_name`。守门 `tests/good/member-bare-call.zx`（六种形状：链式/当值传/enum/泛型容器/方法体内/同名隔离）。`std/debug_alloc` 的 `shutdown` 仍在模块级，不必回改。
 - `zx_debug_panic` 先 `fflush(stdout)`：重定向时 stdout 全缓冲，abort 不走退出清理，报告会整块丢。
@@ -50,6 +51,7 @@
 
 ## 编译器 / 后端
 - **if 剪枝**：常量条件只检查会走的一支，结论存 `n->ival`；后端 `gen_if_body` 用 `ct ? ct->bval : n->ival`。死分支标识符要 `mark_uses` 标 used，否则假报 E0410。
+- **`return <expr>;` + defer 的求值顺序（§142 已修）**：`gen_return` 普通分支原来把 `cxs(n->a, want)` 的**表达式字符串**直接塞进 `return %s;`，却先发 `run_defers(0)` → defer 跑在表达式求值**之前**（返回值被改、锁提前放开）。修法：统一先把值存进 `_dr%d` 临时量再展开 defer/errdefer 再返回；`want==TY_VOID` 时先发一句 `v;` 再 defer 再 `return;`。`is_ctl` 分支本来就对。守门 `tests/good/defer-return-order.zx`（`ret:1 log:101 vside:0 vlog:10`）。**写 Pool 这类锁包装仍用显式单一出口，别依赖 defer**。
 - **zxls 文档表**：换/关文档先 `dirty.fetchRemove(path)` 再 free，否则悬垂键在扩容重哈希时 panic。
 - **诊断码由 `src/zxc.c` 的 `g_rules` strstr 顺序决定**：新规则放 `found \`` 这类笼统规则**之前**。
 - 守门：`demo/snake.zx --sim` 300 局、`tests/good/casts-one-way.zx`、`tests/bad/removed-*.zx`（E0211）、`tests/multibad/private-member`。

@@ -1622,6 +1622,7 @@ defer { … }        // 块形式
 - 写在哪个块里，就在**那个块退出时**执行一次：正常结束、收割（`tag: expr;`）、`continue`、`return` 全都算。
 - 同一个块里的多个 `defer` **逆序执行**（LIFO）：后声明的先跑。
 - 表达式在**退出时求值**，不是 `defer` 那一行求值。所以 `defer free(buf)` 拿到的是 `buf` 的最终值。
+- `return <expr>;` 时，**`<expr>` 先求值并存进临时量，然后才执行 defer**，最后返回那个临时量。所以 `defer` 改不了返回值，也动不了 `return` 里那次调用的副作用顺序；`return voidCall();` 同样是先调 `voidCall()` 再跑 defer。后端把返回值落进 `_dr0` 之类的临时量正是为此（§142 修过一次「defer 语句排在 `return f();` 前面」的错序）。
 - `defer` 是语句，不产生值，**不影响块的值**（块的值只来自收割，见 R3）。
 - `defer` 体内不能收割 / `continue` / `return`（防止控制流跳进已退出作用域）。
 - 条件执行用 `if (cond) { defer … }`，因为 `defer` 只认"所在块"。
@@ -1633,6 +1634,10 @@ const locked = fn (m: *Mutex, f: fn() void) void {
     f();
 };
 ```
+
+示例里的 `Mutex` 是伪代码占位：M58 起 zx 没有内建 mutex 类型，只有
+`std.atomic.*`（§13.1）。真实可用的成对写法见 `Pool.initThreadSafe`——它
+刻意用「先存临时量、再解锁、再返回」的单一出口，不依赖 defer。
 
 ```zx
 var x: i32 = 0;
@@ -2124,6 +2129,7 @@ if (raw) p {
 | `std.arena.ArenaAllocator` | `init(backing)` → `?Allocator` | 一次性批量释放：`alloc` 推指针，`free` 空操作，`deinit(a)` 全还 |
 | `std.debug_alloc.DebugAllocator` | `init(backing)` → `?Allocator` | 记账分配器：泄漏 / 重复释放 / 长度不符当场报（§13.2） |
 | `std.pool.Pool` | `init(backing)` → `?Pool` | 尺寸分级池：`alloc(n)` → `?*u8` 指向**负载起点**（块头在它之前 16B），`free(p)` 收同一个指针自己反查头；`allocator()` → `Allocator` 视图（ctx 指 this，Pool 必须活得比它久），`deinit()` 整批归还 |
+| `std.pool.Pool.initThreadSafe(backing)` | `?Pool` | 同一个 `Pool` 类型、同一套 API，只是每次 `alloc` / `free` / `used` 进出一把原子自旋锁。`init()` 保持无锁零开销；`allocator()` 视图自动继承锁（§13.3） |
 | `std.print` / `std.println` / `std.format` | 内建 | 见 §11.1 |
 | `std.file.read(alloc, path)` | `?[]const u8` | 整个文件读进分配器给的缓冲，末尾补 0 |
 | `std.file.write(path, data)` / `append` | `bool` | 覆盖写 / 追加写 |
@@ -2241,6 +2247,57 @@ dev 档（`-O0`）也会展开。**没有 `inline` 关键字**：该不该内联
 **做不到的部分**：分配器在运行期才知道时（容器字段 `self.alloc`、函数形参），
 间接调用消不掉——那是类型擦除的代价，`-O2` 也消不掉。要彻底消掉得把容器对
 分配器单态化（`ArrayList(T, A)`），zed 的取舍是不做。
+
+### 13.3 多线程共用一个分配器
+
+`init(backing)` 造出来的 `Pool` **不是线程安全的**：空闲链 `Class.head`、
+在用计数 `count`、槽区链 `region`、块头 `flags` 全是共享可变状态，两条线程
+同时 `alloc` 会从同一条链上摘下同一块。
+
+`initThreadSafe(backing)` 返回的是**同一个 `Pool` 类型**，因此 `alloc` /
+`free` / `used` / `deinit` / `allocator()` 一概不用改：
+
+```zx
+let p = std.pool.Pool.initThreadSafe(std.heap.page);
+if (p) pv {
+    var pp = pv;                 // 把 &pp 交给各线程
+    let a = pp.allocator();      // 多条线程可以各持一份，锁在池里
+    // … 各线程收工后再 pp.deinit()
+}
+```
+
+实现上给池加一个 `guard: usize` 字段（`0` = 无锁），锁字是**单独从 backing
+分配的一个 `u64`**，不在 `Pool` 值里。`Pool` 是值类型，unwrap `?Pool`、把值
+传进线程、或者复制一份出去都不该复制出第二把锁——所以所有副本看到的必须
+是同一个锁字地址。公开入口是薄包装，内部 `allocImpl` / `freeImpl` /
+`usedImpl` 原封不动：
+
+```zx
+poolLock(self);
+let r = self.allocImpl(size);
+poolUnlock(self);
+return r;
+```
+
+锁是 `std.atomic.atomicCAS` / `atomicLoad` / `atomicStore` 造的 TTAS 自旋锁
+（SEQ_CST）。M58 起 mutex/cond 运行时已收掉，这里不新增类型、不新增
+命名空间、不往 C 运行时加东西；临界区只有几十条指令，自旋比阻塞更划算。
+`init()` 路径多付的只是一次 `guard != 0` 判断。
+
+**三条边界**（调用方责任，语言不做检查）：
+
+- **backing 自己得是线程安全的**。`std.heap.page`（malloc/free）是；
+  `std.debug_alloc.DebugAllocator` 不是，不能在并发段里给它当 backing。
+- **`deinit()` 只能在所有线程收工之后调用**。它是销毁（把档位表和锁字一起
+  还给 backing），不是加锁操作，此刻不能还有人持锁。
+- 自旋锁在**临界区极短**时合适；如果将来把长操作放进锁里，高竞争会空转
+  占 CPU。要阻塞语义得另议，不能靠这个构造器。
+
+全量守门见 `tests/good/pool-threadsafe.zx`：6 条内核线程 × 500 次
+alloc/写标记/读回/free + 各自的 `ArrayList` 共用一个视图；把构造器换成
+无锁的 `init` 跑同一份用例会直接段错误。
+
+---
 
 ## 14. 内建（`@` 前缀，不可重定义）
 

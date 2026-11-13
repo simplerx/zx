@@ -1,0 +1,88 @@
+// pool-threadsafe.zx —— initThreadSafe：多条内核线程共享同一个池（§142）。
+//
+// 对照面：init() 是无锁的，跑这段会踩坏空闲链（flags/count/head 全是
+// 共享可变状态）。initThreadSafe 用一把原子自旋锁罩住每次 alloc/free/used。
+// 每线程拿到块后写入自己的标记、做几次原子加拉开窗口、再读回校验：
+// 两条线程若拿到同一块（classPop 竞态），后写的会盖掉先写的，g_bad 上涨。
+//
+// 还验两件事：同一个池的 Allocator 视图可以喂给多条线程各自的 ArrayList；
+// 锁字在 deinit 时按原长度还给 backing（用 DebugAllocator 当账本核）。
+// expect-output:ok:3000
+// expect-output:bad:0
+// expect-output:views:6
+// expect-output:used64:0
+// expect-output:live:0
+const std = module("std");
+
+var g_pool: usize = 0;    // *Pool（主线程设好，Group 的任务只能带一个 usize）
+var g_ok: usize = 0;
+var g_bad: usize = 0;
+var g_view: usize = 0;
+var g_spin: usize = 0;    // 纯用来拉开写/读之间的窗口
+
+const work = fn (id: usize) !usize {
+    let pl = (*std.pool.Pool)g_pool;
+    var i: usize = 0;
+    while (i < 500) {
+        if (pl.alloc(64)) b {
+            let mark = (u64)(id + 1) * 1000000 + (u64)i;
+            let w = (*u64)b;
+            w.0 = mark;
+            var k: usize = 0;
+            while (k < 16) { _ = std.atomic.atomicAdd(&g_spin, 1); k = k + 1; }
+            if (w.0 == mark) { _ = std.atomic.atomicAdd(&g_ok, 1); }
+            else { _ = std.atomic.atomicAdd(&g_bad, 1); }
+            if (!pl.free(b)) { _ = std.atomic.atomicAdd(&g_bad, 1); }
+        } else {
+            _ = std.atomic.atomicAdd(&g_bad, 1);
+        }
+        i = i + 1;
+    }
+
+    // 每线程自己的 ArrayList，但共用池的 Allocator 视图。
+    let a = pl.allocator();
+    var list = std.ArrayList(i32).init(a);
+    var j: usize = 0;
+    while (j < 100) { _ = list.push((i32)j); j = j + 1; }
+    let good = list.len == 100 && list.at(99).?.0 == 99;
+    list.deinit();
+    if (good) { _ = std.atomic.atomicAdd(&g_view, 1); }
+    else { _ = std.atomic.atomicAdd(&g_bad, 1); }
+    return id + 1;
+};
+
+pub const main = fn () i32 {
+    let p = std.pool.Pool.initThreadSafe(std.heap.page);
+    if (p) pv {
+        var pp = pv;
+        g_pool = (usize)(*u8)&pp;
+        let g = std.task.Task.group();
+        var i: usize = 0;
+        while (i < 6) { _ = g.spawn(work, i); i = i + 1; }
+        g.wait();
+        g.close();
+        std.println("ok:{}", std.atomic.atomicLoad(&g_ok));
+        std.println("bad:{}", std.atomic.atomicLoad(&g_bad));
+        std.println("views:{}", std.atomic.atomicLoad(&g_view));
+        std.println("used64:{}", pp.used(64));
+        pp.deinit();
+    }
+
+    // 顺序访问 + 记账分配器：deinit 要把档位表和锁字都还清。
+    // DebugAllocator 本身不是线程安全的，所以只在单线程这一段用它当 backing。
+    let da = std.debug_alloc.DebugAllocator.init(std.heap.page);
+    if (da) a {
+        let p2 = std.pool.Pool.initThreadSafe(a);
+        if (p2) pv2 {
+            var pp2 = pv2;
+            if (pp2.alloc(32)) b2 {
+                b2.0 = 7;
+                _ = pp2.free(b2);
+            }
+            pp2.deinit();
+        }
+        std.println("live:{}", std.debug_alloc.DebugAllocator.liveBytes(a));
+        std.debug_alloc.DebugAllocator.deinit(a);
+    }
+    return 0;
+};
