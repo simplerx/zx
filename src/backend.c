@@ -1157,6 +1157,10 @@ static void wrap_slice_len(Buf *b, Buf *len, Node *n, const char *total_c) {
 static void lvalue(Buf *b, Node *n) {
     switch (n->kind) {
     case NK_IDENT:
+        /* §151：`&self` / 赋值左侧也要遵守同样的 ABI 透明规则。按指针传的
+         * `Self` 接收者在 C 里是 `T *self`，直接发 `&(self)` 会得到 `T **`
+         * （B1001）。交给 ex() 补 `(*self)`，`&(*self)` 才是 `*Self`。 */
+        if (n->sym && sema_sym_self_by_ptr(n->sym)) { ex(b, n); return; }
         cname(b, sym_cname(n));
         return;
     case NK_FIELD: {

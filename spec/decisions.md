@@ -6081,3 +6081,36 @@ sema 保证。`tests/bad/self-immutable.zx` 钉住。
 `test.sh` §151 用 `--emit-c` 断言两种签名、`(*self).a`、`(*ps_…)`、
 `_zx_pad` 以及小类型没走指针；`tests/bad/self-immutable.zx`。
 LSP hover / completion 断言随 fixture 迁移同步更新。
+
+---
+
+## §152 `&self` 穿透接收者 ABI（2026-11-13）
+
+用户追问「方法里取 `&self` 会得到 `*Self` 还是 `**Self`」，实测暴露 §151
+的一个真实后端缺口：大类型（按 `const Self *` 传）的方法里写 `&self`，
+`lvalue()` 的 `NK_IDENT` 分支只发裸 `self`，生成 `ZxS2 * p = &(self);`，
+C 层是 `ZxS2 **`，被 C 编译器拒编并报 B1001（"code-generation bug"）。
+`ex()` 里 §151 补的 `(*self)` 只覆盖了值上下文，取地址 / 赋值左侧走的
+`lvalue()` 没跟上。
+
+**修复**：`lvalue()` 的 `NK_IDENT` 分支对 `sema_sym_self_by_ptr` 的符号
+转交 `ex(b, n)`，于是 `&self` 发 `&((*self))`、`&self.a` 发 `&((*self).a)`；
+按值形态仍是 `&(self)`。只改这一处，别的参数与别的左值路径不动。
+
+**语言层答案**：`&self` 恒为**一层只读指针** `*const Self`（形参是 SK_PARAM，
+`check_unary` 的 `cst = !lvalue_mutable(n->a)` 打上 const），不是可变的
+`*Self`，更不是 `**Self`。因此 `p.a = 99` 报 E0403、`return &self;` 报
+E0503（`*const Self` 作为返回类型时只报这一条）；`read(p: *const Self)`
+能接住它，`read(p: *Self)` 报 E0301。深度恒为 1，与 `ty_size` 无关。
+
+**如实留下的边界**：地址身份随 ABI 变 —— 按值时 `&self` 指向方法内的副本，
+按指针时指向调用者原对象。编译器禁止该地址逃逸（E0503），且它是只读的，
+所以函数外观察不到；但方法内比较地址仍可察觉。彻底消除要二选一：
+禁掉对 `Self` 接收者取地址，或在按指针档先复制一份本地副本（抵消零拷贝
+优化）。当前按「ABI 是纯优化但不承诺地址身份」记录，需要稳定身份用 `*Self`。
+
+守门：`tests/good/addr-self.zx`（8B / 24B / 空聚合的 `&self`、
+`&self.a`、`&self` 传给 `*const Self` 参数、指针上调 `Self` 方法）、
+`tests/bad/addr-self-write.zx`（E0403）、`tests/bad/addr-self-return.zx`
+（E0503）、`test.sh` §152 的 `--emit-c` 断言钉住 `&(self)` /
+`&((*self))` / `&((*self).a)`。

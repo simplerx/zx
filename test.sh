@@ -1210,6 +1210,20 @@ else
     fail=1
 fi
 
+# §152：`&self` 在按指针形态必须穿透成 &((*self))。发成 &(self) 会得到
+# `Self **`，C 编译器直接拒编（B1001）；按值形态仍是 &(self)。
+# 只读 / 不可返回由 tests/bad/addr-self-*.zx 的 E0403、E0503 守门。
+$ZXC tests/good/addr-self.zx --emit-c > "$TPFX.s152.c" 2>/dev/null
+if grep -qF '&((*self))' "$TPFX.s152.c" \
+   && grep -qF '&((*self).a)' "$TPFX.s152.c" \
+   && grep -qF '&(self)' "$TPFX.s152.c"; then
+    printf "  ok   §152 &self 穿透 ABI（值 &(self) / 指针 &((*self))）\n"
+else
+    printf "  FAIL §152 &self 没有按形态取地址\n"
+    grep -nE '&\(\(?\*?self' "$TPFX.s152.c" | head -20
+    fail=1
+fi
+
 # 用例会在仓库根留下自己的临时文件：io_fmt.zx 写 io_fmt.tmp，stdfs.zx 建
 # fs_t_dir / fs_t_dir2。跑完统一带走——测试不该往工作区里堆东西。
 rm -rf io_fmt.tmp fs_t_dir fs_t_dir2 2>/dev/null || true

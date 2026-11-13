@@ -1,0 +1,58 @@
+// addr-self.zx —— §152：方法里 `&self` 恒是一层只读指针 `*const Self`。
+//
+// `Self` 恒不可变；编译期按 ty_size 选 ABI 时，小类型按值、大类型按
+// `const Self *` 传地址。取地址必须穿透这层 ABI：按指针形态要发
+// `&((*self))` 而不是 `&(self)`（后者是 `Self **`，C 编译器会拒绝）。
+// `&self` / `&self.a` 在两种形态下读到的都是同一个值；写入被 E0403 挡住，
+// 地址也不能返回（E0503）——ABI 只是实现细节，不承诺指向调用者。
+// expect-exit: 0
+// expect-output
+// small: 11 11
+// big: 22 22
+// field: 55
+// empty: 0
+const std = @mod("std");
+
+const Small = struct {
+    a: u64,
+    const viaAddr = fn (self: Self) u64 {
+        let p = &self;
+        return p.a;
+    };
+    const read = fn (p: *const Self) u64 { return p.a; };
+    const viaArg = fn (self: Self) u64 { return Self.read(&self); };
+};
+
+const Big = struct {
+    a: u64, b: u64, c: u64,
+    const viaAddr = fn (self: Self) u64 {
+        let p = &self;
+        return p.a;
+    };
+    const read = fn (p: *const Self) u64 { return p.a; };
+    const viaArg = fn (self: Self) u64 { return Self.read(&self); };
+    const viaField = fn (self: Self) u64 {
+        let pa = &self.a;
+        let pb = &self.b;
+        return pa.0 + pb.0;
+    };
+};
+
+const Empty = struct {
+    const viaAddr = fn (self: Self) i32 {
+        let p = &self;
+        return p.zero();
+    };
+    const zero = fn (self: Self) i32 { return 0; };
+};
+
+pub const main = fn () i32 {
+    let s = Small{ .a = 11 };
+    let b = Big{ .a = 22, .b = 33, .c = 44 };
+    let e = Empty{};
+    std.println("small: {} {}", s.viaAddr(), s.viaArg());
+    std.println("big: {} {}", b.viaAddr(), b.viaArg());
+    std.println("field: {}", b.viaField());
+    std.println("empty: {}", e.viaAddr());
+    return 0;
+};

@@ -1,0 +1,10 @@
+// expect: cannot assign through a read-only path
+const Big = struct {
+    a: u64, b: u64, c: u64,
+    const f = fn (self: Self) void {
+        let p = &self;
+        p.a = 99;
+    };
+};
+
+const main = fn () u8 { return 0; };
