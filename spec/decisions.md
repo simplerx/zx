@@ -5879,3 +5879,54 @@ unwrap、复制、传参都可能产生副本；堆上那一个 `u64` 由所有�
   `namedTypeNear` 的显式标注（`let t2: {i32,f64,…} = {…}`）。
 - hover 补 `.len` / `.size`（`usize` + 编译器字段说明）与 `.N`（元素类型）。
 - 编译器一字未动：本轮只补 LSP 的可见性，不改语言能力。
+
+## §148 工厂链去虚拟化：把 §141 的「假绿」修成真绿（2026-11-13）
+
+§138 声称 `DebugAllocator.init(page)` / `Pool.allocator()` 这类工厂返回的
+分配器也能去虚拟化，§141 查明是**假绿**：`test.sh` 只按函数名 grep，函数
+定义/原型里本来就有那个名字。本轮把两处根因都修掉，并让用例按**调用点**
+断言，不再给假绿留缝。
+
+两层根因：
+
+- `allocator_target` 的 `NK_CALL` 只认 `fs->decl == NK_DECL` 这一种形状。
+  容器方法（`C.init` / `p.allocator()`）的 callee 是 `NK_FIELD`，`sym` 常为
+  空，只有 `->inst` 指向方法自己的 `NK_FN`；模块级 `const F = fn …` 的 decl
+  又是 `NK_FN` 而不是 `NK_DECL`。三种形状原来只覆盖一种。
+- 工厂住在**惰性加载**的子模块里（§144 的 `std.debug_alloc` 等）。调用方
+  `main` 的体先查完，工厂体还在 `g_pending` 队列里：`return Allocator{…}`
+  的字面量 `ty` 为空、`.alloc = f` 的标识符 `sym` 也为空，推不出可直调目标。
+
+修法（`src/sema.c`）：
+
+- `allocator_target` 的 `NK_CALL` 先取 `callee->inst`（`NK_FN`），再退回
+  `sym->decl` 的 `NK_FN` / `NK_DECL + NK_FN`；三种都能拿到函数体。
+- `lit_is_allocator` 在类型戳缺失时按字面量类型表达式的名字认
+  （`Allocator{…}` 与 `std.Allocator{…}` 同名），**有类型戳则以类型为准**，
+  不让用户自定义的同名结构靠名字蒙混。
+- `collect_allocator_returns` 逐层剥掉 `?Allocator` 返回时 coerce 插的
+  `NK_CAST` / `NK_UNWRAP` / `NK_TRY` / `NK_ORELSE` 外壳。
+- `devirt_retry_all()`：第一次证明失败的调用点登记进 `g_devirt_retry`，
+  `sema_check` 末尾所有排队体查完后统一重试一次；已经证明成功的不登记、
+  不改动。`g_devirt_final` 防止重试轮再往队列里塞。
+
+顺手补齐否定证据（否则重试轮会把「后来才被改写」的变量也算成可证明）：
+
+- `check_assign`：`a.alloc = f` 改写的是分发目标本身，沿字段/下标链找到
+  基变量，和 `a = opaque(a)` 一样打 `nassign`。
+- `check_unary` 的 `&`：`&a.alloc` 沿字段链给基变量打 `escaped`。**标记必须
+  放在 `check_expr(n->a)` 之后**——标识符的 `sym` 到那时才绑定；§138 原来
+  把它放在前面，那段 `&ident` 的否定证据其实一直是死代码（本轮实测
+  `&esc.alloc` 仍被误直调才暴露）。
+
+守门：`test.sh` §148 按调用点断言 `= debug_alloc_trackedAlloc(d.ctx, 40)`
+与 `debug_alloc_trackedFree(d.ctx, r1, 40)`，并**反向**断言 `d.alloc(…)`
+不存在；C 前端（`--fe=c`）同样验一遍。新增
+`tests/good/devirt-alloc-negative.zx`：字段改写 / 取字段地址两条链必须退回
+间接分发，双前端实跑 `w: ok` / `esc: ok`。`devirt-alloc.zx` 四条链实跑输出
+不变。
+
+已知边界：调用点若在另一个函数体置上 `nassign`/`escaped` **之前**就检查并
+改写，末轮不会复核已成功的证明（不回退）。当前 std 的分配器都是函数内的
+局部值，按语句顺序检查，未触发；跨函数共享全局分配器时若要严格证明，得把
+改写全部推迟到末轮统一做，代价是 `mark_uses` 要跟着改。本轮不做。

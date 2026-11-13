@@ -1,0 +1,35 @@
+// devirt-alloc-negative.zx —— 分配器去虚拟化的否定证据（§148）。
+//
+// §138 允许「能证明目标」时把 a.alloc(...) 改成直调；证明的前提是
+// 这个变量从声明到这里没被改过、也没把分发字段的地址交出去。下面两条链
+// 各破坏一个前提，编译器必须退回间接分发，行为还得和直调完全一致。
+// 守门在 test.sh：按调用点 grep 生成代码，断言两条链仍是
+// `<var>.alloc(<var>.ctx, 8)`，不能出现 `= cAlloc(`。
+// expect-exit: 0
+// expect-output
+// w: ok
+// esc: ok
+const std = @mod("std");
+
+const cAlloc = fn (_: ?*u8, n: usize) ?*u8 {
+    return std.heap.page.alloc(null, n);
+};
+const cFree = fn (_: ?*u8, p: *u8, n: usize) void {
+    std.heap.page.free(null, p, n);
+};
+
+pub const main = fn () i32 {
+    // ① 改写分发字段本身：声明初值不再是可靠证明
+    var w = Allocator{ .ctx = null, .alloc = cAlloc, .free = cFree };
+    w.alloc = cAlloc;
+    if (w.alloc(w.ctx, 8)) p1 { w.free(w.ctx, p1, 8); } else { return 1; }
+    std.println("w: ok");
+
+    // ② 把字段地址交出去：外部拿着指针就能改分发目标
+    var esc = Allocator{ .ctx = null, .alloc = cAlloc, .free = cFree };
+    let fp = &esc.alloc;
+    _ = fp;
+    if (esc.alloc(esc.ctx, 8)) p2 { esc.free(esc.ctx, p2, 8); } else { return 1; }
+    std.println("esc: ok");
+    return 0;
+};

@@ -444,6 +444,14 @@ typedef struct { Node *fn; Module *mod; struct Scope *scope; } Pending;
 static Pending *g_pending;
 static int g_npending, g_cappending;
 
+/* §148：工厂（DebugAllocator.init / Pool.allocator / ArenaAllocator.init）
+ * 住在**惰性加载**的子模块里，调用方 main 的体先查时它还没查过：return
+ * 的 Allocator 字面量没有 ty，`.alloc = f` 的标识符也没有 sym。所有体查完
+ * 后把这些调用点再证明一遍（见 devirt_retry_all）。 */
+static Node **g_devirt_retry;
+static int g_ndr, g_cdr;
+static bool g_devirt_final;
+
 typedef struct {
     Node   *fn;
     int     nargs;
@@ -2735,6 +2743,17 @@ static Type *check_assign(Node *n) {
         /* 重新绑定过就不再信任初值（§138：分配器去虚拟化的前提是
          * "这个变量从声明到这里没被改过"）。 */
         if (n->a->kind == NK_IDENT && n->a->sym) n->a->sym->nassign++;
+        /* `a.alloc = f` 改写的是分发目标本身，不能再按声明初值直调：
+         * 沿字段/下标链找到基变量，同样打上 nassign（§148）。 */
+        {
+            Node *base = n->a;
+            int guard = 0;
+            while (base && (base->kind == NK_FIELD || base->kind == NK_INDEX) &&
+                   guard++ < 8)
+                base = base->a;
+            if (base && base->kind == NK_IDENT && base->sym)
+                base->sym->nassign++;
+        }
         /* 赋进局部变量的指针也记来源：之后 return 它同样要拦 */
         if (n->a->kind == NK_IDENT && n->a->sym && expr_frame(n->b))
             n->a->sym->stack_val = true;
@@ -2992,9 +3011,21 @@ static Type *check_unary(Node *n, Type *expect) {
     if (n->op == TOK_AMP) {
         if (n->a->kind == NK_TUPLE)      /* &{…}（不带点）也不该当元组 */
             return check_array_lit(n, n->a->items, n->a->nitems, expect);
-        /* 取过地址：别人手里有它的指针，随时可能改写（§138 否定证据） */
-        if (n->a->kind == NK_IDENT && n->a->sym) n->a->sym->escaped = true;
         Type *t = check_expr(n->a, NULL);
+        /* 取过地址：别人手里有它的指针，随时可能改写（§138 否定证据）。
+         * 必须在 check_expr 之后——标识符的 sym 到那时才绑定；放在前面
+         * 标记会落在空 sym 上，等于没标（§148 实测修正）。
+         * `&a.alloc` 把分发字段的地址交出去：沿字段/下标链找到基变量，
+         * 同样打 escaped，此后不能按声明初值直调。 */
+        {
+            Node *base = n->a;
+            int guard = 0;
+            while (base && (base->kind == NK_FIELD || base->kind == NK_INDEX) &&
+                   guard++ < 8)
+                base = base->a;
+            if (base && base->kind == NK_IDENT && base->sym)
+                base->sym->escaped = true;
+        }
         /* `*[N]T` 只是"带长度的指针"：C 那边就是 `T *`，本身有槽位，
          * `&xs` 是合法的 `**(...)`（用户 2026-11-10 确认的设计）。
          * 以前这里错误地按"内联数组"挡掉，是文档/实现的误解。 */
@@ -3844,15 +3875,34 @@ static Node *allocator_pair_value(Node *lit, const char *field) {
     return NULL;
 }
 
-/* 收集函数体里的 `return Allocator{…}`（不进军嵌套函数）。多于一条就不用。 */
+/* 工厂体可能还没查过（惰性模块）：类型戳缺失时按字面量上的类型名认。
+ * `Allocator{…}` 与 `std.Allocator{…}` 的 a 节点都叫 "Allocator"。 */
+static bool lit_is_allocator(Node *lit) {
+    if (!lit || lit->kind != NK_STRUCT_LIT) return false;
+    /* 已经有类型戳就以类型为准：用户自定义的同名 Allocator 不能靠名字蒙混 */
+    if (lit->ty) return ty_is_allocator(lit->ty);
+    Node *te = lit->a;
+    if (te && te->type_val && ty_is_allocator(te->type_val)) return true;
+    return te && te->name && !strcmp(te->name, "Allocator");
+}
+
+/* 收集函数体里的 `return Allocator{…}`（不进军嵌套函数）。多于一条就不用。
+ * `?Allocator` 的返回会被 coerce 裹一层 NK_CAST/NK_UNWRAP，逐层剥掉。 */
 static void collect_allocator_returns(Node *n, int depth, Node **found, int *count) {
     if (!n || depth > 16 || *count > 1) return;
     if (n->kind == NK_FN) return;
-    if (n->kind == NK_RETURN && n->a && n->a->kind == NK_STRUCT_LIT &&
-        ty_is_allocator(n->a->ty)) {
-        *found = n->a;
-        *count = *count + 1;
-        return;
+    if (n->kind == NK_RETURN && n->a) {
+        Node *cand = n->a;
+        for (int g = 0; g < 4 && cand; g++) {
+            if (cand->kind != NK_CAST && cand->kind != NK_UNWRAP &&
+                cand->kind != NK_TRY && cand->kind != NK_ORELSE) break;
+            cand = cand->b ? cand->b : cand->a;
+        }
+        if (lit_is_allocator(cand)) {
+            *found = cand;
+            *count = *count + 1;
+            return;
+        }
     }
     collect_allocator_returns(n->a, depth + 1, found, count);
     collect_allocator_returns(n->b, depth + 1, found, count);
@@ -3893,16 +3943,22 @@ static Symbol *allocator_target(Node *e, bool want_alloc, int depth) {
     case NK_TRY:
         return allocator_target(e->a, want_alloc, depth + 1);
     case NK_CALL: {
-        /* 工厂：`DebugAllocator.init(page)` / `ArenaAllocator.init(page)` */
+        /* 工厂：`DebugAllocator.init(page)` / `ArenaAllocator.init(page)` /
+         * `Pool.allocator()` / `SyncPool.allocator()`。容器方法是 NK_FIELD
+         * callee，sym 常为空，只有 inst 指向方法自己的 NK_FN。 */
         Node *callee = e->a;
-        Symbol *fs = (callee && callee->sym) ? callee->sym : NULL;
-        if (!fs) return NULL;
-        Node *d = fs->decl;
-        if (!d || d->kind != NK_DECL || !d->b || d->b->kind != NK_FN) return NULL;
-        if (!d->b->b) return NULL;
+        Node *fn = NULL;
+        if (callee && callee->inst && callee->inst->kind == NK_FN)
+            fn = callee->inst;
+        else if (callee && callee->sym && callee->sym->decl) {
+            Node *d = callee->sym->decl;
+            if (d->kind == NK_FN) fn = d;
+            else if (d->kind == NK_DECL && d->b && d->b->kind == NK_FN) fn = d->b;
+        }
+        if (!fn || !fn->b) return NULL;
         Node *lit = NULL;
         int cnt = 0;
-        collect_allocator_returns(d->b->b, 0, &lit, &cnt);
+        collect_allocator_returns(fn->b, 0, &lit, &cnt);
         if (cnt != 1 || !lit) return NULL;
         Node *v = allocator_pair_value(lit, want_alloc ? "alloc" : "free");
         if (!v) return NULL;
@@ -3912,6 +3968,14 @@ static Symbol *allocator_target(Node *e, bool want_alloc, int depth) {
     default:
         return NULL;
     }
+}
+
+static void devirt_retry_add(Node *n) {
+    if (g_ndr == g_cdr) {
+        g_cdr = g_cdr ? g_cdr * 2 : 64;
+        g_devirt_retry = realloc(g_devirt_retry, sizeof(Node *) * (size_t)g_cdr);
+    }
+    g_devirt_retry[g_ndr++] = n;
 }
 
 /* `a.alloc(a.ctx, n)` / `a.free(a.ctx, p, n)`：证明得了就直调。 */
@@ -3927,12 +3991,27 @@ static void devirt_allocator_call(Node *n) {
     /* 实参个数这时已经对齐（check_call 前面报过错），签名与字段类型逐字相同 */
     if (n->nitems != (want_alloc ? 2 : 3)) return;
     Symbol *tgt = allocator_target(recv, want_alloc, 0);
-    if (!tgt || !tgt->ty || tgt->ty->kind != TY_FN) return;
+    if (!tgt || !tgt->ty || tgt->ty->kind != TY_FN) {
+        if (!g_devirt_final) devirt_retry_add(n);
+        return;
+    }
     Node *id = node_new(NK_IDENT, n->a->line, n->a->col);
     id->name = tgt->name;
     id->sym  = tgt;
     id->ty   = tgt->ty;
     n->a = id;
+    n->ct = NULL;      /* 别留旧被调（函数指针字段）的编译期折叠结果 */
+}
+
+/* 所有排队的函数体都查过之后再证明一次：惰性子模块里的工厂此刻才有
+ * 类型戳与符号。只重试登记过的调用点，不改任何已成功的证明。 */
+static void devirt_retry_all(void) {
+    g_devirt_final = true;
+    for (int i = 0; i < g_ndr; i++) devirt_allocator_call(g_devirt_retry[i]);
+    g_devirt_final = false;
+    free(g_devirt_retry);
+    g_devirt_retry = NULL;
+    g_ndr = g_cdr = 0;
 }
 
 /* 方法调用。两种写法：
@@ -6897,6 +6976,9 @@ void sema_check(Node *root) {
         g_scope = ss;
         g_srcpath = sp;
     }
+
+    /* 函数体全部查完：把第一次因工厂体未检查而没证明出来的调用点重试。 */
+    devirt_retry_all();
 
     m0->loading = false;
     g_scope = NULL;
