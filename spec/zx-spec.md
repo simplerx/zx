@@ -2123,6 +2123,7 @@ if (raw) p {
 | `std.heap.page` | `Allocator` | 唯一的现成分配器（malloc/free） |
 | `std.arena.ArenaAllocator` | `init(backing)` → `?Allocator` | 一次性批量释放：`alloc` 推指针，`free` 空操作，`deinit(a)` 全还 |
 | `std.debug_alloc.DebugAllocator` | `init(backing)` → `?Allocator` | 记账分配器：泄漏 / 重复释放 / 长度不符当场报（§13.2） |
+| `std.pool.Pool` | `init(backing)` → `?Pool` | 尺寸分级池：`alloc(n)` → `?*u8` 指向**负载起点**（块头在它之前 16B），`free(p)` 收同一个指针自己反查头，`deinit()` 整批归还 |
 | `std.print` / `std.println` / `std.format` | 内建 | 见 §11.1 |
 | `std.file.read(alloc, path)` | `?[]const u8` | 整个文件读进分配器给的缓冲，末尾补 0 |
 | `std.file.write(path, data)` / `append` | `bool` | 覆盖写 / 追加写 |

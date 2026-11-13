@@ -1,0 +1,89 @@
+// pool-header-layout.zx —— 池的块头在「返回指针之前」，不在它里面。
+//
+// 池内部（classGrow / classPush / classPop）流转的是**块头地址**；
+// Pool.alloc 对外返回的是负载地址（块头 + HDR），Pool.free 收到的也是负载
+// 地址、自己减 HDR 反查头。这两个地址空间差 HDR 字节，别混。
+//
+// A 段直接从返回指针前面读出块头字段并解引用；B 段把池架在
+// DebugAllocator 上（两层头串联）——只要 alloc/free 有任何一个把地址或
+// 长度算错，deinit 就会报 size mismatch / 野指针 / 泄漏并 panic。
+// expect-exit: 0
+// expect-output
+// A payload aligned16 = true
+// A header len = 32
+// A header gen = 0
+// A header flags = 1
+// A deref = 305419896
+// A struct deref = 42
+// A free = true
+// A flags after free = true
+// B nested deref = 99
+// B tracked = true
+// B free = true
+// B big deref = 7
+// B big free = true
+// B live after pool deinit = 0
+// B debug_alloc deinit ok
+const std = module("std");
+
+const Node = struct { value: i32, next: ?*Node };
+
+pub const main = fn () i32 {
+    // A) 裸池：HDR = 16，头是 [len, gen, flags, reserved] 四个 u32。
+    //    头在负载之前，返回指针指向的是负载的第一个字节。
+    let p = std.pool.Pool.init(std.heap.page);
+    if (p) pv {
+        var pp = pv;
+        let q = pp.alloc(20);          // 落 32B 档
+        if (q) qv {
+            std.println("A payload aligned16 = {}", ((usize)qv & 15) == 0);
+            let h = (*u32)(qv - 16);
+            std.println("A header len = {}", h.0);
+            std.println("A header gen = {}", (h + 1).0);
+            std.println("A header flags = {}", (h + 2).0);
+
+            let w = (*u64)qv;
+            w.0 = 305419896;
+            std.println("A deref = {}", w.0);
+            let nd = (*Node)qv;       // 同一地址强转，字段同样落在负载里
+            nd.value = 42;
+            nd.next = null;
+            std.println("A struct deref = {}", nd.value);
+
+            std.println("A free = {}", pp.free(qv));
+            std.println("A flags after free = {}", h.0 == 32 && (h + 2).0 == 2);
+        }
+        pp.deinit();
+    }
+
+    // B) 两层头：DebugAllocator 的 48B 头 + Pool 的 16B 头。
+    //    每层都返回自己的负载起点，所以两者串联而不重叠。
+    let da = std.debug_alloc.DebugAllocator.init(std.heap.page);
+    if (da) a {
+        let p2 = std.pool.Pool.init(a);
+        if (p2) pv2 {
+            var pp2 = pv2;
+            let q2 = pp2.alloc(64);
+            if (q2) qv2 {
+                let w2 = (*u64)qv2;
+                w2.0 = 99;
+                std.println("B nested deref = {}", w2.0);
+                std.println("B tracked = {}",
+                    std.debug_alloc.DebugAllocator.liveBytes(a) > 0);
+                std.println("B free = {}", pp2.free(qv2));
+            }
+            let big = pp2.alloc(600000);   // 大块路径也有头
+            if (big) bb {
+                bb.0 = 7;
+                std.println("B big deref = {}", bb.0);
+                std.println("B big free = {}", pp2.free(bb));
+            }
+            pp2.deinit();                  // 整批槽区 + Region + 档位表全归还
+        }
+        std.println("B live after pool deinit = {}",
+            std.debug_alloc.DebugAllocator.liveBytes(a));
+        std.debug_alloc.DebugAllocator.deinit(a);   // 有泄漏就 panic
+        std.println("B debug_alloc deinit ok");
+    }
+    return 0;
+};

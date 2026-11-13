@@ -5360,3 +5360,81 @@ const Cnt = struct {
 
 - `tests/good/member-bare-call.zx`：上面六种形状一次跑完，`expect-output` 七行
   逐字比对。
+
+## §140 池的块头与返回指针：两个地址空间（2026-11-13 用户提问）
+
+**用户原话**：「std.pool.Pool 申请的内存返回的指针带了头块，那他解引用时地址
+不就是错的吗？」
+
+**结论：不会错，返回的指针里没有头。** 但这个问题值得写下来，因为池内部
+确实有另一套地址，混淆这两者是最容易踩的坑。
+
+### 1. 内部地址 vs 对外地址
+
+```
+        gpa.alloc(n * slotSize) 返回的 base
+        |
+        v
+   [ 16B Header ][ payload (slotSize - 16) ]   <- 一个槽
+   ^              ^
+   |              |
+   a              a + HDR
+   块头地址        负载地址
+   内部流转        对外
+```
+
+| 场合 | 用哪个地址 | 代码 |
+|---|---|---|
+| `classGrow` 铺槽 | 块头 | `let a = (usize)base + j * slotSize; let hp = (*Header)a;` |
+| `classPush` / `classPop`（空闲链） | 块头 | `classPush(c, a)` / `return a` |
+| **`Pool.alloc` 的返回值** | **负载** | `return (*u8)(a + HDR);`（池内）／`return b + HDR;`（大块） |
+| **`Pool.free` 的入参** | **负载** | `let ha = a - HDR; let hp = (*Header)ha;` |
+
+所以「池申请的内存」确实带一块头，但**那块头留在返回指针之前**：调用方拿到
+`a + HDR`，往它上面写 `(*u64)p.0 = …`、强转 `(*Node)p` 都落在负载里，不会读
+到 `len/gen/flags`。`free` 收同一个指针，自己减 16 反查头，也不需要调用方记
+住偏移或者档位。
+
+### 2. 实跑证据（`tests/good/pool-header-layout.zx`）
+
+从返回指针往前 16B 读到的头是 `len = 32`（20B 请求落 32B 档）、`gen = 0`、
+`flags = 1`（LIVE）；直接在返回指针写 `u64` 读回 `305419896`，强转 `(*Node)`
+后写 `value = 42` 读回 42；`free(p)` 后 `flags` 变 2。负载地址低 4 位为 0。
+
+还把池架在 `DebugAllocator` 上验了两层头：
+
+```
+[ DebugAllocator 48B 头 ][ Pool 16B 头 ][ payload ]
+```
+
+每层分配器都返回**自己的**负载起点、也要求还回同一个指针，于是两层头串联
+而不重叠。`Pool.deinit()` 后 `liveBytes == 0`，`DebugAllocator.deinit(a)` 不
+panic —— 只要 `alloc`/`free` 里有任何一处把地址或 `bytes` 算错，记账分配器
+当场就会报 `size mismatch` / 野指针 / 泄漏。
+
+### 3. 顺带修掉的真隐患：HDR 写死 16
+
+`std/pool.zx` 原来是 `const HDR: usize = 16;`，而
+`std/debug_alloc.zx` 用的是
+`(@type(Header).size + ALIGN - 1) / ALIGN * ALIGN`。同一个项目两套做法，不自洽：
+将来给 `Header` 加一个字段却忘了同步 16，负载起点就会**静默错位**——
+`alloc` 返回的指针指到块头中间、`free` 也反查不到头，那时用户的疑问就真的
+成立了，而且没有任何编译期提示。
+
+已统一：把 `ALIGN: usize = 16` 提为唯一来源，`align16` 用 `ALIGN - 1` 当掩码，
+`HDR` 移到 `Header` 定义之后按真实尺寸上取整。行为完全不变（`@type(Header).size`
+现在就是 16），改的是"改 Header 时不会算错"这一条。`std/pool.zx` 是 CRLF，按字节改。
+
+### 4. 对齐是这个答案的另一半
+
+返回指针能安全解引用，除了"跳过头"还得"对齐够"：`gpa.alloc` 的基址 16 对齐
+（malloc / DebugAllocator 的 48B 头都是 16 的倍数），`slotSize = HDR + align16(payload)`
+也是 16 的倍数，于是每个槽的负载起点都 16 对齐。这条链依赖 backing 至少给
+16 对齐；换一个只保证 8 对齐的分配器，池就得自己补对齐。目前 `std.heap.page`
+与 `DebugAllocator` 都满足。
+
+### 守门
+
+- `tests/good/pool-header-layout.zx`：裸池的头字段 / 解引用 / 对齐，加上
+  `Pool over DebugAllocator` 两层头的归还校验（16 行 `expect-output`）。
+- 既有 `tests/good/std-pool.zx` 保持通过（分级、复用、重复释放、大块）。

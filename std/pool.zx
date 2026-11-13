@@ -27,8 +27,10 @@ const F_LIVE: u32 = 1;
 const F_FREED: u32 = 2;
 const F_EXTERNAL: u32 = 3;
 
-// 块头大小 = 负载对齐。
-const HDR: usize = 16;
+// 负载对齐基数。槽区基址来自 malloc（16 对齐），槽尺寸始终是它的倍数，
+// 于是每个块的负载起点都 16 对齐。align16 与 HDR 都从这一个数算，
+// 别在别处再写一次 16。
+const ALIGN: usize = 16;
 
 // 档位数：8 个线性档（16/32/…/128，共 8 个，别数成 7）+
 // 11 个 2 的幂档（256B…256KiB）。init 里就是按这两个循环铺的，
@@ -38,10 +40,10 @@ pub const classCount: usize = 19;
 // 超过这档就走大块路径。
 pub const maxClass: usize = 256 * 1024;
 
-// 16 向上取整。不用 ~（位反）：`x & 15` 恰好就是 x%16，减掉即得下取整。
+// 按 ALIGN 向上取整。不用 ~（位反）：`a & (ALIGN-1)` 就是 a % ALIGN。
 const align16 = fn (n: usize) usize {
-    let a = n + 15;
-    return a - (a & 15);
+    let a = n + (ALIGN - 1);
+    return a - (a & (ALIGN - 1));
 };
 
 // 块头。len 是申请时的字节数（free 靠它重新找到档位）。
@@ -51,6 +53,12 @@ const Header = struct {
     flags: u32,
     reserved: u32,
 };
+
+// 块头大小 = Header 的真实尺寸上取整到 ALIGN。debug_alloc.zx 用的是同一条
+// 公式。写死 16 的话，将来给 Header 加一个字段却忘了同步，负载起点就会
+// 静默错位：alloc 返回的指针指到块头中间，free 也反查不到头 —— 这才是
+// 解引用真会算错的地方。
+const HDR: usize = (@type(Header).size + ALIGN - 1) / ALIGN * ALIGN;
 
 // 一批槽区。槽位从不搬动（发出去的指针因此始终有效），
 // 用完就再开一批（批量翻倍，封顶 4096）；deinit 沿链整批归还。

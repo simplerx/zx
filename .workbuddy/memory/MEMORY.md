@@ -29,6 +29,7 @@
 - **自动内联**：后端 `fn_small_for_inline` —— **本模块私有**、AST ≤24 节点、无循环/嵌套 fn/递归 → 定义发 `ZX_INLINE`（`static inline __attribute__((always_inline))`，MSVC `__forceinline`）。原型保持 `static`。**没有函数级 `inline` 关键字**（只有 `inline for`）。跨模块不内联（单元边界，硬内联要把函数体搬进共享头）。
 - 消不掉的分发：容器字段 `self.alloc`、函数形参 —— 类型擦除代价，-O2 也不行；彻底解要 `ArrayList(T, A)` 单态化，不做。
 - `std.debug_alloc.DebugAllocator`：块头记 `prev/next/size/seq/magic`，活跃双向链；泄漏 `deinit` 逐块（序号/字节/地址）报告后 panic，`deinitQuiet` 只报告返回块数；double free / 野指针 / 长度不符都打印现场摘要后 panic。`HDR` 由 `@type(Header).size` 上取整，别写死。
+- **`std.pool.Pool` 两个地址空间（§140）**：内部 `classPush/classPop/classGrow` 流转**块头地址** `a`；`alloc` 对外返回 `a + HDR`（负载起点），`free` 入参也是负载、`ha = a - HDR` 反查头。块头在返回指针**之前**，解引用不会读到头。HDR 现按 `@type(Header).size` 上取整（与 debug_alloc 同公式，`std/pool.zx` 是 CRLF）。负载 16 对齐靠 backing 基址 + slotSize 都是 16 倍数。守门 `tests/good/pool-header-layout.zx`（含 Pool over DebugAllocator 两层头归还校验）。
 - **容器体内裸名互调（§139 已修）**：`struct { pub const a = fn () i32 {…}; pub const b = fn () i32 { return a() + 1; }; }` 曾经编不过（B1001 `call to undeclared 'a'`：定义发 `a_i0`，裸名发 `a`）。修法：`Symbol.in_agg` 记容器体节点，`check_expr` 的 NK_IDENT 遇到体里的 NK_FN 就填 `n->inst = s->decl`，后端 NK_IDENT 分支看到 `inst` 就发 `inst_name`。守门 `tests/good/member-bare-call.zx`（六种形状：链式/当值传/enum/泛型容器/方法体内/同名隔离）。`std/debug_alloc` 的 `shutdown` 仍在模块级，不必回改。
 - `zx_debug_panic` 先 `fflush(stdout)`：重定向时 stdout 全缓冲，abort 不走退出清理，报告会整块丢。
 
