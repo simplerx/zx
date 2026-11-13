@@ -5983,13 +5983,55 @@ NK_FIELD；第一次证明不了、此刻能证明的补上直调；仍能证明
 `cross: 1 1`，§148 版输出 `cross: 2 0`（已用 §148 版 exe 对照验证）。
 `sh test.sh` 全绿（LSP 411 项、snake --sim 300 局）。
 
-### 本轮发现但未修的既有缺口（不在本轮范围）
+### §149 本轮发现、已在 §150 修复的既有缺口
 
 - 模块级 `var` 的**聚合字面量初值**不发进静态初始化：`var G = Allocator{…}`
   生成 `static ZxS2 G = { {0}, {0}, {0} }`，`zx_init_main()` 为空，解引用
   `G.alloc` 直接段错误；`const INIT = Allocator{…}; var G = INIT;` 同样全 0。
-  守门用例因此在 `main` 里显式补一次赋值（它同时也是一个后置否定证据）。
-  要修得动后端的模块级变量静态/运行时初始化。
+  §149 的守门用例因此在 `main` 里显式补一次赋值；§150 修好后已删掉这段
+  权宜代码，用例现在只靠 `spoil()` 一条后置否定证据。
 - 直接写 `std.heap.page.alloc(null, n)`（不经局部变量）会报
   `E0401 unknown identifier 'zx_page_alloc'`：去虚拟化造的 C 运行时符号
-  不在当前作用域里。§148 版 exe 同样报错，与本轮无关；本轮用例绕开它。
+  不在当前作用域里。§148 版 exe 同样报错，与 §149 无关；§150 已修。
+
+### §150 具名嵌套类型补全 + 两个后端缺口
+
+**LSP：`tup.2` 取出的值再下钻 0 项补全**（用户 2026-11-13 截图）。真实源码
+与 §145 fixture 的差别是 `child: Child`，而 `Child` 是**声明在 Person 容器
+体内的具名嵌套类型**。断点有两层：① `anonTyOfPath` 的叶子落在具名类型名
+上，所有消费点却只调 `parseAnonTy`（只认匿名 `struct{…}` 串）；
+② 更早的分支其实解析出了 `name`/`school`，但把接收者判成 `.ty`，字段在
+类型命名空间过滤里被整批剔掉。
+
+修法（`tools/zxls.zig`）：新增统一的 `tyMembersOf` —— 匿名串照旧拆字段，
+具名容器走 `containerMembersAny` / `extractBraceMembers`（注释与方法都正确
+跳过），内建类型走 `builtinTyMembers`。补全 8621 段、hover 5971 段、末轮
+递归兜底 8671 段都改用它。**不采用**「在 anonTyOfPath 尾部把具名容器一律
+展开成匿名串」：试过，容器体里的注释/方法会被 `parseAnonTy` 当成字段，
+一次性挂掉 24 条既有守门。末轮兜底里匿名串沿用原覆盖语义；具名容器只在
+两种情形接管：前面 0 成员、或 `recv_kind=.ty` 且已有成员**全是实例字段**
+（误判的值路径）。真正的类型值字段路径（`r.top.` 要出 `MidT`/`cf1`）
+成员里带 `.value`，不覆盖。
+新 exe 417 项全过；§149 版 exe 下新增 4 条守门 FAIL。
+
+**后端 ①：模块级 `var` 聚合初值全 0**（`src/backend.c`）。根因不是「没发
+静态初始化」，而是 `gen_global` 用编译期 `Value` 物化，`V_FN`（函数引用）
+在 `val_init` 里落到 `default -> {0}`。纯标量聚合（`Pt{3,7}`）本来就对。
+新增 `val_has_fn()` 沿 `V_AGG`/`V_PTR` 递归检测；带 `V_FN` 的聚合跳过
+`val_init`、登记进 `g_late`，由 `zx_init_<unit>()` 在 main 开头按源码表达式
+赋值（`G = ((ZxS1){ .f = inc, .n = 5 });`），函数符号保持真实名字。
+
+**后端 ②：`std.heap.page.alloc` 直写报 E0401**（`src/sema.c`）。去虚拟化把
+被调改成合成 NK_IDENT `zx_page_alloc`，`sym` 是只带 cname/ty 的静态符号，
+不挂在任何用户作用域。`ct_call` 折叠调用时会 `clone_tree` 克隆被调函数体
+再查一遍，而 `clone_tree` 明确清掉 `sym`；`check_expr(NK_IDENT)` 只按名字
+`lookup`，必然落空。只在「小函数里写 page.alloc、再被 main 调用」时触发
+（直接写在 main 里不触发），这与 §149 记录的现场一致。新增
+`synthetic_fn_sym()` 在名字解析层认领两个编译器保留名，等价于登记进根
+作用域但不污染用户命名空间。
+
+守门：新增 `tests/good/global-agg-init.zx`（标量/单层/嵌套聚合，实跑
+`g: 5 5` / `o: 2 7` / `p: 3 7`）、`tests/good/heap-page-direct.zx`（小函数
+载体，实跑 `page: ok`）；`test.sh` §150 五条断言（生成代码 + 实跑 + 双前端
+E0401 复核）。用 `git show HEAD:src/{sema,backend}.c` 编的 §149 版对照 exe：
+前者段错误、后者报 E0401；新 exe 全过。`sh test.sh` 全绿。

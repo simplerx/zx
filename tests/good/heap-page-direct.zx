@@ -1,0 +1,23 @@
+// heap-page-direct.zx —— 小函数里直写 std.heap.page.alloc（§150）。
+//
+// 去虚拟化把 `std.heap.page.alloc(...)` 的被调改成合成 NK_IDENT
+// `zx_page_alloc`，它只带 cname/ty，不挂在任何用户作用域。ct_call 折叠
+// 调用时 clone_tree 会清掉 sym 再查一遍被调函数体，按名字 lookup 落空
+// -> E0401 unknown identifier 'zx_page_alloc'。直接写在 main 里不触发，
+// 所以必须有一个「被 main 调用的小函数」当载体。
+// expect-exit: 0
+// expect-output
+// page: ok
+const std = @mod("std");
+
+const pageAlloc = fn (_: ?*u8, n: usize) ?*u8 {
+    return std.heap.page.alloc(null, n);
+};
+
+pub const main = fn () i32 {
+    if (pageAlloc(null, 8)) p {
+        std.heap.page.free(null, p, 8);
+        std.println("page: ok");
+    }
+    return 0;
+};

@@ -3867,6 +3867,20 @@ static Symbol *page_alloc_fn(bool want_alloc) {
     return want_alloc ? &sa : &sf;
 }
 
+/* §150：去虚拟化把 `std.heap.page.alloc/free(...)` 的被调改写成只带
+ * cname/ty 的合成标识符，它不挂在任何用户作用域。ct_call 折叠调用时会
+ * clone_tree 克隆被调函数体再查一遍，而 clone_tree 明确清掉 sym——按名字
+ * lookup 必然落空，报 E0401 unknown identifier 'zx_page_alloc'。只在小函数
+ * 里写 page.alloc 再被 main 调用时触发（直接写在 main 里没事）。
+ * 编译器自造的保留名在这里认领，等价于把它们登记进根作用域，又不污染
+ * 用户可见的命名空间。 */
+static Symbol *synthetic_fn_sym(const char *name) {
+    if (!name) return NULL;
+    if (!strcmp(name, "zx_page_alloc")) return page_alloc_fn(true);
+    if (!strcmp(name, "zx_page_free"))  return page_alloc_fn(false);
+    return NULL;
+}
+
 /* 结构体字面量里 .alloc / .free 的值节点 */
 static Node *allocator_pair_value(Node *lit, const char *field) {
     if (!lit || lit->kind != NK_STRUCT_LIT) return NULL;
@@ -4618,6 +4632,7 @@ static Type *check_expr_raw(Node *n, Type *expect) {
 
     case NK_IDENT: {
         Symbol *s = lookup(n->name);
+        if (!s) s = synthetic_fn_sym(n->name);   /* §150 合成直调目标 */
         if (!s) {
             /* §144：module 关键字已换成内建 @mod。旧写法会落到这里，
              * 给一条能照着改的提示，而不是含糊的 unknown identifier。 */

@@ -3389,6 +3389,79 @@ if _r and isinstance(_r.get("result"), dict):
 check("hover.tupleIdx.personTy", "Pv145Person" in _pv_hover, _pv_hover[:160])
 
 # ---------------------------------------------------------------------------
+# §150 具名嵌套类型：tup 取出的值再下钻（用户 2026-11-13 截图，0 项补全）
+# KEEP — 容器体内的 `const Pv150Child = struct{…}` 不是内联匿名 struct：
+# 字段 `child: Pv150Child` 让 anonTyOfPath 的叶子落在**具名类型名**上，
+# 旧链只调 parseAnonTy，person.child. / p1.child. 全空。名字全局唯一，
+# 避免与 §145/§146 的 fixture 串味。
+PV150 = """const std = @mod("std");
+
+const Pv150Person = struct {
+    name: []const u8,
+    age: i32,
+    child: Pv150Child,
+    const Pv150Child = struct {
+        name: []const u8,
+        school: []const u8,
+    };
+};
+
+const main = fn () i32 {
+    var tup = {1, 22, Pv150Person{ .name = "w", .age = 100, .child = .{ .name = "c", .school = "s" } }};
+    let person = tup.2;
+    var child = person.child.
+    person.
+    person.child.
+    var p1 = Pv150Person{ .name = "w", .age = 100, .child = .{ .name = "c", .school = "s" } };
+    p1.child.
+    _ = child; _ = person; _ = p1; _ = tup;
+    return 0;
+};
+"""
+pv150uri = "file:///" + os.path.join(SRC_DIR, "pv150.zx").replace(chr(92), "/")
+open(os.path.join(SRC_DIR, "pv150.zx"), "w", encoding="utf-8").write(PV150)
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": pv150uri, "languageId": "zx", "version": 1, "text": PV150}}})
+
+def pv150_labels(needle):
+    global _rid
+    _rid += 1
+    off = PV150.index(needle) + len(needle)
+    send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/completion",
+          "params": {"textDocument": {"uri": pv150uri}, "position": pos(PV150, off)}})
+    r, _ = recv_id("pv150", _rid)
+    return {i["label"] for i in (r["result"]["items"] if r and r.get("result") else [])}
+
+_p150_person = pv150_labels("    person.")
+check("completion.namedNested.person", {"name", "age", "child"} <= _p150_person,
+      str(sorted(_p150_person)))
+_p150_assign = pv150_labels("    var child = person.child.")
+check("completion.namedNested.child.assign", {"name", "school"} <= _p150_assign,
+      str(sorted(_p150_assign)))
+check("completion.namedNested.child.noCtor",
+      not any("{" in l and "..." in l for l in _p150_assign), str(sorted(_p150_assign)))
+_p150_dot = pv150_labels("    person.child.")
+check("completion.namedNested.child.members", {"name", "school"} <= _p150_dot,
+      str(sorted(_p150_dot)))
+_p150_p1 = pv150_labels("    p1.child.")
+check("completion.namedNested.child.fromLiteral", {"name", "school"} <= _p150_p1,
+      str(sorted(_p150_p1)))
+
+_rid += 1
+send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/hover", "params": {
+    "textDocument": {"uri": pv150uri},
+    "position": pos(PV150, PV150.index("person.child") + len("person.child") - 1)}})
+_r, _ = recv_id("pv150", _rid)
+_p150_hover = ""
+if _r and isinstance(_r.get("result"), dict):
+    _c = _r["result"].get("contents")
+    if isinstance(_c, dict):
+        _p150_hover = _c.get("value", "")
+    elif isinstance(_c, str):
+        _p150_hover = _c
+check("hover.namedNested.childTy", "child: Pv150Child" in _p150_hover, _p150_hover[:160])
+
+# ---------------------------------------------------------------------------
 # §146 / §147 元组收敛为 {} + 元组接收者的编译器成员（用户 2026-11-13）
 # KEEP — 四条都不许删：
 #   · 位置式 `.{1, 2}` 已删除：LSP 不再把它推成 `{i32,f64}` 类型。

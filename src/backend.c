@@ -7116,6 +7116,20 @@ static bool is_view_expr(Node *n) {
 static Node **g_late;      /* 需要运行时初始化的全局 */
 static int    g_nlate, g_clate;
 
+/* §150：编译期 Value 里带着函数引用（V_FN）时，val_init 没有函数符号的
+ * 表示，会静默折成 {0} —— `var G = Allocator{ .alloc = cAlloc, ... };`
+ * 的全局函数指针字段全成 NULL，解引用就段错误。这类聚合不能物化成静态
+ * 数据，改由 zx_init_<unit>() 在 main 开头按源码表达式赋值。 */
+static bool val_has_fn(Value *v) {
+    if (!v) return false;
+    if (v->kind == V_FN) return true;
+    if (v->kind == V_AGG)
+        for (int i = 0; i < v->nitems; i++)
+            if (val_has_fn(v->items[i])) return true;
+    if (v->kind == V_PTR && v->base) return val_has_fn(v->base);
+    return false;
+}
+
 static void gen_global(Node *d, bool exported) {
     const char *st = exported ? "" : "static ";
     Type *t = d->ty;
@@ -7242,7 +7256,8 @@ static void gen_global(Node *d, bool exported) {
      * 视图例外——它是个地址，复制数据会让别名关系断掉。 */
     bool view = d->b->ct && d->b->ct->kind == V_PTR && d->b->ct->base &&
                 is_view_expr(d->b);
-    if (d->b->ct && !view) {
+    bool has_fn = d->b->ct && val_has_fn(d->b->ct);
+    if (d->b->ct && !view && !has_fn) {
         Buf s; buf_init(&s);
         val_init(&s, d->b->ct, t);
         bline(&g_bglobals, "%s%s %s = %s;", st, cty(t), cn, s.data);
@@ -7250,7 +7265,7 @@ static void gen_global(Node *d, bool exported) {
     }
 
     /* 不是 C 常量表达式：先声明，等 main 开头再赋值 */
-    if (view || !is_const_init(d->b) || is_ctl(d->b)) {
+    if (view || has_fn || !is_const_init(d->b) || is_ctl(d->b)) {
         bline(&g_bglobals, "%s%s %s = {0};", st, cty(t), cn);
         if (g_nlate == g_clate) {
             g_clate = g_clate ? g_clate * 2 : 16;

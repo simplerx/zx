@@ -3270,6 +3270,36 @@ fn anonTyOfPath(text: []const u8, doc: *const Document, path: []const u8, off: u
     return ty;
 }
 
+/// 类型串 → 成员表的统一入口。匿名 struct 串直接拆字段；**具名容器**
+/// （包括声明在别的容器体内的嵌套类型，如 Person 里的
+/// `const Child = struct{…}`）到容器体里取——走 extractBraceMembers 才能
+/// 正确跳过注释与方法。anonTyOfPath 的叶子可能是具名类型名，消费点以前
+/// 一律只调 parseAnonTy，于是 `person.child.` 0 项补全（用户 2026-11-13
+/// 截图）。具名时返回成员声明所在的文件文本与容器名，供补全设实例命名空间。
+const TyMembersHit = struct { ok: bool, txt: ?[]const u8 = null, name: []const u8 = "" };
+
+fn tyMembersOf(files: []const []const u8, ty: []const u8,
+               out: *std.ArrayList(Decl)) TyMembersHit {
+    if (parseAnonTy(ty)) |f0| {
+        var flds = f0;
+        defer flds.deinit(gpa);
+        const before = out.items.len;
+        for (flds.items) |f| {
+            if (f.name.len == 0) continue;      // 元组元素不是具名成员
+            out.append(gpa, .{ .name = f.name, .kind = .field, .ty = f.ty }) catch {};
+        }
+        return .{ .ok = out.items.len > before };
+    }
+    const cn = containerNameOf(ty);
+    if (cn.len == 0) return .{ .ok = false };
+    const before = out.items.len;
+    if (containerMembersAny(files, cn, out)) |ctxtp|
+        return .{ .ok = out.items.len > before, .txt = ctxtp, .name = cn };
+    if (builtinTyMembers(cn, out))
+        return .{ .ok = out.items.len > before };
+    return .{ .ok = false };
+}
+
 // ------------------------------------------------------------- 模块搜索目录
 //
 // 编译器的 module_load 只有一条解析链：**相对导入文件所在目录** → 打不开时
@@ -5969,11 +5999,13 @@ fn hoverAt(doc: *const Document, line: u32, character: u32) ?[]const u8 {
             // KEEP - 匿名类型线：`anon.pos` / `info.a` / `nv.pos.x` 的成员
             // hover。命名容器路径全部落空才到这里；3z 守门。
             if (anonTyOfPath(text, doc, bind, off)) |aty| {
-                if (parseAnonTy(aty)) |flds| {
-                    for (flds.items) |f| {
-                        if (std.mem.eql(u8, f.name, member)) {
+                var hm: std.ArrayList(Decl) = .empty;
+                defer hm.deinit(gpa);
+                if (tyMembersOf(sf.items, aty, &hm).ok) {
+                    for (hm.items) |d| {
+                        if (std.mem.eql(u8, d.name, member) and d.ty.len > 0) {
                             var b: std.ArrayList(u8) = .empty;
-                            b.print(gpa, "```zx\n{s}: {s}\n```", .{ member, f.ty }) catch return null;
+                            b.print(gpa, "```zx\n{s}: {s}\n```", .{ member, d.ty }) catch return null;
                             return hoverPayload(b.items);
                         }
                     }
@@ -8619,15 +8651,18 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                     // 落空才到这里（`o.count` 的 Obj 实例等不受影响）。
                     if (!handled) {
                         if (anonTyOfPath(text, doc, path, off)) |aty| {
-                            if (parseAnonTy(aty)) |flds| {
-                                var named: usize = 0;
-                                for (flds.items) |f| {
-                                    if (f.name.len == 0) continue; // 元组元素不是成员
-                                    decls.append(gpa, .{ .name = f.name, .kind = .field, .ty = f.ty }) catch {};
-                                    named += 1;
+                            var cf = scanFiles(doc, text);
+                            defer cf.deinit(gpa);
+                            const hm = tyMembersOf(cf.items, aty, &decls);
+                            if (hm.ok) {
+                                handled = true;
+                                recv_kind = .instance;
+                                if (hm.txt) |ctxtp| {
+                                    mem_txt = ctxtp;
+                                    mem_body_fix = null;
+                                    owner = hm.name;
+                                    markContainerFns(ctxtp, &decls);
                                 }
-                                handled = named > 0;
-                                if (handled) recv_kind = .instance;
                             }
                         }
                     }
@@ -8669,15 +8704,40 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
             // 自己递归；解析成功就覆盖，具名容器解析不出匿名串时不受影响。
             if (!lit_ctx and dotted) {
                 if (anonTyOfPath(text, doc, path, off)) |aty| {
-                    if (parseAnonTy(aty)) |flds| {
+                    var cf = scanFiles(doc, text);
+                    defer cf.deinit(gpa);
+                    var repl: std.ArrayList(Decl) = .empty;
+                    defer repl.deinit(gpa);
+                    const hm = tyMembersOf(cf.items, aty, &repl);
+                    // 具名容器叶子只作**最后兜底**：前面已解析出成员时不许
+                    // 覆盖（vendor 容器 / std 模块 / 泛型实例链都靠它们）。
+                    // 两个例外：① 前面一个成员都没解析出来；② 接收者被误判
+                    // 成类型命名空间、且解析出的成员**全是实例字段**——这些
+                    // 字段会在 .ty 过滤里被整批剔掉，`person.child.` 就只弹
+                    // 0 项（用户 2026-11-13 截图）。真正的类型值字段路径
+                    //（`r.top.` 要出 MidT/cf1）成员里带 .value，不能覆盖。
+                    // 匿名串沿用原来的覆盖语义（3v/3w/3x 守门）。
+                    var all_fields = decls.items.len > 0;
+                    for (decls.items) |d0| {
+                        if (d0.kind != .field) { all_fields = false; break; }
+                    }
+                    const mis_ty = recv_kind == .ty and all_fields;
+                    if (hm.ok and (hm.txt == null or decls.items.len == 0 or mis_ty))
+                    {
                         decls.clearRetainingCapacity();
-                        for (flds.items) |f| {
-                            if (f.name.len == 0) continue; // 元组没有具名成员
-                            decls.append(gpa, .{ .name = f.name, .kind = .field, .ty = f.ty }) catch {};
-                        }
-                        if (decls.items.len > 0) {
-                            handled = true;
-                            recv_kind = .instance;
+                        for (repl.items) |d2| decls.append(gpa, d2) catch {};
+                        handled = true;
+                        recv_kind = .instance;
+                        // 具名容器（含嵌套具名类型）走真实容器体：注释/方法由
+                        // extractBraceMembers 跳过，签名与命名空间过滤仍生效。
+                        // 匿名串则保持原来的 anon_only 语义（字段不是文件声明）。
+                        if (hm.txt) |ctxtp| {
+                            mem_txt = ctxtp;
+                            mem_body_fix = null;
+                            owner = hm.name;
+                            markContainerFns(ctxtp, &decls);
+                            anon_only = false;
+                        } else {
                             mem_txt = null;
                             mem_body_fix = null;
                             owner = "";

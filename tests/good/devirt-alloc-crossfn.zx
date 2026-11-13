@@ -40,9 +40,8 @@ const spoil = fn () void {
 };
 
 pub const main = fn () i32 {
-    // 模块级 var 的**聚合字面量初值**当前不发进 zx_init_main（后端静态初始化
-    // 一律清零），这里显式补一次；它同样是一个比 useIt 更晚检查的否定证据。
-    G = Allocator{ .ctx = null, .alloc = cAlloc, .free = cFree };
+    // G 的初值由 §150 修好的 zx_init_main() 赋值；这里不再手工补初始化。
+    // 唯一的后置否定证据就是 spoil() 里的 G.alloc = cAllocB。
     useIt();
     spoil();
     useIt();

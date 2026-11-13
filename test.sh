@@ -881,7 +881,7 @@ fi
 printf "\n== §149 已知边界：跨函数后置抹源要回退已证明的调用点\n"
 $ZXC tests/good/devirt-alloc-crossfn.zx --emit-c > "$TPFX.dvx.c" 2>/dev/null
 # useIt() 的体先于 spoil() / main 检查：第一次按 G 的声明初值证明成功，
-# 之后才出现 `G.alloc = cAllocB` / `G = Allocator{…}`。§148 只重试首次
+# 之后才出现 `G.alloc = cAllocB`。§148 只重试首次
 # 失败的点，不回退已成功的改写 → 生成 `cAlloc(G.ctx, 8)`，spoil 之后
 # useIt 仍走旧函数（假安全）。§149 用原始 NK_FIELD 统一复核并回退。
 if grep -qF 'G.alloc(G.ctx, 8)' "$TPFX.dvx.c" \
@@ -908,6 +908,52 @@ if grep -qF 'G.alloc(G.ctx, 8)' "$TPFX.dvx.fec.c" \
     printf "  ok   --fe=c 下同样回退\n"
 else
     printf "  FAIL --fe=c 下没回退\n"
+    fail=1
+fi
+
+printf "\n== §150 模块级聚合初值 + std.heap.page 直写（两个既有后端缺口）\n"
+$ZXC tests/good/global-agg-init.zx --emit-c > "$TPFX.gai.c" 2>/dev/null
+# V_FN（函数引用）不能物化成静态数据：带函数引用的聚合交给 zx_init_main
+# 按源码表达式赋值；纯标量聚合仍在静态初始化里，别一律改成运行时。
+if grep -qF 'G = ((ZxS1){ .f = inc, .n = 5 });' "$TPFX.gai.c" \
+   && grep -qF 'O = ((ZxS3){ .in = ((ZxS2){ .f = inc }), .n = 7 });' "$TPFX.gai.c" \
+   && grep -qF 'static ZxS4 P = { 3, 7 };' "$TPFX.gai.c"; then
+    printf "  ok   V_FN 聚合走 zx_init_main，标量聚合仍静态初始化\n"
+else
+    printf "  FAIL 模块级聚合初值没发出来\n"
+    grep -n 'zx_init_main\|static ZxS' "$TPFX.gai.c" | head -n 12
+    fail=1
+fi
+$ZXC tests/good/global-agg-init.zx -o "$TPFX.gai.exe" > /dev/null 2>&1 || true
+"$TPFX.gai.exe" > "$TPFX.gai.run" 2>&1 || true
+if grep -q '^g: 5 5$' "$TPFX.gai.run" \
+   && grep -q '^o: 2 7$' "$TPFX.gai.run" \
+   && grep -q '^p: 3 7$' "$TPFX.gai.run"; then
+    printf "  ok   实跑：全局函数指针字段可调用（§149 版会段错误）\n"
+else
+    printf "  FAIL 全局聚合初值实跑不对\n"
+    sed -n '1,6p' "$TPFX.gai.run"
+    fail=1
+fi
+# 小函数里直写 page.alloc：合成标识符 zx_page_alloc 在 ct_call 克隆体
+# 重查时不该报 E0401（§149 版会）。双前端都要过。
+for fe in "" "--fe=c"; do
+    $ZXC tests/good/heap-page-direct.zx --check $fe > "$TPFX.hpd.log" 2>&1 || true
+    if ! grep -q 'E0401' "$TPFX.hpd.log"; then
+        printf "  ok   %s 下 page.alloc 合成标识符可重查\n" "${fe:-默认前端}"
+    else
+        printf "  FAIL %s 下 page.alloc 仍报 E0401\n" "${fe:-默认前端}"
+        head -n 6 "$TPFX.hpd.log"
+        fail=1
+    fi
+done
+$ZXC tests/good/heap-page-direct.zx -o "$TPFX.hpd.exe" > /dev/null 2>&1 || true
+"$TPFX.hpd.exe" > "$TPFX.hpd.run" 2>&1 || true
+if grep -q '^page: ok$' "$TPFX.hpd.run"; then
+    printf "  ok   实跑：page.alloc/free 行为正常\n"
+else
+    printf "  FAIL page.alloc 实跑不对\n"
+    sed -n '1,6p' "$TPFX.hpd.run"
     fail=1
 fi
 
