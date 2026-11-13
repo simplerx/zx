@@ -840,14 +840,18 @@ static Node *parse_brace_expr(P *p) {
     return n;
 }
 
-/* `.{ … }` — always a literal */
-static Node *parse_dot_brace(P *p) {
+/* `.{ … }` — anonymous struct literal, or the array literal after `&`.
+ * §146: the positional tuple spelling `.{1,2}` is gone. A tuple is always
+ * `{1,2}`; the dot form is reserved for field initializers and `&.{…}`. */
+static Node *parse_dot_brace(P *p, bool array_lit) {
     Token *t = advance(p);
     bool is_struct = false;
     if (at(p, TOK_DOT) && peek(p, 1)->kind == TOK_IDENT && peek(p, 2)->kind == TOK_ASSIGN)
         is_struct = true;
 
-    if (is_struct) {
+    /* `.{}` with no items is the empty anonymous-struct literal: with an
+     * expected type every field comes from its default. It is not a tuple. */
+    if (is_struct || (!array_lit && at(p, TOK_RBRACE))) {
         Node *n = node_new(NK_ANON_STRUCT, t->line, t->col);
         while (!at(p, TOK_RBRACE) && !at(p, TOK_EOF_)) {
             Node *pair = node_new(NK_PAIR, cur(p)->line, cur(p)->col);
@@ -863,6 +867,12 @@ static Node *parse_dot_brace(P *p) {
         return n;
     }
 
+    if (!array_lit) {
+        if (g_spec_depth > 0) longjmp(g_spec, 1);
+        diag_code_at("E0211", t->line, t->col,
+                     "`.{...}` tuple spelling was removed: write `{...}` for a tuple, "
+                     "or `&.{...}` for an array");
+    }
     Node *n = node_new(NK_TUPLE, t->line, t->col);
     if (!at(p, TOK_RBRACE)) {
         for (;;) {
@@ -882,7 +892,7 @@ static Node *parse_unary(P *p) {
         advance(p);
         if (at(p, TOK_DOT_BRACE)) {
             /* &.{ … } — array literal: one anonymous storage block */
-            Node *lit = parse_dot_brace(p);
+            Node *lit = parse_dot_brace(p, true);
             Node *n = node_new(NK_ARRAY_LIT, t->line, t->col);
             n->items = lit->items;
             n->nitems = lit->nitems;
@@ -1025,7 +1035,7 @@ static Node *parse_primary(P *p) {
     }
 
     case TOK_LBRACE:  return parse_brace_expr(p);
-    case TOK_DOT_BRACE: return parse_dot_brace(p);
+    case TOK_DOT_BRACE: return parse_dot_brace(p, false);
 
     case TOK_KW_IF: case TOK_KW_WHILE: case TOK_KW_FOR: case TOK_KW_SWITCH:
         return parse_construct(p, NULL);
@@ -1129,9 +1139,16 @@ static Node *parse_decl(P *p) {
     n->flag = (t->kind == TOK_KW_LET) ? true : false;
     n->op = (t->kind == TOK_KW_VAR) ? 2 : (t->kind == TOK_KW_LET ? 1 : 0);
 
-    /* destructuring: const {a, b, c} = tup;  /  let .{a, b} = t; */
+    /* destructuring has one spelling: `{a, b}` (§146). The old `.{a, b}`
+     * pattern is rejected with a migration hint but still parsed, so the
+     * diagnostics don't cascade. */
+    if (at(p, TOK_DOT_BRACE)) {
+        Token *db = cur(p);
+        diag_code_at("E0211", db->line, db->col,
+                     "`.{a, b}` tuple pattern was removed: write `{a, b}`");
+    }
     if (at(p, TOK_LBRACE) || at(p, TOK_DOT_BRACE)) {
-        if (at(p, TOK_DOT_BRACE)) advance(p); else advance(p);
+        advance(p);
         Node *pat = node_new(NK_TUPLE, t->line, t->col);
         if (!at(p, TOK_RBRACE)) {
             for (;;) {

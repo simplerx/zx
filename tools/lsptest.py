@@ -73,7 +73,7 @@ const lit2 = fn () i32 {
 const nest = fn () i32 {
     let anon = .{ .x = 1, .y = "s" };
     let nv = .{ .pos = .{ .x = 1, .y = 2 }, .tag = "t" };
-    let tp = .{ 1, 2.5 };
+    let tp = { 1, 2.5 };
     conf("n", .{ .depth = 2, .kind = "k" });
     deep(.{ .opts = .{ .width = 1, .height = 2 }, .flag = true });
     std.println("{} {} {}", anon.x, nv.pos.x, tp.0);
@@ -303,7 +303,7 @@ details = {i["label"]: i.get("detail") for i in r["result"]["items"]} if r and r
 check("completion.anonNest.fields", {"x", "y"} <= labels, str(sorted(labels)))
 check("completion.anonNest.fieldType", details.get("x") == "i32", str(details))
 
-# 3w2 嵌套匿名的行内类型提示 + 匿名元组形状（.{1, 2.5} 是 {i32,f64}）
+# 3w2 嵌套匿名的行内类型提示 + 元组形状（{1, 2.5} 是 {i32,f64}；§146 起 .{…} 不再是元组）
 send({"jsonrpc": "2.0", "id": 32, "method": "textDocument/inlayHint", "params": {
     "textDocument": {"uri": uri},
     "range": {"start": {"line": 0, "character": 0},
@@ -3071,7 +3071,7 @@ pub const main = fn () i32 {
     const s = strs.0;
     s.;
     strs.;
-    const t = .{ 1, 2.5 };
+    const t = { 1, 2.5 };
     const x = t.0;
     _ = slice; _ = x;
     return 0;
@@ -3239,7 +3239,7 @@ send({"jsonrpc": "2.0", "method": "textDocument/didClose",
 #     其余内建（@memcpy/…）仍是普通补全。
 TUPIDX = """const std = @mod("std");
 
-const tup: {i32,i32,str} = .{10,23,"hello"};
+const tup: {i32,i32,str} = {10,23,"hello"};
 const s = tup[2];
 const a = tup[0];
 """
@@ -3267,7 +3267,7 @@ for _need, _want, _tag in (
 # ---------------------------------------------------------------------------
 # §145 裸元组字面量 + 嵌套内联 struct 的递归补全（用户 2026-11-13 截图 1/2）
 # KEEP — 三条都不许删：
-#   · `var tup = {1,22,Pv145Person{...}};` 没有前导点，旧链只认 `.{...}`，
+#   · `var tup = {1,22,Pv145Person{...}};` 没有前导点，旧链只认 `.{...}`（§146 删），
 #     `let person = tup.2;` 没有 inlay 类型、`person.` 一个成员都不出。
 #   · `p1.child.` 的 child 是内联 struct 字段，旧链只弹一条
 #     `child{...} 构造骨架`，name/school 全被 .ty 命名空间过滤掉。
@@ -3347,7 +3347,10 @@ check("completion.nested.arrayPtrElem", {"name", "school"} <= _pv_ii, str(sorted
 _pv_arr = pv145_labels("    arr.1.")
 check("completion.nested.arrayPtrPerson", {"name", "age", "child"} <= _pv_arr, str(sorted(_pv_arr)))
 _pv_tup = pv145_labels("    tup.")
-check("completion.tuple.noEmptyLabel", "" not in _pv_tup and not _pv_tup, str(sorted(_pv_tup)))
+# §147：元组接收者自己也要出编译器成员（旧断言写死空列表，改为钉住成员集）。
+check("completion.tuple.noEmptyLabel",
+      "" not in _pv_tup and {"len", "size", "0", "1", "2"} <= _pv_tup,
+      str(sorted(_pv_tup)))
 # 三层内联 struct：anonTyOfPath 每一段都重新判匿名串 / 具名容器，深度不设限。
 _pv_deep = pv145_labels("    d.lvl.inner.")
 check("completion.nested.threeLevel", {"leaf", "tag"} <= _pv_deep, str(sorted(_pv_deep)))
@@ -3365,6 +3368,94 @@ if _r and isinstance(_r.get("result"), dict):
     elif isinstance(_c, str):
         _pv_hover = _c
 check("hover.tupleIdx.personTy", "Pv145Person" in _pv_hover, _pv_hover[:160])
+
+# ---------------------------------------------------------------------------
+# §146 / §147 元组收敛为 {} + 元组接收者的编译器成员（用户 2026-11-13）
+# KEEP — 四条都不许删：
+#   · 位置式 `.{1, 2}` 已删除：LSP 不再把它推成 `{i32,f64}` 类型。
+#   · `&.{…}` 数组字面量推断不受影响（去掉前导点后按裸 `{…}` 推）。
+#   · `tup.` 出 .len/.size/.0/.1/.2，且不出空 label；显式标注的元组也出。
+#   · hover 的 .len/.size/.N 要有内容（编译器字段，源文件无声明文本）。
+PV146 = """const std = @mod("std");
+
+const Pv146Pair = struct { a: i32 = 1, b: i32 = 2 };
+
+const main = fn () i32 {
+    var tup = {1, 22, "hello"};
+    let t2: {i32, f64, []const u8} = {1, 2.5, "x"};
+    let one = {7};
+    let old = .{1, 2.5};
+    let strs = &.{ "a", "b" };
+    let p: Pv146Pair = .{ };
+    tup.
+    t2.
+    one.
+    tup.1
+    _ = tup.len; _ = tup.size; _ = tup.2;
+    _ = t2; _ = one; _ = old; _ = strs; _ = p;
+    return 0;
+};
+"""
+pv146uri = "file:///" + os.path.join(SRC_DIR, "pv146.zx").replace("\\", "/")
+open(os.path.join(SRC_DIR, "pv146.zx"), "w", encoding="utf-8").write(PV146)
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": pv146uri, "languageId": "zx", "version": 1, "text": PV146}}})
+
+def pv146_req(method, tag, off, extra=None):
+    global _rid
+    _rid += 1
+    params = {"textDocument": {"uri": pv146uri}, "position": pos(PV146, off)}
+    if extra:
+        params.update(extra)
+    send({"jsonrpc": "2.0", "id": _rid, "method": method, "params": params})
+    r, _ = recv_id("pv146", _rid)
+    return r or {}
+
+def pv146_comp(needle, tag):
+    r = pv146_req("textDocument/completion", tag, PV146.index(needle) + len(needle))
+    items = (r.get("result") or {}).get("items") or []
+    return {i["label"]: i.get("detail", "") for i in items}
+
+def pv146_hover(needle):
+    r = pv146_req("textDocument/hover", "hover", PV146.index(needle) + len(needle) - 1)
+    c = ((r.get("result") or {}).get("contents") or {})
+    return c.get("value", "") if isinstance(c, dict) else str(c)
+
+_tup = pv146_comp("    tup.", "completion.tupleMembers")
+check("completion.tupleMembers.set",
+      {"len", "size", "0", "1", "2"} <= set(_tup) and "" not in _tup,
+      str(sorted(_tup)))
+check("completion.tupleMembers.detail",
+      _tup.get("len") == "usize" and _tup.get("2") == "str", str(_tup))
+_t2 = pv146_comp("    t2.", "completion.tupleMembers.annotated")
+check("completion.tupleMembers.annotated",
+      {"len", "size", "0", "1", "2"} <= set(_t2) and _t2.get("1") == "f64",
+      str(_t2))
+_one = pv146_comp("    one.", "completion.tupleMembers.single")
+check("completion.tupleMembers.single",
+      "0" in _one and "1" not in _one, str(sorted(_one)))
+_pfx = pv146_comp("    tup.1", "completion.tupleMembers.prefix")
+check("completion.tupleMembers.prefix", set(_pfx) == {"1"}, str(sorted(_pfx)))
+check("hover.tupleMembers.len", "usize" in pv146_hover("tup.len"), "")
+check("hover.tupleMembers.size", "usize" in pv146_hover("tup.size"), "")
+check("hover.tupleMembers.index", "str" in pv146_hover("tup.2"), "")
+
+_rid += 1
+send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/inlayHint", "params": {
+    "textDocument": {"uri": pv146uri},
+    "range": {"start": {"line": 0, "character": 0},
+              "end": {"line": len(PV146.split(chr(10))), "character": 0}}}})
+_r, _ = recv_id("pv146", _rid)
+_p146h = {}
+if _r and _r.get("result"):
+    for _h in _r["result"]:
+        _lab = _h.get("label")
+        if isinstance(_lab, str):
+            _p146h[_h["position"]["line"]] = _lab
+_ln_old = PV146[:PV146.index("let old =")].count(chr(10))
+_ln_arr = PV146[:PV146.index("let strs =")].count(chr(10))
+check("inlayHint.noDotTupleType", _p146h.get(_ln_old) is None, str(_p146h))
+check("inlayHint.arrayLiteralStillWorks", _p146h.get(_ln_arr) == ": *[2]str", str(_p146h))
 
 atdoc = "const std = @mod(\"std\");\n@\n"
 aturi = "file:///" + os.path.join(SRC_DIR, "atbuild.zx").replace("\\", "/")

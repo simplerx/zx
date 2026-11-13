@@ -1361,8 +1361,8 @@ pub const Parser = struct {
         return n;
     };
 
-    // `.{ … }` —— 永远是字面量
-    pub const parse_dot_brace = fn (self: *Parser) !*Node {
+    // `.{ … }` —— 匿名结构体字面量 / `&.{…}` 数组字面量（§146）
+    pub const parse_dot_brace = fn (self: *Parser, array_lit: bool) !*Node {
         let t = self.advance();
         var is_struct = false;
         if (self.at(lex.Kind.dot) && self.peek_tok(1).kind == lex.Kind.ident &&
@@ -1370,7 +1370,8 @@ pub const Parser = struct {
             is_struct = true;
         }
 
-        if (is_struct) {
+        // §146：位置式 `.{…}` 不再是元组；空 `.{}` 是空匿名结构体。
+        if (is_struct || (!array_lit && self.at(lex.Kind.rbrace))) {
             let n = self.new_at(NK.anon_struct, t);
             var go = true;
             while (go && !self.at(lex.Kind.rbrace) && !self.at(lex.Kind.eof)) {
@@ -1389,6 +1390,9 @@ pub const Parser = struct {
             return n;
         }
 
+        if (!array_lit) {
+            self.record("E0211", "`.{...}` tuple spelling was removed: write `{...}` for a tuple, or `&.{...}` for an array");
+        }
         // 位置钉在 `.{` 这个 token 上（C 版 node_new(NK_TUPLE, t)）：
         // 用 new() 会取当前 token——那是第一个元素，字面量套字面量时位置就岔了。
         let n = self.new_at(NK.tuple, t);
@@ -1414,7 +1418,7 @@ pub const Parser = struct {
             _ = self.advance();
             if (self.at(lex.Kind.dot_brace)) {
                 // &.{ … } —— 数组字面量
-                let lit = try self.parse_dot_brace();
+                let lit = try self.parse_dot_brace(true);
                 let n = self.new_at(NK.array_lit, t);
                 n.items = lit.items;
                 return n;
@@ -1558,7 +1562,7 @@ pub const Parser = struct {
         }
 
         if (t.kind == lex.Kind.lbrace) { return self.parse_brace_expr(); }
-        if (t.kind == lex.Kind.dot_brace) { return self.parse_dot_brace(); }
+        if (t.kind == lex.Kind.dot_brace) { return self.parse_dot_brace(false); }
 
         if (t.kind == lex.Kind.kw_if || t.kind == lex.Kind.kw_while ||
             t.kind == lex.Kind.kw_for || t.kind == lex.Kind.kw_switch) {
@@ -1665,7 +1669,11 @@ pub const Parser = struct {
             if (t.kind == lex.Kind.kw_let) { n.op2 = 1; }
         }
 
-        // 解构：const {a, b} = tup;  /  let .{a, b} = t;
+        // 解构只有 `{a, b}` 一种写法（§146）；旧 `.{a, b}` 报迁移提示后仍按
+        // pattern 解析，避免诊断级联。
+        if (self.at(lex.Kind.dot_brace)) {
+            self.record("E0211", "`.{a, b}` tuple pattern was removed: write `{a, b}`");
+        }
         if (self.at(lex.Kind.lbrace) || self.at(lex.Kind.dot_brace)) {
             _ = self.advance();
             // C 版：pattern 元组的位置 = decl 关键字

@@ -56,7 +56,7 @@ const escape = fn (n: i32) i32 {
 };
 
 const main = fn () u8 {
-    std.println("{} {}", area(.{ .circle = 3 }), area(.{ .rect = .{ 2, 3 } }));
+    std.println("{} {}", area(.{ .circle = 3 }), area(.{ .rect = { 2, 3 } }));
     std.println("{} {}", orZero(6), orZero(null));
     std.println("{any} {any} {any}", self(Color.red), self(Color.green), self(Color.blue));
     std.println("{} {}", orMinus(4), orMinus(error.bad));

@@ -134,7 +134,7 @@ const findZero = fn (m: *const [9]i32) ?{usize, usize} {
     for (0..3) i {
         for (0..3) j {
             if (m[i * 3 + j] == 0) {
-                hit = .{ i, j };           // 找到零：记录下标元组
+                hit = { i, j };            // 找到零：记录下标元组
             }
         }
     }

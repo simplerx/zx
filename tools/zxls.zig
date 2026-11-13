@@ -4635,10 +4635,12 @@ fn inferExprType(text: []const u8, doc: *const Document, expr: []const u8, depth
     }
     // 取地址的数组字面量：`&.{ "a", "b" }` → `*[N]T`（元素类型按第一项推）。
     // 用户 2026-11-09 第 16 条：`const s = strs.0` 推不出类型。
+    // §146：位置式 `.{…}` 不再是元组写法；去掉前导点后按裸 `{…}` 推元素
+    // 类型，数组字面量仍走 `&.{…}`，与编译器 parse_dot_brace 的分工一致。
     if (e.len > 1 and e[0] == '&' and depth < 4) {
         const inner = trimSl(e[1..]);
         if (std.mem.startsWith(u8, inner, ".{")) {
-            if (inferExprType(text, doc, inner, depth + 1)) |tt| {
+            if (inferExprType(text, doc, inner[1..], depth + 1)) |tt| {
                 const t = trimSl(tt);
                 if (t.len > 2 and t[0] == '{' and t[t.len - 1] == '}') {
                     const body = t[1 .. t.len - 1];
@@ -4738,13 +4740,13 @@ fn inferExprType(text: []const u8, doc: *const Document, expr: []const u8, depth
     }
     // 匿名 struct 字面量 `.{ .a = 1, .b = "x" }`：没有期望类型时自成
     // 一个匿名结构体，字段类型由初值推（spec/decisions.md §33）。
-    // 元素式 `.{1, 2.5}` 是元组 → `{i32,f64}`（§4.1，同层不可混用）。
+    // §146 起位置式 `.{…}` 已删除：`.{` 只接字段初始化，元组只有 `{…}`。
     // 字段值递归推（depth < 4），嵌套拼成
     // `struct{pos:struct{x:i32,y:i32},tag:str}` 给行内类型提示用。
-    // KEEP — 裸 `{…}` 也是元组（spec §4.1：`.{1,2,3}` 等价于 `{1,2,3}`）。
+    // KEEP — 裸 `{…}` 是唯一的元组写法（spec §4.1；§146 删掉 `.{1,2,3}`）。
     // 旧链只认前导点，`var tup = {1, 22, Person{…}};` 推不出类型，连带
     // `let person = tup.2;` 没有行内类型、`person.` 一个成员都不出
-    //（用户 2026-11-13 截图 1）。两种写法共用下面同一份元素/字段解析，
+    //（用户 2026-11-13 截图 1）。元素式与字段式共用下面同一份解析，
     // 只差字面量 '{' 的位置；不再递归一层，免得撞 depth<4 的帽子。
     var anon_open: ?usize = null;
     if (std.mem.startsWith(u8, e, ".{")) {
@@ -4830,6 +4832,9 @@ fn inferExprType(text: []const u8, doc: *const Document, expr: []const u8, depth
         for (items.items) |it2| {
             if (it2.field) { any_field = true; break; }
         }
+        // §146：位置式 `.{…}` 不再是元组，别把 `.{1, 2.5}` 推成 `{i32,f64}`。
+        // `&.{…}` 走上面那条链（已去掉前导点），不会进这里。
+        if (ob == 1 and !any_field) return null;
         var out: std.ArrayList(u8) = .empty;
         out.appendSlice(gpa, if (any_field) "struct{" else "{") catch return null;
         var count: usize = 0;
@@ -5340,6 +5345,41 @@ fn addSliceMembers(list: *Json, seen: *std.StringHashMapUnmanaged(void),
     }
 }
 
+/// 元组接收者的编译器成员：`.len` / `.size` 与编译期下标 `.0`..`.N-1`。
+/// 源文件里没有声明文本，按类型串 `{A,B,C}` 直接出（spec §3.3 / §4.1）。
+fn addTupleMembers(list: *Json, seen: *std.StringHashMapUnmanaged(void),
+                   prefix: []const u8, tty: []const u8) void {
+    if (prefix.len == 0 or std.mem.startsWith(u8, "len", prefix))
+        addItem(list, seen, "len", 6, "usize", 0);
+    if (prefix.len == 0 or std.mem.startsWith(u8, "size", prefix))
+        addItem(list, seen, "size", 6, "usize", 0);
+    var i: usize = 0;
+    while (i < 16) : (i += 1) {
+        const et = tupleElemTy(tty, i) orelse break;
+        var nb: [8]u8 = undefined;
+        const lab = std.fmt.bufPrint(&nb, "{d}", .{i}) catch break;
+        if (prefix.len > 0 and !std.mem.startsWith(u8, lab, prefix)) continue;
+        addItem(list, seen, lab, 6, et, 0);
+    }
+}
+
+/// 接收者表达式 → 元组类型串 `{A,B,…}`。先看初值/绑定推断，再看显式类型
+/// 标注（`let t: {i32,f64} = …`）。不是元组返回 null。
+fn tupleRecvTy(text: []const u8, doc: *const Document, expr0: []const u8,
+               off: usize) ?[]const u8 {
+    const expr = trimSl(expr0);
+    if (expr.len == 0) return null;
+    if (inferExprType(text, doc, expr, 0)) |t| {
+        const tt = trimSl(t);
+        if (tupleElemTy(tt, 0) != null) return tt;
+    }
+    if (namedTypeNear(text, expr, off)) |nt| {
+        const tt = trimSl(nt);
+        if (tupleElemTy(tt, 0) != null) return tt;
+    }
+    return null;
+}
+
 /// 接收者表达式 → 切片类型。覆盖 `"字面量"`、`var b: []T`、`let b = 切片`、
 /// `f(…)` 返回 `?[]T`（如 std.file.read）。识别不了返回 null。
 /// KEEP — 用户 2026-11-09：`"hello".` 与切片变量的 `.` 一个成员都不出。
@@ -5790,6 +5830,35 @@ fn hoverAt(doc: *const Document, line: u32, character: u32) ?[]const u8 {
                         var b: std.ArrayList(u8) = .empty;
                         b.print(gpa, "```zx\nptr: {s}\n```", .{ty.items}) catch return null;
                         return hoverPayload(b.items);
+                    }
+                }
+            }
+        }
+    }
+
+    // §147 — 元组接收者的编译器字段 hover：`tup.len` / `.size` / `.0`。
+    {
+        var ms = off;
+        while (ms > 0 and isIdentChar(text[ms - 1])) ms -= 1;
+        var me = off;
+        while (me < text.len and isIdentChar(text[me])) me += 1;
+        const mn = text[ms..me];
+        if (ms > 0 and text[ms - 1] == '.' and mn.len > 0) {
+            const rs = recvExprStart(text, ms - 1);
+            const recv = trimSl(text[rs .. ms - 1]);
+            if (recv.len > 0) {
+                if (tupleRecvTy(text, doc, recv, off)) |tt| {
+                    var b: std.ArrayList(u8) = .empty;
+                    if (std.mem.eql(u8, mn, "len") or std.mem.eql(u8, mn, "size")) {
+                        b.print(gpa, "```zx\n{s}: usize\n```\n编译器字段（编译期常量，spec §3.3）", .{mn}) catch return null;
+                        return hoverPayload(b.items);
+                    }
+                    if (allDigits(mn)) {
+                        const ix = std.fmt.parseInt(usize, mn, 10) catch return null;
+                        if (tupleElemTy(tt, ix)) |et| {
+                            b.print(gpa, "```zx\n{s}: {s}\n```", .{ mn, et }) catch return null;
+                            return hoverPayload(b.items);
+                        }
                     }
                 }
             }
@@ -8227,6 +8296,15 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                 if (sliceRecvTy(text, doc, path, 0)) |si| {
                     handled = true;
                     addSliceMembers(&list, &seen, prefix, si);
+                }
+            }
+            // §147 — 元组接收者的编译器成员（用户 2026-11-13：`tup.` 空列表）。
+            // 编译器侧 sema/backend 早就有 .len/.size/.N，只是补全没有声明
+            // 文本可查；按推断出的 `{A,B,…}` 类型串直接出，别落回全局噪音。
+            if (!handled) {
+                if (tupleRecvTy(text, doc, path, off)) |tt| {
+                    handled = true;
+                    addTupleMembers(&list, &seen, prefix, tt);
                 }
             }
 

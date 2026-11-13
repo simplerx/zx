@@ -140,7 +140,7 @@ fi
 # 尾逗号就拆成一行一个，并递归（18:xx 扩展）；且必须幂等（拆完再 fmt 一字不动）。
 printf "\n== 尾逗号列表 + fmt 拆行\n"
 mkdir -p "$pdir/tc/src"
-printf 'const add = fn (a: i32, b: i32,) i32 {\n    return a + b;\n};\n\nconst Cfg = struct { name: []const u8, val: i32 };\n\nconst main = fn () i32 {\n    _ = add(1, 2,);\n    const e = error{a, b,};\n    const t: {i32, i32,} = .{5, 6,};\n    const c = Cfg{ .name = "a", .val = 1, };\n    _ = e;\n    _ = t;\n    _ = c;\n    return 0;\n};\n' > "$pdir/tc/src/main.zx"
+printf 'const add = fn (a: i32, b: i32,) i32 {\n    return a + b;\n};\n\nconst Cfg = struct { name: []const u8, val: i32 };\n\nconst main = fn () i32 {\n    _ = add(1, 2,);\n    const e = error{a, b,};\n    const t: {i32, i32,} = {5, 6,};\n    const c = Cfg{ .name = "a", .val = 1, };\n    _ = e;\n    _ = t;\n    _ = c;\n    return 0;\n};\n' > "$pdir/tc/src/main.zx"
 if ( cd "$pdir/tc" && "$ZXCW" src/main.zx --check > "$TPFX.tc.chk" 2>&1 ); then
     printf "  ok   尾逗号：参数/实参/error集/元组类型/字面量全解析\n"
 else
@@ -1077,6 +1077,18 @@ if $ZXC tests/good/array-pointer-index.zx --emit-c > "$TPFX.api.c" 2>/dev/null \
 else
     printf "  FAIL ptr[i] 没生成界检查\n"; fail=1
 fi
+# §146：位置式 .{...} 与解构 .{a,b} 两套前端都要给 E0211 迁移提示。
+# runner 只跑默认前端（zxfe），这里补一条 --fe=c 的对拍。
+for dt in removed-dot-tuple removed-dot-pattern; do
+    $ZXC "tests/bad/$dt.zx" --check --fe=c > "$TPFX.$dt.c.log" 2>&1 || true
+    if grep -q 'E0211' "$TPFX.$dt.c.log" \
+       && grep -q 'was removed' "$TPFX.$dt.c.log"; then
+        printf "  ok   %s 在 C 前端也给迁移提示\n" "$dt"
+    else
+        printf "  FAIL %s 在 C 前端没有迁移提示\n" "$dt"
+        cat "$TPFX.$dt.c.log"; fail=1
+    fi
+done
 
 # 用例会在仓库根留下自己的临时文件：io_fmt.zx 写 io_fmt.tmp，stdfs.zx 建
 # fs_t_dir / fs_t_dir2。跑完统一带走——测试不该往工作区里堆东西。

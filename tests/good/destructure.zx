@@ -6,7 +6,7 @@
 // expect: 1 1 2 3
 
 const std = @mod("std");
-const tup = .{ 1, 2 };
+const tup = { 1, 2 };
 const { g1, g2 } = tup;                 // 顶层解构：常量值
 
 const main = fn () u8 {

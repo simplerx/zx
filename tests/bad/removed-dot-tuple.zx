@@ -1,0 +1,8 @@
+// expect: `.{...}` tuple spelling was removed: write `{...}` for a tuple
+// expect-code: E0211
+// §146：元组字面量只有 {} 一种写法。位置式 .{...} 已删除，旧写法要给
+// 明确的迁移提示，不能只报 unknown identifier。
+const main = fn () u8 {
+    let t = .{ 1, 2 };
+    return (u8)t.0;
+};

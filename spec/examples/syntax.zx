@@ -19,7 +19,7 @@ const findZero = fn (m: *const [9]i32) ?{usize, usize} {
     var hit: ?{usize, usize} = null;
     for (0..3) i {
         for (0..3) j {
-            if (m[i * 3 + j] == 0) { hit = .{ i, j }; }
+            if (m[i * 3 + j] == 0) { hit = { i, j }; }
         }
     }
     return hit;

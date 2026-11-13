@@ -5827,3 +5827,55 @@ unwrap、复制、传参都可能产生副本；堆上那一个 `u64` 由所有�
 - `test.sh` §144 三段（助手结构 / 旧写法诊断 / 界检查）。
 - `zxc explain E0211` 的 details 与 `docs/errors.md` 三段覆盖同步；
   `zx-spec.md` §3.2 / §13.1 / §13.4 / §14 关键字与内建表；`spec/zx.ebnf`。
+
+## §145 LSP：裸元组字面量类型推断 + 嵌套内联 struct 递归补全（2026-11-13 截图 1/2）
+
+`inferExprType` 原来只认带前导点的 `.{…}`，`var tup = {1,22,Person{…}};` 整条
+推断断在起点；`anonTyOfPath` 只认匿名类型串，具名容器字段（`p1.child`）走到
+`tyCtorFallback`，弹出一条 `child{…} 构造骨架`。修法：裸 `{…}` 与前导点形态
+共用同一份聚合解析（把字面量 `{` 位置参数化，不额外递归一层，避开 `depth<4`）；
+`anonTyOfPath` 逐级下钻——匿名串用 `parseAnonTy`，具名容器进容器体取字段声明
+类型，下一轮继续展开，内联 struct / 嵌套容器任意深度都走同一个循环。副作用：
+元组类型串 `{i32,i32,Pv145Person}` 被当成命名成员表会出一条空 label，五条灌
+补全项的路径统一跳过空字段名。守门 `tools/lsptest.py` 的 PV145 fixture（9 条），
+旧 exe 下 6 条 FAIL、新 exe 397 项 `SMOKE ALL PASS`。
+
+## §146 元组收敛为 `{}`（2026-11-13 用户裁定）
+
+用户：「元组是 `.{}` 写法不要，只留 `{}`」。原先 spec §4.1 把 `.{1,2,3}` 写成
+「强制字面量写法，等价于 `{1,2,3}`」，parser 的 `parse_dot_brace` 也真的把它
+造成 `NK_TUPLE`——同一语义两套写法，且 `.{` 还要同时承担匿名字段字面量与
+`&.{…}` 数组字面量。裁定删除**位置式** `.{…}`：
+
+- `.{` token 保留，但只允许两种用途：`.{ .name = v }` 匿名结构体、以及 `&.{…}`
+  数组字面量（`parse_dot_brace(p, array_lit)` 用布尔参数区分；`&` 那条链才收
+  位置式元素）。空 `.{}` 归一为**空匿名结构体**（有期望类型时全取默认值），不再
+  是零元组——顺手修掉 `let p: P = .{ };` 原来报 E0301 的不自洽。
+- 位置式 `.{1, 2}` 与解构 `.{a, b}` 一律报 **E0211** 并给迁移提示；解析仍把
+  节点造出来，避免诊断级联。C 前端（`src/parse.c`）与自举前端
+  （`bootstrap/parse.zx`）同一套判定，`zxfe` 已重新自举。
+- LSP `inferExprType` 不再把 `.{1, 2.5}` 推成 `{i32,f64}`；`&.{…}` 的元素推断
+  改成**去掉前导点后按裸 `{…}` 推**，与编译器分工一致，数组类型提示不回归。
+- 全库位置式 `.{…}` 只有 11 处（3 份 good 用例、2 份 spec 示例、3 份 LSP
+  fixture、3 处注释），全部改成 `{}`；`.{ .field = … }` 的 360 处与 `&.{…}`
+  的 179 处**不动**。
+- 规范：`zx-spec.md` §1 / §1.2 / §4.1 / §4.2、`zx.ebnf`（`anon_struct_lit`
+  取代 `dot_brace`）、`docs/reference.md`、`docs/errors.md` E0211 迁移表。
+  另修掉 §4.2 一处旧错：`let anon = { .x = 1 }` 从来不成立（裸 `{` 遇到
+  `.name =` 报 E0202），正确写法是 `.{ .x = 1 }`。
+- 守门：`tests/bad/removed-dot-tuple.zx` / `removed-dot-pattern.zx`，双前端
+  各报 1 条 E0211；`tests/good/destructure*.zx`、`switch_cap_value.zx`、
+  `spec/examples/*.zx` 改成唯一写法后照常通过。
+
+## §147 元组接收者的编译器成员（2026-11-13 用户点名先做）
+
+用户上一轮的两张截图修完后，`tup.` 自己仍是空列表。编译器侧 sema/backend 早
+就有 `.len`（字段数）、`.size`（总字节数，均为编译期常量）和 `.0/.1/.2`
+（编译期下标），但源文件里没有声明文本可查，补全与 hover 都落空。实现：
+
+- `addTupleMembers` 按推断出的 `{A,B,…}` 类型串直接出 `.len` / `.size` /
+  `.0..N-1`（detail 是对应元素类型，前缀过滤与切片成员同一套规则）。
+- `tupleRecvTy` 先走 `inferExprType`（`var tup = {1,22,"hi"}`），再退回
+  `namedTypeNear` 的显式标注（`let t2: {i32,f64,…} = {…}`）。
+- hover 补 `.len` / `.size`（`usize` + 编译器字段说明）与 `.N`（元素类型）。
+- 编译器一字未动：本轮只补 LSP 的可见性，不改语言能力。

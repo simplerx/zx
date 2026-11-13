@@ -18,7 +18,7 @@ let_decl    = "let"   pattern "=" expr ";" ;
 var_decl    = "var"   pattern [ ":" type ] "=" expr ";" ;
 
 pattern     = IDENT | "{" IDENT { "," IDENT } [ "," ] "}" ;
-(* 解构：let {a, b, c} = t;   也可写 .{a, b, c} *)
+(* 解构：let {a, b, c} = t;   §146 起只有 {…} 一种写法 *)
 
 (* 函数定义（v0.24）：只有一种写法，名字属于绑定
      const add = fn (a: i32, b: i32) i32 { return a + b; };
@@ -157,7 +157,7 @@ primary     = INT | FLOAT | CHAR | STRING
             | IDENT
             | "(" expr ")"
             | brace_expr                               (* {…}：块 或 元组 *)
-            | dot_brace                                (* .{…}：强制字面量 *)
+            | anon_struct_lit                          (* .{…}：匿名结构体字面量 *)
             | typed_lit                                (* Person{ .f = e } *)
             | builtin                                  (* @type(T).size *)
             | module_call                              (* @mod("std") *)
@@ -180,19 +180,17 @@ primary     = INT | FLOAT | CHAR | STRING
 
 brace_expr  = block | tuple_lit ;
 
-tuple_lit   = "{" [ agg_item { "," agg_item } [ "," ] ] "}" ;
+tuple_lit       = "{" [ expr { "," expr } [ "," ] ] "}" ;  (* 唯一的元组写法 *)
 
-dot_brace   = "." tuple_lit ;                          (* .{…} 永不可能是块 *)
-
-agg_item    = "." IDENT "=" expr                       (* 字段式 → 匿名结构体 *)
-            | expr ;                                  (* 元素式 → 元组（同层不可混用）*)
+anon_struct_lit = ".{" [ field_init { "," field_init } [ "," ] ] "}" ;
 
 typed_lit   = type "{" [ field_init { "," field_init } [ "," ] ] "}" ;
 field_init  = "." IDENT "=" expr ;
 
-(* 数组字面量 &.{1,2,3} 不需要单独产生式：
-   "&" 前缀作用在 dot_brace 上，语义要求元素类型一致，结果类型 *T。
-   写作 &{1,2,3} 也接受（等价），但规范形式是 &.{…}。 *)
+(* 数组字面量 &.{1,2,3} 是 "&" + DOT_BRACE token 的特例：parser 直接把
+   里面的位置式元素收成 NK_ARRAY_LIT（*T），语义要求元素类型一致。
+   `&{1,2,3}` 也接受（等价），规范形式是 `&.{…}`。
+   单独出现的 `.{…}` 只能是字段式匿名结构体；位置式 `.{1,2}` 报 E0211。 *)
 
 (* ---------------- 控制流（全部是表达式） ---------------- *)
 

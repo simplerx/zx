@@ -1,0 +1,9 @@
+// expect: `.{a, b}` tuple pattern was removed: write `{a, b}`
+// expect-code: E0211
+// §146：解构模式也只有 {} 一种写法，`.{p, q}` 与字面量一起退场。
+const main = fn () u8 {
+    const t = {1, 2};
+    let .{p, q} = t;
+    _ = p; _ = q;
+    return 0;
+};
