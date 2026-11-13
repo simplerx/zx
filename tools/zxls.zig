@@ -3225,24 +3225,44 @@ fn anonTyOfPath(text: []const u8, doc: *const Document, path: []const u8, off: u
                     if (structTyOf(dt0) != null) ty = dt0;
                 }
                 if (ty.len == 0) {
-                    const init = declInitOf(stmt) orelse return null;
-                    ty = inferExprType(text, doc, init, 0) orelse return null;
+                    if (declInitOf(stmt)) |init| {
+                        ty = inferExprType(text, doc, init, 0) orelse "";
+                    }
                 }
+                // 初值推不出来时还有显式标注：`var p: Person = Person{…};`
+                // 的 Person 是具名容器，后续段到容器体里递归找字段。
+                if (ty.len == 0) {
+                    if (declTyOf(stmt)) |dty2| ty = trimSl(dty2);
+                }
+                if (ty.len == 0) return null;
             } else if (paramStructTypeNear(text, seg, off) orelse
                 namedTypeNear(text, seg, off)) |t|
             {
                 ty = t;
             } else return null;
         } else {
-            const flds = parseAnonTy(ty) orelse return null;
-            var hit: ?[]const u8 = null;
-            for (flds.items) |f| {
-                if (std.mem.eql(u8, f.name, seg)) {
-                    hit = f.ty;
-                    break;
+            if (parseAnonTy(ty)) |flds| {
+                var hit: ?[]const u8 = null;
+                for (flds.items) |f| {
+                    if (std.mem.eql(u8, f.name, seg)) {
+                        hit = f.ty;
+                        break;
+                    }
                 }
+                ty = hit orelse return null;
+            } else {
+                // KEEP — 具名容器上的字段（`p1.child`）：parseAnonTy 只认
+                // 匿名类型串，这里到容器体里取字段声明类型再继续下钻。
+                // 字段本身是内联 struct 时，下一轮循环自然再展开一层——
+                // 任意深度的嵌套都走这同一个循环（用户 2026-11-13 截图 2：
+                // `child{…}` 只弹构造骨架，name/school 一个都不出）。
+                var sf = scanFiles(doc, text);
+                defer sf.deinit(gpa);
+                const cn = containerNameOf(ty);
+                if (cn.len == 0) return null;
+                const hit = findContainerBody(sf.items, cn) orelse return null;
+                ty = trimSl(fieldTypeIn(hit.body, seg) orelse return null);
             }
-            ty = hit orelse return null;
         }
         idx += 1;
     }
@@ -4721,11 +4741,35 @@ fn inferExprType(text: []const u8, doc: *const Document, expr: []const u8, depth
     // 元素式 `.{1, 2.5}` 是元组 → `{i32,f64}`（§4.1，同层不可混用）。
     // 字段值递归推（depth < 4），嵌套拼成
     // `struct{pos:struct{x:i32,y:i32},tag:str}` 给行内类型提示用。
-    if (std.mem.startsWith(u8, e, ".{") and depth < 4) {
+    // KEEP — 裸 `{…}` 也是元组（spec §4.1：`.{1,2,3}` 等价于 `{1,2,3}`）。
+    // 旧链只认前导点，`var tup = {1, 22, Person{…}};` 推不出类型，连带
+    // `let person = tup.2;` 没有行内类型、`person.` 一个成员都不出
+    //（用户 2026-11-13 截图 1）。两种写法共用下面同一份元素/字段解析，
+    // 只差字面量 '{' 的位置；不再递归一层，免得撞 depth<4 的帽子。
+    var anon_open: ?usize = null;
+    if (std.mem.startsWith(u8, e, ".{")) {
+        anon_open = 1;
+    } else if (e.len > 2 and e[0] == '{' and e[e.len - 1] == '}') {
+        // `{ .a = 1 }` 顶层带字段名是**块**（zx 的块不给值），不是聚合；
+        // 元素式 `{1, 22, Person{…}}` 才按元组推。
+        var f0: usize = 1;
+        while (f0 < e.len and (e[f0] == ' ' or e[f0] == '\t' or
+            e[f0] == '\n' or e[f0] == '\r')) f0 += 1;
+        if (f0 < e.len and e[f0] == '.' and f0 + 1 < e.len and isIdentChar(e[f0 + 1])) {
+            var f1 = f0 + 1;
+            while (f1 < e.len and isIdentChar(e[f1])) f1 += 1;
+            var f2 = f1;
+            while (f2 < e.len and (e[f2] == ' ' or e[f2] == '\t')) f2 += 1;
+            if (f2 < e.len and e[f2] == '=') return null;
+        }
+        anon_open = 0;
+    }
+    if (anon_open != null and depth < 4) {
+        const ob = anon_open.?;
         var d: usize = 0;
         var in_str = false;
         var rb: ?usize = null;
-        var q: usize = 1;
+        var q: usize = ob;
         while (q < e.len) : (q += 1) {
             const ch = e[q];
             if (in_str) {
@@ -4742,7 +4786,7 @@ fn inferExprType(text: []const u8, doc: *const Document, expr: []const u8, depth
             }
         }
         const end = rb orelse return null;
-        const body = e[2..end];
+        const body = e[ob + 1 .. end];
         const Item = struct { fname: []const u8, val: []const u8, field: bool };
         var items: std.ArrayList(Item) = .empty;
         var seg: usize = 0;
@@ -8024,6 +8068,7 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                                         k5 = j5;
                                     }
                                     for (flds.items) |f| {
+                                        if (f.name.len == 0) continue;
                                         if (done5.contains(f.name)) continue;
                                         addItem(&list, &seen, f.name, 5, f.ty, 0);
                                     }
@@ -8497,11 +8542,14 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                     if (!handled) {
                         if (anonTyOfPath(text, doc, path, off)) |aty| {
                             if (parseAnonTy(aty)) |flds| {
-                                handled = flds.items.len > 0;
-                                if (handled) recv_kind = .instance;
+                                var named: usize = 0;
                                 for (flds.items) |f| {
+                                    if (f.name.len == 0) continue; // 元组元素不是成员
                                     decls.append(gpa, .{ .name = f.name, .kind = .field, .ty = f.ty }) catch {};
+                                    named += 1;
                                 }
+                                handled = named > 0;
+                                if (handled) recv_kind = .instance;
                             }
                         }
                     }
@@ -8512,10 +8560,13 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                         var mitxt: ?[]const u8 = null;
                         if (modInstanceTyOfPath(doc, text, path, &mitxt)) |mty| {
                             if (parseAnonTy(mty)) |flds| {
-                                handled = flds.items.len > 0;
+                                var named: usize = 0;
                                 for (flds.items) |f| {
+                                    if (f.name.len == 0) continue;
                                     decls.append(gpa, .{ .name = f.name, .kind = .field, .ty = f.ty }) catch {};
+                                    named += 1;
                                 }
+                                handled = named > 0;
                             } else if (mitxt) |mt| {
                                 var mf: std.ArrayList(Decl) = .empty;
                                 defer mf.deinit(gpa);
@@ -8543,6 +8594,7 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                     if (parseAnonTy(aty)) |flds| {
                         decls.clearRetainingCapacity();
                         for (flds.items) |f| {
+                            if (f.name.len == 0) continue; // 元组没有具名成员
                             decls.append(gpa, .{ .name = f.name, .kind = .field, .ty = f.ty }) catch {};
                         }
                         if (decls.items.len > 0) {
@@ -8581,6 +8633,7 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                         if (parseAnonTy(text[k5 - 6 .. base_end])) |flds| {
                             decls.clearRetainingCapacity();
                             for (flds.items) |f| {
+                                if (f.name.len == 0) continue;
                                 decls.append(gpa, .{ .name = f.name, .kind = .field, .ty = f.ty }) catch {};
                             }
                             if (decls.items.len > 0) {

@@ -3264,6 +3264,108 @@ for _need, _want, _tag in (
     _ln = TUPIDX[:TUPIDX.index(_need)].count("\n")
     check("inlayHint." + _tag, _tih.get(_ln) == _want, str(_tih))
 
+# ---------------------------------------------------------------------------
+# §145 裸元组字面量 + 嵌套内联 struct 的递归补全（用户 2026-11-13 截图 1/2）
+# KEEP — 三条都不许删：
+#   · `var tup = {1,22,Pv145Person{...}};` 没有前导点，旧链只认 `.{...}`，
+#     `let person = tup.2;` 没有 inlay 类型、`person.` 一个成员都不出。
+#   · `p1.child.` 的 child 是内联 struct 字段，旧链只弹一条
+#     `child{...} 构造骨架`，name/school 全被 .ty 命名空间过滤掉。
+#   · 元组类型串 `{i32,i32,Pv145Person}` 不是命名成员表，补全不许出空 label。
+PV145 = """const std = @mod("std");
+
+const Pv145Person = struct {
+    name: []const u8,
+    age: i32,
+    child: struct { name: []const u8, school: []const u8 },
+};
+
+const Pv145Deep = struct {
+    lvl: struct { inner: struct { leaf: i32, tag: []const u8 } },
+};
+
+const main = fn () i32 {
+    var tup = {1, 22, Pv145Person{ .name = "w", .age = 100, .child = .{ .name = "c", .school = "s" } }};
+    let person = tup.2;
+    person.
+    let arr: *[2]Pv145Person = &.{
+        Pv145Person{ .name = "a", .age = 1, .child = .{ .name = "x", .school = "y" } },
+        Pv145Person{ .name = "b", .age = 2, .child = .{ .name = "x", .school = "y" } },
+    };
+    let ii: Pv145Person = arr.1;
+    ii.child.
+    var p1: Pv145Person = Pv145Person{ .name = "w", .age = 100, .child = .{ .name = "child", .school = "school" } };
+    p1.child.
+    arr.1.
+    tup.
+    let d = Pv145Deep{ .lvl = .{ .inner = .{ .leaf = 1, .tag = "t" } } };
+    d.lvl.inner.
+    return 0;
+};
+"""
+pv145uri = "file:///" + os.path.join(SRC_DIR, "pv145.zx").replace(chr(92), "/")
+open(os.path.join(SRC_DIR, "pv145.zx"), "w", encoding="utf-8").write(PV145)
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": pv145uri, "languageId": "zx", "version": 1, "text": PV145}}})
+
+def pv145_items(needle, rid):
+    off = PV145.index(needle) + len(needle)
+    send({"jsonrpc": "2.0", "id": rid, "method": "textDocument/completion",
+          "params": {"textDocument": {"uri": pv145uri}, "position": pos(PV145, off)}})
+    r, _ = recv_id("pv145", rid)
+    return r["result"]["items"] if r and r.get("result") else []
+
+def pv145_labels(needle):
+    global _rid
+    _rid += 1
+    return {i["label"] for i in pv145_items(needle, _rid)}
+
+_rid += 1
+send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/inlayHint", "params": {
+    "textDocument": {"uri": pv145uri},
+    "range": {"start": {"line": 0, "character": 0},
+              "end": {"line": len(PV145.split(chr(10))), "character": 0}}}})
+_r, _ = recv_id("pv145", _rid)
+_pvh = {}
+if _r and _r.get("result"):
+    for _h in _r["result"]:
+        _lab = _h.get("label")
+        if isinstance(_lab, str):
+            _pvh[_h["position"]["line"]] = _lab
+for _need, _want, _tag in (
+        ("var tup =", ": {i32,i32,Pv145Person}", "tupleBare"),
+        ("let person = tup.2", ": Pv145Person", "tupleIdxPerson")):
+    _ln = PV145[:PV145.index(_need)].count(chr(10))
+    check("inlayHint." + _tag, _pvh.get(_ln) == _want, str(_pvh))
+
+_pv_person = pv145_labels("    person.")
+check("completion.tupleIdx.person", {"name", "age", "child"} <= _pv_person, str(sorted(_pv_person)))
+_pv_p1 = pv145_labels("    p1.child.")
+check("completion.nested.inlineStruct", {"name", "school"} <= _pv_p1, str(sorted(_pv_p1)))
+_pv_ii = pv145_labels("    ii.child.")
+check("completion.nested.arrayPtrElem", {"name", "school"} <= _pv_ii, str(sorted(_pv_ii)))
+_pv_arr = pv145_labels("    arr.1.")
+check("completion.nested.arrayPtrPerson", {"name", "age", "child"} <= _pv_arr, str(sorted(_pv_arr)))
+_pv_tup = pv145_labels("    tup.")
+check("completion.tuple.noEmptyLabel", "" not in _pv_tup and not _pv_tup, str(sorted(_pv_tup)))
+# 三层内联 struct：anonTyOfPath 每一段都重新判匿名串 / 具名容器，深度不设限。
+_pv_deep = pv145_labels("    d.lvl.inner.")
+check("completion.nested.threeLevel", {"leaf", "tag"} <= _pv_deep, str(sorted(_pv_deep)))
+
+_rid += 1
+send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/hover", "params": {
+    "textDocument": {"uri": pv145uri},
+    "position": pos(PV145, PV145.index("    person.") + len("    person.") - 1)}})
+_r, _ = recv_id("pv145", _rid)
+_pv_hover = ""
+if _r and isinstance(_r.get("result"), dict):
+    _c = _r["result"].get("contents")
+    if isinstance(_c, dict):
+        _pv_hover = _c.get("value", "")
+    elif isinstance(_c, str):
+        _pv_hover = _c
+check("hover.tupleIdx.personTy", "Pv145Person" in _pv_hover, _pv_hover[:160])
+
 atdoc = "const std = @mod(\"std\");\n@\n"
 aturi = "file:///" + os.path.join(SRC_DIR, "atbuild.zx").replace("\\", "/")
 send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
