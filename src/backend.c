@@ -6301,19 +6301,41 @@ static void emit_region_free(int gid, uint64_t total, Node *al) {
          a.data, gid, (unsigned long long)total);
 }
 
+/* §153：region 的分配器恒是 NK_IDENT（§130 只合并同一个局部标识符）。
+ * 若这个标识符就在本块里声明，`__zxrN` 的初始化必须排到那条声明之后，
+ * 否则生成的 C 先用后声明（B1002）。§150 让 `std.heap.page` 变成
+ * late-init 全局 + 运行时局部副本后，bench/mmat.zx 首次暴露这条顺序错误。 */
+static void emit_region_alloc(Node *b) {
+    Buf a; buf_init(&a); ex(&a, b->reg_alloc);
+    g_need_heapalloc = true;
+    line("uint8_t *__zxr%d = (uint8_t *)zx_heapalloc(%s, (uint64_t)%llu);",
+         b->reg_gid, a.data, (unsigned long long)b->reg_total);
+    if (g_csc) {
+        g_csc->reg_gid = b->reg_gid;
+        g_csc->reg_total = b->reg_total;
+        g_csc->reg_alloc = b->reg_alloc;
+    }
+}
+
 static void gen_block_stmts(Node *b) {
-    if (b->reg_gid > 0) {
-        Buf a; buf_init(&a); ex(&a, b->reg_alloc);
-        g_need_heapalloc = true;
-        line("uint8_t *__zxr%d = (uint8_t *)zx_heapalloc(%s, (uint64_t)%llu);",
-             b->reg_gid, a.data, (unsigned long long)b->reg_total);
-        if (g_csc) {
-            g_csc->reg_gid = b->reg_gid;
-            g_csc->reg_total = b->reg_total;
-            g_csc->reg_alloc = b->reg_alloc;
+    int after = -1;
+    if (b->reg_gid > 0 && b->reg_alloc && b->reg_alloc->kind == NK_IDENT &&
+        b->reg_alloc->name) {
+        for (int i = 0; i < b->nitems; i++) {
+            Node *s = b->items[i];
+            if (s->kind == NK_DECL && s->name &&
+                !strcmp(s->name, b->reg_alloc->name)) { after = i; break; }
         }
     }
-    for (int i = 0; i < b->nitems; i++) gen_stmt(b->items[i]);
+    bool done = false;
+    if (b->reg_gid > 0 && after < 0) { emit_region_alloc(b); done = true; }
+    for (int i = 0; i < b->nitems; i++) {
+        gen_stmt(b->items[i]);
+        /* 声明语句发射完再放 alloc：它一定早于第一个 heapAlloc 站点，
+         * 因为源码里分配器不声明就写不出那次调用。 */
+        if (!done && i == after) { emit_region_alloc(b); done = true; }
+    }
+    if (b->reg_gid > 0 && !done) emit_region_alloc(b);
 }
 
 /* 函数返回类型 / 是否是 main：生成 return 时需要 */

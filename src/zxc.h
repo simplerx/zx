@@ -12,10 +12,12 @@
 
 /* ---------- version ---------- */
 
-/* 唯一版本源：`zxc -v` / `zxc --version` 与生成的工程清单都读这里。
- * 编号跟 README 的里程碑走：次版本 = 里程碑号（M49 → 0.49），修订号
- * 留给同一里程碑里的修补。改这个数就顺手在 README 的「状态」里改一行。 */
-#define ZXC_VERSION "1.2.4"
+/* 编译器版本唯一源：`zxc -v` / `zxc --version` / `--help` 都读这里。
+ * （`zxc init` 写进 zx.json 的 0.1.0 是**工程**版本，不是编译器版本。）
+ * 发版时同步 `docs/reference.md` 的版本行、`docs/manual.md` 的落款与
+ * README 的文档表。1.3.0 = 方法接收者收成两种、@mod / heapSlice、
+ * Pool / SyncPool 这一轮能力线之后的发布版。 */
+#define ZXC_VERSION "1.3.0"
 
 /* ---------- diagnostics ---------- */
 

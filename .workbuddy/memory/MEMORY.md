@@ -42,5 +42,8 @@
 - `zx_debug_panic` 先 `fflush(stdout)`：abort 不走退出清理，重定向时报告会整块丢。
 - 守门：`demo/snake.zx --sim` 300 局、`tests/good/casts-one-way.zx`、`tests/bad/removed-*.zx`（E0211）、`tests/multibad/private-member`。
 
-## 文档范围（用户 2026-11-10 裁定）
-- 手册与离线文档站已删（std 未定型）；**`docs/errors.md` 保留**（`zxc explain` 的 details 链接、zxls codeDescription、test.sh 三段覆盖检查都依赖）。README 写明 "std/ 源码 + 补全就是文档"。
+## 文档范围（2026-11-13 校正）
+- **`docs/manual.md`（入门）、`docs/reference.md`（速查）、`docs/errors.md`（错误码）都在 HEAD 里且持续维护**（§146/§144/1.3.0 都改过）；离线文档站不做。旧记忆「手册已删」已过期 —— README 的文档表指向三者，`std/` 源码与编辑器补全仍是一手资料。
+- `docs/errors.md` 是 `zxc explain` details 链接、zxls codeDescription、test.sh 三段覆盖检查的依赖，改动不能丢码与 `id="eNNNN"` 锚点。
+- **版本点四处**：`src/zxc.h ZXC_VERSION`、`docs/reference.md` 头、`docs/manual.md` 落款、README 文档表；`zxc init` 写进 zx.json 的 0.1.0 是工程版本，别一起改。当前 **1.3.0**。
+- **§153**：region 合并的分配器若是本块局部声明，`__zxrN = zx_heapalloc(al,…)` 必须排在那条 NK_DECL 之后（`emit_region_alloc`），否则 §150 的 late-init `std.heap.page` 局部副本会让 C 先用后声明报 B1002；`bench/run.sh` 的 build FAILED 必须非零退出。

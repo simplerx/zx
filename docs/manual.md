@@ -81,8 +81,11 @@ _ = N; _ = x;               // 没用到的绑定报 E0410，用 `_` 丢弃
 
 - `*[N]T` 是**一个 8 字节指针**，`N` 写在类型里，编译器拿它做界检查和
   `.len`/`.size`。`*[3]i32` 和 `*[4]i32` 是不同类型。
-- 存储从哪来：`std.stackAlloc(T, n)`（栈）、`std.heapAlloc(al, T, n)`（堆）、
-  `&.{ … }`（匿名存储的糖）。
+- 存储从哪来：`std.stackAlloc(T, N)`（栈）、`std.heapAlloc(al, T, N)`（堆，
+  **N 必须编译期常量**，否则 E0501）、`std.heapSlice(al, T, n)`（堆，
+  n 可运行期 → `[]T`）、`&.{ … }`（匿名存储的糖）。
+- 同一个 `*[N]T` 指针值两种下标：`xs.0` / `.1` 是编译期常量下标，
+  `xs[0]` / `xs[i]` 是运行期下标（带界检查），读写都行（§144）。
 - `&xs`（xs 是 `*[N]T` 变量）是**取这个指针变量的地址**，得到 `**T`——
   不是"数组的地址"，因为 Zx 里没有数组变量。
 
@@ -133,7 +136,7 @@ const Shape = union(enum) {                         // 带标签联合
 
 const Counter = struct {
     n: i32 = 0,
-    const bump = fn (self: *Counter) i32 {          // 首参 self → 方法
+    const bump = fn (self: *Self) i32 {             // 首参 self → 方法（可变接收者）
         self.n = self.n + 1;
         return self.n;
     };
@@ -154,6 +157,14 @@ const main = fn () u8 {
 };
 ```
 
+- **方法接收者只有两种**（§151）：`self: Self` 只读，`self: *Self` 可变、
+  改的是调用者。`Self` 怎么传由编译期按 `@type(Self).size` 定：`<=16B` 复制一份，
+  `>16B` 传 `const Self *`（零拷贝）。这是纯 ABI 优化，方法体里 `self` 仍是值
+  语义；只改第一个参数，别的参数保持源码写法。旧写法 `*const Self` / `*Counter`
+  仍兼容，新代码统一写 `Self` / `*Self`。
+- **`&self` 恒是一层只读指针 `*const Self`**（§152），不是 `*Self`、更不是 `**Self`：
+  按值形态指向方法内的副本、按指针形态指向调用者；透过它写入 E0403、把地址
+  返回 E0503。不承诺指向调用者，需要稳定身份就写 `*Self`。
 - 字面量 `T{ .f = v }` 编译期检查完整性；匿名结构 `.{ .x = 1 }` 靠期望类型定型。
 - `switch` 臂是 `模式: 体;`，整数/枚举必须完整划分（不完整报 E0504）。
 - plain `union` 读错成员是未定义行为，一律用 `union(enum)` + `.tag` 分派。
@@ -283,7 +294,11 @@ if (std.arena.ArenaAllocator.init(al)) a {
 
 - std 约定：**要分配的函数，分配器放第一个参数**；返回带 NUL 的结果可直接传 FFI。
 - `std.pool.Pool`：19 档尺寸分级内存池（16B–256KiB），`alloc/free/used`，
-  槽位从不搬动。
+  槽位从不搬动；`p.allocator()` 给出 `Allocator` 视图（ctx 就是 `*Pool`），
+  可以喂给吃分配器的 API，Pool 要比这个视图活得久。
+- **线程安全用独立类型 `std.pool.SyncPool`**（`init(gpa)` 起，自带加锁的
+  `alloc/free/used/allocator`）；`Pool` 本身永远无锁、只给单线程用，
+  不要把 `Pool.allocator()` 跨线程共享。
 - arena 的 `free` 是 no-op，不逐块释放；**不是线程安全**，别跨 Task 共享。
 
 ---
@@ -385,5 +400,5 @@ zxc init myproj            # 生成工程骨架
 
 ---
 
-*本文按 Zx 1.2.4 实现逐片段实测写成；语言演进以编译器行为为准，
+*本文按 Zx 1.3.0 实现逐片段实测写成；语言演进以编译器行为为准，
 API 细节以 `std/` 源码与 `docs/reference.md` 为准。*

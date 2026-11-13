@@ -74,3 +74,20 @@ ArrayList push/append/insertAt + HashMap put/get（含扩容），五个负载�
 - 8/8 校验和一致：fib 15 / mandel 153 / mmat 91-102 / str 3 / json 88 / cont 76 / pool 221-234 / poolraw 285（net ms）。
 - mmat/pool 比基线 +5~13%：毛值稳定（130-134/261-265），总量波动来自扣基线的 31ms 项 + 同机 Zed/LSP 负载；这两项本就是内存带宽型，判定为环境噪声而非回退（codegen 无相关改动）。
 - bench/pool.zx 改用 pub deinit（容器可见性规则上线后 std/pool.zx 漏标 pub，已修）。
+
+## 2026-11-13 复测（1.3.0 发布压测）
+
+- 编译器 1.3.0（§151 / §152 / §153 之后），`zig cc -O2` 不变。
+  `sh test.sh` EXIT=0：runner 388/388、LSP 冒烟 417 项、snake `--sim` 300 局、
+  §151 / §152 / §153 断言全绿；`tools/lspstress.py` 0 failure（2MB 文档 0.37s 出诊断）。
+- 8/8 校验和一致：fib 8 / mandel 148 / mmat 108 / str 0 / json 94 /
+  cont 90 / pool 234 / poolraw 294（net ms，空程序基线 37ms）。
+- **mmat 首轮 `build FAILED`**：§130 region 合并把 `zx_heapalloc(al, …)` 发在
+  块开头，而 §150 之后 `let al = std.heap.page` 会生成运行时局部声明，C
+  先用后声明报 B1002。§153 把 `__zxrN` 初始化挪到分配器声明之后，
+  `6118/6191/6118/6187` 与旧基线逐字符一致；新增
+  `tests/good/region-local-alloc.zx` + `test.sh` §153 顺序断言守门。
+- `bench/run.sh` 同时修正：某个程序 build FAILED 以前只打印一行就返回 0，
+  压测仍报「通过」；现在累计失败数并以非零退出。
+- 毛值整体比 11-11 高 5~15%（同机 Zed/LSP 负载 + 基线 31→37ms），校验和
+  与生成代码结构无回退，判定为环境噪声，不改主表。

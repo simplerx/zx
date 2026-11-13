@@ -1,7 +1,7 @@
 # Zx 语言查阅文档（Reference）
 
-> 版本 1.2.4 · 一份文档看完全部定义和用法。  
-> 语言细则与设计理由在 `spec/zx-spec.md`；错误码逐条解释在 `docs/errors.md`；  
+> 版本 1.3.0 · 一份文档看完全部定义和用法。
+> 语言细则与设计理由在 `spec/zx-spec.md`；错误码逐条解释在 `docs/errors.md`；
 > 本文是**查阅用**的完整速查：语法、类型、内建、模块、std 全 API、工具链。
 
 ---
@@ -17,7 +17,7 @@ const Point = struct {                        // 类型声明就是 const 绑定
     x: i32,
     y: i32,
     const ORIGIN = Point{ .x = 0, .y = 0 };   // 静态成员
-    const len2 = fn (self: *const Point) i32 {
+    const len2 = fn (self: Self) i32 {              // 只读接收者（§5.5）
         return self.x * self.x + self.y * self.y;
     };
 };
@@ -125,7 +125,8 @@ extern var g: i32;    // 外部 C 全局变量
 | `noreturn`                        | 不返回   | 0                    | `@compileError` / `@trap` / 死循环臂 |
 
 **Zx 没有"数组值"**：`*[N]T` 就是 8 字节指针，长度只写在类型里，用于编译期界检查与  
-`.len`。存储来自 `std.stackAlloc(T, n)`（栈）、`std.heapAlloc(al, T, n)`（堆）、  
+`.len`。存储来自 `std.stackAlloc(T, n)`（栈）、`std.heapAlloc(al, T, N)`（堆，
+N 编译期常量）、`std.heapSlice(al, T, n)`（堆，n 可运行期 → `[]T`）、
 `&.{ … }`（匿名存储糖）。`&xs`（xs 是 `*[N]T` 变量）是**取指针变量的地址**，得 `**T`。
 
 ---
@@ -140,8 +141,10 @@ p.0 = 2;                     // 透过可变指针写入
 ```
 
 - `.` 自动穿透一层指针：`p.name` ≡ `p.0.name`。
-- 切片语法：`a[lo..hi]`（`hi` 省略到结尾）；下标 `a[i]` 运行期界检查由调用方保证语义、  
-  `*[N]T` 的 `.N` 是**编译期**下标。
+- 切片语法：`a[lo..hi]`（`hi` 省略到结尾）；`[]T` 的 `a[i]` 带运行期界检查。
+- **`*[N]T` 同一个指针值两种下标**：`ptr.0` / `ptr.1` 是编译期常量下标，
+  `ptr[0]` / `ptr[i]` 是运行期下标（带界检查），读写都行。函数参数、字段、
+  `?*[N]T`、泛型 N 全都适用（§144）。
 - `.len` / `.size` 是编译器字段：`[]T` 的 `.len`、`*[N]T` 的 `.len` 与 `.size`  
   （`size` = N × 元素大小）都是编译期常量。聚合体自己有 `len`/`size` 字段时字段优先。
 - 指针算术 `p + n` 按元素偏移，要求 `usize` 或字面量。
@@ -206,16 +209,35 @@ switch (s.tag) {
 
 ### 5.5 方法
 
-首参是 `self` 的成员函数就是方法，`p.method(args)` 等价 `P.method(&p, args)`：
+首参是 `self` 的成员函数就是方法；`p.method(args)` 与 `P.method(p, args)` 等价。
+**接收者只有两种**（§151）：
+
+| 写法 | 语义 | 传递 |
+| --- | --- | --- |
+| `self: Self` | 只读；方法里给 `self` 或它的字段赋值报 E0403 | 编译期按 `@type(Self).size` 定：`<=16B` 复制一份，`>16B` 传 `const Self *`（零拷贝） |
+| `self: *Self` | 可变，改的就是调用者 | 传地址；接收者须是可变绑定且能取地址 |
 
 ```zx
 const Counter = struct {
     n: i32 = 0,
-    const bump = fn (self: *Counter) i32 { self.n = self.n + 1; return self.n; };
+    const bump = fn (self: *Self) i32 { self.n = self.n + 1; return self.n; };
+    const peek = fn (self: Self) i32 { return self.n; };
 };
 var c = Counter{};
 _ = c.bump();
+_ = c.peek();
 ```
+
+- 选值还是选地址是**纯 ABI 优化**：`self.x`、`return self;`、`p.peek()`（`p: *Counter`）
+  在两种形态下写法一致；显式 `Counter.peek(c)` 在按指针形态会自动补 `&`。
+  只有 `params[0]` 被改写，`fn (self: Self, o: Self)` 里的 `o` 仍按源码写法传。
+- **`&self` 恒是一层只读指针 `*const Self`**（§152），不是 `*Self`，更不是
+  `**Self`：按值形态发 `&(self)`，按指针形态发 `&((*self))`，`&self.x` 同理。
+  透过它写入 E0403，把地址返回 E0503。地址身份随 ABI 变（本地副本 / 调用者
+  原对象），**不承诺指向调用者**；要稳定指向调用者写 `*Self`。
+- 旧写法 `*const Self` / `*const Point` / `*Point` 仍兼容，新代码只写 `Self` / `*Self`。
+- `size == 0` 落在按值档，**不退化成关联函数**：仍是方法、`x.f()` 合法。
+- **第一参数不叫 `self` 就是关联函数**（`Point.ORIGIN`），不能当实例方法调。
 
 ---
 
@@ -327,10 +349,11 @@ castable 表覆盖全部合法转换；不合法的转换编译期报 E0301/E030
 
 ---
 
-## 10. 内建（`@` 前缀，1.2.2 起共 7 个）
+## 10. 内建（`@` 前缀，§144 起共 8 个）
 
 | 内建                      | 签名                                     | 用途              |
 | ----------------------- | -------------------------------------- | --------------- |
+| `@mod("name")`          | `fn(str) module`                       | 加载模块并绑定，见 §12；旧 `module(…)` 关键字报 E0211 |
 | `@type(x)`              | `fn(type\|expr) Type`                  | 编译期描述符，见下       |
 | `@memcpy(dst, src, n)`  | `(ptr\|slice, ptr\|slice, usize) void` | 批量复制（不得重叠）      |
 | `@memmove(dst, src, n)` | 同上                                     | 批量复制（可重叠）       |
@@ -434,7 +457,8 @@ pub const task = @mod("task.zx"); // 再导出：别的模块经 std.task 访问
 | `std.heap.page` | 值（Allocator） | 现成分配器：malloc/free |
 | `std.Allocator` | 类型 | `{ ctx: ?*u8, alloc: fn, free: fn }` 接口 |
 | `std.stackAlloc(T, n)` | 函数 | 栈上分配 → `*[n]T` |
-| `std.heapAlloc(al, T, n)` | 函数 | 堆分配 → `*[n]T`，OOM abort |
+| `std.heapAlloc(al, T, N)` | 函数 | 堆分配 → `*[N]T`，**N 必须编译期常量**（否则 E0501），OOM abort |
+| `std.heapSlice(al, T, n)` | 函数 | 堆分配 → `[]T`，**n 可运行期**；长度装进 16 字节 `{ptr,len}` 值 |
 | `std.file.read(al, path)` | 函数 | 整块读，`?[]const u8`（NUL 结尾） |
 | `std.file.write / append(path, data)` | 函数 | 整块写/追加，`bool` |
 | `std.file.exists(path)` / `remove(path)` | 函数 | 元信息，`bool`（不带分配器） |
@@ -477,9 +501,12 @@ pub const task = @mod("task.zx"); // 再导出：别的模块经 std.task 访问
 ### 14.2 std.BufReader / std.BufWriter —— 缓冲流（std.zx）
 
 ```zx
-var r = std.BufReader.open(al, "a.txt", 4096) orelse return error.io;
-defer r.deinit();
-while (r.next()) line { … }          // 行指向内部缓冲，next() 后失效
+// 没有 `orelse return`；`?T` 要走 if 捕获，失败用 else 提前返回
+if (std.BufReader.open(al, "a.txt", 4096)) r0 {
+    var r = r0;
+    defer r.deinit();
+    while (r.next()) line { … }      // 行指向内部缓冲，next() 后失效
+} else { return error.io; }
 ```
 
 - BufReader：`open(al, path, cap) ?Self` / `init(al, h, cap)` / `deinit` / `close` /
@@ -527,15 +554,26 @@ while (i < m.capacity()) {          // 没有 while 续写语法，递增写在�
 ### 14.5 std.pool.Pool —— 尺寸分级内存池
 
 ```zx
-var p = std.pool.Pool.init(al) orelse return 1;   // ?Pool
-defer p.deinit();
-let q = p.alloc(64);                 // ?*u8（19 档按尺寸归档）
-if (q) b { if (!p.free(b)) …; }      // false = 重复释放/非法块，被拦下
-_ = p.used(64);                      // 诊断：该档已用字节
+if (std.pool.Pool.init(al)) p0 {       // ?Pool；`orelse return` 不合法
+    var p = p0;                       // alloc/free 要可变接收者
+    defer p.deinit();
+    let q = p.alloc(64);              // ?*u8（19 档按尺寸归档）
+    if (q) b { if (!p.free(b)) …; }   // false = 重复释放/非法块，被拦下
+    _ = p.used(64);                   // 诊断：该档已用字节
+} else { return 1; }
 ```
 
 19 档（16–128 每 16B 一档；256B–256KiB 每档 ×2），更大绕过池直连分配器。
-槽位从不搬动；`used(size)` 供诊断。
+槽位从不搬动；`used(size)` 供诊断。`Pool.alloc` 返回的是 payload 地址，
+头块留在块内由 `free` 反查。
+
+`p.allocator()`（§141）返回 `Allocator` 视图，`ctx` 直接装 `*Pool`，可以喂给
+`ArrayList` / `json` / `fs` 这类吃分配器的 API；**Pool 必须比这个视图活得久**。
+
+**线程安全是独立类型 `SyncPool`**（§143）：`SyncPool.init(gpa) ?SyncPool`，
+自带 `alloc / free / used / allocator / deinit`，每次操作加锁（`guard` 是堆上
+`u64` 的地址，值副本共享同一把锁）。`Pool` 永远无锁、只给单线程用；
+别把 `Pool.allocator()` 跨线程共享，也别指望 `SyncPool.deinit` 替你等线程收工。
 
 ### 14.6 std.fs —— 文件系统
 
@@ -586,9 +624,10 @@ const f = parsed.?.float;                        // float 成员直接读
 ### 14.8 std.arena.ArenaAllocator —— 一次性批量分配
 
 ```zx
-var ar = std.arena.ArenaAllocator.init(std.heap.page) orelse return 1;
-defer ar.deinit();                       // 一次全释放（free 本身是 no-op）
-if (std.json.parse(ar, doc)) v { … }     // 全程 arena
+if (std.arena.ArenaAllocator.init(std.heap.page)) a {
+    defer a.deinit();                   // 一次全释放（free 本身是 no-op）
+    if (std.json.parse(a, doc)) v { … } // 全程 arena
+} else { return 1; }
 ```
 
 `init(backing) ?Allocator` / `reset(a)`（保留块、bump 归零）/ `deinit(a)`。

@@ -1224,6 +1224,20 @@ else
     fail=1
 fi
 
+# §153：region 合并用的分配器是本块里的局部声明时，`al` 的 C 声明必须排在
+# `__zxrN = zx_heapalloc(al, …)` 之前，否则 C 先用后声明报 B1002。
+# 用例本身由 runner 实跑（并触发 merged=2），这里只钉住发射顺序。
+$ZXC tests/good/region-local-alloc.zx --emit-c > "$TPFX.s153.c" 2>/dev/null
+S153_AL=$(grep -nE 'ZxS[0-9]+ al_[0-9_]+ = zx_alloc_page;' "$TPFX.s153.c" | head -1 | cut -d: -f1)
+S153_RG=$(grep -nE '__zxr[0-9]+ = .*zx_heapalloc\(al_' "$TPFX.s153.c" | head -1 | cut -d: -f1)
+if [ -n "$S153_AL" ] && [ -n "$S153_RG" ] && [ "$S153_AL" -lt "$S153_RG" ]; then
+    printf "  ok   §153 region 局部分配器先声明后使用\n"
+else
+    printf "  FAIL §153 region 分配器声明顺序\n"
+    grep -nE 'al_[0-9_]+|__zxr' "$TPFX.s153.c" | head -12
+    fail=1
+fi
+
 # 用例会在仓库根留下自己的临时文件：io_fmt.zx 写 io_fmt.tmp，stdfs.zx 建
 # fs_t_dir / fs_t_dir2。跑完统一带走——测试不该往工作区里堆东西。
 rm -rf io_fmt.tmp fs_t_dir fs_t_dir2 2>/dev/null || true

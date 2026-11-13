@@ -6114,3 +6114,45 @@ E0503（`*const Self` 作为返回类型时只报这一条）；`read(p: *const 
 `tests/bad/addr-self-write.zx`（E0403）、`tests/bad/addr-self-return.zx`
 （E0503）、`test.sh` §152 的 `--emit-c` 断言钉住 `&(self)` /
 `&((*self))` / `&((*self).a)`。
+
+---
+
+## §153 1.3.0 发布：region 局部分配器顺序 + 文档对齐（2026-11-13）
+
+用户要求「压测 → 更新手册文档 → 达标后升 1.3.0 push」。
+
+**压测逮到的真回归**：`sh bench/run.sh` 里 `mmat build FAILED`，报
+B1002 `use of undeclared identifier 'al_9_5'`。§130 的 region 合并把
+`uint8_t *__zxr1 = zx_heapalloc(al, …);` 发在 `gen_block_stmts` 的块开头；
+§150 让 `std.heap.page` 变成 late-init 全局 + 运行时局部副本后，
+`let al = std.heap.page` 会在块里生成 `ZxS2 al_9_5 = zx_alloc_page;`，
+于是 C 先用后声明。之前 `al` 被编译期折叠成 `zx_alloc_page` 才没暴露。
+
+**修复**：`reg_alloc` 恒是 NK_IDENT（§130 只合并同一个局部标识符）。
+`gen_block_stmts` 先在本块直接子项里找同名的 NK_DECL，抽出的
+`emit_region_alloc()` 排到那条声明之后发射；块内没有声明时保持块开头。
+分配器声明必然早于第一个 heapAlloc 站点（源码里不声明就写不出调用），
+所以 `__zxrN` 仍在所有使用点之前。校验和 `6118/6191/6118/6187` 与
+BASELINE 逐字符一致。守门 `tests/good/region-local-alloc.zx`（ZX_REGION
+下 merged=2 group=1）+ `test.sh` §153 的 `--emit-c` 行号顺序断言。
+
+**压测脚本自身的不达标也一起修**：`bench/run.sh` 的 `run()` 在 build
+FAILED 时只打印一行就 `return 0`，脚本仍以 0 退出，等于把编译失败算成
+「压测通过」。现在累计 `BENCH_FAIL` 并在末尾非零退出。
+
+**文档对齐（1.3.0）**：`docs/reference.md` / `docs/manual.md` 的版本号、
+接收者示例（`*const Point` / `*Counter` → `Self` / `*Self`）、§5.5 方法节
+补 §151 / §152 语义、内建表补 `@mod` 到 8 个、§13 补 `heapSlice` 与
+`heapAlloc` 的 N 必须常量、§14.5 补 `Pool.allocator()` / `SyncPool`、
+§4 补 `ptr[i]` 运行期下标；`docs/errors.md` 的 E0403 补只读接收者、
+E0503 的旧 `std.heapAlloc(1) orelse …` / `p.*` 示例换成可编译写法，
+三处 `orelse return` 改成合法的 if 捕获；README 删掉与现存手册矛盾的
+「没有写手册」，给出文档表。`src/zxc.h` 的注释也修掉「工程清单读这里」
+的错述。`ZXC_VERSION` 1.2.4 → **1.3.0**，三处版本点同步。
+手册 / 参考里的新方法示例已实编实跑（`25 25 1 1 2`）。
+
+**达标记录**：`zxc -v` = `zxc 1.3.0`；`sh test.sh` EXIT=0、
+`passed 388, failed 0`、LSP 417 项、snake `--sim` 300 局、
+§151/§152/§153 断言全绿；`bash bench/run.sh` 8/8 编译通过且校验和一致；
+`tools/lspstress.py` 0 failure（18.4s）。首轮压测 mmat 失败、修复后
+复跑全绿，两次日志在 `.tmp/press130*.log`。

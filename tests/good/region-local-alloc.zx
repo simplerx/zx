@@ -1,0 +1,18 @@
+// region-local-alloc.zx —— §153：region 合并用的分配器是本块里的局部声明时，
+// 生成的 C 必须先声明 `al` 再发 `__zxrN = zx_heapalloc(al, …)`。
+// §150 让 `std.heap.page` 变成 late-init 全局 + 运行时局部副本后，
+// bench/mmat.zx 曾因此报 B1002 use of undeclared identifier。
+// expect-exit: 0
+// expect-output
+// region: 3 7
+const std = @mod("std");
+
+const main = fn () u8 {
+    let al = std.heap.page;
+    var a = std.heapAlloc(al, i32, 4);
+    var b = std.heapAlloc(al, i32, 4);
+    a[0] = 3;
+    b[0] = 7;
+    std.println("region: {} {}", a[0], b[0]);
+    return 0;
+};

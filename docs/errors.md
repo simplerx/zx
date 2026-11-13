@@ -256,6 +256,8 @@ let c: Color = undefined;      // E0401 —— help 会说 `did you mean \`Colou
 **典型消息**：`cannot assign to 'x'`、`cannot take the address of …`
 
 `let`/`const` 绑定不可改（要改就用 `var`）；`&` 只能作用于左值。
+§151 起 `self: Self` 是只读接收者，`self.x = …` 与透过 `&self` 写入
+（`p.x = …`）同样报本码；要改调用者请写 `self: *Self`。
 
 <a id="e0404"></a>
 ### E0404 私有成员，或声明位置不合法
@@ -373,9 +375,10 @@ const bad = fn () *i32 {
 };
 
 const ok = fn () *i32 {
-    let p = std.heapAlloc(1) orelse unreachable;
-    p.* = 1;
-    return p;
+    let al = std.heap.page;
+    var p = std.heapAlloc(al, i32, 1);    // *[1]i32，要写入就用 var
+    p.0 = 1;                              // 解引用是 .0
+    return (*i32)p;
 };
 ```
 

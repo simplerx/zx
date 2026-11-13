@@ -53,7 +53,8 @@ run() {
     # 基准量的是发布性能：--release（-O2）。dev 档默认 -O0，测不得。
     if ! $ZXC "$file" -o "$OUT/$name" --release >/dev/null 2>&1; then
         printf "  %-8s build FAILED\n" "$name"
-        return
+        BENCH_FAIL=$((BENCH_FAIL + 1))   # 编译失败不能算「压测通过」（§153）
+        return 0
     fi
     prog="$OUT/$name.exe"
     [ -x "$prog" ] || prog="$OUT/$name"
@@ -65,6 +66,7 @@ run() {
 }
 
 echo "== zx benchmark (median of $REPEAT, base $BASE ms) =="
+BENCH_FAIL=0
 run fib     bench/fib.zx
 run mandel  bench/mandel.zx
 run mmat    bench/mmat.zx
@@ -73,3 +75,8 @@ run json    bench/json.zx
 run cont    bench/containers.zx
 run pool    bench/pool.zx
 run poolraw bench/poolraw.zx
+
+if [ "$BENCH_FAIL" -ne 0 ]; then
+    printf "benchmark: %d program(s) failed to build\n" "$BENCH_FAIL"
+    exit 1
+fi
