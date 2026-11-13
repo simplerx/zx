@@ -1,0 +1,4 @@
+// shadow.zx —— 模块自己声明同名函数时，种进来的内建不会覆盖它（scope_add
+// 返回 NULL），lookup 拿到的就是 SK_FN；裸名调用不该被内建分派劫持。
+pub const println = fn (n: i32) i32 { return n * 2; };
+pub const probe = fn () i32 { return println(21); };

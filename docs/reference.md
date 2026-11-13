@@ -754,6 +754,52 @@ async/await，会丢掉 zx 的无函数着色，不做。
   竞态密集的纤程调度与等待链仍留在 C 机制层 —— 这是用户认可的「最后还是要
   C 的运行时」，不是对外暴露的类。
 
+### 14.11 std.math —— 数学（`std/math.zx`）
+
+常量 `pi / e / tau / sqrt2 / ln2 / ln10`（编译期 `f64`，可直接当数组长度或泛型实参）。
+
+- **浮点函数直接 `extern "C"` 到 C 运行时的 libm**，不另造一层同名转发：
+  `sqrt / cbrt / pow / floor / ceil / round / trunc / fabs / fmod / sin / cos /
+  tan / asin / acos / atan / atan2 / exp / log / log2 / log10 / hypot`，参数与返回
+  都是 `f64`。Windows 走 ucrt、POSIX 走 libm，`zig cc` 默认链得上，不需要 `@link`。
+  补全会直接看到真实签名。
+- 整数工具（纯 Zx 代码）：`absI / minI / maxI / clampI`（`i32`）、
+  `gcd / lcm / powI / isPowerOfTwo / nextPowerOfTwo`（`u32`）。
+- 浮点小工具：`min / max / clamp / sign / degToRad / radToDeg`。
+- 不做泛型 `min/max`：容器方法不能泛型，函数泛型要按实例检查；整数走 `*I` 后缀、
+  浮点走无后缀，一眼看清走的是哪条路。
+
+```zx
+std.println("{} {}", std.math.sqrt(2.0), std.math.nextPowerOfTwo(37));  // 1.414214 64
+```
+
+### 14.12 std.net —— 同步 IPv4 TCP / UDP（`std/net.zx`）
+
+Windows Winsock2 先行（和 `std.time` 的平台策略一致）：`@link("ws2_32")` 写在模块里，
+只有真正引用 `std.net` 的程序才会加载本模块、才会链这个库。POSIX 版等语言有条件
+编译后再补，**对外 API 不变**，换掉那组私有 `extern` 即可。
+
+- 进程级：`init() bool` / `deinit()`，包住所有 socket 操作。
+- 地址：`loopback: u32`（`127.0.0.1`，主机序）、`ipv4(b0,b1,b2,b3) u32`、
+  `hostToNet16/32` 与 `netToHost16/32`、`Ipv4{addr,port}`。
+- `TcpListener.open(port) ?TcpListener`（`port = 0` 让系统挑空闲端口，`ls.port` 读
+  实际端口）、`acceptOne() ?TcpStream`、`close()`；`TcpStream.dial(ip, port)
+  ?TcpStream`、`read / write / close`，返回实际字节数（`-1` 出错、`0` 对端关闭）。
+- `UdpSocket.open(port) ?UdpSocket`、`sendTo / recvFrom / close`；`recvFrom` 把对端
+  地址写回 `out_ip / out_port`（都是主机序）。
+- 失败一律用 `?T` 的 `null` 或 `-1` 表达，没有异常、没有错误码枚举。句柄就是 `u64`；
+  C 符号一律私有，避免绕过封装直接调 `bind/connect`（两条平行路径）。
+
+```zx
+if (!std.net.init()) { return 1; }
+defer std.net.deinit();
+if (std.net.TcpListener.open(0)) ls {
+    var listener = ls;                       // 端口 0 → 读 ls.port，单线程可自连接
+    if (std.net.TcpStream.dial(std.net.loopback, listener.port)) c { … }
+    defer listener.close();
+}
+```
+
 ---
 
 ## 15. 错误码索引（37 个，详见 `docs/errors.md` / `zxc explain CODE`）

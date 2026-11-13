@@ -355,12 +355,30 @@ defer t.close();
 if (t.spawn(job, 21)) h {
     if (t.await(h)) r { std.println("{}", r); }   // 42
 }
+
+// 数学：浮点函数 extern 到 C 运行时的 libm，整数工具是纯 Zx 代码
+std.println("{} {}", std.math.sqrt(16.0), std.math.gcd(12, 18));   // 4 6
+
+// 网络：同步 IPv4 TCP/UDP（Windows Winsock2），init/deinit 包住
+if (!std.net.init()) { return 1; }
+defer std.net.deinit();
+if (std.net.TcpListener.open(0)) ls {
+    var listener = ls;
+    defer listener.close();
+    if (std.net.TcpStream.dial(std.net.loopback, listener.port)) c { … }
+}
 ```
+
+`std.math` / `std.net` 的完整签名见 `docs/reference.md` §14.11 / §14.12；网络目前
+只有 Windows 版，POSIX 版会保持同一套对外 API。
 
 编译器 seed 的内建面（不是 Zx 代码）：`std.print/println/format`、
 `std.heap.page`、`std.stackAlloc/heapAlloc`、`std.file.*`、`std.io.*`、
 `std.process.args/getEnv/setEnv/exit`（**args 不含 argv[0]**）、
-`std.debug.panic/assert/errName`、`std.atomic.*`。
+`std.debug.panic/assert/errName`、`std.atomic.*`。这些名字会种进**每个由
+`@mod` 加载的模块**的作用域，所以库文件里可以直接写裸名（`println("{}", x)`、
+`stackAlloc(u8, 8)`）；入口文件请写 `const std = @mod("std");` 再用 `std.` 前缀。
+模块自己声明了同名函数时，以模块声明为准，裸名不会被内建劫持。
 
 ---
 

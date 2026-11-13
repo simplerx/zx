@@ -114,6 +114,9 @@ Node *node_new(NodeKind k, int line, int col);
 
 /* 后端要用符号名：Symbol 本体是 sema.c 私有的，这里只暴露名字。 */
 const char *sema_sym_name(struct Symbol *s);
+/* 模块内裸名内建调用：返回六个内建 API 的名字，否则 NULL。
+ * Symbol 本体是 sema.c 私有的，后端只按这个字符串分派发射。 */
+const char *sema_sym_builtin_name(struct Symbol *s);
 /* 命令行第 0 个参数：用来找随附的 std/ 源码 */
 void sema_set_argv0(const char *p);
 Node *parse_program(Lexer *lx);

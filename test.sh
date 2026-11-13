@@ -1275,6 +1275,46 @@ for f156 in slice-len-runtime continue-label generic-type-default; do
     fi
 done
 
+# §157：新 std.math / std.net，以及它们牵出的两个真编译器缺口。
+# 1) 多参 extern 原型的无名形参必须按位置编号；全叫 `_p` 会被 C 判参数重定义。
+$ZXC tests/good/std-math.zx --emit-c > "$TPFX.s157m.c" 2>/dev/null
+if grep -qF 'extern double atan2(double _p0, double _p1);' "$TPFX.s157m.c" \
+   && grep -qF 'extern double hypot(double _p0, double _p1);' "$TPFX.s157m.c" \
+   && ! grep -qF 'double _p, double _p' "$TPFX.s157m.c"; then
+    printf "  ok   §157 无名 extern 形参按位置编号\n"
+else
+    printf "  FAIL §157 多参 extern 原型仍撞名\n"
+    grep -nE 'atan2|hypot' "$TPFX.s157m.c" | head -8; fail=1
+fi
+
+# 2) 模块内裸名内建（g_std_seeded）必须和 std. 前缀走同一条分派：发射真的
+#    alloca / heapslice / zx_format / printf，而不是未声明的裸标识符。
+$ZXC tests/multi/seeded-builtins/main.zx --emit-c > "$TPFX.s157s.c" 2>/dev/null
+if grep -qF '__builtin_alloca' "$TPFX.s157s.c" \
+   && grep -qF '= zx_format(' "$TPFX.s157s.c" \
+   && grep -qF 'printf("println-ok' "$TPFX.s157s.c"; then
+    printf "  ok   §157 模块内裸名内建发射真实 C\n"
+else
+    printf "  FAIL §157 裸名内建发射形状\n"
+    grep -nE 'alloca|zx_format|println\(' "$TPFX.s157s.c" | head -12; fail=1
+fi
+
+# 3) 新库 / 新守门用例在 C 前端也要过（默认 zxfe 前端由 runner 实跑）。
+for f157 in std-math std-net; do
+    if $ZXC "tests/good/$f157.zx" --check --fe=c > "$TPFX.$f157.fe.log" 2>&1; then
+        printf "  ok   §157 %s 在 C 前端通过\n" "$f157"
+    else
+        printf "  FAIL §157 %s 在 C 前端失败\n" "$f157"
+        head -12 "$TPFX.$f157.fe.log"; fail=1
+    fi
+done
+if $ZXC tests/multi/seeded-builtins/main.zx --check --fe=c > "$TPFX.s157s.fe.log" 2>&1; then
+    printf "  ok   §157 seeded-builtins 在 C 前端通过\n"
+else
+    printf "  FAIL §157 seeded-builtins 在 C 前端失败\n"
+    head -12 "$TPFX.s157s.fe.log"; fail=1
+fi
+
 # 用例会在仓库根留下自己的临时文件：io_fmt.zx 写 io_fmt.tmp，stdfs.zx 建
 # fs_t_dir / fs_t_dir2。跑完统一带走——测试不该往工作区里堆东西。
 rm -rf io_fmt.tmp fs_t_dir fs_t_dir2 2>/dev/null || true

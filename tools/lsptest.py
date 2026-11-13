@@ -4574,6 +4574,105 @@ _ms = mcomp(MUSE, muri, "    if", "mchain.snippet")
 check("completion.mchain.snippet",
       _ms.get("if", {}).get("insertTextFormat") == 2, str(sorted(_ms)))
 
+# ---------------------------------------------------------------------------
+# §157 类型构造式直接接字面量（用户 2026-11-13 截图 `var gen = Gen(i32,10){…}`）
+# KEEP — 几条都不许删：
+#   · `var gen = Ctor(i32,10){…}` 要有 `: Ctor(i32, 10)` 行内类型；
+#   · `let n = gen.mem;` / `var q = gen.get();` 要有 `: i32`（泛型实参替换，
+#     且字段默认值 `= n` 不能被拼进类型串）；
+#   · hover 不能回显成 `let n: i32 = n = gen.mem`；
+#   · `G` 补全要同时给调用骨架和 `Ctor(...){...}` 构造泛型实例骨架；
+#   · `std.` 要能看到新注册的 math / net。
+GEN157 = """const std = @mod("std");
+
+const Gen157 = fn (T: type, n: T) type {
+    return struct {
+        mem: T = n,
+        const get = fn (self: Self) T { return self.mem; };
+    };
+};
+
+const main = fn () u8 {
+    var gen = Gen157(i32, 10){ .mem = 10 };
+    let n = gen.mem;
+    _ = n;
+    std.println("{} {}", gen.get(), n);
+    var q = gen.get();
+    var p1 = gen.;
+    var p2 = G;
+    var p3 = std.;
+    return 0;
+};
+"""
+g157uri = "file:///" + os.path.join(SRC_DIR, "gen157.zx").replace(chr(92), "/")
+open(os.path.join(SRC_DIR, "gen157.zx"), "w", encoding="utf-8").write(GEN157)
+s8({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": g157uri, "languageId": "zx", "version": 1, "text": GEN157}}})
+
+s8({"jsonrpc": "2.0", "id": 5200, "method": "textDocument/inlayHint", "params": {
+    "textDocument": {"uri": g157uri},
+    "range": {"start": {"line": 0, "character": 0},
+              "end": {"line": len(GEN157.split("\n")), "character": 0}}}})
+_r, _ = r8("gen157.inlay", 5200)
+_g157_hints = {}
+for _h in ((_r or {}).get("result") or []):
+    _lb = _h.get("label")
+    if isinstance(_lb, str) and _h.get("kind") == 1:
+        _g157_hints[(_h["position"]["line"], _h["position"]["character"])] = _lb
+
+def g157_hint(decl):
+    p = pos(GEN157, GEN157.index(decl) + len(decl))
+    return _g157_hints.get((p["line"], p["character"]))
+
+_g157_detail = str(sorted(_g157_hints.items()))[:260]
+check("inlayHint.ctorLiteral.instance",
+      g157_hint("var gen") == ": Gen157(i32, 10)", _g157_detail)
+check("inlayHint.ctorLiteral.field", g157_hint("let n") == ": i32", _g157_detail)
+check("inlayHint.ctorLiteral.method", g157_hint("var q") == ": i32", _g157_detail)
+
+def g157_hover(decl, rid):
+    s8({"jsonrpc": "2.0", "id": rid, "method": "textDocument/hover", "params": {
+        "textDocument": {"uri": g157uri},
+        "position": pos(GEN157, GEN157.index(decl) + len(decl))}})
+    r, _ = r8("gen157.hover", rid)
+    res = (r or {}).get("result")
+    c = res.get("contents") if isinstance(res, dict) else None
+    if isinstance(c, dict):
+        return c.get("value", "")
+    return c if isinstance(c, str) else ""
+
+_h_gen = g157_hover("var gen", 5201)
+check("hover.ctorLiteral.instance",
+      "var gen: Gen157(i32, 10)" in _h_gen and "void" not in _h_gen, _h_gen[:160])
+_h_n = g157_hover("let n", 5202)
+check("hover.ctorLiteral.field",
+      "let n: i32 = gen.mem" in _h_n and "= n =" not in _h_n, _h_n[:160])
+
+def g157_comp(needle, rid):
+    off = GEN157.index(needle) + len(needle)
+    s8({"jsonrpc": "2.0", "id": rid, "method": "textDocument/completion", "params": {
+        "textDocument": {"uri": g157uri}, "position": pos(GEN157, off)}})
+    r, _ = r8("gen157.completion", rid)
+    res = (r or {}).get("result")
+    return res.get("items", []) if isinstance(res, dict) else (res or [])
+
+_g157_gen = g157_comp("var p1 = gen.", 5203)
+check("completion.ctorLiteral.members",
+      {"mem", "get"} <= {i["label"] for i in _g157_gen},
+      str([(i["label"], i.get("detail")) for i in _g157_gen])[:200])
+_g157_snips = {i["label"]: i for i in g157_comp("var p2 = G", 5204)}
+check("completion.ctorLiteral.callSnippet",
+      "Gen157(...)" in _g157_snips
+      and _g157_snips["Gen157(...)"].get("insertTextFormat") == 2,
+      str(sorted(_g157_snips))[:200])
+check("completion.ctorLiteral.instanceSnippet",
+      "Gen157(...){...}" in _g157_snips
+      and ".mem =" in (_g157_snips["Gen157(...){...}"].get("insertText") or ""),
+      str(_g157_snips.get("Gen157(...){...}"))[:240])
+_g157_std = {i["label"] for i in g157_comp("var p3 = std.", 5205)}
+check("completion.std.mathNet", {"math", "net"} <= _g157_std,
+      str(sorted(_g157_std))[:200])
+
 try:
     p8.kill()
 except Exception:

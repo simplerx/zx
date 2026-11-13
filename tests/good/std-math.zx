@@ -1,0 +1,29 @@
+// std-math.zx —— std/math.zx 守门：常量、C libm extern、纯 Zx 整数/浮点工具。
+// 浮点函数走 extern "C" 原型（无名形参按位置编号，见 §157），链接到 CRT/libm；
+// 整数工具不依赖任何外部符号。
+// expect-output
+// pi=3.141592653589793 sqrt=4 cbrt=3 pow=1024
+// round=3 4 -3 2.5 3 hypot=5
+// gcd=6 lcm=12 powI=1024 isPow2=true next=64
+// clamp=5 abs=7 min=1.5 max=9 sign=-1
+// deg=3.141592653589793 rad=180
+const std = @mod("std");
+
+pub const main = fn () u8 {
+    std.println("pi={} sqrt={} cbrt={} pow={}", std.math.pi,
+                std.math.sqrt(16.0), std.math.cbrt(27.0), std.math.pow(2.0, 10.0));
+    std.println("round={} {} {} {} {} hypot={}",
+                std.math.floor(3.7), std.math.ceil(3.2), std.math.trunc(-3.7),
+                std.math.fabs(-2.5), std.math.fmod(7.0, 4.0),
+                std.math.hypot(3.0, 4.0));
+    std.println("gcd={} lcm={} powI={} isPow2={} next={}",
+                std.math.gcd(12, 18), std.math.lcm(4, 6), std.math.powI(2, 10),
+                std.math.isPowerOfTwo(64), std.math.nextPowerOfTwo(37));
+    std.println("clamp={} abs={} min={} max={} sign={}",
+                std.math.clampI(9, 0, 5), std.math.absI(-7),
+                std.math.min(1.5, 2.5), std.math.max(1.5, 9.0),
+                std.math.sign(-2.0));
+    std.println("deg={} rad={}", std.math.degToRad(180.0),
+                std.math.radToDeg(std.math.pi));
+    return 0;
+};

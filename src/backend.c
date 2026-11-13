@@ -5666,6 +5666,20 @@ static void ex(Buf *b, Node *n) {
             buf_puts(b, "0");
             return;
         }
+        /* §157 — 模块内裸名内建（g_std_seeded 种进每个模块作用域）。
+         * sema 已把内建符号挂在 callee 上；按符号而不是按名字分派，
+         * 用户自己写的同名函数不会被改道。 */
+        if (n->a->kind == NK_IDENT && n->a->sym) {
+            const char *bi = sema_sym_builtin_name(n->a->sym);
+            if (bi) {
+                if (!strcmp(bi, "print"))       { ex_print(b, n, false); return; }
+                if (!strcmp(bi, "println"))     { ex_print(b, n, true);  return; }
+                if (!strcmp(bi, "format"))      { ex_format(b, n); return; }
+                if (!strcmp(bi, "stackAlloc"))  { ex_stackalloc(b, n); return; }
+                if (!strcmp(bi, "heapAlloc"))   { ex_heapalloc(b, n); return; }
+                if (!strcmp(bi, "heapSlice"))   { ex_heapslice(b, n); return; }
+            }
+        }
         /* std.io.print / println：往句柄流上格式化。按符号的 C 名字认——
          * std.io.print 和 `const io = std.io` 别名拿到的都是同一个符号。 */
         {
@@ -6901,7 +6915,11 @@ static void gen_extern(Node *fn) {
         if (i) buf_puts(&sig, ", ");
         ctype_c(&sig, pt);
         buf_putc(&sig, ' ');
-        buf_puts(&sig, pm->name ? pm->name : "_p");
+        /* 无名形参必须按位置编号：所有参数都叫 `_p` 会让多参 extern 原型
+         * 变成 `double atan2(double _p, double _p)`，C 直接报参数重定义。
+         * 与 emit_params 的 `_p%d` 保持同一套命名。 */
+        if (pm->name) buf_puts(&sig, pm->name);
+        else buf_printf(&sig, "_p%d", i);
     }
     buf_putc(&sig, ')');
     bline(&g_bpub, "%s;", sig.data);

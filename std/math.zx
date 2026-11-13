@@ -1,0 +1,147 @@
+// math.zx —— 数学：常量、整数工具、浮点函数。
+//
+//   const std = @mod("std");
+//   std.println("{}", std.math.sqrt(2.0));
+//   let n = std.math.nextPowerOfTwo(37);       // 64
+//
+// 平台：浮点函数直接 extern 到 C 运行时的 libm（Windows 是 ucrt，POSIX 是
+// libm，zig cc 默认都链得上，不需要 @link）。参数是 f64，和 C double 同构。
+// `extern "C" { pub fn … }` 让 C 符号本身就是 std.math 的公开成员，不另造
+// 一层同名转发——既少一份代码，补全会直接看到真实签名。
+//
+// 简约约定：不做泛型 min/max（容器方法不能泛型，函数泛型要按实例检查），
+// 整数用 *I 后缀、浮点用无后缀，一眼看清走的是哪条路。
+
+// ---- 常量（编译期值，可直接当数组长度 / 泛型实参）-------------------------
+
+pub const pi: f64 = 3.14159265358979323846;
+pub const e: f64 = 2.71828182845904523536;
+pub const tau: f64 = 6.28318530717958647692;
+pub const sqrt2: f64 = 1.41421356237309504880;
+pub const ln2: f64 = 0.69314718055994530942;
+pub const ln10: f64 = 2.30258509299404568402;
+
+// ---- C 运行时的浮点函数（签名必须与 math.h 一致）---------------------------
+
+extern "C" {
+    pub fn sqrt(f64) f64;
+    pub fn cbrt(f64) f64;
+    pub fn pow(f64, f64) f64;
+    pub fn floor(f64) f64;
+    pub fn ceil(f64) f64;
+    pub fn round(f64) f64;
+    pub fn trunc(f64) f64;
+    pub fn fabs(f64) f64;
+    pub fn fmod(f64, f64) f64;
+    pub fn sin(f64) f64;
+    pub fn cos(f64) f64;
+    pub fn tan(f64) f64;
+    pub fn asin(f64) f64;
+    pub fn acos(f64) f64;
+    pub fn atan(f64) f64;
+    pub fn atan2(f64, f64) f64;
+    pub fn exp(f64) f64;
+    pub fn log(f64) f64;
+    pub fn log2(f64) f64;
+    pub fn log10(f64) f64;
+    pub fn hypot(f64, f64) f64;
+}
+
+// ---- 纯 Zx 的整数工具（不依赖任何外部符号）---------------------------------
+
+pub const absI = fn (x: i32) i32 {
+    if (x < 0) { return -x; }
+    return x;
+};
+
+pub const minI = fn (a: i32, b: i32) i32 {
+    if (a < b) { return a; }
+    return b;
+};
+
+pub const maxI = fn (a: i32, b: i32) i32 {
+    if (a > b) { return a; }
+    return b;
+};
+
+pub const clampI = fn (x: i32, lo: i32, hi: i32) i32 {
+    if (x < lo) { return lo; }
+    if (x > hi) { return hi; }
+    return x;
+};
+
+pub const gcd = fn (a: u32, b: u32) u32 {
+    var x = a;
+    var y = b;
+    while (y != 0) {
+        let t = x % y;
+        x = y;
+        y = t;
+    }
+    return x;
+};
+
+pub const lcm = fn (a: u32, b: u32) u32 {
+    if (a == 0 || b == 0) { return 0; }
+    return a / gcd(a, b) * b;
+};
+
+// 快速幂：u32 溢出按无符号回绕，和 Zx 的整数语义一致。
+pub const powI = fn (base: u32, n: u32) u32 {
+    var r: u32 = 1;
+    var b = base;
+    var k = n;
+    while (k > 0) {
+        if (k % 2 == 1) { r = r * b; }
+        b = b * b;
+        k = k / 2;
+    }
+    return r;
+};
+
+pub const isPowerOfTwo = fn (x: u32) bool {
+    if (x == 0) { return false; }
+    var v = x;
+    while (v > 1) {
+        if (v % 2 == 1) { return false; }
+        v = v / 2;
+    }
+    return true;
+};
+
+pub const nextPowerOfTwo = fn (x: u32) u32 {
+    if (x <= 1) { return 1; }
+    var v: u32 = 1;
+    while (v < x) {
+        if (v > 2147483648) { return 0; }   // 再翻一倍就溢出 u32
+        v = v * 2;
+    }
+    return v;
+};
+
+// ---- 纯 Zx 的浮点小工具 ----------------------------------------------------
+
+pub const min = fn (a: f64, b: f64) f64 {
+    if (a < b) { return a; }
+    return b;
+};
+
+pub const max = fn (a: f64, b: f64) f64 {
+    if (a > b) { return a; }
+    return b;
+};
+
+pub const clamp = fn (x: f64, lo: f64, hi: f64) f64 {
+    if (x < lo) { return lo; }
+    if (x > hi) { return hi; }
+    return x;
+};
+
+pub const sign = fn (x: f64) i32 {
+    if (x < 0.0) { return -1; }
+    if (x > 0.0) { return 1; }
+    return 0;
+};
+
+pub const degToRad = fn (d: f64) f64 { return d * pi / 180.0; };
+pub const radToDeg = fn (r: f64) f64 { return r * 180.0 / pi; };

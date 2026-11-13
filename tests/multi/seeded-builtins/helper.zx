@@ -1,0 +1,30 @@
+// helper.zx —— 模块里直接用编译器种进作用域的裸名内建（g_std_seeded）。
+// §157 守门：以前只有 `std.xxx` 的 NK_FIELD 分支认这些调用，裸名会被 sema
+// 判成 TY_INVALID 静默放过，后端再吐出未声明的 C 标识符（B1001「编译器
+// bug」）。现在限定名与裸名共用一条分派；输出必须和等价的 std. 前缀写法一致。
+pub const probe = fn () void {
+    print("print-ok ");
+    println("println-ok {}", 7);
+
+    var stack = stackAlloc(u8, 4);
+    stack.0 = 65;
+    println("stack={}", stack.0);
+
+    let a = heap.page;                       // heap 本身也是种进来的裸名
+    var fixed = heapAlloc(a, i32, 3);
+    fixed.1 = 9;
+    println("fixed={}", fixed[1]);
+    a.free(a.ctx, (*u8)fixed, 3 * @type(i32).size);
+
+    var slice = heapSlice(a, i32, 2);
+    slice[0] = 11;
+    slice[1] = 12;
+    println("slice={} {} len={}", slice[0], slice[1], slice.len);
+    a.free(a.ctx, (*u8)slice.ptr, slice.len * @type(i32).size);
+
+    var out = format(a, "fmt={}", 42);
+    if (out) s {
+        println("{} len={}", s, s.len);
+        a.free(a.ctx, s.ptr, s.len);
+    }
+};

@@ -1,0 +1,48 @@
+// std-net.zx —— std/net.zx 守门：地址/字节序工具 + TCP/UDP 本机回环。
+// 端口 0 让系统挑空闲端口，listen 的 backlog 在内核里排队，单线程就能自连接；
+// 不打印端口号，输出稳定。Windows 走 Winsock2（@link("ws2_32") 写在模块里）。
+// expect-output
+// ipv4=2130706433 bytes=4660 305419896
+// tcp=112105110103
+// udp=4 11710011233
+const std = @mod("std");
+
+pub const main = fn () u8 {
+    if (!std.net.init()) { return 1; }
+    std.println("ipv4={} bytes={} {}", std.net.ipv4(127, 0, 0, 1),
+                std.net.netToHost16(std.net.hostToNet16(4660)),
+                std.net.netToHost32(std.net.hostToNet32(305419896)));
+
+    if (std.net.TcpListener.open(0)) ls {
+        var listener = ls;
+        if (std.net.TcpStream.dial(std.net.loopback, listener.port)) c {
+            var cli = c;
+            if (listener.acceptOne()) a {
+                var srv = a;
+                let ping = "ping";
+                if (cli.write(ping[0..4]) != 4) { return 2; }
+                var ibuf = std.stackAlloc(u8, 8);
+                if (srv.read(ibuf[0..4]) != 4) { return 3; }
+                std.println("tcp={}{}{}{}", ibuf.0, ibuf.1, ibuf.2, ibuf.3);
+                srv.close();
+            } else { return 4; }
+            cli.close();
+        } else { return 5; }
+        listener.close();
+    } else { return 6; }
+
+    if (std.net.UdpSocket.open(0)) u {
+        var udp = u;
+        let dgram = "udp!";
+        if (udp.sendTo(std.net.loopback, udp.port, dgram[0..4]) != 4) { return 7; }
+        var dbuf = std.stackAlloc(u8, 8);
+        var ip: u32 = 0;
+        var port: u16 = 0;
+        let n = udp.recvFrom(dbuf[0..4], &ip, &port);
+        std.println("udp={} {}{}{}{}", n, dbuf.0, dbuf.1, dbuf.2, dbuf.3);
+        udp.close();
+    } else { return 8; }
+
+    std.net.deinit();
+    return 0;
+};

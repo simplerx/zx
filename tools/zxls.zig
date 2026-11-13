@@ -4577,10 +4577,102 @@ fn memberIsTypeDecl(files: []const []const u8, body: []const u8, member: []const
     return false;
 }
 
+/// §157 — 类型构造函数实例的字段类型替换。
+/// `var gen = Gen(i32, 10){…};` 里 `mem: T` 在 `gen.mem` / `gen.get()` 上
+/// 应该显示 i32，而不是泛型形参名 T。只认签名里 `: type` 的那个形参，
+/// 按位置取调用点第一个实参；替换是整词边界，别的名字原样返回。
+/// 与 genericBodyOf 的「编译期实参不做替换」不冲突：那条是**补全 detail**
+/// 的展示约定，这里是推断出来的具体类型。
+fn substGenericArg(text: []const u8, base: []const u8, ty0: []const u8) []const u8 {
+    var ty = trimSl(ty0);
+    // fieldTypeIn 会把字段默认值一起读进来（`mem: T = n` → `T = n`）。
+    // 推断出的**类型**只取 '=' 前面那段，否则 hint 变成 `: i32 = n`
+    // 被合法字符检查挡掉，hover 也会拼成 `let n: i32 = n = gen.mem`。
+    if (std.mem.indexOfScalar(u8, ty, '=')) |eqp| ty = trimSl(ty[0..eqp]);
+    if (ty.len == 0 or ty.len > 48) return ty;
+    const bst = findDeclStmt(text, base) orelse return ty;
+    const init = trimSl(declInitOf(bst) orelse return ty);
+    const lp = std.mem.indexOfScalar(u8, init, '(') orelse return ty;
+    const head = trimSl(init[0..lp]);
+    if (head.len == 0 or !isPurePath(head)) return ty;
+    const cst = findDeclStmt(text, head) orelse return ty;
+    const sig = sigOfStmt(cst);
+    var tp: []const u8 = "";
+    var ti: usize = 0;
+    for (sig.params) |p| {
+        ti += 1;
+        const c = std.mem.indexOfScalar(u8, p, ':') orelse continue;
+        if (std.mem.eql(u8, trimSl(p[c + 1 ..]), "type")) { tp = paramName(p); break; }
+    }
+    if (tp.len == 0) return ty;
+    if (std.mem.indexOf(u8, ty, tp) == null) return ty;
+    // 取第 ti 个实参（类型形参通常就是第一个）
+    var ai = lp + 1;
+    var which: usize = 1;
+    while (which < ti) : (which += 1) {
+        const comma = std.mem.indexOfScalarPos(u8, init, ai, ',') orelse return ty;
+        ai = comma + 1;
+    }
+    while (ai < init.len and (init[ai] == ' ' or init[ai] == '\t')) ai += 1;
+    var ae = ai;
+    while (ae < init.len and init[ae] != ',' and init[ae] != ')') ae += 1;
+    const arg = trimSl(init[ai..ae]);
+    if (arg.len == 0 or arg.len > 48) return ty;
+    if (std.mem.eql(u8, ty, tp)) return arg;
+    const at = std.mem.indexOf(u8, ty, tp).?;
+    // 整词边界：前一个字符是标识符就不能当形参名（Gen 里的 Generator 之类）
+    if (at > 0 and isIdentChar(ty[at - 1])) return ty;
+    if (at + tp.len < ty.len and isIdentChar(ty[at + tp.len])) return ty;
+    var out: std.ArrayList(u8) = .empty;
+    out.appendSlice(gpa, ty[0..at]) catch return ty;
+    out.appendSlice(gpa, arg) catch return ty;
+    out.appendSlice(gpa, ty[at + tp.len ..]) catch return ty;
+    return out.items;
+}
+
 fn inferExprType(text: []const u8, doc: *const Document, expr: []const u8, depth: u8) ?[]const u8 {
     const e = trimSl(expr);
     if (e.len == 0) return null;
     if (std.mem.startsWith(u8, e, "@mod(")) return null;
+    // §157 — 泛型构造式实例的字段 / 方法：`var gen = Gen(i32,10){…};`
+    // 之后 `gen.mem` 要出 `: i32`、`gen.get()` 要出方法返回类型。
+    // 放在最前面：下面的「类型值接收者」链会把初值里的 `Gen(...)` 当成
+    // 类型值，实例成员被吞掉（用户 2026-11-13 截图：`let n = gen.mem;`
+    // 没有行内类型）。只认「base 绑定到 Name(args){…}」这一种形态。
+    if (depth < 3 and std.mem.indexOfScalar(u8, e, '.') != null) {
+        const d0 = std.mem.lastIndexOfScalar(u8, e, '.').?;
+        const base = trimSl(e[0..d0]);
+        var member = trimSl(e[d0 + 1 ..]);
+        if (std.mem.indexOfScalar(u8, member, '(')) |op|
+            member = trimSl(member[0..op]);
+        if (base.len > 0 and member.len > 0 and isPurePath(base) and isPurePath(member)) {
+            if (findDeclStmt(text, base)) |bst| {
+                const ini = trimSl(declInitOf(bst) orelse "");
+                if (ini.len > 2 and ini[ini.len - 1] == '}') {
+                    if (std.mem.indexOfScalar(u8, ini, '(')) |lp| {
+                        const rp = std.mem.lastIndexOfScalar(u8, ini, ')') orelse lp;
+                        var k = rp + 1;
+                        while (k < ini.len and (ini[k] == ' ' or ini[k] == '\t' or
+                            ini[k] == '\n' or ini[k] == '\r')) k += 1;
+                        if (k < ini.len and ini[k] == '{') {
+                            const head = trimSl(ini[0..lp]);
+                            var sg = scanFiles(doc, text);
+                            defer sg.deinit(gpa);
+                            if (genericBodyOf(sg.items, head)) |bod| {
+                                if (fieldTypeIn(bod, member)) |ft|
+                                    return substGenericArg(text, base, ft);
+                                if (findDeclStmt(bod, member)) |ms| {
+                                    const msig = sigOfStmt(ms);
+                                    if (msig.is_fn and msig.ret.len > 0)
+                                        return substGenericArg(text, base, msig.ret);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     // KEEP - 类型值别名上的调用（2026-11-12 用户截图：类型不显示）。
     // `const Hs: type = std.map.HashMap(V: i32);` 之后写
     // `var map = Hs.init(std.heap.page);`，旧链只认纯路径类型值绑定
@@ -4763,6 +4855,39 @@ fn inferExprType(text: []const u8, doc: *const Document, expr: []const u8, depth
                 if (elemTyOf(bt)) |t| return t;
             }
             return null;
+        }
+    }
+    // §157 — 类型构造函数实例直接接字面量：`var gen = Gen(i32, 10){ .mem = 10 };`
+    // 初值以 '}' 收尾而不是 ')'，finalCallOpen 认不出；旧链一路落到裸标识符
+    // 分支，`gen` 的行内 `: Type`、hover、`let n = gen.mem;` 的字段类型全断。
+    // 收敛成实例串 `Gen(i32, 10)`：containerNameOf 截到 '(' 前的容器名，
+    // 补全 / 字段链照常接得上，行内提示也能显示实参（见白名单加的括号）。
+    if (e.len > 4 and e[e.len - 1] == '}') {
+        const lp = std.mem.indexOfScalar(u8, e, '(') orelse 0;
+        if (lp > 0 and isPurePath(trimSl(e[0..lp]))) {
+            var dp: usize = 0;
+            var rp: ?usize = null;
+            var q: usize = lp;
+            while (q < e.len) : (q += 1) {
+                if (e[q] == '(') { dp += 1; continue; }
+                if (e[q] == ')') {
+                    if (dp == 0) break;
+                    dp -= 1;
+                    if (dp == 0) { rp = q; break; }
+                }
+            }
+            if (rp) |r| {
+                var lb = r + 1;
+                while (lb < e.len and (e[lb] == ' ' or e[lb] == '\t' or
+                    e[lb] == '\n' or e[lb] == '\r')) lb += 1;
+                if (lb < e.len and e[lb] == '{') {
+                    const head = trimSl(e[0..lp]);
+                    var sg = scanFiles(doc, text);
+                    defer sg.deinit(gpa);
+                    if (isContainerIn(sg.items, head) or genericBodyOf(sg.items, head) != null)
+                        return trimSl(e[0 .. r + 1]);
+                }
+            }
         }
     }
     // 调用：path(args)。取**末位**那个 '('（`std.map.HashMap(i32).init(x)`
@@ -5020,14 +5145,22 @@ fn inferExprType(text: []const u8, doc: *const Document, expr: []const u8, depth
                     }
                 }
             }
-            // 实例成员 → 容器体里的字段类型 / 方法返回类型
+            // 实例成员 → 容器体里的字段类型 / 方法返回类型。
+            // §157：泛型 fn 的 `return struct {…}` 走 genericBodyOf，
+            // 而且字段类型里的 `T` 要按调用点实参替换成具体类型。
             if (instanceContainerTy(sf.items, text, base)) |ty| {
-                if (findContainerBody(sf.items, ty)) |ch| {
-                    if (fieldTypeIn(ch.body, member)) |t| return t;
-                    if (memberIsTypeDecl(sf.items, ch.body, member)) return "type";
-                    if (findDeclStmt(ch.body, member)) |stmt| {
+                const ibody: ?[]const u8 = if (findContainerBody(sf.items, ty)) |ch|
+                    ch.body
+                else
+                    genericBodyOf(sf.items, ty);
+                if (ibody) |bod| {
+                    if (fieldTypeIn(bod, member)) |t|
+                        return substGenericArg(text, base, t);
+                    if (memberIsTypeDecl(sf.items, bod, member)) return "type";
+                    if (findDeclStmt(bod, member)) |stmt| {
                         const sig = sigOfStmt(stmt);
-                        if (sig.is_fn and sig.ret.len > 0) return sig.ret;
+                        if (sig.is_fn and sig.ret.len > 0)
+                            return substGenericArg(text, base, sig.ret);
                     }
                 }
             }
@@ -6859,7 +6992,7 @@ fn inlayHintsAt(doc: *const Document, start_line: u32, end_line: u32) []const u8
         for (ty) |ch| {
             if (!(isIdentChar(ch) or ch == '.' or ch == '*' or ch == '[' or
                 ch == ']' or ch == '?' or ch == '!' or ch == '{' or ch == '}' or
-                ch == ',' or ch == ' ' or ch == ':')) {
+                ch == ',' or ch == ' ' or ch == ':' or ch == '(' or ch == ')')) {
                 valid = false;
                 break;
             }
@@ -7343,6 +7476,64 @@ fn addCallSnippet(list: *Json, seen: *std.StringHashMapUnmanaged(void),
     seen.put(gpa, dupe(name), {}) catch {};
 }
 
+/// §157 — 类型构造函数（`fn (T: type, n: T) type`）除了 `Name(...) 调用骨架`，
+/// 再给一条能直接落地的实例构造骨架：`Gen(i32, 10){ .mem = 0 }`。
+/// 它既不是普通函数（调用只得到类型值），也不是 `const X = struct` 的具名
+/// 容器（addCtorSnippet 认不到），旧链只有调用骨架，写实例得手敲后半截。
+/// 字段从泛型 fn 体的 struct 取，最多三个，占位顺序接着实参往后排。
+fn addGenericCtorSnippet(list: *Json, seen: *std.StringHashMapUnmanaged(void),
+                         doc: *const Document, text: []const u8, name: []const u8) void {
+    var sf = scanFiles(doc, text);
+    defer sf.deinit(gpa);
+    const body = genericBodyOf(sf.items, name) orelse return;
+    var fields: std.ArrayList(Decl) = .empty;
+    defer fields.deinit(gpa);
+    // 泛型体的原文是 `{…}`：parseAnonTy 会把裸 `{…}` 当元组，字段全变成
+    // 无名位置项。补上 `struct` 前缀才走具名字段分支。
+    var sty: std.ArrayList(u8) = .empty;
+    defer sty.deinit(gpa);
+    sty.appendSlice(gpa, "struct") catch return;
+    sty.appendSlice(gpa, body) catch return;
+    _ = tyMembersOf(sf.items, sty.items, &fields);
+    const st = findDeclStmt(text, name) orelse return;
+    const sig = sigOfStmt(st);
+    var ins: std.ArrayList(u8) = .empty;
+    defer ins.deinit(gpa);
+    ins.appendSlice(gpa, name) catch return;
+    ins.append(gpa, '(') catch return;
+    var tab: usize = 1;
+    var first = true;
+    for (sig.params) |p0| {
+        if (tab > 6) break;
+        if (!first) ins.appendSlice(gpa, ", ") catch return;
+        first = false;
+        ins.print(gpa, "${{{d}:", .{tab}) catch return;
+        const nm = paramName(p0);
+        if (nm.len == 0) {
+            escapeSnippet(&ins, paramPlaceholderText(p0));
+        } else {
+            escapeSnippet(&ins, nm);
+        }
+        ins.append(gpa, '}') catch return;
+        tab += 1;
+    }
+    ins.appendSlice(gpa, "){ ") catch return;
+    var used: usize = 0;
+    for (fields.items) |dcl| {
+        if (dcl.kind != .field or dcl.name.len == 0 or used >= 3) continue;
+        if (used > 0) ins.appendSlice(gpa, ", ") catch return;
+        ins.print(gpa, ".{s} = ${{{d}:0}}", .{ dcl.name, tab }) catch return;
+        used += 1;
+        tab += 1;
+    }
+    if (used == 0) return;
+    ins.appendSlice(gpa, " }$0") catch return;
+    var lab: std.ArrayList(u8) = .empty;
+    defer lab.deinit(gpa);
+    lab.print(gpa, "{s}(...){{...}}", .{name}) catch return;
+    addSnippetRaw(list, seen, lab.items, ins.items, "构造泛型实例");
+}
+
 fn addCtorSnippet(list: *Json, seen: *std.StringHashMapUnmanaged(void),
                   files: []const []const u8, name: []const u8) void {
     var fields: std.ArrayList(Decl) = .empty;
@@ -7388,8 +7579,12 @@ fn addExprSnippets(list: *Json, seen: *std.StringHashMapUnmanaged(void),
         // 是 .value（is_fn 只标裸 fn NAME(），那条给 extern 绑定用）。
         var is_fn_decl = false;
         if (findDeclStmt(text, d.name)) |st| {
-            if (sigOfStmt(st).is_fn) {
+            const sd = sigOfStmt(st);
+            if (sd.is_fn) {
                 addCallSnippet(list, seen, text, d.name);
+                // §157：类型构造函数（`return struct {…}`）再给一条实例构造
+                // 骨架；普通函数里没有 struct 体，helper 自己会退出。
+                addGenericCtorSnippet(list, seen, doc, text, d.name);
                 is_fn_decl = true;
             }
         }
@@ -7674,6 +7869,18 @@ fn isTypeValuedRecv(files: []const []const u8, doc: *const Document,
     const init = declInitOf(st) orelse return false;
     const e = trimSl(init);
     if (e.len == 0) return false;
+    // §157 — `Gen(i32,10){ .mem = 10 }` 是**实例值**，不是类型值。
+    // 末尾的字面量把类型构造式折成了 struct 值；按类型值接收者处理会让
+    // `gen.mem` 掉进 containerOfBinding 的空结果里直接 return null（行内
+    // `: i32` 与 hover 全断）。`Gen(i32,10)`（没有字面量）仍是类型值。
+    if (e.len > 2 and e[e.len - 1] == '}') {
+        if (std.mem.lastIndexOfScalar(u8, e, ')')) |rp| {
+            var lb = rp + 1;
+            while (lb < e.len and (e[lb] == ' ' or e[lb] == '\t' or
+                e[lb] == '\n' or e[lb] == '\r')) lb += 1;
+            if (lb < e.len and e[lb] == '{') return false;
+        }
+    }
     // 裸别名：const A = B;
     var j: usize = 0;
     while (j < e.len and isIdentChar(e[j])) j += 1;

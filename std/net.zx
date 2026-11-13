@@ -1,0 +1,226 @@
+// net.zx —— 同步网络：IPv4 地址、TCP 监听/连接、UDP 数据报。
+//
+//   const std = @mod("std");
+//   if (!std.net.init()) { return 1; }
+//   defer std.net.deinit();
+//   if (std.net.TcpListener.open(0)) ls {
+//       if (std.net.TcpStream.dial(std.net.loopback, ls.port)) c {
+//           if (ls.acceptOne()) s { ... }
+//       }
+//   }
+//
+// 平台：Windows Winsock2 先行（和 time.zx 的平台策略一致）。`@link("ws2_32")`
+// 写在模块里，只有真正引用 std.net 的程序才会加载本模块、才会链这个库。
+// POSIX 版等语言有条件编译后再补：对外 API 不变，换掉下面这组 extern 即可。
+//
+// 设计：句柄就是 u64，容器上只有 open/dial/read/write/close 这类实例方法；
+// C 符号一律不 pub，避免用户绕过封装直接调 bind/connect（两条平行路径）。
+// 所有失败用 `?T` 的 null 或 -1 表达，不用异常、不用错误码枚举。
+//
+// 端口 0 = 让系统挑一个空闲端口，open 之后用 `ls.port` 读实际端口；
+// 因此单进程自连接测试不需要多线程（listen 的 backlog 在内核里排队）。
+
+@link("ws2_32");
+
+const AF_INET: i32 = 2;
+const SOCK_STREAM: i32 = 1;
+const SOCK_DGRAM: i32 = 2;
+const IPPROTO_TCP: i32 = 6;
+const SOCKADDR_LEN: i32 = 16;
+
+// sockaddr_in 的 C 布局：u16 family / u16 port / u32 addr / 8 字节 sin_zero。
+// Zx 没有数组值类型（`*[N]T` 是指针），sin_zero 用一个 u64 占位，尺寸仍是 16。
+const SockAddrIn = extern struct {
+    family: u16,
+    port: u16,
+    addr: u32,
+    pad: u64,
+};
+
+extern "C" {
+    fn WSAStartup(v: u16, data: *u8) i32;
+    fn WSACleanup() i32;
+    fn socket(af: i32, ty: i32, proto: i32) u64;
+    fn closesocket(s: u64) i32;
+    fn bind(s: u64, addr: *u8, len: i32) i32;
+    fn listen(s: u64, backlog: i32) i32;
+    fn accept(s: u64, addr: *u8, len: *i32) u64;
+    fn connect(s: u64, addr: *u8, len: i32) i32;
+    fn send(s: u64, buf: *u8, len: i32, flags: i32) i32;
+    fn recv(s: u64, buf: *u8, len: i32, flags: i32) i32;
+    fn sendto(s: u64, buf: *u8, len: i32, flags: i32, to: *u8, tolen: i32) i32;
+    fn recvfrom(s: u64, buf: *u8, len: i32, flags: i32, from: *u8, fromlen: *i32) i32;
+    fn getsockname(s: u64, addr: *u8, len: *i32) i32;
+    fn htons(v: u16) u16;
+    fn ntohs(v: u16) u16;
+    fn htonl(v: u32) u32;
+    fn ntohl(v: u32) u32;
+}
+
+// ---- 公开的地址 / 字节序工具 -----------------------------------------------
+
+pub const loopback: u32 = 0x7F000001;          // 127.0.0.1，主机序
+
+pub const ipv4 = fn (b0: u8, b1: u8, b2: u8, b3: u8) u32 {
+    return (u32)b0 * 16777216 + (u32)b1 * 65536 + (u32)b2 * 256 + (u32)b3;
+};
+
+pub const hostToNet16 = fn (v: u16) u16 { return htons(v); };
+pub const netToHost16 = fn (v: u16) u16 { return ntohs(v); };
+pub const hostToNet32 = fn (v: u32) u32 { return htonl(v); };
+pub const netToHost32 = fn (v: u32) u32 { return ntohl(v); };
+
+pub const Ipv4 = struct {
+    pub addr: u32,
+    pub port: u16,
+};
+
+// ---- 进程级初始化 ----------------------------------------------------------
+
+pub const init = fn () bool {
+    // WSAData 在 Windows 上是 ~400 字节；库只把指针交给系统，不解析内容。
+    // 一帧栈缓冲就够了：不用向堆要内存，也不用留一块没人管的全局缓冲。
+    var data = stackAlloc(u8, 512);
+    return WSAStartup(0x0202, (*u8)data) == 0;
+};
+
+pub const deinit = fn () void { _ = WSACleanup(); };
+
+// ---- 内部小工具 ------------------------------------------------------------
+
+// INVALID_SOCKET 是 ~0（u64 全 1）。正常句柄是内核对象索引，远小于 2^32；
+// 高 32 位非零只可能是错误返回值。
+const badSocket = fn (s: u64) bool { return s > 4294967295; };
+
+const sockaddr = fn (ip: u32, port: u16) SockAddrIn {
+    return SockAddrIn{
+        .family = 2,
+        .port = htons(port),
+        .addr = htonl(ip),
+        .pad = 0,
+    };
+};
+
+// ---- TCP -------------------------------------------------------------------
+
+pub const TcpStream = struct {
+    pub fd: u64,
+
+    pub const dial = fn (ip: u32, port: u16) ?Self {
+        let s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (badSocket(s)) { return null; }
+        var sa = sockaddr(ip, port);
+        if (connect(s, (*u8)&sa, SOCKADDR_LEN) != 0) {
+            _ = closesocket(s);
+            return null;
+        }
+        return Self{ .fd = s };
+    };
+
+    // 返回实际收发的字节数；-1 表示出错，0 表示对端关闭（TCP）。
+    pub const write = fn (self: Self, data: []const u8) i32 {
+        return send(self.fd, (*u8)data.ptr, (i32)data.len, 0);
+    };
+
+    pub const read = fn (self: Self, buf: []u8) i32 {
+        return recv(self.fd, (*u8)buf.ptr, (i32)buf.len, 0);
+    };
+
+    pub const close = fn (self: *Self) void {
+        if (self.fd != 0) {
+            _ = closesocket(self.fd);
+            self.fd = 0;
+        }
+    };
+};
+
+pub const TcpListener = struct {
+    pub fd: u64,
+    pub port: u16,
+
+    pub const open = fn (port: u16) ?Self {
+        let s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (badSocket(s)) { return null; }
+        var sa = sockaddr(loopback, port);
+        if (bind(s, (*u8)&sa, SOCKADDR_LEN) != 0) {
+            _ = closesocket(s);
+            return null;
+        }
+        if (listen(s, 4) != 0) {
+            _ = closesocket(s);
+            return null;
+        }
+        var len: i32 = SOCKADDR_LEN;
+        if (getsockname(s, (*u8)&sa, &len) != 0) {
+            _ = closesocket(s);
+            return null;
+        }
+        return Self{ .fd = s, .port = netToHost16(sa.port) };
+    };
+
+    pub const acceptOne = fn (self: Self) ?TcpStream {
+        var peer = sockaddr(0, 0);
+        var len: i32 = SOCKADDR_LEN;
+        let s = accept(self.fd, (*u8)&peer, &len);
+        if (badSocket(s)) { return null; }
+        return TcpStream{ .fd = s };
+    };
+
+    pub const portOf = fn (self: Self) u16 { return self.port; };
+
+    pub const close = fn (self: *Self) void {
+        if (self.fd != 0) {
+            _ = closesocket(self.fd);
+            self.fd = 0;
+        }
+    };
+};
+
+// ---- UDP -------------------------------------------------------------------
+
+pub const UdpSocket = struct {
+    pub fd: u64,
+    pub port: u16,
+
+    pub const open = fn (port: u16) ?Self {
+        let s = socket(AF_INET, SOCK_DGRAM, 0);
+        if (badSocket(s)) { return null; }
+        var sa = sockaddr(loopback, port);
+        if (bind(s, (*u8)&sa, SOCKADDR_LEN) != 0) {
+            _ = closesocket(s);
+            return null;
+        }
+        var len: i32 = SOCKADDR_LEN;
+        if (getsockname(s, (*u8)&sa, &len) != 0) {
+            _ = closesocket(s);
+            return null;
+        }
+        return Self{ .fd = s, .port = netToHost16(sa.port) };
+    };
+
+    pub const sendTo = fn (self: Self, ip: u32, port: u16, data: []const u8) i32 {
+        var sa = sockaddr(ip, port);
+        return sendto(self.fd, (*u8)data.ptr, (i32)data.len, 0,
+                      (*u8)&sa, SOCKADDR_LEN);
+    };
+
+    // 收到数据时把对端地址写回 out_ip / out_port（都是主机序）。
+    pub const recvFrom = fn (self: Self, buf: []u8, out_ip: *u32, out_port: *u16) i32 {
+        var peer = sockaddr(0, 0);
+        var len: i32 = SOCKADDR_LEN;
+        let n = recvfrom(self.fd, (*u8)buf.ptr, (i32)buf.len, 0,
+                         (*u8)&peer, &len);
+        if (n > 0) {
+            out_ip.0 = netToHost32(peer.addr);
+            out_port.0 = netToHost16(peer.port);
+        }
+        return n;
+    };
+
+    pub const close = fn (self: *Self) void {
+        if (self.fd != 0) {
+            _ = closesocket(self.fd);
+            self.fd = 0;
+        }
+    };
+};

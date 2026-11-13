@@ -566,6 +566,21 @@ enum { BI_NONE, BI_PRINT, BI_PRINTLN, BI_FORMAT, BI_HEAP, BI_FILE, BI_FILE_FN,
        BI_PROC, BI_PROC_FN, BI_DEBUG, BI_DEBUG_FN, BI_TASK, BI_TASK_FN,
        BI_SYNC, BI_SYNC_FN };
 
+/* 后端分派裸名内建调用用：Symbol 的 builtin 编号不对外暴露，只给名字。
+ * 用户自己写的同名函数 builtin == BI_NONE，返回 NULL，不会被改道。 */
+const char *sema_sym_builtin_name(Symbol *s) {
+    if (!s || s->kind != SK_NS) return NULL;
+    switch (s->builtin) {
+    case BI_PRINT:      return "print";
+    case BI_PRINTLN:    return "println";
+    case BI_FORMAT:     return "format";
+    case BI_STACKALLOC: return "stackAlloc";
+    case BI_HEAPALLOC:  return "heapAlloc";
+    case BI_HEAPSLICE:  return "heapSlice";
+    default:            return NULL;
+    }
+}
+
 /* ---------------- 内建类型 Allocator ----------------
  *
  * std.format 要把结果放回堆上，按 spec §13 的约定必须显式传分配器。
@@ -4234,68 +4249,87 @@ static void debug_inject_loc(Node *n) {
 
 static Type *check_call(Node *n, Type *expect) {
     (void)expect;
-    /* 内建命名空间方法：std.print / std.println / std.format */
+    /* 内建调用分派：限定名 `std.println` 与模块内裸名 `println` 走同一条路。
+     * 裸名是 g_std_seeded 种进每个模块作用域的；以前只有 NK_FIELD 分支认，
+     * 裸名调用在 sema 里被判成 TY_INVALID 静默放过，
+     * 后端再吐出未声明的 C 标识符（§157：std/net.zx 里的
+     * `stackAlloc(u8,512)` 就是这么炸的，报 B1001）。 */
+    Symbol *m = NULL;
     if (n->a->kind == NK_FIELD && n->a->a && n->a->a->kind == NK_IDENT) {
         Type *bt = check_expr(n->a->a, NULL);
         if (bt && bt->kind == TY_TYPE && n->a->a->sym && n->a->a->sym->kind == SK_NS) {
-            Symbol *m = ns_member(n->a->a->sym, n->a->name, n->a->line, n->a->col);
+            m = ns_member(n->a->a->sym, n->a->name, n->a->line, n->a->col);
             if (!m) return type_of(n, ty_invalid());
-            if (m->builtin == BI_PRINT || m->builtin == BI_PRINTLN || m->builtin == BI_FORMAT) {
-                bool isfmt = (m->builtin == BI_FORMAT);
-                int first = 0;
-                if (isfmt) {            /* std.format(alloc, fmt, args…) */
-                    if (n->nitems < 2)
-                        return BAD(n, "std.format needs an allocator and a format string");
-                    Type *at = check_expr(n->items[0], sema_allocator_type());
-                    coerce_node(n->items[0], at, sema_allocator_type(), "allocator");
-                    first = 1;
-                } else if (n->nitems < 1) {
-                    return BAD(n, "std.%s needs a format string", m->name);
-                }
-                Type *ft = check_expr(n->items[first], ty_slice(ty_u8(), true));
-                coerce_node(n->items[first], ft, ty_slice(ty_u8(), true), "format string");
-                for (int i = first + 1; i < n->nitems; i++) check_expr(n->items[i], NULL);
-                check_fmt_args(n, first, n->nitems - first - 1);
-                if (isfmt) return type_of(n, ty_err(ty_slice(ty_u8(), false)));
-                return type_of(n, ty_void());
+        }
+    } else if (n->a->kind == NK_IDENT) {
+        /* 只认编译器种进去的内建符号：模块自己声明同名函数时
+         * lookup 拿到的是 SK_FN（builtin == BI_NONE），不会被改道。 */
+        Symbol *s = lookup(n->a->name);
+        if (s && s->kind == SK_NS &&
+            (s->builtin == BI_PRINT || s->builtin == BI_PRINTLN ||
+             s->builtin == BI_FORMAT || s->builtin == BI_STACKALLOC ||
+             s->builtin == BI_HEAPALLOC || s->builtin == BI_HEAPSLICE)) {
+            n->a->sym = s;
+            s->used = true;
+            m = s;
+        }
+    }
+    if (m) {
+        if (m->builtin == BI_PRINT || m->builtin == BI_PRINTLN || m->builtin == BI_FORMAT) {
+            bool isfmt = (m->builtin == BI_FORMAT);
+            int first = 0;
+            if (isfmt) {            /* std.format(alloc, fmt, args…) */
+                if (n->nitems < 2)
+                    return BAD(n, "std.format needs an allocator and a format string");
+                Type *at = check_expr(n->items[0], sema_allocator_type());
+                coerce_node(n->items[0], at, sema_allocator_type(), "allocator");
+                first = 1;
+            } else if (n->nitems < 1) {
+                return BAD(n, "std.%s needs a format string", m->name);
             }
-            /* 分配 API：stackAlloc/heapAlloc 返回 *[N]T（长度在类型里），
-             * heapSlice 返回 []T（长度在值里，n 可运行期）。§130 的编译期
-             * 合并依赖 N 是常量算静态布局，所以只有 heapAlloc 进 region。 */
-            if (m->builtin == BI_STACKALLOC || m->builtin == BI_HEAPALLOC ||
-                m->builtin == BI_HEAPSLICE) {
-                bool stack = (m->builtin == BI_STACKALLOC);
-                bool slice = (m->builtin == BI_HEAPSLICE);
-                if (n->nitems != (stack ? 2 : 3))
-                    return BAD(n, "std.%s takes %s, a type and a count", m->name,
-                               stack ? "a type" : "an allocator");
-                int base = 0;
-                if (!stack) {
-                    Type *at = check_expr(n->items[0], sema_allocator_type());
-                    coerce_node(n->items[0], at, sema_allocator_type(), "allocator");
-                    base = 1;
-                }
-                Type *elem = resolve_type(n->items[base]);
-                if (!elem || elem->kind == TY_INVALID || elem->kind == TY_TYPE ||
-                    elem->kind == TY_VOID)
-                    return BAD(n, "std.%s cannot allocate `%s`", m->name,
-                               elem ? ty_str(elem) : "?");
-                check_expr(n->items[base + 1], ty_usize());
-                if (slice)
-                    return type_of(n, ty_slice(elem, false));
-                IntV c = ev_int(n->items[base + 1]);
-                if (!c.ok)
-                    return BAD(n->items[base + 1],
-                               "std.%s count must be known at compile time", m->name);
-                n->esc = stack;          /* 栈那份指向当前帧：逃逸检查盯它 */
-                if (!stack && !n->reg_slot) {
-                    int sz = ty_size(elem), al = ty_align(elem);
-                    n->reg_slot = region_new(n,
-                        (uint64_t)(sz > 0 ? sz : 1) * c.v,
-                        (uint64_t)(al > 0 ? al : 1));
-                }
-                return type_of(n, ty_ptr(elem, false, true, c.v));
+            Type *ft = check_expr(n->items[first], ty_slice(ty_u8(), true));
+            coerce_node(n->items[first], ft, ty_slice(ty_u8(), true), "format string");
+            for (int i = first + 1; i < n->nitems; i++) check_expr(n->items[i], NULL);
+            check_fmt_args(n, first, n->nitems - first - 1);
+            if (isfmt) return type_of(n, ty_err(ty_slice(ty_u8(), false)));
+            return type_of(n, ty_void());
+        }
+        /* 分配 API：stackAlloc/heapAlloc 返回 *[N]T（长度在类型里），
+         * heapSlice 返回 []T（长度在值里，n 可运行期）。§130 的编译期
+         * 合并依赖 N 是常量算静态布局，所以只有 heapAlloc 进 region。 */
+        if (m->builtin == BI_STACKALLOC || m->builtin == BI_HEAPALLOC ||
+            m->builtin == BI_HEAPSLICE) {
+            bool stack = (m->builtin == BI_STACKALLOC);
+            bool slice = (m->builtin == BI_HEAPSLICE);
+            if (n->nitems != (stack ? 2 : 3))
+                return BAD(n, "std.%s takes %s, a type and a count", m->name,
+                           stack ? "a type" : "an allocator");
+            int base = 0;
+            if (!stack) {
+                Type *at = check_expr(n->items[0], sema_allocator_type());
+                coerce_node(n->items[0], at, sema_allocator_type(), "allocator");
+                base = 1;
             }
+            Type *elem = resolve_type(n->items[base]);
+            if (!elem || elem->kind == TY_INVALID || elem->kind == TY_TYPE ||
+                elem->kind == TY_VOID)
+                return BAD(n, "std.%s cannot allocate `%s`", m->name,
+                           elem ? ty_str(elem) : "?");
+            check_expr(n->items[base + 1], ty_usize());
+            if (slice)
+                return type_of(n, ty_slice(elem, false));
+            IntV c = ev_int(n->items[base + 1]);
+            if (!c.ok)
+                return BAD(n->items[base + 1],
+                           "std.%s count must be known at compile time", m->name);
+            n->esc = stack;          /* 栈那份指向当前帧：逃逸检查盯它 */
+            if (!stack && !n->reg_slot) {
+                int sz = ty_size(elem), al = ty_align(elem);
+                n->reg_slot = region_new(n,
+                    (uint64_t)(sz > 0 ? sz : 1) * c.v,
+                    (uint64_t)(al > 0 ? al : 1));
+            }
+            return type_of(n, ty_ptr(elem, false, true, c.v));
         }
     }
 

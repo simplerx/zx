@@ -6217,3 +6217,52 @@ Zx 没有具名实参）。
 runner 新增 6 例 `passed 9, failed 0`；21 个相关既有用例 `passed 38, failed 0`；
 `ZXLS_BIN=bin/zxls.exe python tools/lsptest.py` 全绿（含 4 条新断言，SMOKE ALL PASS）；
 test.sh 的 §154/§155/§154-§156 断言与 `sh -n` 均通过。
+
+
+## 157. 构造式类型提示 / snippet + std.math / std.net + 裸名内建根治（2026-11-13）
+
+用户截图 `var gen = Gen(i32,10){ .mem = 10 }; let n = gen.mem;`（`T:` / `n:` 是 inlay，
+不是源码）指出缺类型提示、补全和 snippet；同轮要求「增加 std，数学库 math 和
+网络库 net」，并说明 README 首段简介是他自己改的（不捎带提交）。
+
+**LSP 三处缺口**（`tools/zxls.zig`）：① `inferExprType` 只认以 `)` 收尾的调用，
+「类型构造式直接接字面量」以 `}` 收尾，`gen` 的 inlay、hover、`gen.mem` 全断；
+② `gen.mem` 被「类型值接收者」链提前吞掉，且 `fieldTypeIn` 把字段默认值一起读进来
+（`mem: T = n` → `T = n`），替换后成 `i32 = n`，既被 inlay 合法字符检查挡掉，
+hover 也拼成 `let n: i32 = n = gen.mem`；③ `addExprSnippets` 把 `fn(...) type`
+当普通函数，只给调用骨架。修法：先加实例直连分支（把初值收敛成实例串）、
+`substGenericArg` 只取 `=` 前的类型段并按整词边界替换首个 `: type` 形参、
+再给类型构造函数补 `Name(...){...}` 构造泛型实例骨架。实测
+`: Gen(i32, 10)` / `: i32`（字段与方法）、hover `var gen: Gen(i32, 10) = ...`、
+`Gen(...)` 与 `Gen(...){...}` 两条 snippet 全部到位。
+
+**两个新 std 模块**（复用既有通道，不造平行系统）：
+- `std/math.zx`：常量 + 21 个 `extern "C"` 浮点函数（直接是模块公开成员，CRT/libm
+  默认可链，不写 `@link`、不造同名转发层）+ 纯 Zx 整数工具与浮点小工具。
+  不做泛型 `min/max`：容器方法不能泛型，整数 `*I` / 浮点无后缀各走一条路。
+- `std/net.zx`：同步 IPv4 TCP/UDP，Windows Winsock2 先行，`@link("ws2_32")` 写在
+  模块里（只有引用 std.net 的程序才链）；C 符号一律私有，`?T` / -1 表失败，
+  句柄就是 `u64`，`init/deinit` 包住全部操作。端口 0 让系统挑空闲端口，
+  单线程即可自连接回环。POSIX 版等有条件编译后再补，对外 API 不变。
+
+**两个真编译器缺口按「根治」处理，不在 std 里绕开**：
+1. `gen_extern` 给所有无名形参都发 `_p`，`atan2(f64,f64)` 生成
+   `double atan2(double _p, double _p)` 被 C 拒（B1003/B1001）。改成按位置
+   `_p%d`，与 `emit_params` 同一套命名。
+2. `g_std_seeded` 把 `print/println/format/stackAlloc/heapAlloc/heapSlice` 种进
+   每个 `@mod` 加载的模块作用域，但 `check_call` 只有 `NK_FIELD`（`std.xxx`）
+   分支认内建；裸名被判 `TY_INVALID` 静默放过，后端吐出未声明的 C 标识符
+   （`std/net.zx` 最初写 `stackAlloc(u8,512)` 就是这么炸的）。根治：
+   `check_call` 先统一解析内建符号 `m`（限定名走 `ns_member`，裸名走 `lookup`
+   且只认 `builtin != BI_NONE` 的 `SK_NS`），打印/格式化/分配三条分支共用；
+   后端 `NK_CALL` 增加裸名分派，按 `sema_sym_builtin_name(n->a->sym)` 而不是
+   按名字认，用户自己声明的同名函数不会被劫持。修完把 `std.net.init` 从
+   临时堆分配改回最自然的栈缓冲 `var data = stackAlloc(u8, 512)`。
+   入口文件不种这些名字，仍要写 `std.` 前缀（文档已注明）。
+
+守门：`tests/good/std-math.zx`（实跑 21 个 extern 中的代表 + 整数工具）、
+`tests/good/std-net.zx`（TCP/UDP 本机回环，输出稳定不带端口）、
+`tests/multi/seeded-builtins/`（六个裸名内建 + 同名用户函数不被劫持，双前端实跑）、
+`tools/lsptest.py` §157 九条断言（inlay/hover/snippet/`std.` 出现 math+net）、
+`test.sh` §157（`--emit-c` 钉住 `_p0/_p1` 与裸名发射形状 + C 前端对拍）。
+文档同步 `docs/reference.md` §14.11/§14.12、`docs/manual.md` §10。

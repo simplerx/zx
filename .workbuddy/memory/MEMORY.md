@@ -53,3 +53,10 @@
 - **`continue :label;` 本来就实现了**（冒号前缀，标签写在循环关键字前；`src/parse.c` + `bootstrap/parse.zx`、sema `label_find_loop`、后端 `lab_find_loop`）。`docs/reference.md`/`manual.md` 漏写冒号造成「没实现」的错觉；不造无冒号别名（两种拼写不合规），只改文档 + 补守门。`continue label;` 是 E0201，未知标签 E0405。
 - **LSP 行内提示不是源码**：截图里的 `: void`、`self: `、`fmt: `、`args: ` 都是 zxls inlay（Zx 没具名实参，照抄会 E0201）。`fn (T: type, n: T) type` 的值形参可以当返回 struct 的字段默认值，编译器一直支持，调用结果是类型值。
 - `tools/zxls.zig sigOfStmt` 曾 `indexOf("fn ") orelse indexOf("fn(")`，类型构造函数里挑中体内方法 → 返回类型报 `void`、参数名报 `self`。**取两种拼写里最靠前的 fn**。改 zxls 必须绕 Zed 锁重编 `bin/zxls.exe` 并让用户重启 Zed。
+
+
+## §157（2026-11-13）
+- **std 新库**：`std/math.zx`（`extern "C" { pub fn … }` 直接把 C 符号当模块公开成员，不写转发层/不 @link，CRT/libm 默认可链）、`std/net.zx`（同步 IPv4 TCP/UDP，`@link("ws2_32")` 写在模块里；只 Windows，POSIX 待条件编译；C 符号私有，句柄 u64，失败用 ?T / -1）。`std/std.zx` 里注册。**extern 无名形参必须按位置编号 `_p%d`**（`gen_extern` 曾全发 `_p`，多参原型被 C 判重定义）。
+- **裸名内建只在「由 @mod 加载的模块」里可用**（`g_std_seeded` 种进模块作用域；入口文件不种，仍要 `std.` 前缀）。`sema.c check_call` 统一解析内建符号 `m`：限定名走 `ns_member`，裸名走 `lookup` 且只认 `builtin != BI_NONE` 的 SK_NS；后端 NK_CALL 按 `sema_sym_builtin_name(n->a->sym)` 分派，**按符号不按名字**，用户同名函数不会被劫持。守门 `tests/multi/seeded-builtins/`（六裸名内建 + 同名函数 + 双前端）。
+- **LSP 构造式**：`var gen = Gen(i32,10){…}` 初值以 `}` 收尾，`inferExprType` 要收敛成实例串；`fieldTypeIn` 会连字段默认值一起读出（`mem: T = n`），`substGenericArg` 必须先切掉 `=` 后半段，否则 inlay 被合法字符检查挡掉、hover 拼成 `let n: i32 = n = gen.mem`。类型构造函数要同时给 `Gen(...)` 与 `Gen(...){...}` 两条 snippet；inlay 白名单含 `(`/`)`。
+- **测试环境坑**：`test.sh` 的 fixture 目录是 `.tmp/zxc_test.<PID>.cli.proj`，Windows 会复用 PID；沙箱里 `rm -rf` 可能静默失败留下旧 `zx.json`，让 5 条 CLI 冒烟假红（与代码无关）。先清掉残留 `*.cli.proj` 再重跑。

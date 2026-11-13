@@ -1,0 +1,18 @@
+// main.zx —— §157 裸名内建调用（限定名/裸名同分派 + 同名用户函数不被劫持）
+const std = @mod("std");
+const h = @mod("helper.zx");
+const s = @mod("shadow.zx");
+
+pub const main = fn () u8 {
+    h.probe();
+    std.println("shadow={}", s.probe());
+    return 0;
+};
+
+// expect-output
+// print-ok println-ok 7
+// stack=65
+// fixed=9
+// slice=11 12 len=2
+// fmt=42 len=6
+// shadow=42
