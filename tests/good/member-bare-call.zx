@@ -1,0 +1,82 @@
+// member-bare-call.zx —— 容器体内的裸名引用（decisions §139）。
+//
+// struct / union / enum 的体是一个作用域：里面声明的函数可以互相用裸名调用，
+// 不必写 `Cnt.f()`。这曾经编不过——后端给容器静态函数发的是实例名
+// （`b_i0`），而裸名引用查到的符号 cname 只是裸 `b`，C 那边就是
+// "call to undeclared function"。sema 现在把容器体节点挂到引用点上，两条
+// 命名路径对齐。
+// expect-exit: 0
+// expect-output
+// math three = 3
+// apply = 42
+// mode twice = 20
+// pair sum2 = 2
+// acc = 9
+// A.use = 1
+// B.use = 2
+const std = module("std");
+
+// 1) 非泛型 struct：裸名互调（三层，链式）
+const Math = struct {
+    pub const one = fn () i32 { return 1; };
+    pub const two = fn () i32 { return one() + one(); };
+    pub const three = fn () i32 { return two() + one(); };
+};
+
+// 2) 裸名当函数值传：`const f = bump;` 不是调用，也要发实例名
+const Fns = struct {
+    pub const bump = fn (n: i32) i32 { return n + 1; };
+    pub const apply = fn (n: i32) i32 {
+        const f = bump;
+        return f(n);
+    };
+};
+
+// 3) enum 体的成员也是同一个作用域
+const Mode = enum {
+    off,
+    on,
+    pub const base = fn () i32 { return 10; };
+    pub const twice = fn () i32 { return base() + base(); };
+};
+
+// 4) 泛型容器的体：每次实例化都是独立的一份，裸名各自指向自己那份
+const Pair = fn (T: type) type {
+    return struct {
+        pub const first = fn () T { return 1; };
+        pub const sum2 = fn () T { return first() + first(); };
+    };
+};
+
+// 5) 方法（第一参数是 self）体内裸名调静态函数
+const Acc = struct {
+    n: i32,
+    pub const step = fn () i32 { return 2; };
+    pub const bump = fn (self: *Acc) void { self.n = self.n + step(); };
+    pub const init = fn () Acc { return Acc{ .n = 7 }; };
+};
+
+// 6) 两个容器各有同名 helper：各自解析，不许串味
+const A = struct {
+    pub const helper = fn () i32 { return 1; };
+    pub const use = fn () i32 { return helper(); };
+};
+const B = struct {
+    pub const helper = fn () i32 { return 2; };
+    pub const use = fn () i32 { return helper(); };
+};
+
+pub const main = fn () i32 {
+    std.println("math three = {}", Math.three());
+    std.println("apply = {}", Fns.apply(41));
+    std.println("mode twice = {}", Mode.twice());
+    std.println("pair sum2 = {}", Pair(i32).sum2());
+
+    var acc = Acc.init();
+    acc.bump();
+    std.println("acc = {}", acc.n);
+
+    std.println("A.use = {}", A.use());
+    std.println("B.use = {}", B.use());
+    return 0;
+};

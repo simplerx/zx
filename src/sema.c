@@ -145,6 +145,12 @@ struct Symbol {
     int          nassign;  /* `a = …` / `a += …` 的次数 */
     bool         escaped;  /* 被 `&a` 取过地址 */
     Node        *cap_src;  /* SK_CAPTURE：捕获的源表达式（?T 解包前） */
+    /* 声明在容器体（struct/union/enum 的 body）里时指向那个体。容器内的
+     * 静态函数在 C 层是实例名（`a_i0`），而裸名引用查到的符号 cname 只是
+     * 裸 `a` —— 两条命名路径对不上（B1001 call to undeclared）。带上体节点，
+     * 引用点就能给后端同一个实例节点，见 check_expr 的 NK_IDENT。
+     * 模块级函数为 NULL。 */
+    Node        *in_agg;
     Symbol     *next;
 };
 
@@ -1854,7 +1860,7 @@ static Type *resolve_struct_body(Node *n, Type *agg, bool is_union) {
                     diag_note(NULL, prev->decl_line, prev->decl_col, "'%s' first declared here", it->name);
                 err_at(it->line, it->col, "duplicate member '%s'", it->name ? it->name : "?");
             }
-            else { s->decl = it; it->sym = s; }
+            else { s->decl = it; it->sym = s; s->in_agg = n; }
         }
     }
 
@@ -2019,7 +2025,7 @@ static Type *resolve_enum_body(Node *n, Type *e) {
                 err_at(it->line, it->col, "duplicate member '%s'",
                        it->name ? it->name : "?");
             }
-            else { s->decl = it; it->sym = s; }
+            else { s->decl = it; it->sym = s; s->in_agg = n; }
         }
     }
 
@@ -4526,6 +4532,16 @@ static Type *check_expr_raw(Node *n, Type *expect) {
             return type_of(n, ty_type());
         }
         ensure(s);
+        /* 容器体内裸名引用同容器的静态函数（`b` 的函数体里写 `a()`）：
+         * 后端发定义时用的是实例名（容器静态函数走 itab 懒发射，名字是
+         * `<cname>_i<n>`），而裸名查到的 cname 只是 `a`。把容器体上的函数
+         * 节点挂到引用点，后端两条路径就对齐了（§139）。
+         * 泛型函数例外：它的名字由调用点的实例化决定，这里不插手。
+         * 方法（第一参数 self）也照挂——裸名调用方法本来就该在参数处报错，
+         * 名字先对齐了报错才看得懂。 */
+        if (s->in_agg && s->decl && s->decl->kind == NK_FN &&
+            !fn_is_generic(s->decl))
+            n->inst = s->decl;
         if (s->ty && s->ty->kind == TY_TYPE) {
             n->type_val = s->type_val;
             return type_of(n, ty_type());

@@ -5245,19 +5245,20 @@ MSVC 走 `__forceinline`）。原型保持 `static`：属性只需在定义处�
 
 ### 5. 已知限制（写清楚，别再踩）
 
-**容器体内裸名调用同容器的静态函数编不过**：
+**容器体内裸名调用同容器的静态函数编不过**（**已由 §139 修掉**，下面留作
+病史——它说明了根因在哪）：
 
 ```zx
 const C = struct {
     pub const a = fn () i32 { return 1; };
-    pub const b = fn () i32 { return a() + 1; };   // B1001: call to undeclared 'a'
+    pub const b = fn () i32 { return a() + 1; };   // 曾经 B1001: call to undeclared 'a'
 };
 ```
 
 定义发成 `a_i0`（`inst_name`），裸名引用发成 `a`。根因不在后端取名：sema 的
 裸名解析没有给容器成员建实例（`C.a()` 走字段路径才有），后端也就没有可用的
-名字。**绕法：写 `Self.a()`**（verified）。`std/debug_alloc` 的 `shutdown`
-因此写成模块级函数。修这条要动 sema 的容器上下文，留作后续。
+名字。当时的绕法是写 `Self.a()`。§139 把容器体节点挂到了引用点上，现在裸名
+直接可用；`std/debug_alloc` 的 `shutdown` 仍留在模块级（已稳定，不必回改）。
 
 ### 6. 实测（dev 档 -O0，1e6 次 alloc+free，各 64B）
 
@@ -5280,3 +5281,82 @@ const C = struct {
   致命路径，各起一个进程断言 stdout 报告与 stderr 的 panic 原因（abort 会带走
   测试进程，不能塞进 runner）。
 - test.sh 新增 §138 两段（去虚拟化 + 自动内联 + DebugAllocator 五条断言）。
+
+## §139 容器体内裸名互调：把容器体挂到引用点上（2026-11-13，§138 的债）
+
+§138 写 DebugAllocator 时撞上的坑：容器（struct / union / enum）体里的静态
+函数互相用裸名调用，编不过——
+
+```zx
+const Cnt = struct {
+    pub const one = fn () i32 { return 1; };
+    pub const two = fn () i32 { return one() + one(); };   // B1001: call to undeclared 'one'
+};
+```
+
+当时只能写 `Self.one()` 绕过去，并把 `std/debug_alloc` 的公共实体提成模块级
+函数。这是债：体是一个货真价实的作用域，裸名看得见成员是**语言该给的**，
+不该逼用户记一个绕法。
+
+### 1. 根因：两条命名路径对不上
+
+| 位置 | 走哪条路 | 发出的 C 名 |
+|---|---|---|
+| 定义（`one` 的函数体） | 容器静态函数进 `g_itab`，懒发射，`inst_name` 命名 | `one_i0` |
+| 裸名引用（`two` 体里的 `one()`） | `NK_IDENT` → `sym_cname` | `one` |
+
+`Cnt.one()` 之所以能过，是因为它走 `NK_FIELD`，sema 在那条路上给调用点填了
+`n->inst = m->fn`，后端据此发 `inst_name`。裸名这条路从来没填过 `inst`，
+后端只能发符号自己的 cname——而那个名字**根本没有定义**（`one` 只在被引用时
+才经 `inst_name` 拿到 `one_i0`）。
+
+所以问题不在后端取名，而在 sema 的裸名解析没带上"这个函数属于哪个容器"。
+
+### 2. 修法：符号记住容器体，引用点带上函数节点
+
+- `struct Symbol` 新增 `Node *in_agg;`：`resolve_struct_body` 与
+  `resolve_enum_body` 在登记 `SK_FN` 时填 `s->in_agg = n`（`n` 就是那个体）。
+  模块级函数保持 `NULL`，行为不变。
+- `check_expr` 的 `NK_IDENT`：拿到符号后
+  `if (s->in_agg && s->decl && s->decl->kind == NK_FN && !fn_is_generic(s->decl)) n->inst = s->decl;`
+- 后端 `NK_IDENT` 的发射分支加一条前置：
+  `if (n->inst) { buf_puts(b, inst_name(n->inst, n->name)); return; }`
+
+`inst_name` 以**函数节点**为 key 查/建表（`g_itab`），而 `m->fn`、`s->decl`
+本来就是同一个节点——所以定义与引用必然落到同一个 `_i<n>`，`g_itab` 那条
+统一发射的循环（`gen_fn(..., exported=true)`）负责把定义补出来，即使它没有
+任何一次被 `Cnt.` 显式引用过。
+
+**为什么不去掉 `in_agg` 直接看 `s->decl->kind == NK_FN`**：模块级函数也是
+`NK_FN`，那样会把整个模块的函数都发成实例名。区分"在体里"与"在文件顶层"
+只能靠一个记忆标记。
+
+### 3. 覆盖到的形状（都有用例）
+
+| 形状 | 结果 |
+|---|---|
+| 非泛型 struct 内三层链式互调 | `math three = 3` |
+| 裸名当函数值传（`const f = bump; f(n)`） | `apply = 42` |
+| enum 体内互调 | `mode twice = 20` |
+| 泛型容器（`Pair(i32)`）内互调 | `pair sum2 = 2` |
+| 方法（第一参数 self）体内调静态函数 | `acc = 9` |
+| 两个容器各有同名成员，各解析各的 | `A.use = 1` / `B.use = 2` |
+
+泛型那条能自动成立，是因为实例化会重新走一遍 `resolve_struct_body`，新作用域
+里 `s->in_agg` 指新体、`s->decl` 指克隆出来的 fn 节点，`inst_name` 的 key 也
+跟着是克隆节点 —— 一个实例一份名字，天然不串。
+
+方法（第一参数 `self`）也照挂 `inst`：裸名调用方法本来就该在参数处报错
+（少一个接收者），名字先对齐了，那条报错才读得懂。这里不为它开特例。
+
+### 4. 没变的东西
+
+- 可见性仍只由 `pub` 决定，且**裸名的作用域就是那个体**：出了体写 `one()`
+  照样是 unknown identifier。`in_agg` 只影响命名，不放开作用域。
+- 跨容器引用私有成员仍报 E0404（走 `NK_FIELD` 的可见性检查，未改动）。
+- `s->in_agg` 只在 sema 里活着，不进 AST 序列化（zxfe 不感知，无需重建）。
+
+### 守门
+
+- `tests/good/member-bare-call.zx`：上面六种形状一次跑完，`expect-output` 七行
+  逐字比对。

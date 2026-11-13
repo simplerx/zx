@@ -616,6 +616,19 @@ const V = struct {
 V.i = 20;
 ```
 
+体里的成员**互相用裸名就能看见**，不必写成 `Cnt.别的()`——体和函数体一样是一条词法作用域链，最近一层优先：
+
+```zx
+const Cnt = struct {
+    pub const one  = fn () i32 { return 1; };
+    pub const two  = fn () i32 { return one() + one(); };   // 裸名，不用 Cnt.one()
+    pub const apply = fn () i32 { const f = two; return f(); };  // 当值传也一样
+};
+Cnt.two();      // 2
+```
+
+容器外仍然只能写 `Cnt.one()`：裸名的作用域就是那个体，出了体就没了。两个容器各有同名成员时各解析各的（体与体之间不串味）。
+
 - 构造用 `.字段 = 值`：
 
 ```zx

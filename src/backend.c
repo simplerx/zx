@@ -5118,6 +5118,9 @@ static void ex(Buf *b, Node *n) {
                 return;
             }
         }
+        /* 容器体内裸名引用同容器的静态函数（§139）：定义发的是实例名
+         * `a_i<n>`，引用点必须发同一个，否则 C 那边就是"未声明的函数"。 */
+        if (n->inst) { buf_puts(b, inst_name(n->inst, n->name)); return; }
         need_by_cname(sym_cname(n));
         emit_sym_name(b, n);
         return;
