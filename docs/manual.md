@@ -375,9 +375,10 @@ if (std.net.TcpListener.open(0)) ls {
 编译器 seed 的内建面（不是 Zx 代码）：`std.print/println/format`、
 `std.heap.page`、`std.stackAlloc/heapAlloc`、`std.file.*`、`std.io.*`、
 `std.process.args/getEnv/setEnv/exit`（**args 不含 argv[0]**）、
-`std.debug.panic/assert/errName`、`std.atomic.*`。这些名字会种进**每个由
-`@mod` 加载的模块**的作用域，所以库文件里可以直接写裸名（`println("{}", x)`、
-`stackAlloc(u8, 8)`）；入口文件请写 `const std = @mod("std");` 再用 `std.` 前缀。
+`std.debug.panic/assert/errName`、`std.atomic.*`。这些名字会种进**每个模块
+作用域**（包括入口单元），所以库文件与入口文件都能直接写裸名
+（`println("{}", x)`、`stackAlloc(u8, 8)`）；编辑器把缓冲当单文件检查时，
+结论与真实构建一致。`std.` 前缀仍是推荐写法——它写明了名字来自标准库。
 模块自己声明了同名函数时，以模块声明为准，裸名不会被内建劫持。
 
 ---

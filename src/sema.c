@@ -1216,6 +1216,24 @@ static Module *module_load(const char *rel, int line, int col);
 static Module *module_load_full(const char *full, int line, int col);
 static Module *module_load_std(int line, int col);
 static void sym_copy(Symbol *dst, Symbol *src, const char *name);
+
+/* 把编译器内建名字并进一个模块作用域。
+ * 模块自己声明了同名就以它为准 (scope_add 返回 NULL)，
+ * 用户同名函数不会被内建劫持。
+ * 入口单元也调这一份 (sema_check)：§158 前 LSP 把编辑器
+ * 缓冲写成同目录影子文件单查，而 std/ 里的库文件
+ * 在真实构建里是 @mod 模块，裸名 stackAlloc / file 都可用。
+ * 入口/模块作用域不对称会让编辑器假报 E0401。 */
+static void seed_std_builtins(Scope *sc) {
+    for (int i = 0; g_std_seeded[i]; i++) {
+        Symbol *b = std_builtin(g_std_seeded[i]);
+        if (!b) continue;
+        Symbol *s = scope_add(sc, b->name, b->kind);
+        if (!s) continue;
+        sym_copy(s, b, b->name);
+        s->is_pub = true;
+    }
+}
 static Symbol *module_member(Module *m, const char *name);
 
 static IntV intv(uint64_t v) { IntV r = { true, false, v }; return r; }
@@ -5711,14 +5729,7 @@ static Module *module_load_full(const char *full_in, int line, int col) {
     /* 编译器内建名字并进每个模块的作用域（print/file/io/Allocator…）。
      * 之前只种 std——std.zx 里能用裸 `io.`，fs.zx 里想转发 std.file
      * 却得绕。模块自己声明了同名：以它为准（scope_add 返回 NULL）。 */
-    for (int i = 0; g_std_seeded[i]; i++) {
-        Symbol *b = std_builtin(g_std_seeded[i]);
-        if (!b) continue;
-        Symbol *s2 = scope_add(&m->scope, b->name, b->kind);
-        if (!s2) continue;
-        sym_copy(s2, b, b->name);
-        s2->is_pub = true;
-    }
+    seed_std_builtins(&m->scope);
     g_root_stmts = true;
     check_stmts(m->root);
     g_root_stmts = false;
@@ -5836,14 +5847,7 @@ static Module *module_load_std(int line, int col) {
 
     /* 编译器内建的名字并进 std 的作用域：用户写 `std.println`，
      * std.zx 自己写 `Allocator`，走的是同一张表。 */
-    for (int i = 0; g_std_seeded[i]; i++) {
-        Symbol *b = std_builtin(g_std_seeded[i]);
-        if (!b) continue;
-        Symbol *s = scope_add(&m->scope, b->name, b->kind);
-        if (!s) continue;                 /* std.zx 自己声明了同名：以它为准 */
-        sym_copy(s, b, b->name);
-        s->is_pub = true;
-    }
+    seed_std_builtins(&m->scope);
     return m;
 }
 
@@ -7088,6 +7092,12 @@ void sema_check(Node *root) {
     g_scope = &m0->scope;
     m0->scope.is_module = true;
     hoist(&m0->scope, root);
+    /* §158：入口单元也种同一张内建表。
+     * 之前只给 @mod 模块种，LSP 单文件 --check 会把 std/net.zx
+     * 当成入口，对 stackAlloc 报假的 E0401。
+     * 入口也能用裸名是纯放宽（原来报错的写法现在合法）；
+     * std. 前缀仍是推荐写法，显式能力没有变。 */
+    seed_std_builtins(&m0->scope);
     g_root_stmts = true;
     check_stmts(root);
     g_root_stmts = false;

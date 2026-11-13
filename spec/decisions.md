@@ -6258,7 +6258,8 @@ hover 也拼成 `let n: i32 = n = gen.mem`；③ `addExprSnippets` 把 `fn(...) 
    后端 `NK_CALL` 增加裸名分派，按 `sema_sym_builtin_name(n->a->sym)` 而不是
    按名字认，用户自己声明的同名函数不会被劫持。修完把 `std.net.init` 从
    临时堆分配改回最自然的栈缓冲 `var data = stackAlloc(u8, 512)`。
-   入口文件不种这些名字，仍要写 `std.` 前缀（文档已注明）。
+   入口文件不种这些名字，仍要写 `std.` 前缀。
+   **【已被 §158 推翻】** 这条不对称正是下一张截图里 `stackAlloc` 假诊断的根因。
 
 守门：`tests/good/std-math.zx`（实跑 21 个 extern 中的代表 + 整数工具）、
 `tests/good/std-net.zx`（TCP/UDP 本机回环，输出稳定不带端口）、
@@ -6266,3 +6267,58 @@ hover 也拼成 `let n: i32 = n = gen.mem`；③ `addExprSnippets` 把 `fn(...) 
 `tools/lsptest.py` §157 九条断言（inlay/hover/snippet/`std.` 出现 math+net）、
 `test.sh` §157（`--emit-c` 钉住 `_p0/_p1` 与裸名发射形状 + C 前端对拍）。
 文档同步 `docs/reference.md` §14.11/§14.12、`docs/manual.md` §10。
+
+## §158 两张截图：math 补全形状 + 模块文件的假诊断（2026-11-13 21:5x）
+
+用户两张截图：① 输入 `std.math.sqrt` 弹出 `sqrt  sqrt(f64) f64` 与
+`sqrt2  f64`；② 打开 `std/net.zx` 时 `var data = stackAlloc(u8, 512);` 被画
+红线 `unknown identifier 'stackAlloc'`。用户确认 ① 两处都要修。
+
+**① std.math 的补全形状**（LSP 文本链，不造新能力）：
+- `std/math.zx` 的 21 个 `extern "C"` 声明原先按 C 习惯写无名形参
+  （`pub fn sqrt(f64) f64;`）。`sigOfStmt` 只能把这样的声明显示成 C 原型
+  `sqrt(f64) f64`，`memberCallSnippet` 的占位默认值也落成类型名 `f64`
+  （`sqrt(${1:f64})`）。改成具名形参 `sqrt(x: f64) f64`、
+  `atan2(y: f64, x: f64)` 之后，补全/hover 是 Zx 形状、snippet 是
+  `sqrt(${1:x})$0`，与 `std/net.zx` 的 extern 写法一致。
+- 常量 `sqrt2` 是 √2 的值，但与函数 `sqrt` 同前缀，输入 `sqrt` 会被一起
+  模糊匹配出来，看起来像重复定义。改名 `root2`（不跟任何函数名同前缀）。
+  这是 1.3.0 之后新增的库、没有兼容负担。
+- §157 的「无名 extern 形参按位置编号 `_p0/_p1`」仍是编译器能力，但
+  `std/math.zx` 不再覆盖它：新建 `tests/good/extern-unnamed.zx` 专门钉住
+  `zxUnnamedA(int32_t _p0, int32_t _p1)`，`test.sh §157` 改指它；
+  `test.sh §158` 另钉 `std/math.zx` 生成 C 里的具名原型。
+
+**② 假诊断的根因不在 zxls，在作用域不对称**：LSP 的 `runCheck` 把编辑器缓冲
+写成同目录影子文件再跑 `zxc <影子> --check`，这个文件被当成**入口单元**；
+而 §157 只把 `g_std_seeded` 种进 `@mod` 加载的模块作用域。真实构建里
+`std/net.zx` 是模块、裸名 `stackAlloc` 合法，于是编辑器与编译器给出相反结论。
+`std/fs.zx` 的裸名 `file` 同样会假报三条 E0401，不是 `net.zx` 独有。
+
+三条候选：给 zxls 加「按文件名过滤 E0401」（只在解析端打补丁，否）、给 zxls
+加模块上下文探测/包装入口文件（多一套影子文件与路径换算，否）、**统一入口
+单元也种同一张表**（选它）。`sema_check` 在 `hoist` 之后调
+`seed_std_builtins(&m0->scope)`；同时把 `module_load_full` / `module_load_std`
+里重复的循环收进同一个 helper，三处只有一份规则。`scope_add` 遇到模块自己
+声明的同名返回 NULL，用户同名函数仍不会被内建劫持（`shadow.zx` 守门不变）。
+
+这是**纯放宽**：原来报错的裸名写法现在合法，任何原本合法的程序都不受影响；
+`std.` 前缀仍是文档推荐写法。它同时让 LSP 对任意模块文件、任意单文件检查
+都不再假报，不需要 zxls 知道「这个文件是不是模块」。`docs/manual.md §10`
+与 §157 裁定同步改写。
+
+**守门**：`tests/good/seeded-builtins-entry.zx`（入口裸名实跑）、
+`tests/good/extern-unnamed.zx`（保住 `_p0/_p1`）、`test.sh §158`（具名 extern
+原型 + 库文件单文件 `--check` 零诊断）、`tools/lsptest.py` 五条
+（`mathSqrt.singleItem` / `zxSignature` / `noSqrt2` / hover 签名 /
+`diagnostics.s158.bareBuiltinNoFalseE0401`：故意留一个真错逼诊断包非空，
+断言里面没有 `stackAlloc`）。
+
+**守门自身的一次修正**：`test.sh §158` 初版钉的是
+`extern double sqrt(double x);`，但 `backend.c libc_declared()` 早把
+`sqrt / pow / floor / ceil / fmod / fabs` 等 math.h 名字从生成头里排除
+（重复声明会与标准头冲突），这条断言永远不可能绿，与源码改动无关。
+改钉真正会发射的 `cbrt(double x)` / `atan2(double y, double x)` /
+`hypot(double x, double y)`，并反向断言生成 C 里不出现 `double _p0`。
+判断「extern 形参是否具名」要拿会发射的原型当样本，不要拿被 libc 名单
+吞掉的名字。

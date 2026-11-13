@@ -1277,14 +1277,30 @@ done
 
 # §157：新 std.math / std.net，以及它们牵出的两个真编译器缺口。
 # 1) 多参 extern 原型的无名形参必须按位置编号；全叫 `_p` 会被 C 判参数重定义。
-$ZXC tests/good/std-math.zx --emit-c > "$TPFX.s157m.c" 2>/dev/null
-if grep -qF 'extern double atan2(double _p0, double _p1);' "$TPFX.s157m.c" \
-   && grep -qF 'extern double hypot(double _p0, double _p1);' "$TPFX.s157m.c" \
-   && ! grep -qF 'double _p, double _p' "$TPFX.s157m.c"; then
+#    §158 把 std/math.zx 的形参改成具名后，这条能力改由 extern-unnamed.zx 钉住。
+$ZXC tests/good/extern-unnamed.zx --emit-c > "$TPFX.s157u.c" 2>/dev/null
+if grep -qF 'zxUnnamedA(int32_t _p0, int32_t _p1);' "$TPFX.s157u.c" \
+   && grep -qF 'zxUnnamedB(double _p0, double _p1);' "$TPFX.s157u.c" \
+   && ! grep -qF '_p, double _p' "$TPFX.s157u.c"; then
     printf "  ok   §157 无名 extern 形参按位置编号\n"
 else
     printf "  FAIL §157 多参 extern 原型仍撞名\n"
-    grep -nE 'atan2|hypot' "$TPFX.s157m.c" | head -8; fail=1
+    grep -nE 'zxUnnamed' "$TPFX.s157u.c" | head -8; fail=1
+fi
+# §158：库里公开成员的 extern 形参一律具名，补全/hover 不能退化成 C 原型。
+# sqrt/pow/floor/... 在 backend.c 的 libc_declared() 名单里：生成的 C 头
+# 已 include math.h，这些名字不重复声明（否则与标准头冲突），所以这里只钉
+# 真正会发射出来的 cbrt/atan2/hypot；一元、二元都要带形参名，且不能出现
+# gen_extern 给无名形参补的 _p0/_p1 编号。
+$ZXC tests/good/std-math.zx --emit-c > "$TPFX.s157m.c" 2>/dev/null
+if grep -qF 'extern double cbrt(double x);' "$TPFX.s157m.c" \
+   && grep -qF 'extern double atan2(double y, double x);' "$TPFX.s157m.c" \
+   && grep -qF 'extern double hypot(double x, double y);' "$TPFX.s157m.c" \
+   && ! grep -qE '\(double _p[0-9]' "$TPFX.s157m.c"; then
+    printf "  ok   §158 std.math 的 extern 形参具名\n"
+else
+    printf "  FAIL §158 std.math 的 extern 形参退化成无名原型\n"
+    grep -nE 'extern double (cbrt|atan2|hypot)|double _p[0-9]' "$TPFX.s157m.c" | head -8; fail=1
 fi
 
 # 2) 模块内裸名内建（g_std_seeded）必须和 std. 前缀走同一条分派：发射真的
@@ -1314,6 +1330,39 @@ else
     printf "  FAIL §157 seeded-builtins 在 C 前端失败\n"
     head -12 "$TPFX.s157s.fe.log"; fail=1
 fi
+
+# §158：入口单元也种 g_std_seeded 之后，库文件当单文件检查不能再假报 E0401。
+# LSP 的 runCheck 走的就是这条 `zxc <同目录影子文件> --check`，所以这几行
+# 直接钉住用户截图里 std/net.zx 的红色波浪线；std/fs.zx 的裸名 `file`
+# 同一根因，一起守门。
+for f158 in net fs; do
+    if $ZXC "std/$f158.zx" --check > "$TPFX.s158.$f158.log" 2>&1 \
+       && [ ! -s "$TPFX.s158.$f158.log" ]; then
+        printf "  ok   §158 std/%s.zx 单文件检查无假诊断\n" "$f158"
+    else
+        printf "  FAIL §158 std/%s.zx 单文件检查仍有假诊断\n" "$f158"
+        head -12 "$TPFX.s158.$f158.log"; fail=1
+    fi
+done
+
+$ZXC tests/good/seeded-builtins-entry.zx --emit-c > "$TPFX.s158e.c" 2>/dev/null
+if grep -qF '__builtin_alloca' "$TPFX.s158e.c" \
+   && grep -qF 'printf("entry=' "$TPFX.s158e.c" \
+   && grep -qF '= zx_format(' "$TPFX.s158e.c"; then
+    printf "  ok   §158 入口裸名内建发射真实 C\n"
+else
+    printf "  FAIL §158 入口裸名内建发射形状\n"
+    grep -nE 'alloca|entry=|zx_format' "$TPFX.s158e.c" | head -12; fail=1
+fi
+
+for f158c in extern-unnamed seeded-builtins-entry; do
+    if $ZXC "tests/good/$f158c.zx" --check --fe=c > "$TPFX.$f158c.fe.log" 2>&1; then
+        printf "  ok   §158 %s 在 C 前端通过\n" "$f158c"
+    else
+        printf "  FAIL §158 %s 在 C 前端失败\n" "$f158c"
+        head -12 "$TPFX.$f158c.fe.log"; fail=1
+    fi
+done
 
 # 用例会在仓库根留下自己的临时文件：io_fmt.zx 写 io_fmt.tmp，stdfs.zx 建
 # fs_t_dir / fs_t_dir2。跑完统一带走——测试不该往工作区里堆东西。

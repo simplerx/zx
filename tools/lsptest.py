@@ -4601,6 +4601,8 @@ const main = fn () u8 {
     var p1 = gen.;
     var p2 = G;
     var p3 = std.;
+    var p4 = std.math.sqrt;
+    var p5 = std.math.;
     return 0;
 };
 """
@@ -4672,6 +4674,40 @@ check("completion.ctorLiteral.instanceSnippet",
 _g157_std = {i["label"] for i in g157_comp("var p3 = std.", 5205)}
 check("completion.std.mathNet", {"math", "net"} <= _g157_std,
       str(sorted(_g157_std))[:200])
+
+# §158 用户截图 1：`std.math.sqrt` 只能出一条，
+# 且签名/snippet 不能退化成 C 原型；常量不跟函数同前缀。
+_g157_sqrt = g157_comp("var p4 = std.math.sqrt", 5206)
+check("completion.mathSqrt.singleItem",
+      len(_g157_sqrt) == 1 and _g157_sqrt[0].get("label") == "sqrt",
+      str(_g157_sqrt)[:240])
+check("completion.mathSqrt.zxSignature",
+      len(_g157_sqrt) == 1
+      and _g157_sqrt[0].get("detail") == "sqrt(x: f64) f64"
+      and _g157_sqrt[0].get("insertText") == "sqrt(${1:x})$0",
+      str(_g157_sqrt)[:240])
+_g157_math = {i["label"] for i in g157_comp("var p5 = std.math.", 5207)}
+check("completion.mathConstants.noSqrt2",
+      "root2" in _g157_math and "sqrt2" not in _g157_math,
+      str(sorted(_g157_math))[:240])
+
+def g157_hover_sqrt(rid):
+    off = GEN157.index("std.math.sqrt") + len("std.math.sqrt") - 1
+    s8({"jsonrpc": "2.0", "id": rid, "method": "textDocument/hover", "params": {
+        "textDocument": {"uri": g157uri},
+        "position": pos(GEN157, off)}})
+    r, _ = r8("gen157.hover.sqrt", rid)
+    res = (r or {}).get("result")
+    c = res.get("contents") if isinstance(res, dict) else None
+    if isinstance(c, dict):
+        return c.get("value", "")
+    return c if isinstance(c, str) else ""
+
+_h_sqrt = g157_hover_sqrt(5208)
+check("hover.mathSqrt.zxSignature",
+      "sqrt(x: f64) f64" in _h_sqrt and "sqrt(f64)" not in _h_sqrt,
+      _h_sqrt[:160])
+
 
 try:
     p8.kill()
@@ -4866,6 +4902,22 @@ check("diagnostics.e0511CodeDescription",
       _d511 is not None and _d511.get("source") == "zxc"
       and _h511.endswith("docs/errors.md#e0511"),
       _h511 or str(_e511_diags)[:300])
+
+# §158 用户截图 2：LSP 单文件 --check 不能再把
+# stackAlloc 判成 E0401。故意留一个真错逼诊断包非空，
+# 同时证明种内建表后诊错仍然会报。
+S158_BARE = """pub const main = fn () u8 {
+    var st = stackAlloc(u8, 4);
+    st.0 = 65;
+    return bogusName;
+};
+"""
+_s158_diags = diag_client("s158bare.zx", S158_BARE)
+check("diagnostics.s158.bareBuiltinNoFalseE0401",
+      any(d.get("code") == "E0401" and "bogusName" in d.get("message", "")
+          for d in _s158_diags)
+      and not any("stackAlloc" in d.get("message", "") for d in _s158_diags),
+      str(_s158_diags)[:300])
 
 # ---------------------------------------------------------------------------
 # 同一个文件反复 didOpen（守一个真崩过的悬垂键）

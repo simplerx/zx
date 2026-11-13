@@ -1,5 +1,6 @@
 // std-math.zx —— std/math.zx 守门：常量、C libm extern、纯 Zx 整数/浮点工具。
-// 浮点函数走 extern "C" 原型（无名形参按位置编号，见 §157），链接到 CRT/libm；
+// 浮点函数走 extern "C" 原型（形参具名，补全/hover 才是 Zx 签名，见 §158）；
+// 无名形参的 `_p0/_p1` 编号另由 tests/good/extern-unnamed.zx 守门。
 // 整数工具不依赖任何外部符号。
 // expect-output
 // pi=3.141592653589793 sqrt=4 cbrt=3 pow=1024

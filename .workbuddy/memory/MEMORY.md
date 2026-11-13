@@ -57,6 +57,11 @@
 
 ## §157（2026-11-13）
 - **std 新库**：`std/math.zx`（`extern "C" { pub fn … }` 直接把 C 符号当模块公开成员，不写转发层/不 @link，CRT/libm 默认可链）、`std/net.zx`（同步 IPv4 TCP/UDP，`@link("ws2_32")` 写在模块里；只 Windows，POSIX 待条件编译；C 符号私有，句柄 u64，失败用 ?T / -1）。`std/std.zx` 里注册。**extern 无名形参必须按位置编号 `_p%d`**（`gen_extern` 曾全发 `_p`，多参原型被 C 判重定义）。
-- **裸名内建只在「由 @mod 加载的模块」里可用**（`g_std_seeded` 种进模块作用域；入口文件不种，仍要 `std.` 前缀）。`sema.c check_call` 统一解析内建符号 `m`：限定名走 `ns_member`，裸名走 `lookup` 且只认 `builtin != BI_NONE` 的 SK_NS；后端 NK_CALL 按 `sema_sym_builtin_name(n->a->sym)` 分派，**按符号不按名字**，用户同名函数不会被劫持。守门 `tests/multi/seeded-builtins/`（六裸名内建 + 同名函数 + 双前端）。
+- **裸名内建种进所有模块作用域，含入口单元**（§158 推翻 §157「入口不种、仍要 std. 前缀」那条）；`sema_check` 在 hoist 后也调 `seed_std_builtins`，三处共用一份 helper。`sema.c check_call` 统一解析内建符号 `m`：限定名走 `ns_member`，裸名走 `lookup` 且只认 `builtin != BI_NONE` 的 SK_NS；后端 NK_CALL 按 `sema_sym_builtin_name(n->a->sym)` 分派，**按符号不按名字**，用户同名函数不会被劫持。守门 `tests/multi/seeded-builtins/`、`tests/good/seeded-builtins-entry.zx`。`std.` 前缀仍是推荐写法。
 - **LSP 构造式**：`var gen = Gen(i32,10){…}` 初值以 `}` 收尾，`inferExprType` 要收敛成实例串；`fieldTypeIn` 会连字段默认值一起读出（`mem: T = n`），`substGenericArg` 必须先切掉 `=` 后半段，否则 inlay 被合法字符检查挡掉、hover 拼成 `let n: i32 = n = gen.mem`。类型构造函数要同时给 `Gen(...)` 与 `Gen(...){...}` 两条 snippet；inlay 白名单含 `(`/`)`。
 - **测试环境坑**：`test.sh` 的 fixture 目录是 `.tmp/zxc_test.<PID>.cli.proj`，Windows 会复用 PID；沙箱里 `rm -rf` 可能静默失败留下旧 `zx.json`，让 5 条 CLI 冒烟假红（与代码无关）。先清掉残留 `*.cli.proj` 再重跑。
+
+## §158（2026-11-13，两张截图）
+- **`std/math.zx` 的 extern 形参一律具名**：无名形参虽能编译（`_p0/_p1`），LSP 的 `sigOfStmt` 会把它显示成 C 原型 `sqrt(f64) f64`，snippet 占位落成类型名 `f64`；具名后是 `sqrt(x: f64) f64` / `sqrt(${1:x})$0`。`_p0/_p1` 能力改由 `tests/good/extern-unnamed.zx` 单独守门。**常量不要跟函数同前缀**（`sqrt2` → `root2`），否则输入 `sqrt` 会连带弹出常量，看起来像重复定义。
+- **LSP 假诊断的根因是作用域不对称，不是 zxls 解析**：`runCheck` 写同目录影子文件再 `zxc <影子> --check`，入口单元若不种 `g_std_seeded`，`std/net.zx` 的 `stackAlloc`、`std/fs.zx` 的 `file` 都会假报 E0401。根治 = 入口也种同一张表（纯放宽，不动 zxls、不做按文件名过滤）。`test.sh §158` 直接钉「单文件 --check 零输出」。
+- **守门别拿 libc 名字当样本**：`backend.c libc_declared()` 会把 `sqrt/pow/floor/ceil/fmod/fabs` 等 math.h 已声明的 extern 原型从生成 C 里排除；钉「形参具名」要用会发射的 `cbrt/atan2/hypot`，否则断言恒假（§158 首轮全量唯一假红）。

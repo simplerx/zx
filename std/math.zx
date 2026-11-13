@@ -7,44 +7,47 @@
 // 平台：浮点函数直接 extern 到 C 运行时的 libm（Windows 是 ucrt，POSIX 是
 // libm，zig cc 默认都链得上，不需要 @link）。参数是 f64，和 C double 同构。
 // `extern "C" { pub fn … }` 让 C 符号本身就是 std.math 的公开成员，不另造
-// 一层同名转发——既少一份代码，补全会直接看到真实签名。
+// 一层同名转发——既少一份代码，补全会直接看到真实签名。形参一律具名：
+// 无名形参虽能编译（`_p0/_p1`），补全/hover 却会退化成 C 原型 `sqrt(f64)`，
+// snippet 占位也变成类型名；写成 `sqrt(x: f64) f64` 才是 Zx 的形状。
 //
 // 简约约定：不做泛型 min/max（容器方法不能泛型，函数泛型要按实例检查），
-// 整数用 *I 后缀、浮点用无后缀，一眼看清走的是哪条路。
+// 整数用 *I 后缀、浮点用无后缀，一眼看清走的是哪条路。常量名不与函数名
+// 同前缀（`root2` 而不是 `sqrt2`），否则输入 `std.math.sqrt` 会连带弹出常量。
 
 // ---- 常量（编译期值，可直接当数组长度 / 泛型实参）-------------------------
 
 pub const pi: f64 = 3.14159265358979323846;
 pub const e: f64 = 2.71828182845904523536;
 pub const tau: f64 = 6.28318530717958647692;
-pub const sqrt2: f64 = 1.41421356237309504880;
+pub const root2: f64 = 1.41421356237309504880;
 pub const ln2: f64 = 0.69314718055994530942;
 pub const ln10: f64 = 2.30258509299404568402;
 
 // ---- C 运行时的浮点函数（签名必须与 math.h 一致）---------------------------
 
 extern "C" {
-    pub fn sqrt(f64) f64;
-    pub fn cbrt(f64) f64;
-    pub fn pow(f64, f64) f64;
-    pub fn floor(f64) f64;
-    pub fn ceil(f64) f64;
-    pub fn round(f64) f64;
-    pub fn trunc(f64) f64;
-    pub fn fabs(f64) f64;
-    pub fn fmod(f64, f64) f64;
-    pub fn sin(f64) f64;
-    pub fn cos(f64) f64;
-    pub fn tan(f64) f64;
-    pub fn asin(f64) f64;
-    pub fn acos(f64) f64;
-    pub fn atan(f64) f64;
-    pub fn atan2(f64, f64) f64;
-    pub fn exp(f64) f64;
-    pub fn log(f64) f64;
-    pub fn log2(f64) f64;
-    pub fn log10(f64) f64;
-    pub fn hypot(f64, f64) f64;
+    pub fn sqrt(x: f64) f64;
+    pub fn cbrt(x: f64) f64;
+    pub fn pow(x: f64, y: f64) f64;
+    pub fn floor(x: f64) f64;
+    pub fn ceil(x: f64) f64;
+    pub fn round(x: f64) f64;
+    pub fn trunc(x: f64) f64;
+    pub fn fabs(x: f64) f64;
+    pub fn fmod(x: f64, y: f64) f64;
+    pub fn sin(x: f64) f64;
+    pub fn cos(x: f64) f64;
+    pub fn tan(x: f64) f64;
+    pub fn asin(x: f64) f64;
+    pub fn acos(x: f64) f64;
+    pub fn atan(x: f64) f64;
+    pub fn atan2(y: f64, x: f64) f64;
+    pub fn exp(x: f64) f64;
+    pub fn log(x: f64) f64;
+    pub fn log2(x: f64) f64;
+    pub fn log10(x: f64) f64;
+    pub fn hypot(x: f64, y: f64) f64;
 }
 
 // ---- 纯 Zx 的整数工具（不依赖任何外部符号）---------------------------------

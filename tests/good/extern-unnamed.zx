@@ -1,0 +1,13 @@
+// extern-unnamed.zx —— 无名 extern 形参必须按位置编号（§157 的 _p0/_p1 能力）。
+// §158 把 std/math.zx 的 21 个 extern 声明改成具名形参后，这条编译器能力
+// 不再有 std 用例覆盖，单独立一个守门：生成 C 里必须是
+// `zxUnnamedA(int _p0, int _p1)`，不能是 `int _p, int _p`（C 判参数重定义）。
+// 两个符号只用来检查原型，不调用，因此不需要真实链接符号。
+extern "C" {
+    fn zxUnnamedA(i32, i32) i32;
+    fn zxUnnamedB(f64, f64) f64;
+}
+
+pub const main = fn () u8 {
+    return 0;
+};

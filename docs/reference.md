@@ -756,13 +756,16 @@ async/await，会丢掉 zx 的无函数着色，不做。
 
 ### 14.11 std.math —— 数学（`std/math.zx`）
 
-常量 `pi / e / tau / sqrt2 / ln2 / ln10`（编译期 `f64`，可直接当数组长度或泛型实参）。
+常量 `pi / e / tau / root2 / ln2 / ln10`（编译期 `f64`，可直接当数组长度或泛型实参）。
+常量名特意不跟函数同前缀：`root2` 不是 `sqrt2`，输入 `std.math.sqrt` 时不会连带
+弹出一个看起来像重复函数的常量。
 
 - **浮点函数直接 `extern "C"` 到 C 运行时的 libm**，不另造一层同名转发：
   `sqrt / cbrt / pow / floor / ceil / round / trunc / fabs / fmod / sin / cos /
   tan / asin / acos / atan / atan2 / exp / log / log2 / log10 / hypot`，参数与返回
-  都是 `f64`。Windows 走 ucrt、POSIX 走 libm，`zig cc` 默认链得上，不需要 `@link`。
-  补全会直接看到真实签名。
+  都是 `f64`。形参一律具名（`sqrt(x: f64) f64`），补全、hover 与调用 snippet 才
+  是 Zx 形状；无名形参会让它们退化成 C 原型。Windows 走 ucrt、POSIX 走 libm，
+  `zig cc` 默认链得上，不需要 `@link`。
 - 整数工具（纯 Zx 代码）：`absI / minI / maxI / clampI`（`i32`）、
   `gcd / lcm / powI / isPowerOfTwo / nextPowerOfTwo`（`u32`）。
 - 浮点小工具：`min / max / clamp / sign / degToRad / radToDeg`。

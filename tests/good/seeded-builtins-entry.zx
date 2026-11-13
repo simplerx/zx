@@ -1,0 +1,20 @@
+// seeded-builtins-entry.zx —— §158：入口单元也种同一张内建表。
+// §157 只给 @mod 模块种 g_std_seeded，LSP 把编辑器缓冲写成同目录影子文件
+// 单查时，std/net.zx 这类库文件的裸名 stackAlloc 会被假报 E0401。统一入口
+// 作用域后，编译器与编辑器对同一份源码给出同一个结论。
+// 入口用裸名是纯放宽；`std.` 前缀仍是推荐写法，显式能力没有变化。
+// expect-output
+// entry=88
+// fmt=7
+pub const main = fn () u8 {
+    var st = stackAlloc(u8, 2);
+    st.0 = 88;
+    println("entry={}", st.0);
+
+    var out = format(heap.page, "fmt={}", 7);
+    if (out) s {
+        println("{}", s);
+        heap.page.free(heap.page.ctx, s.ptr, s.len);
+    }
+    return 0;
+};
