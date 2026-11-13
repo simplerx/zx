@@ -1,0 +1,39 @@
+// continue-label.zx —— 带标签 continue 的实现守门（§155）
+//
+// 标签写在循环关键字前（outer: for …），跳过时写 `continue :outer;`。
+// 冒号不能省：spec §8.5 / docs/reference.md §8 与两个前端的 parser 都是这个形状。
+// expect-output
+// for: 3
+// while: 12
+// defer: 3
+const std = @mod("std");
+
+const main = fn () u8 {
+    var hits: usize = 0;
+    outer: for (0..3) i {
+        for (0..3) j {
+            if (j == 1) { continue :outer; }   // 一次跨两层，直接进 outer 下一轮
+            hits = hits + 1;
+        }
+        hits = hits + 100;                     // 被跳过的本轮收尾
+    }
+    std.println("for: {}", hits);
+
+    var k: usize = 0;
+    var acc: usize = 0;
+    lp: while (k < 5) {
+        k = k + 1;
+        if (k == 3) { continue :lp; }
+        acc = acc + k;
+    }
+    std.println("while: {}", acc);
+
+    // continue 前本轮的 defer 仍按 LIFO 执行
+    var d: usize = 0;
+    dlp: for (0..3) i {
+        defer d = d + 1;
+        if (i < 2) { continue :dlp; }
+    }
+    std.println("defer: {}", d);
+    return 0;
+};

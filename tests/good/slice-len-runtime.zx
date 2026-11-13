@@ -1,0 +1,28 @@
+// slice-len-runtime.zx —— []T 的 .len/.size 是运行期值（§154）
+//
+// 长度写在类型里（*[N]T）才是编译期常量：const N = fixed.len 合法；
+// 长度写在值里（[]T 的 {ptr,len}）只能运行时读：const L = s.len 报 E0501。
+// .size 对 []T 是运行期的 len × 元素大小，不是描述符自己的 16 字节。
+// expect-output
+// fixed: 3 12
+// slice: 2 8 16
+// const: 3 12
+const std = @mod("std");
+
+const main = fn () u8 {
+    let a = std.heap.page;
+    var fixed = std.heapAlloc(a, i32, 3);
+    fixed.0 = 1; fixed.1 = 2; fixed.2 = 3;
+    const N = fixed.len;                  // 编译期常量
+    const SZ = fixed.size;                // 编译期常量（3 × 4）
+    std.println("fixed: {} {}", N, SZ);
+
+    let all = std.heapSlice(a, i32, 4);
+    let s = all[2..];                    // 运行期长度 = 2
+    std.println("slice: {} {} {}", s.len, s.size, all.size);
+
+    std.println("const: {} {}", N, SZ);
+    a.free(a.ctx, (*u8)all.ptr, all.size);
+    a.free(a.ctx, (*u8)fixed, SZ);
+    return 0;
+};

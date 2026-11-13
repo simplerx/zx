@@ -3462,6 +3462,80 @@ if _r and isinstance(_r.get("result"), dict):
 check("hover.namedNested.childTy", "child: Pv150Child" in _p150_hover, _p150_hover[:160])
 
 # ---------------------------------------------------------------------------
+# §156 类型构造函数的签名解析（用户 2026-11-13 截图 `const n: void = Gen(...)`）
+# KEEP — 外层 `fn(` 与体内方法的 `fn ` 同时出现时，sigOfStmt 必须取最靠前的
+# fn；旧版挑中体内方法，把 Gen 的返回类型读成 void、实参名提示写成 `self: `。
+GEN154 = """const std = @mod("std");
+
+const Gen = fn(T: type, n: T) type {
+    return struct{
+        mem: T = n,
+        const print = fn (self:Self) void {
+            std.println("N:{}", self.mem);
+        };
+    };
+};
+
+const main = fn () u8 {
+    const n = Gen(i32,4);
+    const v = n{};
+    v.print();
+    n.
+    return 0;
+};
+"""
+g154uri = "file:///" + os.path.join(SRC_DIR, "gen154.zx").replace(chr(92), "/")
+open(os.path.join(SRC_DIR, "gen154.zx"), "w", encoding="utf-8").write(GEN154)
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": g154uri, "languageId": "zx", "version": 1, "text": GEN154}}})
+
+_g154_line_call = GEN154[:GEN154.index("const n = Gen")].count("\n")
+send({"jsonrpc": "2.0", "id": 5100, "method": "textDocument/inlayHint", "params": {
+    "textDocument": {"uri": g154uri},
+    "range": {"start": {"line": 0, "character": 0},
+              "end": {"line": len(GEN154.split("\n")), "character": 0}}}})
+_r, _ = recv_id("gen154.inlay", 5100)
+_g154_types = {}
+_g154_params = []
+for _h in ((_r or {}).get("result") or []):
+    _lb = _h.get("label")
+    if not isinstance(_lb, str):
+        continue
+    if _h.get("kind") == 1:
+        _g154_types[_h["position"]["line"]] = _lb
+    elif _h["position"]["line"] == _g154_line_call:
+        _g154_params.append(_lb)
+check("inlayHint.typeCtor.retType", _g154_types.get(_g154_line_call) == ": type", str(_g154_types))
+check("inlayHint.typeCtor.paramNames",
+      "T: " in _g154_params and "n: " in _g154_params and "self: " not in _g154_params,
+      str(_g154_params))
+
+send({"jsonrpc": "2.0", "id": 5101, "method": "textDocument/hover", "params": {
+    "textDocument": {"uri": g154uri},
+    "position": pos(GEN154, GEN154.index("const n = Gen") + len("const n"))}})
+_r, _ = recv_id("gen154.hover", 5101)
+_g154_hover = ""
+if _r and isinstance(_r.get("result"), dict):
+    _c = _r["result"].get("contents")
+    if isinstance(_c, dict):
+        _g154_hover = _c.get("value", "")
+    elif isinstance(_c, str):
+        _g154_hover = _c
+check("hover.typeCtor.notVoid",
+      "const n: type" in _g154_hover and "void" not in _g154_hover, _g154_hover[:160])
+
+send({"jsonrpc": "2.0", "id": 5102, "method": "textDocument/completion", "params": {
+    "textDocument": {"uri": g154uri},
+    "position": pos(GEN154, GEN154.index("    n.\n") + len("    n."))}})
+_r, _ = recv_id("gen154.completion", 5102)
+_g154_items = (_r or {}).get("result", {}).get("items", [])
+_g154_ctor = [i for i in _g154_items if i["label"] == "n{...}"]
+check("completion.typeCtor.instance",
+      len(_g154_ctor) == 1 and "mem: i32" in (_g154_ctor[0].get("detail") or ""),
+      str([(i["label"], i.get("detail")) for i in _g154_items])[:200])
+
+
+# ---------------------------------------------------------------------------
 # §146 / §147 元组收敛为 {} + 元组接收者的编译器成员（用户 2026-11-13）
 # KEEP — 四条都不许删：
 #   · 位置式 `.{1, 2}` 已删除：LSP 不再把它推成 `{i32,f64}` 类型。

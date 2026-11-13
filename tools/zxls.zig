@@ -4395,8 +4395,16 @@ fn sigOfStmt(stmt: []const u8) FnSig {
             std.mem.startsWith(u8, vs, "union") or
             std.mem.startsWith(u8, vs, "enum")) return r;
     }
-    // fn?
-    const fp = std.mem.indexOf(u8, stmt, "fn ") orelse std.mem.indexOf(u8, stmt, "fn(");
+    // fn? —— 两种写法都可能出现在同一条声明里：类型构造函数写成
+    // `const Gen = fn(T: type, n: T) type { return struct{ … fn (self:Self) void … }; };`
+    // 外层是 `fn(`，体内方法却是 `fn `。旧代码 `indexOf("fn ") orelse indexOf("fn(")`
+    // 会挑中体内那个方法，把 Gen 的返回类型报成 `void`、参数名报成 `self:`
+    //（用户 2026-11-13 截图：`const n: void = Gen(...)`）。取**最靠前**的 fn
+    // 才是这条声明自己的签名。
+    const fp_sp = std.mem.indexOf(u8, stmt, "fn ");
+    const fp_lp = std.mem.indexOf(u8, stmt, "fn(");
+    var fp = fp_sp orelse fp_lp;
+    if (fp_sp != null and fp_lp != null and fp_lp.? < fp_sp.?) fp = fp_lp;
     if (fp == null) return r;
     const lp0 = std.mem.indexOfScalarPos(u8, stmt, fp.?, '(') orelse return r;
     // 匹配 ')'

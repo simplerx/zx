@@ -1,0 +1,10 @@
+// expect: no enclosing loop labeled
+// expect-code: E0405
+const std = @mod("std");
+
+const main = fn () u8 {
+    outer: for (0..3) i {
+        continue :nope;        // 标签名必须匹配某一层循环，不能指向普通块
+    }
+    return 0;
+};

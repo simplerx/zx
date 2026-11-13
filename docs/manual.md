@@ -201,7 +201,16 @@ inline for (0..info.fieldCount) i {
 ```
 
 - `defer` 离开作用域倒序执行；`errdefer` 只在以错误返回时执行（函数须返回 `!T`）。
-- `continue` 有；**`break` 没有**——多层退出用 `continue label` 或收割。
+- `continue` 有；**`break` 没有**——多层退出用 `continue :label;`（标签写在循环关键字前、
+  冒号不能省）或标签收割。
+
+  ```zx
+  outer: for (0..3) i {
+      for (0..3) j {
+          if (j == 1) { continue :outer; }   // 直接进入 outer 的下一轮
+      }
+  }
+  ```
 - **收割退出恒真循环**：`n: while(true) { …; n:{}; }` 里的空收割是正常出口，循环后面
   的代码可达；带值收割 `var got = m: while(true) { …; m: x; };` 让循环交出值。不带标签的
   `while (true)` 永远退不出来（后面报 E0502 unreachable）。

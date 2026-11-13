@@ -145,8 +145,11 @@ p.0 = 2;                     // 透过可变指针写入
 - **`*[N]T` 同一个指针值两种下标**：`ptr.0` / `ptr.1` 是编译期常量下标，
   `ptr[0]` / `ptr[i]` 是运行期下标（带界检查），读写都行。函数参数、字段、
   `?*[N]T`、泛型 N 全都适用（§144）。
-- `.len` / `.size` 是编译器字段：`[]T` 的 `.len`、`*[N]T` 的 `.len` 与 `.size`  
-  （`size` = N × 元素大小）都是编译期常量。聚合体自己有 `len`/`size` 字段时字段优先。
+- `.len` / `.size` 是编译器字段，但**只有长度写在类型里才是编译期常量**：
+  `*[N]T` 的 `.len`（= N）与 `.size`（= N × 元素大小）编译期就折成常量；
+  `[]T` 的 `.len` 是**运行期值**（真实存在切片的 `{ptr, len}` 里），`.size` 也是
+  运行期算的 `len × 元素大小`。所以 `const L = s.len;` 报 E0501，要写 `let`。
+  聚合体自己有 `len`/`size` 字段时字段优先。
 - 指针算术 `p + n` 按元素偏移，要求 `usize` 或字面量。
 - 指针 ↔ 整数只有显式转换：`(usize)p` / `(*u8)addr`。
 
@@ -265,7 +268,10 @@ switch (v) {
 ```
 
 - **收割**：`label: expr;` 把 `expr` 交给最近一层名为 `label` 的作用域当值，并**立即离开**该作用域；
-  `label: { … }` 给块起标签，`continue label` 跳过本轮。块不收割时值为 `{}`（void）。
+  `label: { … }` 给块起标签。块不收割时值为 `{}`（void）。
+- **`continue :label;` 跳过本轮**：标签写在循环关键字前（`outer: for (…) x { … }`），
+  内层写 `continue :outer;` 直接进外层循环的下一轮；不带标签的 `continue;` 只跳过最近一层循环。
+  **冒号不能省**——`continue outer;` 是语法错误（Zx 没有 `break`）。
 - **收割是循环的正常出口**：恒真循环里收割自己的标签（`n: {}` 空收割 / `n: v;` 带值）会跳出循环，
   循环后面的语句可达——这是 `while (true)` 加收尾代码的唯一写法（1.2.3 起不再误报 E0502）：
 
@@ -330,6 +336,20 @@ pub const main = fn () u8 { … }          // pub 控制跨文件导出（见 §
   删掉尾逗号，fmt 就把整块收回一行**——不自动补逗号（见 §12 格式化）。
 - **泛型**：形参写 `T: type` 的函数是编译期函数，`ArrayList(i32)` 是一次编译期调用。  
   实例名取自构造式（`var xs = std.ArrayList(i32).init(…)` 推断为该实例）。
+- **返回 `type` 的函数是类型构造函数**：全部实参都在编译期求值，`n: T` 这样的
+  值形参可以直接写成返回 struct 的字段默认值；调用结果就是类型（`§156`）：
+
+  ```zx
+  const Gen = fn (T: type, n: T) type {
+      return struct {
+          mem: T = n,
+          const print = fn (self: Self) void { std.println("N:{}", self.mem); };
+      };
+  };
+  const G = Gen(i32, 4);       // G 是类型，不是 void
+  const g = G{};               // mem 默认取 4
+  g.print();                    // N:4
+  ```
 - **编译期执行**：const 初始化器、泛型实参、`inline for` 都在编译期算；  
   除零、越界在编译期直接报错（E0505/E0506）。
 - `@compileError("msg")`：真的执行到才炸（放进编译期 `if` 做类型分派守卫）。
@@ -418,6 +438,8 @@ inline for (0..ti.fieldCount) i {
 - **顺取与 `{N}` 绝对下标互不感知**：`std.println("{2} {}", a, b, c)` 里  
   `{2}` 是 `c`，但后面的 `{}` 仍从 `a` 顺取。混用容易数错，不建议。
 - 占位符与实参个数不匹配报 E0802。
+- **编辑器里的 `fmt:` / `args:` 是 zxls 的参数名行内提示，不是源码**：Zx 没有具名实参，
+  把提示照抄成 `std.println(fmt: "…", args: x)` 会报 E0201，按位置直接写即可。
 
 ```zx
 std.println("[{x}] [{b}] [{0:>6}] [{1:.2}]", 255, 3.5, 42);
@@ -792,7 +814,7 @@ zxc errors / explain E0301
 | 数组 | **纯指针** `*[N]T`（8 字节） | `T[N]` 值类型 | `[N]T` 值 |
 | 解引用 | `.0`，`.` 自动穿透 | `*p` / `p->` | `p.*` |
 | 块的值 | 只来自收割 `tag: v;` | 语句 | 末尾表达式 |
-| 跳出 | `continue label` + 收割（无 break） | `goto` | `break :label` |
+| 跳出 | `continue :label;` + 收割（无 break） | `goto` | `break :label` |
 | 空值捕获 | `if (x) v { }`（无竖线） | — | `if (x) \|v\| { }` |
 | 转换 | 只有 `(T)v` | 隐式一大堆 | `@intCast` 等 |
 | 反射 | 唯一 `@type(x)` | 无 | `@typeInfo` |

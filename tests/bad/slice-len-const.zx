@@ -1,0 +1,10 @@
+// expect: must be computable at compile time
+// expect-code: E0501
+const std = @mod("std");
+
+const main = fn () u8 {
+    let xs = std.heapSlice(std.heap.page, i32, 4);
+    const L = xs.len;          // []T 的 len 是运行期值，不能进 const
+    std.println("{}", L);
+    return 0;
+};

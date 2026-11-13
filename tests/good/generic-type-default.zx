@@ -1,0 +1,36 @@
+// generic-type-default.zx —— 类型构造函数的值形参用作字段默认值（§156）
+//
+// `fn (T: type, n: T) type` 返回的是**类型值**：Gen(i32, 4) 之后 G 就是类型。
+// n 是编译期值，能直接写在返回 struct 的字段默认值里；方法用只读的
+// `self: Self`（§151），实例 G{} 自动带上 mem = 4。
+// expect-output
+// N:4
+// mem=4
+// second: 9
+// u64: 7
+const std = @mod("std");
+
+const Gen = fn (T: type, n: T) type {
+    return struct {
+        mem: T = n,
+        const print = fn (self: Self) void {
+            std.println("N:{}", self.mem);
+        };
+    };
+};
+
+const main = fn () u8 {
+    const G = Gen(i32, 4);
+    const g = G{};
+    g.print();
+    std.println("mem={}", g.mem);
+
+    const H = Gen(i32, 9);
+    let h = H{};
+    std.println("second: {}", h.mem);
+
+    const U = Gen(u64, 7);
+    let u = U{};
+    std.println("u64: {}", u.mem);
+    return 0;
+};

@@ -6156,3 +6156,64 @@ E0503 的旧 `std.heapAlloc(1) orelse …` / `p.*` 示例换成可编译写法�
 §151/§152/§153 断言全绿；`bash bench/run.sh` 8/8 编译通过且校验和一致；
 `tools/lspstress.py` 0 failure（18.4s）。首轮压测 mmat 失败、修复后
 复跑全绿，两次日志在 `.tmp/press130*.log`。
+
+---
+
+## 154. `[]T.len/.size` 是运行期值；后端 `.size` 三处对齐（2026-11-13）
+
+用户截图指出 `docs/reference.md` §4 把 `[]T` 的 `.len` 写成编译期常量。核对：spec §3.3 的表、
+早期裁定（「切片 `[]T` 的 `.len` 是运行时值」）、编译器 `check_field` 都一致——切片是
+`{ptr,len}` 16 字节，长度真的存在值里；错的只有速查手册那一句。改成「只有长度写在类型里
+才是编译期常量」，并补 `const L = s.len` → E0501 的守门。
+
+顺带发现真 bug：`s.size` 在后端 `ex()` 走 `layout_size(TY_SLICE)` → 常量 16（描述符大小），
+而 sema 的 `ct_field` 折的是 `len × sizeof(elem)`，spec §3.3 写的也是后者；`is_const_init`
+还把 `.size` 一律当 C 常量表达式。修：`ex()` 对 TY_SLICE 发
+`((size_t)(<a>.len) * (size_t)es)`，`is_const_init` 对切片的 `.len/.size` 都返回 false。
+类型检查 / 常量折叠 / 代码生成三处终于同一条规则（§3.3 明文要求）。实测 `[]i32` len=3 时
+`s.size` 从 16 变 12。
+
+守门：`tests/good/slice-len-runtime.zx`（fixed 3/12、slice 2/8/16、const 3/12）、
+`tests/bad/slice-len-const.zx` / `slice-size-const.zx`（E0501）、`test.sh` §154 `--emit-c`
+断言。文档同步 `docs/reference.md` §4、`docs/errors.md` E0501、`spec/zx-spec.md` §3.3。
+
+## 155. `continue :label;` 早就实现了，错的是文档（2026-11-13）
+
+用户截图指 `docs/reference.md` §8 写「`continue label` 跳过本轮」但没实现。核实：
+`spec/zx-spec.md` §8.5 与两个前端 parser（`src/parse.c` 的 NK_CONTINUE、
+`bootstrap/parse.zx` 的 kw_continue 分支）都是 `continue :tag;`（冒号前缀，v0.24 起标签
+写在关键字前）；sema `label_find_loop(n->label)` 与后端 `lab_find_loop()` 都按标签找循环帧、
+发 `goto LcontN`。实测嵌套 `outer: for … { continue :outer; }` 生成 `goto Lcont1;`（外层）
+而不是内层 `Lcont2;`，`hits=3 / acc=12 / defer=3`。所以是**文档漏了冒号**，不是功能缺失；
+`continue outer;` 报 E0201。按「不造第二种拼写」的裁定不动语言，只修文档：reference §8 / §17、
+manual 控制流段、spec §8.5 加「冒号不能省」。
+
+补此前缺失的守门：`tests/good/continue-label.zx`（跨两层 for、标签 while、continue 前的
+defer）、`tests/bad/continue-unknown-label.zx`（E0405）、`test.sh` §155 的 `--emit-c`
+跳转标号断言。
+
+## 156. 类型构造函数返回类型值被 LSP 报成 `void`（2026-11-13）
+
+用户示例 `const Gen = fn(T: type, n: T) type { return struct{ mem: T = n,
+const print = fn (self:Self) void { … }; }; };` 问「这样的泛型可以实现吗，现在返回的不是
+类型而是 void」。实编实跑：**编译器一直支持**，`Gen(i32,4)` 是类型值，`G{}` 带默认值 4、
+只读 `self: Self` 方法正常（`N:4 / mem=4 / second: 9 / u64: 7`）。截图里的 `: void`、
+`self: `、`fmt: `、`args: ` 全是 zxls 的**行内提示**（不是源码，照抄进代码会 E0201；
+Zx 没有具名实参）。
+
+根因在 `tools/zxls.zig sigOfStmt`：`indexOf("fn ") orelse indexOf("fn(")` 在类型构造函数里
+挑中了**体内方法**的 `fn (self:Self) void`（外层是 `fn(`），于是 Gen 的返回类型读成 `void`、
+参数名读成 `self`；`resolveCalleeRet` / `appendParamHints` / hover 三处一起错。改成取两种
+拼写里**最靠前**的 fn，签名就回到声明自己。修后 `const n = Gen(i32,4)` 的行内提示 `: type`、
+实参名提示 `T: ` / `n: `、hover `const n: type = Gen(i32,4)`，`n.` 补全仍是
+`n{...} 构造实例 · struct { mem: i32 = n }`。
+
+守门：`tests/good/generic-type-default.zx`（i32/u64 两种实例 + 字段默认值 + 只读 Self 方法）、
+`tools/lsptest.py` §156 四条断言、`test.sh` §154-§156 的 `--fe=c` 对拍；
+`docs/reference.md` §8 补类型构造函数示例。`bin/zxls.exe` 已绕 Zed 锁重建，
+用户需重启 Zed 才会看到新提示。
+
+**本轮定向验证**（按用户节奏不重跑全量）：`sh build.sh` OK（zxls 单独绕锁重编）；
+runner 新增 6 例 `passed 9, failed 0`；21 个相关既有用例 `passed 38, failed 0`；
+`ZXLS_BIN=bin/zxls.exe python tools/lsptest.py` 全绿（含 4 条新断言，SMOKE ALL PASS）；
+test.sh 的 §154/§155/§154-§156 断言与 `sh -n` 均通过。

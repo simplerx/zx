@@ -5271,6 +5271,18 @@ static void ex(Buf *b, Node *n) {
                         return;
                     }
                 }
+                /* §154：[]T 的 .size 是运行期的 `len * sizeof(elem)`，不是
+                 * 描述符自己的 16 字节。sema 的 ct_field 也是这么折的——
+                 * 类型检查 / 常量折叠 / 代码生成三处必须同一条规则。 */
+                if (bt->kind == TY_SLICE && bt->elem) {
+                    int es = ty_size(bt->elem);
+                    if (es >= 0) {
+                        buf_printf(b, "((size_t)(");
+                        ex(b, n->a);
+                        buf_printf(b, ".len) * (size_t)%d)", es);
+                        return;
+                    }
+                }
                 int sz = layout_size(bt);
                 if (sz >= 0) { buf_printf(b, "((size_t)%d)", sz); return; }
             }
@@ -7137,8 +7149,9 @@ static bool is_const_init(Node *n) {
         if (bt && (bt->kind == TY_STRUCT || bt->kind == TY_UNION) &&
             ty_field(bt, n->name))
             return false;
-        if (!strcmp(n->name, "size")) return true;             /* comptime */
-        if (!strcmp(n->name, "len"))                            /* 切片自己存了 len */
+        /* §154：切片自己存了 len，.len 和 .size 都是运行期值；
+         * 只有长度写在类型里（*[N]T / 元组 / 聚合）才是 C 常量表达式。 */
+        if (!strcmp(n->name, "size") || !strcmp(n->name, "len"))
             return !(bt && bt->kind == TY_SLICE);
         return false;
     }

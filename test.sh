@@ -1238,6 +1238,43 @@ else
     fail=1
 fi
 
+# §154：[]T 的 .size 是运行期 len × 元素大小。后端曾发 layout_size(切片)=16，
+# 和 sema 的 ct_field（len × sizeof(elem)）给出两个答案。.len 的运行期性由
+# tests/bad/slice-len-const.zx、slice-size-const.zx 的 E0501 守门。
+$ZXC tests/good/slice-len-runtime.zx --emit-c > "$TPFX.s154.c" 2>/dev/null
+if grep -qF '.len) * (size_t)4' "$TPFX.s154.c" \
+   && ! grep -qF '((size_t)16)' "$TPFX.s154.c"; then
+    printf "  ok   §154 []T.size 按运行期 len 计算（非描述符 16 字节）\n"
+else
+    printf "  FAIL §154 []T.size 发射形状\n"
+    grep -nE '\.len\)|\(\(size_t\)16\)' "$TPFX.s154.c" | head -12
+    fail=1
+fi
+
+# §155：带标签 continue 必须落到外层循环的 continue 标号（goto Lcont1），
+# 不是内层的 Lcont2；未知标签报 E0405。冒号不能省，语法由 bad 用例守门。
+$ZXC tests/good/continue-label.zx --emit-c > "$TPFX.s155.c" 2>/dev/null
+if grep -qF 'goto Lcont1;' "$TPFX.s155.c" \
+   && grep -qF 'Lcont2: ;' "$TPFX.s155.c" \
+   && grep -qF 'Lcont1: ;' "$TPFX.s155.c"; then
+    printf "  ok   §155 continue :label 跨层跳转\n"
+else
+    printf "  FAIL §155 continue :label 没落到外层循环\n"
+    grep -nE 'Lcont|goto' "$TPFX.s155.c" | head -12
+    fail=1
+fi
+
+# §156：类型构造函数 fn (T: type, n: T) type 返回的是类型值，n 可作字段默认值。
+# 两个前端都得认（默认前端 zxfe 由 runner 实跑，这里补 C 前端对拍）。
+for f156 in slice-len-runtime continue-label generic-type-default; do
+    if $ZXC "tests/good/$f156.zx" --check --fe=c > "$TPFX.$f156.fe.log" 2>&1; then
+        printf "  ok   §154-§156 %s 在 C 前端通过\n" "$f156"
+    else
+        printf "  FAIL §154-§156 %s 在 C 前端失败\n" "$f156"
+        head -12 "$TPFX.$f156.fe.log"; fail=1
+    fi
+done
+
 # 用例会在仓库根留下自己的临时文件：io_fmt.zx 写 io_fmt.tmp，stdfs.zx 建
 # fs_t_dir / fs_t_dir2。跑完统一带走——测试不该往工作区里堆东西。
 rm -rf io_fmt.tmp fs_t_dir fs_t_dir2 2>/dev/null || true

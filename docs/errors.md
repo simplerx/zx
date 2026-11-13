@@ -350,6 +350,16 @@ const now = std.time.now();     // E0501
 let now = std.time.now();       // 对
 ```
 
+`[]T` 的 `.len` / `.size` 也存在这里：长度写在值里（切片的 `{ptr, len}`），
+不是编译期常量。`*[N]T` 的 `.len` / `.size` 才是（长度写在类型里）：
+
+```zx
+let xs = std.heapSlice(std.heap.page, i32, 4);
+let s = xs[1..];
+const L = s.len;                // E0501
+let L = s.len;                  // 对
+```
+
 <a id="e0502"></a>
 ### E0502 控制流完整性不成立
 

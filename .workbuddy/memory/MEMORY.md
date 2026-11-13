@@ -47,3 +47,9 @@
 - `docs/errors.md` 是 `zxc explain` details 链接、zxls codeDescription、test.sh 三段覆盖检查的依赖，改动不能丢码与 `id="eNNNN"` 锚点。
 - **版本点四处**：`src/zxc.h ZXC_VERSION`、`docs/reference.md` 头、`docs/manual.md` 落款、README 文档表；`zxc init` 写进 zx.json 的 0.1.0 是工程版本，别一起改。当前 **1.3.0**。
 - **§153**：region 合并的分配器若是本块局部声明，`__zxrN = zx_heapalloc(al,…)` 必须排在那条 NK_DECL 之后（`emit_region_alloc`），否则 §150 的 late-init `std.heap.page` 局部副本会让 C 先用后声明报 B1002；`bench/run.sh` 的 build FAILED 必须非零退出。
+
+## §154-§156 三个截图反馈（2026-11-13）
+- **`[]T.len/.size` 是运行期值**：只有长度写在类型里（`*[N]T`、元组）才是编译期常量；`const L = s.len` 报 E0501。文档 `reference.md §4` 曾写错，spec §3.3 / decisions 旧裁定一直是对的。后端 `ex()` 曾把 `[]T.size` 发成 `layout_size`=16（描述符大小），与 sema `ct_field` 的 `len*sizeof(elem)` 不一致 → 修成 `.len * es`，`is_const_init` 也别再把切片 `.len/.size` 当 C 常量。**类型检查/常量折叠/代码生成三处必须同一条规则**。
+- **`continue :label;` 本来就实现了**（冒号前缀，标签写在循环关键字前；`src/parse.c` + `bootstrap/parse.zx`、sema `label_find_loop`、后端 `lab_find_loop`）。`docs/reference.md`/`manual.md` 漏写冒号造成「没实现」的错觉；不造无冒号别名（两种拼写不合规），只改文档 + 补守门。`continue label;` 是 E0201，未知标签 E0405。
+- **LSP 行内提示不是源码**：截图里的 `: void`、`self: `、`fmt: `、`args: ` 都是 zxls inlay（Zx 没具名实参，照抄会 E0201）。`fn (T: type, n: T) type` 的值形参可以当返回 struct 的字段默认值，编译器一直支持，调用结果是类型值。
+- `tools/zxls.zig sigOfStmt` 曾 `indexOf("fn ") orelse indexOf("fn(")`，类型构造函数里挑中体内方法 → 返回类型报 `void`、参数名报 `self`。**取两种拼写里最靠前的 fn**。改 zxls 必须绕 Zed 锁重编 `bin/zxls.exe` 并让用户重启 Zed。
