@@ -1,5 +1,5 @@
 // defer 在离开作用域时执行，LIFO
-const std = module("std");
+const std = @mod("std");
 
 const cleanup = fn () void { std.print("bye\n"); };
 

@@ -120,14 +120,14 @@ if ( cd "$pdir" && "$ZXCW" init demo > "$TPFX.cli.init" 2>&1 ); then
     else
         printf "  FAIL check 没有诊断输出\n"; cat "$TPFX.cli.c2"; fail=1
     fi
-    # vendor/ 是模块根：module("ext") → vendor/ext.zx（可省 .zx）
-    printf 'const std = module("std");\n\npub const hi = fn () void {\n    std.println("vendor ok");\n};\n' \
+    # vendor/ 是模块根：@mod("ext") → vendor/ext.zx（可省 .zx）
+    printf 'const std = @mod("std");\n\npub const hi = fn () void {\n    std.println("vendor ok");\n};\n' \
         > "$pdir/demo/vendor/ext.zx"
-    printf 'const std = module("std");\nconst ext = module("ext");\n\nconst main = fn () i32 {\n    ext.hi();\n    return 0;\n};\n' \
+    printf 'const std = @mod("std");\nconst ext = @mod("ext");\n\nconst main = fn () i32 {\n    ext.hi();\n    return 0;\n};\n' \
         > "$pdir/demo/src/main.zx"
     rm -f "$pdir/demo/src/bad.zx"
     if ( cd "$pdir/demo" && "$ZXCW" run > "$TPFX.cli.r" 2>&1 ) && grep -q "vendor ok" "$TPFX.cli.r"; then
-        printf "  ok   vendor/ 里的模块能被 module(\"ext\") 找到\n"
+        printf "  ok   vendor/ 里的模块能被 @mod(\"ext\") 找到\n"
     else
         printf "  FAIL vendor/ 模块解析失败\n"; cat "$TPFX.cli.r"; fail=1
     fi
@@ -284,8 +284,8 @@ int cli_sum(int a, int b) { return a + b; }
 void cli_move(Pt *p, int dx) { p->x += dx; }
 CSRC
 cat > "$pdir/demo/src/main.zx" <<'ZSRC'
-const std = module("std");
-const c = module("cliadd");
+const std = @mod("std");
+const c = @mod("cliadd");
 const main = fn () i32 {
     std.println("sum={} g={}", c.cli_sum(2, 3), c.cli_g);
     return 0;
@@ -351,8 +351,8 @@ HSRC
 printf 'int main(void){ return 1; }\n' > "$TLIB/tests/main.c"
 
 cat > "$pdir/demo/src/main.zx" <<'ZSRC'
-const std = module("std");
-const t = module("treelib");
+const std = @mod("std");
+const t = @mod("treelib");
 const main = fn () i32 {
     std.println("add={} hash={} g={} ver={}",
                 t.tree_add(2, 3), t.tree_hash(), t.tree_g, t.TREE_VER);
@@ -400,7 +400,7 @@ if ( cd "$pdir/auto" && "$ZXCW" init autodemo > "$TPFX.cli.ainit" 2>&1 ); then
         > "$AP/vendor/geolib/src/core/calc.c"
     printf '#include "twice.h"\nint geo_twice_impl(int v) { return v * 2; }\n' \
         > "$AP/vendor/geolib/src/util/twice.c"
-    printf 'const std = module("std");\nconst g = module("geolib");\nconst main = fn () i32 {\n    std.println("add={} twice={} ver={}", g.geo_add(2, 3), g.geo_twice(), g.GEO_VER);\n    return 0;\n};\n' \
+    printf 'const std = @mod("std");\nconst g = @mod("geolib");\nconst main = fn () i32 {\n    std.println("add={} twice={} ver={}", g.geo_add(2, 3), g.geo_twice(), g.GEO_VER);\n    return 0;\n};\n' \
         > "$AP/src/main.zx"
     if ( cd "$AP" && "$ZXCW" run > "$TPFX.cli.arun" 2>&1 ) \
        && grep -q "auto-added C library vendor/geolib" "$TPFX.cli.arun" \
@@ -424,7 +424,7 @@ if ( cd "$pdir/auto" && "$ZXCW" init autodemo > "$TPFX.cli.ainit" 2>&1 ); then
     # 顶层散头 + 散 .c：更简单的放法同样免 include
     printf '#define SMALL_K 9\nint small_mul(int a, int b);\n' > "$AP/vendor/small.h"
     printf '#include "small.h"\nint small_mul(int a, int b) { return a * b; }\n' > "$AP/vendor/small.c"
-    printf 'const std = module("std");\nconst s = module("small");\nconst main = fn () i32 {\n    std.println("mul={} k={}", s.small_mul(4, 5), s.SMALL_K);\n    return 0;\n};\n' \
+    printf 'const std = @mod("std");\nconst s = @mod("small");\nconst main = fn () i32 {\n    std.println("mul={} k={}", s.small_mul(4, 5), s.SMALL_K);\n    return 0;\n};\n' \
         > "$AP/src/main.zx"
     if ( cd "$AP" && "$ZXCW" run > "$TPFX.cli.arun3" 2>&1 ) \
        && grep -q "auto-added C header vendor/small.h" "$TPFX.cli.arun3" \
@@ -507,7 +507,7 @@ assert d['name']=='demo'" "$FDEMO/zx.json" \
         printf "  ok   旧版 vendor 对象写法按新规矩报错（无兼容层）\n"
     fi
     cp "$TPFX.cli.fjson.bak" "$FDEMO/zx.json"
-    printf 'const std = module("std");\nconst a = module("flib");\nconst b = module("fgit");\nconst c = module("fmini");\nconst main = fn () i32 {\n    std.println("add={} mul={} k={} mini={}", a.flib_add(3, 4), b.fgit_mul(2, 6), b.FGIT_K, c.FMINI_K);\n    return 0;\n};\n' > "$FDEMO/src/main.zx"
+    printf 'const std = @mod("std");\nconst a = @mod("flib");\nconst b = @mod("fgit");\nconst c = @mod("fmini");\nconst main = fn () i32 {\n    std.println("add={} mul={} k={} mini={}", a.flib_add(3, 4), b.fgit_mul(2, 6), b.FGIT_K, c.FMINI_K);\n    return 0;\n};\n' > "$FDEMO/src/main.zx"
     if ( cd "$FDEMO" && "$ZXCW" run > "$TPFX.cli.frun" 2>&1 ) \
        && grep -q "add=7 mul=12 k=5 mini=42" "$TPFX.cli.frun"; then
         printf "  ok   拉下来的三种库都能编译链接跑\n"
@@ -619,7 +619,7 @@ if mkdir -p "$MDIR/src" "$MDIR/vendor" "$MDIR/shared" \
    && printf '{"name":"lspmod","main":"src/main.zx","deps":["shared"]}\n' > "$MDIR/zx.json" \
    && printf 'pub const V: i32 = 7;\n' > "$MDIR/vendor/vlib.zx" \
    && printf 'pub const S: i32 = 5;\n' > "$MDIR/shared/slib.zx" \
-   && printf 'const std = module("std");\nconst v = module("vlib");\nconst s = module("slib");\nconst main = fn () i32 { std.println("{}", v.V + s.S); return 0; };\n' > "$MDIR/src/main.zx"; then
+   && printf 'const std = @mod("std");\nconst v = @mod("vlib");\nconst s = @mod("slib");\nconst main = fn () i32 { std.println("{}", v.V + s.S); return 0; };\n' > "$MDIR/src/main.zx"; then
     # ① cwd = 工程根、相对路径：LSP 的典型形态
     if ( cd "$MDIR" && "$ZXCW" src/main.zx --check > "$TPFX.md1" 2>&1 ) \
        && ! grep -q "cannot open module" "$TPFX.md1"; then
@@ -643,9 +643,9 @@ if mkdir -p "$MDIR/src" "$MDIR/vendor" "$MDIR/shared" \
         printf "  FAIL 异目录 cwd 下仍假报模块找不到\n"; cat "$TPFX.md3"; fail=1
     fi
     # ④ 负例：真的写错模块名仍要报错，不许把诊断吞掉。
-    # 注意顶层 const 是惰性求值的：q 不被使用时 module(...) 压根不加载，
+    # 注意顶层 const 是惰性求值的：q 不被使用时 @mod(...) 压根不加载，
     # 所以必须真的引用 q.X 才会走进模块解析链。
-    printf 'const q = module("nope_missing");\nconst main = fn () i32 { return q.X; };\n' > "$MDIR/src/bad.zx"
+    printf 'const q = @mod("nope_missing");\nconst main = fn () i32 { return q.X; };\n' > "$MDIR/src/bad.zx"
     # 注意：报错时 zxc 返回非零，这里不能拿退出码做 && 的前提，
     # 否则"正确报了错"反而会被判成失败——只认诊断文本。
     ( cd "$MDIR" && "$ZXCW" src/bad.zx --check > "$TPFX.md4" 2>&1 ) || true
@@ -921,8 +921,8 @@ BP="$TPFX.modbind"
 if mkdir -p "$BP/src" \
    && printf '{"name":"modbind","version":"0.1.0","main":"src/main.zx","out":"modbind"}\n' > "$BP/zx.json" \
    && printf 'pub const add = fn (a: i32, b: i32) i32 { return a + b; };\n' > "$BP/src/util.zx" \
-   && printf 'pub const math = module("util");\n' > "$BP/src/api.zx" \
-   && printf 'const std = module("std");\nconst g = module("util");\nconst api = module("api");\n\npub const main = fn () !i32 {\n    std.println("{} {}", g.add(1, 2), api.math.add(3, 4));\n    return 0;\n};\n' > "$BP/src/main.zx" \
+   && printf 'pub const math = @mod("util");\n' > "$BP/src/api.zx" \
+   && printf 'const std = @mod("std");\nconst g = @mod("util");\nconst api = @mod("api");\n\npub const main = fn () !i32 {\n    std.println("{} {}", g.add(1, 2), api.math.add(3, 4));\n    return 0;\n};\n' > "$BP/src/main.zx" \
    && ( cd "$BP" && "$ZXCW" run > "$TPFX.modbindrun" 2>&1 ) \
    && grep -q "^3 7$" "$TPFX.modbindrun"; then
     printf "  ok   显式绑定 / 缩写别名 / pub 再导出跑通\n"
@@ -982,7 +982,7 @@ BP="$TPFX.mfail"
 if mkdir -p "$BP/src" \
    && printf '{"name":"mfail","version":"0.1.0","main":"src/main.zx","out":"mfail"}\n' > "$BP/zx.json" \
    && printf 'pub const X: i32 = 0x;\n' > "$BP/src/util.zx" \
-   && printf 'const u = module("util");\n\npub const main = fn () i32 {\n    return u.nope();\n};\n' > "$BP/src/main.zx" \
+   && printf 'const u = @mod("util");\n\npub const main = fn () i32 {\n    return u.nope();\n};\n' > "$BP/src/main.zx" \
    && ( cd "$BP" && "$ZXCW" src/main.zx --check > "$TPFX.mfail1" 2>&1 || true ) \
    && grep -q "src/main.zx:1:11: error\[E0601\]: module 'src/util.zx' failed to parse: 1:22: hex literal needs digits" "$TPFX.mfail1" \
    && ! grep -q "has no member" "$TPFX.mfail1"; then
@@ -1046,6 +1046,36 @@ if $ZXC demo/snake.zx -o "$SNK" > "$TPFX.snakebuild" 2>&1; then
     fi
 else
     printf "  FAIL demo/snake.zx 编译失败\n"; cat "$TPFX.snakebuild"; fail=1
+fi
+
+printf "\n== §144 heapSlice / @mod / 数组指针下标\n"
+$ZXC tests/good/heap-slice.zx --emit-c > "$TPFX.hs.c" 2>/dev/null
+# count 只许求值一次：后端按 []T 生成一份特化助手，n 是唯一的函数实参。
+# 行为上 heap-slice.zx 的 `calls = 1` 已经守住；这里再钉住生成代码结构，
+# 免得哪天改回 { .ptr=..., .len=n } 那种把 n 发两遍的形状。
+if grep -q 'ZxSlice_i32 zx_heapslice_ZxSlice_i32(' "$TPFX.hs.c" \
+   && grep -q 'r.len = (size_t)n;' "$TPFX.hs.c" \
+   && grep -q 'zx_heapalloc(al, n \* sizeof' "$TPFX.hs.c"; then
+    printf "  ok   heapSlice 按 []T 生成助手，count 只求值一次\n"
+else
+    printf "  FAIL heapSlice 生成代码不合预期\n"
+    grep -n 'zx_heapslice_\|r.len\|zx_heapalloc(' "$TPFX.hs.c" | head -n 12
+    fail=1
+fi
+# module 关键字已换成内建 @mod：旧写法必须给 E0211 与替代写法
+$ZXC tests/bad/removed-module.zx --check > "$TPFX.oldmod.log" 2>&1 || true
+if grep -q 'E0211' "$TPFX.oldmod.log" && grep -q '@mod' "$TPFX.oldmod.log"; then
+    printf "  ok   旧 module(...) 写法给出 E0211 + @mod 提示\n"
+else
+    printf "  FAIL 旧 module(...) 写法没有迁移提示\n"; cat "$TPFX.oldmod.log"; fail=1
+fi
+# *[N]T 的 ptr.0/.1、ptr[0]/ptr[i] 由 array-pointer-index.zx 逐字比对；
+# 这里再确认运行期界检查确实进了生成代码。
+if $ZXC tests/good/array-pointer-index.zx --emit-c > "$TPFX.api.c" 2>/dev/null \
+   && grep -q 'out of bounds' "$TPFX.api.c"; then
+    printf "  ok   *[N]T 的 ptr[i] 带运行期界检查\n"
+else
+    printf "  FAIL ptr[i] 没生成界检查\n"; fail=1
 fi
 
 # 用例会在仓库根留下自己的临时文件：io_fmt.zx 写 io_fmt.tmp，stdfs.zx 建

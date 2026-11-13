@@ -5,7 +5,7 @@
 // realloc 挪块，源节点的 unroll 数组悬垂，后端预扫描读到已释放内存段错误。
 // 修复：clone_tree 重置 unroll/nunroll（克隆体不带展开结果）。
 // 踩中形态：`inline for` 体里给局部 var 赋 `@type(T).size` / `d.fields[i].offset`。
-const std = module("std");
+const std = @mod("std");
 
 const Point = struct { x: i32, y: i32 };
 

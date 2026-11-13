@@ -164,7 +164,7 @@ static bool can_follow_cast(TokKind k) {
     case TOK_IDENT: case TOK_INT: case TOK_FLOAT: case TOK_STRING: case TOK_CHAR:
     case TOK_LBRACE: case TOK_DOT_BRACE: case TOK_AMP: case TOK_LPAREN:
     case TOK_KW_NULL: case TOK_KW_UNDEF: case TOK_BANG: case TOK_TILDE:
-    case TOK_KW_IF: case TOK_KW_MODULE:
+    case TOK_KW_IF:
     case TOK_AT:            /* (T)@builtin(...) — `@` 永远不是中缀运算符，无歧义 */
         return true;
     default: return false;
@@ -1060,21 +1060,6 @@ static Node *parse_primary(P *p) {
     case TOK_KW_FN:
         return parse_fn(p, false);
 
-    case TOK_KW_MODULE: {
-        advance(p);
-        expect(p, TOK_LPAREN);
-        Node *n = node_new(NK_MODULE, t->line, t->col);
-        if (at(p, TOK_STRING)) {
-            Token *s = advance(p);
-            n->str = s->text;
-            n->str_len = s->text_len;
-        } else {
-            perr(p, "module() needs a string name");
-        }
-        expect(p, TOK_RPAREN);
-        return n;
-    }
-
     case TOK_AT: {
         advance(p);
         Node *n = node_new(NK_BUILTIN, t->line, t->col);
@@ -1085,6 +1070,23 @@ static Node *parse_primary(P *p) {
             n->name = "type";
         } else {
             n->name = take_ident(p);
+        }
+
+        /* §144：`module` 关键字已换成内建 `@mod`。这里复用 NK_MODULE
+         * 节点——模块加载、sema 作用域、后端全都认它，只把语法入口
+         * 从关键字搬进 @ 内建。模块名是字符串字面量，直接收 token。 */
+        if (n->name && !strcmp(n->name, "mod")) {
+            n->kind = NK_MODULE;
+            expect(p, TOK_LPAREN);
+            if (at(p, TOK_STRING)) {
+                Token *s = advance(p);
+                n->str = s->text;
+                n->str_len = s->text_len;
+            } else {
+                perr(p, "@mod() needs a string name");
+            }
+            expect(p, TOK_RPAREN);
+            return n;
         }
 
         /* 语法只有两种形状：@type 与 @memcpy/@memmove/@memset 先收表达式，
@@ -1795,7 +1797,7 @@ static Node *parse_block(P *p) {
 static bool tok_starts_decl(TokKind k) {
     switch (k) {
     case TOK_KW_FN: case TOK_KW_PUB: case TOK_KW_CONST: case TOK_KW_VAR:
-    case TOK_KW_STRUCT: case TOK_KW_ENUM: case TOK_KW_UNION: case TOK_KW_MODULE:
+    case TOK_KW_STRUCT: case TOK_KW_ENUM: case TOK_KW_UNION:
     case TOK_KW_EXTERN:
         return true;
     default:

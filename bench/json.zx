@@ -1,7 +1,7 @@
 // bench/json.zx —— std.json 解析 + 序列化。
 // 一份含嵌套对象/数组/字符串/数字的文档，反复 parse + stringify，
 // 末尾校验和钉住行为（改坏了语义 benchmark 就没意义了）。
-const std = module("std");
+const std = @mod("std");
 
 const DOC = "{\"name\":\"zx-json\",\"n\":42,\"pi\":3.14159,\"ok\":true,\"nil\":null,\"tags\":[\"a\",\"b\",\"c\"],\"nest\":{\"x\":1,\"y\":[10,20,30],\"s\":\"hello\\nworld\"}}";
 

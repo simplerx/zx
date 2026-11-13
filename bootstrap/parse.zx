@@ -5,8 +5,8 @@
 // 错误码一路上传，试探点 `if (r) v {} else { 回退游标 }`。
 // 对拍格式与 `zxc --ast` 的 s 表达式完全一致（见 dump）。
 
-const std = module("std");
-const lex = module("lex.zx");
+const std = @mod("std");
+const lex = @mod("lex.zx");
 
 const Fail = enum(u8) { f = 1 };
 
@@ -34,7 +34,6 @@ pub const kname = fn (k: lex.Kind) []const u8 {
         .kw_let: "'let'";
         .kw_var: "'var'";
         .kw_fn: "'fn'";
-        .kw_module: "'module'";
         .kw_type: "'type'";
         .kw_null: "'null'";
         .kw_undefined: "'undefined'";
@@ -672,7 +671,6 @@ pub const Parser = struct {
                k == lex.Kind.lparen || k == lex.Kind.kw_null ||
                k == lex.Kind.kw_undefined || k == lex.Kind.bang ||
                k == lex.Kind.tilde || k == lex.Kind.kw_if ||
-               k == lex.Kind.kw_module ||
                k == lex.Kind.at;    // (T)@builtin(...) —— `@` 永远不是中缀运算符，无歧义
     };
 
@@ -1591,20 +1589,6 @@ pub const Parser = struct {
             return self.parse_fn(false);
         }
 
-        if (t.kind == lex.Kind.kw_module) {
-            _ = self.advance();
-            try self.expect(lex.Kind.lparen);
-            let n = self.new_at(NK.module_, t);
-            if (self.at(lex.Kind.string)) {
-                let s = self.advance();
-                n.str = self.strbuf[s.str_off..s.str_off + s.text_len];
-            } else {
-                return (error)Fail.f;
-            }
-            try self.expect(lex.Kind.rparen);
-            return n;
-        }
-
         if (t.kind == lex.Kind.at) {
             _ = self.advance();
             let n = self.new_at(NK.builtin, t);
@@ -1620,6 +1604,20 @@ pub const Parser = struct {
             // @type 的实参类型与表达式都收（类型在表达式位置也是值），
             // 按表达式解析，`@type(p.x)` 里的 p.x 才不会被打成"不是类型"。
             let nm = n.name orelse "";
+            // §144：module 关键字已换成内建 @mod。复用 module_ 节点，
+            // 模块加载 / sema / 后端都认它，只把语法入口搬进 @。
+            if (std.str.eq(nm, "mod")) {
+                n.kind = NK.module_;
+                try self.expect(lex.Kind.lparen);
+                if (self.at(lex.Kind.string)) {
+                    let s = self.advance();
+                    n.str = self.strbuf[s.str_off..s.str_off + s.text_len];
+                } else {
+                    return (error)Fail.f;
+                }
+                try self.expect(lex.Kind.rparen);
+                return n;
+            }
             var value_first = false;
             if (std.str.eq(nm, "type")) { value_first = true; }
             if (std.str.eq(nm, "memcpy")) { value_first = true; }

@@ -3,7 +3,7 @@
 // expect: read of an invalid handle
 // expect-code: E0510
 // expect-count: 1
-const std = module("std");
+const std = @mod("std");
 
 const Handle = struct { pos: usize };
 

@@ -8,7 +8,7 @@
 //
 // 顺带修好同一处：多模式里的 `true, false:` 和负数 `-1, -2:` 也被
 // "逗号后面只认整数和 .成员"那条规则挡掉了。
-const std = module("std");
+const std = @mod("std");
 
 // ① 字节分派：u8 subject（词法器最常见的形状）
 const class_of = fn (c: u8) []const u8 {

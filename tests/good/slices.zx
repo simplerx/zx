@@ -1,5 +1,5 @@
 // 切片：ptr + len，运行时下标，多绑定 for
-const std = module("std");
+const std = @mod("std");
 
 const sumWeighted = fn (xs: []const i32) i32 {
     var total: i32 = 0;

@@ -1,5 +1,5 @@
 // 标签收割：一次跳出多层、continue 继续（循环没有 else 分支——E0405）
-const std = module("std");
+const std = @mod("std");
 
 const firstBig = fn (xs: []const i32) i32 {
     var hit: i32 = 0;

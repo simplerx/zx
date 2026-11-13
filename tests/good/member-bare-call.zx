@@ -14,7 +14,7 @@
 // acc = 9
 // A.use = 1
 // B.use = 2
-const std = module("std");
+const std = @mod("std");
 
 // 1) 非泛型 struct：裸名互调（三层，链式）
 const Math = struct {

@@ -1,5 +1,5 @@
 // .none 没有载荷，捕获直接报错
-const std = module("std");
+const std = @mod("std");
 
 const f = fn (o: ?i32) i32 {
     switch (o) {

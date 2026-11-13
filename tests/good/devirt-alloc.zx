@@ -10,7 +10,7 @@
 // literal: live 0 allocs 2
 // factory: live 0
 // runtime: live 0
-const std = module("std");
+const std = @mod("std");
 
 // 计数分配器：验证 `Allocator{ .ctx = …, .alloc = … }` 这条链
 const Counter = struct {

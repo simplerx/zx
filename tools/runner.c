@@ -534,7 +534,7 @@ static int write_scale_src(const char *path, int n) {
     FILE *f = fopen(path, "wb");
     if (!f) return -1;
     fprintf(f, "// 自动生成，只用来量前端耗时：%d 个函数 + %d 次调用\n", n, n);
-    fprintf(f, "const std = module(\"std\");\n\n");
+    fprintf(f, "const std = @mod(\"std\");\n\n");
     for (int i = 0; i < n; i++)
         fprintf(f, "const f%d = fn (a: i32) i32 { return a * %d + %d; };\n", i, i + 1, i);
     fprintf(f, "\nconst main = fn () i32 {\n    var s: i32 = 0;\n");

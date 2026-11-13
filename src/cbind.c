@@ -1,4 +1,4 @@
-/* cbind.c — `zxc include`：把 C 头文件翻成一份可直接 module() 的 Zx 绑定。
+/* cbind.c — `zxc include`：把 C 头文件翻成一份可直接 @mod() 的 Zx 绑定。
  *
  * 为什么走 clang 的文本 AST：C 头的脏活（typedef、#ifdef、匿名 struct、
  * 调用约定、位宽）clang 已经做完了，AST 里每个声明都带着规整的 qualType
@@ -170,7 +170,7 @@ static const char *tag_get(const char *name) {
 /* Zx 关键字：C 头里的参数名撞上就加个下划线，别让生成物直接编译不过。 */
 static const char *g_kw[] = {
     "fn","let","var","const","pub","if","else","while","for","switch","case",
-    "return","break","continue","struct","union","enum","module","extern",
+    "return","break","continue","struct","union","enum","extern",
     "type","self","try","catch","defer","inline","comptime","test","error",
     "true","false","null","undefined","and","or","not","as","is","in",NULL
 };

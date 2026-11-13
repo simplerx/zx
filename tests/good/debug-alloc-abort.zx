@@ -4,7 +4,7 @@
 // 断言 stderr 里的 panic 原因与 stdout 里的报告。
 //
 // 用法：prog leak | double | size
-const std = module("std");
+const std = @mod("std");
 
 pub const main = fn () i32 {
     let args = std.process.args();

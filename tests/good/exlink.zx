@@ -16,4 +16,4 @@ const main = fn () u8 {
 // expect-output
 // exlink ok: 67305985
 
-const std = module("std");
+const std = @mod("std");

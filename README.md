@@ -19,7 +19,7 @@
 ## 语言速览
 
 ```zx
-const std = module("std");
+const std = @mod("std");
 
 const Point = struct {
     x: f64,
@@ -108,7 +108,7 @@ zxc add https://.../xx.h  or xx.git  or lib  # 从网上拉, 存入vendor，SHA-
 zxc fetch                # 换机器时按锁复现 vendor/
 ```
 
-`vendor/` 是模块搜索根：`const r = module("raylib");` 之后补全、跳转、行内类型
+`vendor/` 是模块搜索根：`const r = @mod("raylib");` 之后补全、跳转、行内类型
 提示照常生效，生成的绑定是普通 Zx 源码，可以直接改。
 
 ## 性能

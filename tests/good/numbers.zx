@@ -16,7 +16,7 @@
 // div trunc: -3 -1
 // f2i bounds: 3 -3 -128 2147483647 4294967295 -9223372036854775808
 
-const std = module("std");
+const std = @mod("std");
 
 const main = fn () void {
     // 128 位极值：字面量、打印、取负

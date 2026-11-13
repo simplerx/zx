@@ -3,7 +3,7 @@
 // expect-output:coro:50
 // expect-output:single:11
 // expect-output:pool:140
-const std = module("std");
+const std = @mod("std");
 const Task = std.task.Task;
 
 var hits: usize = 0;

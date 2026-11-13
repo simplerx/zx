@@ -1,6 +1,6 @@
 // fs.zx —— 文件系统：路径操作 + 目录遍历 + 文件元数据。
 //
-//   const std = module("std");
+//   const std = @mod("std");
 //   std.fs.basename("a/b/c.txt")          // "c.txt"（零分配，切片指向原串）
 //   let d = std.fs.readDir(al, "src");    // 目录条目列表
 //

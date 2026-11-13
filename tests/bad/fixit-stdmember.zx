@@ -4,7 +4,7 @@
 // expect: 'std' has no member 'printfln'
 // expect: did you mean `println`?
 
-const std = module("std");
+const std = @mod("std");
 
 const main = fn () void {
     std.printfln("x");

@@ -4,7 +4,7 @@
 // expect-output:try:would_block
 // expect-output:try-send:would_block
 // expect-output:after-close:closed
-const std = module("std");
+const std = @mod("std");
 const Task = std.task.Task;
 
 var total: usize = 0;

@@ -16,7 +16,7 @@
 // listed=3 got_all=true
 // iter again=3
 // makedirs=true nested=true
-const std = module("std");
+const std = @mod("std");
 
 const main = fn () i32 {
     const al = std.heap.page;

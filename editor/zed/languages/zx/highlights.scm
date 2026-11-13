@@ -16,10 +16,10 @@
 (undefined_literal) @constant.builtin
 
 ; ----------------------------------------------------------- 关键字 --
-; 25 个关键字（guide.md §3.2）+ and/or；
+; 24 个关键字（guide.md §3.2）+ and/or；§144 起 `module` 收成内建 `@mod`。
 ; null/undefined 由 null_literal/undefined_literal 捕获（树里没有匿名 token）
 [
-  "const" "let" "var" "fn" "module"
+  "const" "let" "var" "fn"
   "if" "else" "while" "for" "inline" "switch" "continue" "return"
   "defer" "errdefer" "struct" "union" "enum" "error" "pub" "extern" "try"
   "and" "or"
@@ -85,7 +85,8 @@
 (field_expression
   field: (field_identifier) @property)
 
-; 模块表达式 module("std")
+; 模块表达式。`@mod("std")` 现在由 builtin_function / call_expression 捕获
+; （@ 前缀内建走上面的内建着色）；下面这条只服务仍用旧 `module(...)` 的历史文件。
 (module_expression
   "module" @keyword
   path: (string) @string.special)

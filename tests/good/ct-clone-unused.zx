@@ -4,7 +4,7 @@
 // 做检查期折叠。克隆体自己声明的局部变量若是混进调用方的 g_locals 链，
 // 调用方收尾 check_unused 就会把克隆里"还没走到使用点"的局部报成
 // unused——真身明明每个都用到了。克隆是借道折叠，局部一律不外借。
-const std = module("std");
+const std = @mod("std");
 
 const Lattice = fn (T: type) type {
     return struct {

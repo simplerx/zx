@@ -2,7 +2,7 @@
 //
 // 方法的第一参数是接收者（枚举值就是整数，所以 `Self` 按值传最自然）；
 // 没有接收者的 fn 是挂在类型上的普通函数，写 `Color.count()` 调。
-const std = module("std");
+const std = @mod("std");
 
 const Color = enum {
     red, green = 5, blue,

@@ -7,7 +7,7 @@
 // expect-output
 // ok=1
 // hit=0
-const std = module("std");
+const std = @mod("std");
 
 const find = fn (xs: []const i32, want: i32) ?usize {
     var i: usize = 0;

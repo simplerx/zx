@@ -3,7 +3,7 @@
 // 曾经这里出过一次静默错误：字面量 `.b = 7` 只写了载荷、没写 `.tag`，
 // 于是 C 的指定初始化把标签零填成第一个成员——`switch (u.tag)` 永远走
 // 第一个分支，`.b` / `.c` 的分支形同虚设，而且编译不报任何错。
-const std = module("std");
+const std = @mod("std");
 
 const Tag = enum { one, two, three };
 

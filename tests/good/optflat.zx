@@ -11,7 +11,7 @@
 // sum=3
 // try=9
 // null-check ok
-const std = module("std");
+const std = @mod("std");
 
 const Node = struct {
     val: i32,

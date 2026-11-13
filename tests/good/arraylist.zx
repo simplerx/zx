@@ -1,5 +1,5 @@
 // ArrayList 的完整 API（M19）：增删插、首尾、反转、伸缩、交换。
-const std = module("std");
+const std = @mod("std");
 
 const main = fn () u8 {
     let al = std.heap.page;

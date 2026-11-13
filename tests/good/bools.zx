@@ -1,5 +1,5 @@
 // true / false 就是 bool 字面量：能参与 && || !、能当 switch 模式、能做编译期条件
-const std = module("std");
+const std = @mod("std");
 const debug = true;
 const level = if (debug) 2 else 0;
 

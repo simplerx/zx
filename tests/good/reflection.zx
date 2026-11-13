@@ -3,7 +3,7 @@
 // @type(x)：x 是类型或表达式都行（@typeOf 并了进来）。描述符
 // Type{.name,.size,.align,.ty,.fieldCount,.fields[i]{.name,.ty,.offset}}
 // 全部是编译期值，只许 const 绑定。@sizeOf/@alignOf/@typeName 都是它的字段。
-const std = module("std");
+const std = @mod("std");
 
 const Point = struct {
     x: i32,

@@ -4,9 +4,9 @@
 // 读入源文件 → lex.zx 词法 → parse.zx 语法 → 按 `zxc --ast` 的
 // s 表达式格式打到 stdout，与 C 侧输出逐字节 diff，必须为空。
 // 对拍脚本：bootstrap/diff_ast.sh。
-const std = module("std");
-const lex = module("lex.zx");
-const parse = module("parse.zx");
+const std = @mod("std");
+const lex = @mod("lex.zx");
+const parse = @mod("parse.zx");
 
 const main = fn () i32 {
     let al = std.heap.page;

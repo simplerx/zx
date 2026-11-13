@@ -13,7 +13,7 @@
 //   ④ `e == Err.x` 直接比较，不用先转枚举
 //   ⑤ `try` 在表达式中间（`f(try g(), 10)`）可用
 //   ⑥ `!T` 的 payload 是结构体时也正常
-const std = module("std");
+const std = @mod("std");
 
 const Err = enum(u16) {
     open = 1,

@@ -4,8 +4,8 @@
 // 把一个源文件的 token 流按 C 侧 `zxc --tokens` 的格式打到 stdout，
 // 与 `bin/zxc.exe <file.zx> --tokens` 的输出逐行 diff，必须为空。
 // 对拍脚本：bootstrap/diff_lex.sh。
-const std = module("std");
-const lex = module("lex.zx");
+const std = @mod("std");
+const lex = @mod("lex.zx");
 
 const main = fn () i32 {
     let al = std.heap.page;

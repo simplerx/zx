@@ -5,7 +5,7 @@
 // 2026-11-11 容器成员可见性：容器体里的字段/方法默认私有，跨文件访问
 // 报 E0404；只有带 pub 的成员（a/b/add/make）在别的文件里可见。
 // 带私有字段的容器跨文件构造要走 pub 构造器（字面量会撞 E0300 缺字段）。
-const m = module("mod.zx");
+const m = @mod("mod.zx");
 
 pub const main = fn () u8 {
     var p = m.Pair.make(1, 2);

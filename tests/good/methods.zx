@@ -2,7 +2,7 @@
 //
 // 方法就是"第一个参数是接收者的普通函数"：p.f(a) 等价于 f(p, a)。
 // 接收者写 `Self` / `*Self` / `*const Self`，泛型类型体里也一样（不用重写 T）。
-const std = module("std");
+const std = @mod("std");
 
 const Vec = struct {
     x: i32,

@@ -1,7 +1,7 @@
 // generic.zx —— 泛型：type 是一等编译期值，泛型就是编译期函数
 // 单态化，零运行时开销
 
-const std = module("std");
+const std = @mod("std");
 
 // ---------- 最简单的泛型类型 ----------
 const List = fn (T: type) type {

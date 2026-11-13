@@ -1,6 +1,6 @@
 // expect: expected `Allocator`
 // std.format 的第一个实参必须是分配器
-const std = module("std");
+const std = @mod("std");
 
 const main = fn () u8 {
     var r = std.format(1, "{}", 1);

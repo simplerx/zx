@@ -1,5 +1,5 @@
 // 指针算术 p ± n / p - q，以及 (usize)p / (*T)i
-const std = module("std");
+const std = @mod("std");
 
 // 编译期：视图上的算术照样折叠（R1 要求 const 必须算得出来）
 const tail = "hello"[1..];              // 视图 "ello"

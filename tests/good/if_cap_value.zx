@@ -7,7 +7,7 @@
 //   · bool 条件的 `if (c) x else y` 仍然是普通表达式臂——没有载荷可捕获，
 //     解析器把糖退回原样（spec §8.1）。
 //   · 想要外部常量而不是捕获值，把它括起来：`if (o) (x)`。
-const std = module("std");
+const std = @mod("std");
 
 const orZero = fn (o: ?i32) i32 {
     return if (o) v;

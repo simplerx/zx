@@ -6,7 +6,7 @@
 // static C 函数（名字 = 绑定符号 C 名 + "_impl"），gen_decl_inner 再把
 // 函数指针槽初始化成它的地址。嵌套（局部 fn 里再有局部 fn）与方法体内
 // 的局部 fn 同样覆盖。
-const std = module("std");
+const std = @mod("std");
 
 const add = fn (x: i32, y: i32) i32 { return x + y; };
 

@@ -1,6 +1,6 @@
 // expect: not enough arguments for the format string
 // std.io.print 的占位符个数也在编译期查——句柄流和 stdout 一视同仁
-const std = module("std");
+const std = @mod("std");
 
 const main = fn () u8 {
     var h: usize = 0;

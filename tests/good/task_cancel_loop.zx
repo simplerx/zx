@@ -5,7 +5,7 @@
 // 而不是「任务还没启动就被 run_one 结算成 cancelled」。
 // expect-output:caught:cancelled
 // expect-output:interrupted:1
-const std = module("std");
+const std = @mod("std");
 const Task = std.task.Task;
 const LIMIT: usize = 100000000;
 

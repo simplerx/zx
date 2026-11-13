@@ -1,0 +1,42 @@
+// heap-slice.zx —— std.heapSlice(a, T, n)：运行期长度的堆切片 []T。
+//
+// 与 heapAlloc(a, T, N) 参数顺序一致，语义分工明确：
+//   heapAlloc  N 必须编译期常量 -> *[N]T（长度写在类型里，可进 §130 合并）
+//   heapSlice  n 可以运行期     -> []T   （长度写在值里，不进合并）
+// 两者 OOM 都直接 abort，都不返回 optional。
+// expect-exit: 0
+// expect-output
+// calls = 1
+// len = 4
+// xs = 10 37 40
+// fixed = 7
+// done
+const std = @mod("std");
+
+var calls: usize = 0;
+const bump = fn (n: usize) usize { calls = calls + 1; return n; };
+
+pub const main = fn () i32 {
+    let a = std.heap.page;
+    let n = std.process.args().len + 4;        // 运行期才知道
+
+    // count 是有副作用的表达式：生成的 C 里只许求值一次。后端按 []T
+    // 生成一份特化助手，把 n 当唯一的函数实参传进去；直接发
+    // { .ptr = ..., .len = n } 会把它算两遍。
+    let xs = std.heapSlice(a, i32, bump(n));
+    xs[0] = 10;
+    xs[2] = 37;
+    xs[n - 1] = 40;
+    std.println("calls = {}", calls);
+    std.println("len = {}", xs.len);
+    std.println("xs = {} {} {}", xs[0], xs[2], xs[n - 1]);
+    a.free(a.ctx, (*u8)xs.ptr, xs.len * @type(i32).size);
+
+    // 编译期 N 的 heapAlloc 不受影响，仍返回 *[N]T。
+    var fixed = std.heapAlloc(a, i32, 3);
+    fixed.1 = 7;
+    std.println("fixed = {}", fixed[1]);
+    a.free(a.ctx, (*u8)fixed, 3 * @type(i32).size);
+    std.println("done");
+    return 0;
+};

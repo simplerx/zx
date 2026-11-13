@@ -1,43 +1,45 @@
-// std.zx —— 标准库。编译器随附这个文件（std/ 目录），`module("std")` 就是在读它。
+// std.zx —— 标准库。编译器随附这个文件（std/ 目录），`@mod("std")` 就是在读它。
 //
-// 这个文件里能用的"魔法"只有三样，全部来自编译器：
+// 这个文件里能用的"魔法"全部来自编译器：
 //   print / println / format   打印与格式化
 //   heap.page                  现成的分配器（malloc/free）
 //   file / io                  整块读写文件 / 带句柄的分次读写
+//   stackAlloc / heapAlloc     编译期常量长度 -> *[N]T
+//   heapSlice                  运行期长度     -> []T
 // 其余都是普通 Zx 代码——包括下面这个可增长数组和两个缓冲流。
 
 // 字符串工具（str.zx）。`std.str.eq(a, b)`、`std.str.split(alloc, s, ",")` 之类。
-pub const str = module("str.zx");
+pub const str = @mod("str.zx");
 
 // 哈希表（map.zx）。`std.map.HashMap(i32)` 就是"字符串键 → i32"的表。
 // 不设 `pub const HashMap = map.HashMap` 这类别名——用户要求：别名和真身
 // 分不清，类型只走一条真实路径。下面 pool/arena/task 同此约定。
-pub const map = module("map.zx");
+pub const map = @mod("map.zx");
 
 // 内存池（pool.zx）。`var p = std.pool.Pool.init(std.heap.page)` 之后
 // `p.alloc(n)` / `p.free(ptr)`；重复释放会被拦下。Pool 只给单线程用，
 // 多线程共用改用 `std.pool.SyncPool.init(...)`：另一个类型，内含 Pool + 锁，
 // 同样有 alloc/free/used/allocator，全部加锁。
-pub const pool = module("pool.zx");
+pub const pool = @mod("pool.zx");
 
 // 文件系统（fs.zx）。路径操作零分配；DirIter 流式遍历；stat/exists 元数据。
-pub const fs = module("fs.zx");
+pub const fs = @mod("fs.zx");
 
 // JSON（json.zx）。零拷贝解析、最短 round-trip 序列化，arena 友好。
-pub const json = module("json.zx");
+pub const json = @mod("json.zx");
 
 // Arena（arena.zx）。一次性批量分配：`std.arena.ArenaAllocator.init(std.heap.page)`
 // 造出 Allocator 喂给 json.parse / ArrayList / 任何吃 Allocator 的东西，
 // deinit 一次全释放。ctx 机制下 arena 是有状态分配器的标准实现。
-pub const arena = module("arena.zx");
+pub const arena = @mod("arena.zx");
 
 // DebugAllocator（debug_alloc.zx）。记账分配器：每次分配都留档，
 // 泄漏 / 重复释放 / 野指针当场报出来。`init(std.heap.page)` 造出来的
 // 分配器直接喂给 ArrayList / json / fs；`deinit(a)` 收尾。
-pub const debug_alloc = module("debug_alloc.zx");
+pub const debug_alloc = @mod("debug_alloc.zx");
 
 // 时间（time.zx）。QPC 单调钟（nsBetween 测耗时）、墙钟、ISO 8601 格式化。
-pub const time = module("time.zx");
+pub const time = @mod("time.zx");
 
 // 任务（task.zx）。对外只有 Task 一个类型：它是接口，coro/single/pool/
 // fromId 生成实例，其余能力全是 `t.` 实例方法（分发）。接口只保留任务
@@ -45,7 +47,7 @@ pub const time = module("time.zx");
 // 定时器不做对外 API（zx 没有接口/多态，见 decisions §128），它们留在
 // C 机制层服务唤醒链。Task. 上只剩 SEL_AWAIT / SEL_RECV。
 // std.io 保持纯同步，要并发就显式「task + io」。
-pub const task = module("task.zx");
+pub const task = @mod("task.zx");
 
 // 可增长数组。`T` 是元素类型；容量不够时按倍数向分配器要内存、搬过去、释放旧的。
 pub const ArrayList = fn (T: type) type {

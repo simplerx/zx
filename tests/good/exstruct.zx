@@ -72,4 +72,4 @@ const main = fn () u8 {
 // expect-output
 // exstruct ok: 20 4 42
 
-const std = module("std");
+const std = @mod("std");

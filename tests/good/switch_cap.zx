@@ -3,7 +3,7 @@
 //   ?T 的 .some 捕获载荷；!T 的 .ok 捕获载荷、.err 捕获错误值
 //   枚举 / 整数 / bool 的臂捕获主语值本身
 // 单值臂省略 {}、无捕获块臂照旧。
-const std = module("std");
+const std = @mod("std");
 
 const Color = enum { red, green, blue };
 

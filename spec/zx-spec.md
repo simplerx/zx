@@ -257,17 +257,17 @@ R10 的动机很简单：这些行为一旦发布就改不动了。趁现在只�
 
 ---
 
-### 1.1 关键字（25 个）
+### 1.1 关键字（24 个）
 
 ```
-const  let  var  fn  module  type  null  undefined
+const  let  var  fn  type  null  undefined
 if  else  while  for  inline  switch  continue  return
 defer  errdefer  struct  union  enum  error  pub  extern  orelse  try
 ```
 
 `pub` 只出现在文件作用域的声明前面，决定这个声明是否对外可见（§11）。
 
-`module(...)` 是获取模块命名空间的唯一方式（§11）；把成员拿进当前作用域就是普通的 `const` 绑定。
+`@mod(...)` 是获取模块命名空间的唯一方式（§11）；把成员拿进当前作用域就是普通的 `const` 绑定。
 
 `error` 是类型名（`error ≡ u16`）；`true` / `false` 是布尔字面量，不是关键字（技术上可被局部名遮蔽，不建议）。
 
@@ -354,6 +354,16 @@ let y = p.0;       // 2
 | `[]T` | 16 | 运行时值 | 运行时边界检查 |
 
 所以"数组是指针"说的是**表示**：传参不复制、`@type(*[1000]i32).size == 8`、`arr.0` 就是解引用。而"N 在类型里"说的是**类型**：它让编译器能区分长度，也让 `.len` 有地方来。
+
+**同一个指针值两种下标都能读写**（§144）：编译期常量下标写 `ptr.0` / `ptr.1` / `ptr.2`，运行期下标写 `ptr[0]` / `ptr[i]`；后者按类型里的 N 做界检查，越界 abort。类型始终只有 `*[N]T` 一个 8 字节指针，没有数组值类型：
+
+```zx
+var p = std.heapAlloc(std.heap.page, i32, 8);
+p.1 = 2;                  // 编译期常量下标
+let i = 3;
+p[i] = 37;                // 运行期下标，带界检查
+std.println("{}", p[1]);  // 2
+```
 
 **互相转换**（R7 免拷贝提升 + 1 个显式转换）：
 
@@ -1861,14 +1871,14 @@ const List = fn (T: type, cap: usize) type {
 一个文件就是一个模块。
 
 ```zx
-const std = module("std");
-const math = module("lib/math.zx");
+const std = @mod("std");
+const math = @mod("lib/math.zx");
 math.val = 10;                    // 写模块级 var
-const Person = module("model.zx").Person;
+const Person = @mod("model.zx").Person;
 ```
 
 1. 模块顶层只能有 `const` / `let` / `var` / `fn` 声明，没有自由语句。
-2. `module(path)` 是编译期内建；同一路径返回同一实例。
+2. `@mod(path)` 是编译期内建；同一路径返回同一实例。
 3. 路径相对**调用者所在文件**；`"std"` 是内建模块。
 4. 循环导入直接报错——模块之间不共享名字，也不需要拓扑排序。
 5. **可见性由 `pub` 决定**：带 `pub` 的顶层声明对外可见，其余只在本文件内可见。
@@ -1881,7 +1891,7 @@ pub const add = fn (a: i32, b: i32) i32 { return a + b; };
 const secret = fn (n: i32) i32 { return n * 2; };       // 私有
 
 // main.zx
-const util = module("util.zx");
+const util = @mod("util.zx");
 const v = util.VERSION;                        // ok
 const n = util.add(1, 2);                      // ok
 // util.secret(1);                             // 错误：'secret' is private to module 'util'
@@ -1896,7 +1906,7 @@ const n = util.add(1, 2);                      // ok
 函数、类型、命名空间、编译期常量一视同仁：
 
 ```zx
-const math = module("lib/math.zx");
+const math = @mod("lib/math.zx");
 const square = math.square;        // 函数：以后直接 square(4)
 const cube3  = math.cube;          // 顺便改名
 const Vec2   = math.Vec2;          // 类型
@@ -2052,7 +2062,7 @@ zx_fmt_out(stdout, fmt, (const ZxFmtArg[]){ zx_fa_i(x), zx_fa_f(y) }, 2, 1);
 
 ```zx
 // 计算一批图形的面积
-const std = module("std");
+const std = @mod("std");
 
 const ShapeTag = enum { circle, rect };
 
@@ -2119,12 +2129,13 @@ if (raw) p {
 
 ### 13.1 标准库（`std/`）
 
-编译器随附三个文件，`module("std")` 读的是 `std/std.zx`；它再用 `module("str.zx")` / `module("map.zx")` 挂上字符串工具和哈希表。查找顺序是 `$ZX_STD` → 可执行文件同级的 `std/`、`../std/` → 当前目录。
+编译器随附三个文件，`@mod("std")` 读的是 `std/std.zx`；它再用 `@mod("str.zx")` / `@mod("map.zx")` 挂上字符串工具和哈希表。查找顺序是 `$ZX_STD` → 可执行文件同级的 `std/`、`../std/` → 当前目录。
 
 | 名字 | 形态 | 说明 |
 |---|---|---|
 | `std.stackAlloc(T, N)` | `*[N]T` | 栈帧上申请一段数组，N 编译期已知（§3.5） |
-| `std.heapAlloc(alloc, T, N)` | `*[N]T` | 向分配器要一段数组，OOM 直接 abort（§3.5） |
+| `std.heapAlloc(alloc, T, N)` | `*[N]T` | 向分配器要一段数组，N 编译期常量，OOM 直接 abort（§3.5）；可进 §130 编译期合并 |
+| `std.heapSlice(alloc, T, n)` | `[]T` | 向分配器要一段**运行期长度**的切片（`{ptr, len}` 16B），n 不必是常量；OOM 直接 abort，不进合并（§13.4） |
 | `std.heap.page` | `Allocator` | 唯一的现成分配器（malloc/free） |
 | `std.arena.ArenaAllocator` | `init(backing)` → `?Allocator` | 一次性批量释放：`alloc` 推指针，`free` 空操作，`deinit(a)` 全还 |
 | `std.debug_alloc.DebugAllocator` | `init(backing)` → `?Allocator` | 记账分配器：泄漏 / 重复释放 / 长度不符当场报（§13.2） |
@@ -2177,7 +2188,7 @@ if (raw) p {
 | `std.time.formatUtc(alloc, ms)` | `?[]u8` | `"YYYY-M-D H:M:S.mmmZ"`，24 字节 |
 
 ```zx
-const std = module("std");
+const std = @mod("std");
 let al = std.heap.page;
 
 var xs = std.ArrayList(i32).init(al);
@@ -2307,12 +2318,35 @@ alloc/写标记/读回/free + 各自的 `ArrayList` 共用一个视图；另外�
 
 ---
 
+### 13.4 运行期长度的堆切片：`heapSlice`
+
+`heapAlloc(alloc, T, N)` 的 N 必须编译期已知，因为长度写进了结果类型 `*[N]T`（§3.2），§130 的编译期合并也依赖它算静态布局。运行期长度走 `heapSlice`，两者参数顺序完全一致：
+
+```zx
+let a = std.heap.page;
+let n = std.process.args().len + 4;      // 运行期才知道
+let xs = std.heapSlice(a, i32, n);       // []i32，{ptr, len}
+xs[2] = 37;
+std.println("{} {}", xs.len, xs[2]);      // 4 37
+a.free(a.ctx, (*u8)xs.ptr, xs.len * @type(i32).size);
+```
+
+| | `heapAlloc(a, T, N)` | `heapSlice(a, T, n)` |
+|---|---|---|
+| count | 编译期常量 | 运行期表达式 |
+| 结果 | `*[N]T`，8 字节指针，长度在类型里 | `[]T`，16 字节 `{ptr, len}`，长度在值里 |
+| 分配失败 | abort | abort（同一个 `zx_heapalloc`） |
+| §130 合并 | 参与（`RegionSlot` 静态布局） | 不参与 |
+
+`heapSlice` 不新增语言类型、不改 `heapAlloc`、不删合并。后端按用到的 `[]T` 生成一份特化 C 助手，把 `n` 当唯一函数实参传进去——直接在表达式里发 `{ .ptr = ..., .len = n }` 会让有副作用的 count 被求值两遍。`tests/good/heap-slice.zx` 用带副作用的 `bump(n)` 守住这一点。
+
 ## 14. 内建（`@` 前缀，不可重定义）
 
-**只有七个**（1.2.0 收敛到九个，1.2.2 反射再收敛到一个 `@type`）：
+**只有八个**（1.2.0 收敛到九个，1.2.2 反射再收敛到一个 `@type`，§144 把 `module` 关键字收成 `@mod`）：
 
 | 内建 | 签名 | 用途 |
 |---|---|---|
+| `@mod("path")` | `fn(str) namespace` | 加载模块的唯一入口；取代 §144 之前的 `module("path")` 关键字（§11） |
 | `@type(x)` | `fn(type\|expr) Type` | 编译期描述符：`.size` / `.align` / `.name` / `.ty` / `.fieldCount` / `.fields[i]{.name,.ty,.offset}` |
 | `@memcpy(d, s, n)` | `fn(ptr\|slice, ptr\|slice, usize) void` | 批量复制（不重叠） |
 | `@memmove(d, s, n)` | 同上 | 批量复制（可重叠） |
@@ -2331,7 +2365,7 @@ alloc/写标记/读回/free + 各自的 `ArrayList` 共用一个视图；另外�
 没有源码位置内建（`@file` / `@line` / `@col` / `@fnName`）：位置只在
 `std.debug.panic` / `std.debug.assert` 的调用点由编译器注入。
 
-老名字点名报 E0211，并附替代写法。`@` 前缀保留给内建，用户标识符不能以 `@` 起始。
+老名字点名报 E0211，并附替代写法；`module("x")` 这种旧关键字写法同样报 E0211（提示换成 `@mod("x")`）。`@` 前缀保留给内建，用户标识符不能以 `@` 起始；`module` 不再是关键字，可以当普通标识符用。
 
 ### 14.1 删掉的那批内建（1.2.0）
 

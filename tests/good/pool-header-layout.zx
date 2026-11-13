@@ -24,7 +24,7 @@
 // B big free = true
 // B live after pool deinit = 0
 // B debug_alloc deinit ok
-const std = module("std");
+const std = @mod("std");
 
 const Node = struct { value: i32, next: ?*Node };
 

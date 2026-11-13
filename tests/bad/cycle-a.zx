@@ -1,7 +1,7 @@
 // expect: cyclic module dependency
-// 惰性模块加载下，声明了但从未引用的 module() 不是真实依赖；
+// 惰性模块加载下，声明了但从未引用的 @mod() 不是真实依赖；
 // 这里构造的是真正被引用的循环：a 的函数体用了 b，b 又回头用 a。
-const b = module("cycle-b.zx");
+const b = @mod("cycle-b.zx");
 
 const getB = fn () u8 {
     return b.VALUE;

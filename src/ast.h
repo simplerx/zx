@@ -36,7 +36,7 @@ typedef enum {
     NK_DEFER,           /* a */
     NK_ERRDEFER,        /* a —— errdefer：仅当函数以错误返回（.tag != 0，含 try 传播）时触发 */
     NK_BUILTIN,         /* @name(args) */
-    NK_MODULE,          /* module("str") */
+    NK_MODULE,          /* @mod("str") */
     NK_DECL,            /* const/let/var name [: T] = init  (flag: 0=const,1=let,2=var) */
     NK_FN,              /* [name](params) ret body — ret NULL/flag when none */
     NK_PARAM,           /* name: type (name NULL → anon), flag = is_var */

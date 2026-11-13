@@ -10,7 +10,7 @@
 //
 // 读字段要用 `inline for (0..info.fieldCount) i`——展开后 i 是编译期常量，
 // `info.fields[i]` 才折得动（普通 `while` 的 i 是运行时值，const 初始化器报 R1）。
-const std = module("std");
+const std = @mod("std");
 
 const Point = struct { x: i32, y: i32 };
 const Pair = struct { a: i32, b: i64 };

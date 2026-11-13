@@ -1,5 +1,5 @@
 // else 臂没有"匹配到的东西"，不能捕获
-const std = module("std");
+const std = @mod("std");
 
 const Color = enum { red, green, blue };
 

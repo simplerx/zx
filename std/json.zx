@@ -1,6 +1,6 @@
 // json.zx —— JSON 解析与序列化。
 //
-//   const std = module("std");
+//   const std = @mod("std");
 //   const v = std.json.parse(al, text) orelse { ... };
 //   let name = std.json.member(v, "name");
 //
@@ -24,8 +24,8 @@
 //     错误路径（try 短路返回）不用做清理；
 //   - 失败位置在 errLine / errCol（1 起）；错误码见 ParseErr（0 保留）。
 
-const map = module("map.zx");
-const str = module("str.zx");
+const map = @mod("map.zx");
+const str = @mod("str.zx");
 
 // ---- 值 -----------------------------------------------------------------------
 

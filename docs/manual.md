@@ -10,7 +10,7 @@
 ## 1. 第一个程序
 
 ```zx
-const std = module("std");
+const std = @mod("std");
 
 const main = fn () u8 {
     std.println("hello, {}!", "zx");
@@ -31,7 +31,7 @@ zxc hello.zx -o hello
   **没有 `pub fn`**——`pub` 是前缀修饰符，写在声明前面。
 - 入口是 `main`，返回 `u8` 作退出码；也可以写 `fn () !u8`，错误 tag 就是退出码。
 - `std.println("{}", x)` 直接传参，不是元组。
-- 别的文件里的名字必须先 `module("路径")` 绑定才能用，没有隐式跨文件名。
+- 别的文件里的名字必须先 `@mod("路径")` 绑定才能用，没有隐式跨文件名。
 
 ---
 

@@ -2,7 +2,7 @@
 //
 // 编译期路径（格式串是常量）和运行时路径（fmt 是变量、或 std.format）必须
 // 一个字节都不差：两边都调 zx_any，输出由同一份类型描述符决定。
-const std = module("std");
+const std = @mod("std");
 
 const Color = enum { red, green, blue };
 const ShapeTag = enum { circle, rect };

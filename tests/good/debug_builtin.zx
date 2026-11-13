@@ -6,7 +6,7 @@
 // （会 abort 的用例——panic 真触发、assert 失败——退出码跨平台不稳，
 //   放在 .tmp 手工验证，不进回归。）
 
-const std = module("std");
+const std = @mod("std");
 
 const main = fn () !i32 {
     // 错误码在编译期登记，errName 查静态表

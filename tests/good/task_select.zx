@@ -6,7 +6,7 @@
 // expect-output:s1:which:0 v:22
 // expect-output:s2:which:0 v:33
 // expect-output:s3:timeout
-const std = module("std");
+const std = @mod("std");
 const Task = std.task.Task;
 
 var g_t: usize = 0;

@@ -2,7 +2,7 @@
 //                   当场报出来，不用等 valgrind。
 //
 // 用法：
-//   const std = module("std");
+//   const std = @mod("std");
 //
 //   var da = std.debug_alloc.DebugAllocator.init(std.heap.page);
 //   if (da) a {
@@ -28,7 +28,7 @@
 //
 // 账本自己（Tracker）从 backing 里出，不参与追踪，也不会递归记账。
 
-const std = module("std");
+const std = @mod("std");
 
 const ALIGN: usize = 16;
 

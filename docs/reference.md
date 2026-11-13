@@ -11,7 +11,7 @@
 
 
 ```zx
-const std = module("std");                    // 模块必须显式绑定（§12）
+const std = @mod("std");                    // 模块必须显式绑定（§12）
 
 const Point = struct {                        // 类型声明就是 const 绑定
     x: i32,
@@ -51,10 +51,10 @@ pub const main = fn () u8 {
 - 字符字面量 `'A'`；数字字面量支持 `0x` / `0b` / `0o` 前缀与 `_` 分位。
 - 未定长整数：字面量先按 `comptime_int` / `comptime_float` 携带，落类型时检查拟合。
 
-### 1.1 关键字（25 个）
+### 1.1 关键字（24 个）
 
 ```
-const  let  var  fn  module  type  null  undefined
+const  let  var  fn  type  null  undefined
 if  else  while  for  inline  switch  continue  return
 defer  errdefer  struct  union  enum  error  pub  extern  orelse  try
 ```
@@ -403,18 +403,18 @@ std.println("[{x}] [{b}] [{0:>6}] [{1:.2}]", 255, 3.5, 42);
 ## 12. 模块系统
 
 ```zx
-const std = module("std");          // 显式绑定；std 解析到编译器旁边的 std/
-const gl = module("glfw3");         // 具名模块：glfw3.zx 或 glfw3/glfw3.zx
-const v  = module("ext");           // vendor/ 里的模块直接写名字，不带路径
+const std = @mod("std");          // 显式绑定；std 解析到编译器旁边的 std/
+const gl = @mod("glfw3");         // 具名模块：glfw3.zx 或 glfw3/glfw3.zx
+const v  = @mod("ext");           // vendor/ 里的模块直接写名字，不带路径
 
-pub const task = module("task.zx"); // 再导出：别的模块经 std.task 访问
+pub const task = @mod("task.zx"); // 再导出：别的模块经 std.task 访问
 ```
 
 
-- **没有隐式跨文件名字**：别的 .zx 里的标识符必须先 `module(…)` 绑定（E0401）。
+- **没有隐式跨文件名字**：别的 .zx 里的标识符必须先 `@mod(…)` 绑定（E0401）。
 - 解析顺序：源文件所在目录的相对路径 → 向上每一层的 `vendor/`（近→远）→
-  zx.json 的 `deps`。**vendor/ 里的模块直接写名字**（`module("ext")`），
-  不在 vendor/ 里的才写相对路径（`module("lmod.zx")`，相对源文件所在目录）。
+  zx.json 的 `deps`。**vendor/ 里的模块直接写名字**（`@mod("ext")`），
+  不在 vendor/ 里的才写相对路径（`@mod("lmod.zx")`，相对源文件所在目录）。
 - 未 `pub` 的声明是私有的（E0404）。
 - 循环导入报 E0601（带原因，不刷误导成员错误）。
 - 编译器随附 `std/`；`std.print/heap/file/io/…` 这些**编译器内建成员**见 §13。

@@ -11,13 +11,13 @@
 // "dump 与下一阶段够用"的程度——u64 溢出置 big 标记，浮点用简版 strtod。
 // 对拍协议：bootstrap/lexdump.zx 按 C 侧 `zxc --tokens` 的格式输出，
 // 同一批源文件 diff 必须为空（见 spec/bootstrap.md §4 阶段 1）。
-const std = module("std");
+const std = @mod("std");
 
 // ---- token 种类：名字与 C 侧 TOKEN_KINDS 一一对应 ----
 
 pub const Kind = enum {
     eof, ident, int, float, char, string,
-    kw_const, kw_let, kw_var, kw_fn, kw_module, kw_type,
+    kw_const, kw_let, kw_var, kw_fn, kw_type,
     kw_null, kw_undefined, kw_if, kw_else, kw_while, kw_for,
     kw_inline, kw_switch, kw_continue, kw_return, kw_defer, kw_errdefer,
     kw_struct, kw_union, kw_enum, kw_error, kw_pub, kw_extern,
@@ -43,7 +43,6 @@ pub const spell = fn (k: Kind) []const u8 {
         .kw_let: "KW_LET";
         .kw_var: "KW_VAR";
         .kw_fn: "KW_FN";
-        .kw_module: "KW_MODULE";
         .kw_type: "KW_TYPE";
         .kw_null: "KW_NULL";
         .kw_undefined: "KW_UNDEF";
@@ -114,7 +113,7 @@ pub const spell = fn (k: Kind) []const u8 {
     };
 };
 
-// ---- 关键字表（C 侧 g_keywords，25 个）----
+// ---- 关键字表（C 侧 g_keywords，24 个）----
 // 线性扫：词法热点在字节扫描，25 次短比较不是瓶颈；先对拍，快不快后面量。
 
 const keyword = fn (s: []const u8) ?Kind {
@@ -122,7 +121,6 @@ const keyword = fn (s: []const u8) ?Kind {
     if (std.str.eq(s, "let")) { return Kind.kw_let; }
     if (std.str.eq(s, "var")) { return Kind.kw_var; }
     if (std.str.eq(s, "fn")) { return Kind.kw_fn; }
-    if (std.str.eq(s, "module")) { return Kind.kw_module; }
     if (std.str.eq(s, "type")) { return Kind.kw_type; }
     if (std.str.eq(s, "null")) { return Kind.kw_null; }
     if (std.str.eq(s, "undefined")) { return Kind.kw_undefined; }

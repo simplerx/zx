@@ -1,5 +1,5 @@
 // 编译期求值：const 必须算出来（R1），泛型是编译期函数
-const std = module("std");
+const std = @mod("std");
 
 const N     = 2 + 3 * 4;                     // 14
 const M     = if (N > 10) 3 else 1;          // 3

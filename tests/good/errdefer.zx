@@ -18,7 +18,7 @@
 // both ok: 1
 // expect-exit: 0
 
-const std = module("std");
+const std = @mod("std");
 
 const work = fn (ok: bool) !i32 {
     errdefer std.println("E1");

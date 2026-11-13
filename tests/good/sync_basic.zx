@@ -4,7 +4,7 @@
 // expect-output:cas-hit:true
 // expect-output:cas-miss:false
 // expect-output:sw:9
-const std = module("std");
+const std = @mod("std");
 
 var cnt: usize = 0;
 

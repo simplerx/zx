@@ -1,6 +1,6 @@
 // time.zx —— 时间：高精度单调钟 + 墙钟 + UTC 格式化。
 //
-//   const std = module("std");
+//   const std = @mod("std");
 //   let t0 = std.time.counter();
 //   ... 干活 ...
 //   std.println("{} ms", std.time.nsBetween(t0, std.time.counter()) / 1000000);

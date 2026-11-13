@@ -10,7 +10,7 @@ shutil.copytree(os.path.join(ROOT, "std"), os.path.join(DIR, "std"))
 open(os.path.join(DIR, "zx.json"), "w", encoding="utf-8").write(
     '{"name":"slprobe","main":"src/main.zx","out":"slprobe"}\n')
 
-TEXT = '''const std = module("std");
+TEXT = '''const std = @mod("std");
 
 const main = fn () i32 {
     var a: *const u8 = "hello".;

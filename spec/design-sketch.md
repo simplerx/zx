@@ -26,7 +26,7 @@
 泛型特性: 使用 type 表示泛型;
 
 模块化: 一个文件就是一个模块;
-  ** 引用模块, const name = module("root.zx");
+  ** 引用模块, const name = @mod("root.zx");
 
 
   关键字: module, fn
@@ -52,7 +52,7 @@ continue: 下一个循环
 
 实例:
 // 导入模块, 使用改模块的值
-const mod = module("std");
+const mod = @mod("std");
 
 mod.val = 10;   // 赋值
 

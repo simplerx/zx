@@ -20,7 +20,7 @@
 // err 1
 // wide ok 101
 // legacy -1
-const std = module("std");
+const std = @mod("std");
 
 const IoError  = error{ open, read, write };
 const Wider    = error{ open, read, write, seek };

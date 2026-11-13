@@ -2,7 +2,7 @@
 // ?T 的标签是 bool（null == false），!T 的标签是 error(u16)（0 == 无错误）
 // 布局：载荷在前、标签在尾部 → &x 就是 &payload，零偏移
 
-const std = module("std");
+const std = @mod("std");
 
 // 错误码就是整数，用 enum 起名。
 // 0 留给"无错误"——命名错误码从 1 起（`(error)0` 是编译错误 E0508）。

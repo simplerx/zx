@@ -22,4 +22,4 @@ const main = fn () u8 {
     std.println("htonl={}", v);
     return 0;
 };
-const std = module("std");
+const std = @mod("std");

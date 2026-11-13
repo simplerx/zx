@@ -7,7 +7,7 @@
 // `ZxS5_sz2` 符号引用，C 直接编译失败（compiler bug）。
 //
 // 覆盖：链式实例 / 兄弟静态成员引用 / 多实例互不串值 / via-info 再取一层。
-const std = module("std");
+const std = @mod("std");
 
 const P3 = struct { a: i32, b: i64 };
 const Pair = struct { a: i32, b: i64 };

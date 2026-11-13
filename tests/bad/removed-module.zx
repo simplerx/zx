@@ -1,0 +1,5 @@
+// expect: `module` was removed: use @mod("name")
+// §144：module 关键字换成内建 @mod。旧写法要能照着改，不能只报
+// unknown identifier。
+const std = module("std");
+const main = fn () u8 { return 0; };

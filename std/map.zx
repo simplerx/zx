@@ -14,7 +14,7 @@
 // 没有 remove：要删就重建一张表。省略它是为了让探测链里没有墓碑——
 // 少一个状态，少一类 bug。
 
-const str = module("str.zx");
+const str = @mod("str.zx");
 
 // FNV-1a 64 位。溢出是 u64 回绕（C 里定义良好的那种），不是错误。
 pub const fnv1a = fn (s: []const u8) u64 {

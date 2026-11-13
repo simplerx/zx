@@ -4429,6 +4429,53 @@ static void ex_heapalloc(Buf *b, Node *n) {
     buf_printf(b, ") * sizeof(%s))))", t.data);
 }
 
+/* std.heapSlice(a, T, n) -> []T。n 只在函数实参里求值一次：
+ * 若直接发 `((ZxSlice_T){ .ptr = ..., .len = n })`，n 会在生成的 C 里
+ * 出现两次，`heapSlice(a, T, f())` 就会把 f 调用两遍。所以按 []T 生成
+ * 一份特化的运行时助手，定义统一落在 zxrt 单元（与 zx_heapalloc 同处）。 */
+static Type *g_hslice_types[32];
+static int   g_nhslice;
+
+static void ex_heapslice(Buf *b, Node *n) {
+    g_need_heapalloc = true;
+    Type *sl = (n->ty && n->ty->kind == TY_SLICE) ? n->ty
+                                                  : ty_slice(ty_u8(), false);
+    ensure_type(sl);
+    Buf sn; buf_init(&sn); tn(&sn, sl);
+    bool have = false;
+    for (int i = 0; i < g_nhslice; i++) {
+        Buf o; buf_init(&o); tn(&o, g_hslice_types[i]);
+        if (!strcmp(o.data, sn.data)) { have = true; break; }
+    }
+    if (!have && g_nhslice < 32) g_hslice_types[g_nhslice++] = sl;
+    buf_printf(b, "zx_heapslice_%s(", sn.data);
+    ex(b, n->items[0]);                      /* 分配器 */
+    buf_puts(b, ", (uint64_t)(");
+    coerce(b, n->items[2], ty_usize());      /* n：只在这里求值一次 */
+    buf_puts(b, "))");
+}
+
+static void emit_heapslice_runtime(void) {
+    Type *al = sema_allocator_type();
+    ensure_type(al);
+    Buf an; buf_init(&an); tn(&an, al);
+    for (int i = 0; i < g_nhslice; i++) {
+        Type *sl = g_hslice_types[i];
+        Buf sn; buf_init(&sn); tn(&sn, sl);
+        Buf ct; buf_init(&ct); ctype(&ct, sl->elem);
+        buf_printf(&g_bglobals, "static %s zx_heapslice_%s(%s al, uint64_t n);\n",
+                   sn.data, sn.data, an.data);
+        buf_printf(g_out,
+            "static %s zx_heapslice_%s(%s al, uint64_t n) {\n"
+            "    %s r;\n"
+            "    r.ptr = (%s *)zx_heapalloc(al, n * sizeof(%s));\n"
+            "    r.len = (size_t)n;\n"
+            "    return r;\n"
+            "}\n\n",
+            sn.data, sn.data, an.data, sn.data, ct.data, ct.data);
+    }
+}
+
 static void ex_print(Buf *b, Node *n, bool newline) {
     Node *fmt = n->items[0];
 
@@ -5574,6 +5621,7 @@ static void ex(Buf *b, Node *n) {
             if (!strcmp(n->a->name, "format"))  { ex_format(b, n); return; }
             if (!strcmp(n->a->name, "stackAlloc")) { ex_stackalloc(b, n); return; }
             if (!strcmp(n->a->name, "heapAlloc"))  { ex_heapalloc(b, n); return; }
+            if (!strcmp(n->a->name, "heapSlice"))  { ex_heapslice(b, n); return; }
             buf_puts(b, "0");
             return;
         }
@@ -7573,6 +7621,7 @@ int backend_emit_split(Node *root, Buf *header, Buf *rt, BUnit *units, int maxun
     if (g_need_debug) emit_debug_runtime();
     if (g_need_sync) emit_sync_runtime();
     if (g_need_heapalloc) emit_heapalloc_runtime();
+    if (g_nhslice) emit_heapslice_runtime();   /* 依赖 zx_heapalloc 的原型 */
     if (g_need_div) emit_div_runtime();
     if (g_need_bounds) emit_bounds_runtime();
     if (g_need_f2i) emit_f2i_runtime();

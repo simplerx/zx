@@ -1,7 +1,7 @@
 // if / 带标签的块 / switch 出现在**表达式位置**（函数实参、数组元素、
 // 返回值里）曾经直接报 E0300 internal —— 后端 ex() 没有控制流分支。
 // 现在统一用临时量接值（_ivN），表达式本身引用临时量。
-const std = module("std");
+const std = @mod("std");
 
 const pick = fn (flag: bool) i32 {
     return if (flag) 10 else 20;

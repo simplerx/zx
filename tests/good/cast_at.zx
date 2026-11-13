@@ -5,7 +5,7 @@
 // expect-output
 // 8 1
 // 8 1
-const std = module("std");
+const std = @mod("std");
 
 const N = struct { a: usize, b: u16 };
 

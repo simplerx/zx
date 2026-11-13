@@ -1,5 +1,5 @@
 // expect: must be computable at compile time
-const std = module("std");
+const std = @mod("std");
 
 var counter: i32 = 0;
 

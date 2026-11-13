@@ -5,7 +5,7 @@
 // 写值（var 实例）、传给 *T 形参都是普通指针语义。
 // statics：容器静态成员（const/var 数据，不含方法与类型成员）的切片，
 // `@type(T)` 与 `@type(左值)` 都有；`info.statics.len` / `statics[i].name/.ty`。
-const std = module("std");
+const std = @mod("std");
 
 const Point = struct { x: i32, y: i32 };
 const Pair = struct { a: i32, b: i64 };

@@ -1,6 +1,6 @@
 // str.zx —— 字符串（`[]const u8`）工具。全是普通 Zx 代码。
 //
-//   const std = module("std");
+//   const std = @mod("std");
 //   if (std.str.eq(a, b)) { … }
 //
 // 不分配的函数直接切片返回；要分配的把分配器放在第一个参数上。

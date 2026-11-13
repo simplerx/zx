@@ -7,7 +7,7 @@
 //   ③ 右边只在真的空/错时才求值（惰性）
 //   ④ `.?` 在表达式任意位置可用（含 `(.?).?.` 这类链）
 //   ⑤ 编译期能定下来的就在编译期折掉（`NONE orelse 42` 是常量）
-const std = module("std");
+const std = @mod("std");
 
 const Node = struct { v: i32, next: ?*Node };
 

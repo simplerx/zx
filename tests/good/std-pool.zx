@@ -1,6 +1,6 @@
 // std-pool.zx —— std.pool.Pool（尺寸分级内存池）回归：
 // 分级、对齐、复用、重复释放拦截、大块路径、按类型分配。
-const std = module("std");
+const std = @mod("std");
 
 const Node = struct { value: i32, next: ?*Node };
 

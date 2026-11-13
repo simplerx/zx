@@ -1,7 +1,7 @@
 // main.zx —— "只把需要的名字拿进来"就是普通的 const 绑定：
 // 函数、常量、类型都能绑，绑完直接用，不占存储（它们只是名字别名）。
-const std = module("std");
-const mathx = module("mathx.zx");
+const std = @mod("std");
+const mathx = @mod("mathx.zx");
 
 const square = mathx.square;
 const cube3  = mathx.cube;          // 顺便改名

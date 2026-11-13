@@ -29,7 +29,7 @@ ZXLS = os.environ.get("ZXLS_BIN") or os.path.join(ROOT, "bin", "zxls.exe")
 TESTDIR = os.path.join(ROOT, ".tmp", "lspstress")
 os.makedirs(TESTDIR, exist_ok=True)
 
-GOOD_DOC = """const std = module("std");
+GOOD_DOC = """const std = @mod("std");
 
 const Obj = struct {
     count: i32,
@@ -286,7 +286,7 @@ def scenario_load():
            "no hover reply after storm")
 
     # 2 MB document
-    big = ['const std = module("std");']
+    big = ['const std = @mod("std");']
     for i in range(30000):
         big.append("const v%d: i32 = %d;" % (i, i))
     big_text = "\n".join(big)

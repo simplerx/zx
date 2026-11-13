@@ -1,5 +1,5 @@
 // 捕获只允许单模式臂：`.a, .b: v {}` 类型对不上
-const std = module("std");
+const std = @mod("std");
 
 const Shape = union(enum) {
     circle: f64,

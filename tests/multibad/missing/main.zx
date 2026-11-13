@@ -1,4 +1,4 @@
 // expect: has no member 'nope'
-const m = module("mod.zx");
+const m = @mod("mod.zx");
 
 const main = fn () u8 { return (u8)m.nope(); };

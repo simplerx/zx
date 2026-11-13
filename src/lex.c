@@ -27,7 +27,7 @@ static bool is_alnum_in_base(char c, int base);
 typedef struct { const char *name; TokKind kind; } KwEntry;
 static const KwEntry g_keywords[] = {
     {"const", TOK_KW_CONST},   {"let", TOK_KW_LET},       {"var", TOK_KW_VAR},
-    {"fn", TOK_KW_FN},         {"module", TOK_KW_MODULE}, {"type", TOK_KW_TYPE},
+    {"fn", TOK_KW_FN},         {"type", TOK_KW_TYPE},
     {"null", TOK_KW_NULL},     {"undefined", TOK_KW_UNDEF},
     {"if", TOK_KW_IF},         {"else", TOK_KW_ELSE},
     {"while", TOK_KW_WHILE},   {"for", TOK_KW_FOR},

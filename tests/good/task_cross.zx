@@ -1,7 +1,7 @@
 // task_cross.zx —— 物理隔离下的跨实例 await：A 实例的任务等 B 实例的任务，
 // 完成时等待者必须被推回 A 的队列，而不是在 B 上继续跑。
 // expect-output:cross:42
-const std = module("std");
+const std = @mod("std");
 const Task = std.task.Task;
 
 var sum: usize = 0;

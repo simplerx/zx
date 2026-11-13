@@ -1,6 +1,6 @@
 // bench/mmat.zx —— 内存带宽 + f64 三重循环（矩阵乘 256x256，跑 3 遍）。
 // 校验和 = 结果矩阵的 4 个采样点，用来跨后端/跨优化等级比对正确性。
-const std = module("std");
+const std = @mod("std");
 
 const N: usize = 256;
 const R: usize = 3;

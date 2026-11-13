@@ -3,7 +3,7 @@
 // expect-exit: 0
 // expect-output
 // trunc=44 widen=300 f=300 back=300 ptr=300 reread=7 len=2 same=true
-const std = module("std");
+const std = @mod("std");
 
 const main = fn () u8 {
     var a: i32 = 300;

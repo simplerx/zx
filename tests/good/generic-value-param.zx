@@ -1,7 +1,7 @@
 // 泛型值参数作数组长度：`fn (N: u64) type` 一个 `T: type` 都没有，也必须是
 // 类型构造函数（参数全在编译期），否则 N 没有绑定，`*[N]u64` 只能报
 // 「array length must be a non-negative compile-time integer」。
-const std = module("std");
+const std = @mod("std");
 
 const List = fn (N: u64) type {
     return struct {

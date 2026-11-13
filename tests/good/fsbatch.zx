@@ -1,7 +1,7 @@
 // fsbatch.zx —— fs 批量读写 + 多 Task 并发安全验证。
 // 检查点：整块 roundtrip 字节一致；4 路并发读同一文件校验和一致；
 // 并发读相对串行读有实际加速（独立 FILE*，无锁争用）。
-const std = module("std");
+const std = @mod("std");
 
 const PATH = "fsbatch_test.bin";
 const NBYTES = 65536;

@@ -4,7 +4,7 @@
 //（用户 2026-11-11 截图：`n: while(true) { ...; n:{}; }; var i...;`）。
 // 守门：sema.c 的 while_never_exits 必须认体里的收割出口
 //（stmt_yields_label）；删掉这段扫描，下面两条绑定立即连报 E0502。
-const std = module("std");
+const std = @mod("std");
 
 const main = fn () i32 {
     var hits: i32 = 0;

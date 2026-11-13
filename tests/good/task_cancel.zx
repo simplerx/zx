@@ -2,7 +2,7 @@
 // 收到 error.cancelled，冒到任务顶层，await 它的人收到同一个错误。
 // expect-output:caught:cancelled
 // expect-output:after await:done
-const std = module("std");
+const std = @mod("std");
 const Task = std.task.Task;
 
 const step = fn (n: usize) !i32 {

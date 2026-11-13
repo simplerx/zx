@@ -1,5 +1,5 @@
 // program.zx —— 一个像样的小程序：定长向量、排序、统计、状态机
-const std = module("std");
+const std = @mod("std");
 
 const MAX: usize = 8;
 

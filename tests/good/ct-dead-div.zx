@@ -4,7 +4,7 @@
 // → 早退 return 让循环体成为死代码，但检查器路过循环体里的 `n / xi`
 // 时，xi 的槽位还是初值 0 → 旧编译器在这里报 E0505。
 // 语义上这段除法永远不会执行，折叠失败就该当"运行时值"。
-const std = module("std");
+const std = @mod("std");
 
 const isqrt = fn (n: u64) u64 {
     if (n < 2) { return n; }

@@ -2,7 +2,7 @@
 //
 // 长度算得出来（范围 / 定长数组上的视图）就必须一致；切片本身不带长度，
 // 参数的 `s[0..]` 交给运行时，检查阶段不瞎报。
-const std = module("std");
+const std = @mod("std");
 
 const dot = fn (a: []const i32, b: []const i32) i32 {
     var acc: i32 = 0;

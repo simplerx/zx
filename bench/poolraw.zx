@@ -1,6 +1,6 @@
 // poolraw.zx —— pool.zx 的对照组：同样的环形分配，直接 malloc/free
 // （std.heap.page）。裸 malloc 的 free 需要尺寸，所以多一条尺寸环。
-const std = module("std");
+const std = @mod("std");
 
 const RING: usize = 1024;
 

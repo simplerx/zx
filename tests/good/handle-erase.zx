@@ -2,7 +2,7 @@
 // opt-in——编译器把每个能证明 LIVE 的 get 直接改写成 getUnchecked（零检查）。
 // 这里 create -> get -> free 全在直线代码里，所以访问点可证明；
 // dev / release 两档发射同一种形态，不再有「dev 保留 get」的第二条路。
-const std = module("std");
+const std = @mod("std");
 
 const Handle = struct { pos: usize };
 

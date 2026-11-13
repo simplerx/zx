@@ -1,6 +1,6 @@
 // expect: must be computable at compile time
 // R1：const 的初值必须能在编译期算出来
-const std = module("std");
+const std = @mod("std");
 
 const main = fn () u8 {
     var n: i32 = 3;

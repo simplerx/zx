@@ -1,7 +1,7 @@
 // io_fmt.zx —— std.io.print / println：往任意句柄上格式化输出（M18）。
 // stdout 之外的落点（文件、stderr）用同一套格式串语法；动词在 sema
 // 编译期校验，发射全部走运行时解析器 zx_fmt_out（decisions §46）。
-const std = module("std");
+const std = @mod("std");
 
 const P = struct { x: i32, y: i32 };
 

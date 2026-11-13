@@ -1,6 +1,6 @@
 // bench/mandel.zx —— 浮点内层循环（f64 乘加、分支预测）。
 // 1200x800 网格，逃逸迭代上限 255。校验和 = 全部迭代次数之和。
-const std = module("std");
+const std = @mod("std");
 
 const W: usize = 1200;
 const H: usize = 800;

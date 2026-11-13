@@ -3,7 +3,7 @@
 // 的旧块。环形是为了对上 malloc/free 成对消除（clang 会把"分配立刻释放"
 // 整个删掉，对照组测出来就是假的快）。轮转 4 个尺寸档（16/64/96/192）。
 // 10,000,000 步。
-const std = module("std");
+const std = @mod("std");
 
 const RING: usize = 1024;
 

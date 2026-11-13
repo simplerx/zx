@@ -1,6 +1,6 @@
 // expect: unknown format specifier `{q}`
 // 不认识的动词在编译期报，不等到运行时 abort
-const std = module("std");
+const std = @mod("std");
 
 const main = fn () u8 {
     var h: usize = 0;

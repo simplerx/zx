@@ -2,7 +2,7 @@
 //
 // 文档里的每段示例都从这里抽验：这段过了，指南就不会教坏新人。
 // 改动指南示例时同步改这里（或反过来）。
-const std = module("std");
+const std = @mod("std");
 
 const Person = struct {
     name: []const u8,

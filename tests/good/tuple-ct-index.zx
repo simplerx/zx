@@ -1,6 +1,6 @@
 // tup[N] 编译期索引：字面量、const 绑定、inline for 循环变量都行；
 // 遍历配 inline for（循环变量是编译期绑定）。
-const std = module("std");
+const std = @mod("std");
 const main = fn () u8 {
     const t = {10, 20, 30};
     const K = 2;

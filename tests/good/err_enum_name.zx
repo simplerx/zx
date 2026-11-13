@@ -3,7 +3,7 @@
 // 码→名字表，errName 与 printTrace 走同一张表解析——不再是 ?。
 // expect-output:name:Err.open
 // expect-output:name2:Err.bad
-const std = module("std");
+const std = @mod("std");
 
 const Err = enum { open = 2, bad = 5 };
 

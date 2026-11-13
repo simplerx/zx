@@ -13,10 +13,10 @@
 //
 // 配色借用《剑影仙途》的四色（墨黑/鎏金/玉青/朱砂）——纯属眼熟，与引擎无关。
 
-const std = module("std");
-const win = module("user32.zx");
-const gdi = module("gdi32.zx");
-const gl = module("opengl32.zx");
+const std = @mod("std");
+const win = @mod("user32.zx");
+const gdi = @mod("gdi32.zx");
+const gl = @mod("opengl32.zx");
 
 // kernel32 的 Sleep：没有纳秒级定时器就先这么节流（见帧循环注释）。
 extern fn Sleep(ms: u32) void;

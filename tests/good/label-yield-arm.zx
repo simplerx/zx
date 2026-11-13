@@ -19,7 +19,7 @@
 // C n=4 w=40
 // D q=5
 // E both=3 2
-const std = module("std");
+const std = @mod("std");
 
 const main = fn () !void {
     // ① 带值收割写在臂上

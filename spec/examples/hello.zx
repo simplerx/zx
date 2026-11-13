@@ -3,7 +3,7 @@
 //
 // 注意 return：无标签块的值恒为 {}，末尾表达式是语句，不是返回值。
 
-const std = module("std");
+const std = @mod("std");
 
 const main = fn () u8 {
     std.print("hello, zx\n");

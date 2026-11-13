@@ -3,7 +3,7 @@
 //   都必须折成值，绝不能发成 C 的 `c.K`（struct 里没这个成员）；
 //   `const Inner = struct { … };` 是**类型**成员，没有运行期表示，
 //   但构造 `O.Inner{ .z = … }` 要能拿到它的类型。
-const std = module("std");
+const std = @mod("std");
 
 const O = struct {
     N: i32,

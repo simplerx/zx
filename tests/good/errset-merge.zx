@@ -10,7 +10,7 @@
 // err 3
 // err 5
 // open=true timeout=true
-const std = module("std");
+const std = @mod("std");
 
 const IoErr = error{ open, read };
 const NetErr = error{ timeout, reset };

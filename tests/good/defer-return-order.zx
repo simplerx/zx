@@ -8,7 +8,7 @@
 // expect-output:log:101
 // expect-output:vside:0
 // expect-output:vlog:10
-const std = module("std");
+const std = @mod("std");
 
 var log: i32 = 0;
 var vlog: i32 = 0;

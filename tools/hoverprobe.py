@@ -6,7 +6,7 @@ TESTDIR = os.path.join(ROOT, ".tmp", "hoverprobe")
 os.makedirs(TESTDIR, exist_ok=True)
 ZXLS_BIN = os.environ.get("ZXLS_BIN") or os.path.join(ROOT, "bin", "zxls-new.exe")
 
-SRC = """const std = module("std");
+SRC = """const std = @mod("std");
 
 const Person = struct {
     name: []const u8,

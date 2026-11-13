@@ -4,7 +4,7 @@
 // expect: is private to module
 // expect: declared here
 
-const lib = module("mod.zx");
+const lib = @mod("mod.zx");
 
 const main = fn () u8 {
     lib.secret();

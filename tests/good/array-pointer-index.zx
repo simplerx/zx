@@ -1,0 +1,38 @@
+// array-pointer-index.zx —— *[N]T 就是指针，同一个 ptr 两种下标都能读写。
+//
+// 编译期常量下标：ptr.0 / ptr.1 / ptr.2 …
+// 运行期下标：    ptr[0] / ptr[i]（带界检查，越界 abort）
+// 类型始终只有 *[N]T 这一个（运行期 8 字节 TY_PTR + has_len），
+// 没有数组值类型；N 只写进类型做界检查与 .len。
+// expect-exit: 0
+// expect-output
+// dot = 2 8
+// br = 11 38
+// len = 8
+// stack = 22 33
+const std = @mod("std");
+
+const bumpAt = fn (p: *[8]i32, i: usize) void { p[i] = p[i] + 1; };
+
+pub const main = fn () i32 {
+    let a = std.heap.page;
+    var ptr = std.heapAlloc(a, i32, 8);
+    let i = std.process.args().len + 3;         // 运行期下标
+
+    ptr.0 = 1;
+    ptr.1 = 2;
+    ptr.7 = 8;
+    ptr[0] = ptr[0] + 10;
+    ptr[i] = 37;
+    bumpAt(ptr, i);                            // 传进函数里照样读改写
+    std.println("dot = {} {}", ptr.1, ptr.7);
+    std.println("br = {} {}", ptr[0], ptr[i]);
+    std.println("len = {}", ptr.len);
+    a.free(a.ctx, (*u8)ptr, 8 * @type(i32).size);
+
+    var stk = std.stackAlloc(i32, 4);          // 栈那份同一套语法
+    stk.2 = 22;
+    stk[i - 2] = 33;
+    std.println("stack = {} {}", stk.2, stk[i - 2]);
+    return 0;
+};

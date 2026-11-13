@@ -9,7 +9,7 @@
 //   @memmove 允许重叠，按方向正确搬运
 //   @memset  按字节填充
 // 三者都返回 void；切片实参自动取 .ptr。
-const std = module("std");
+const std = @mod("std");
 
 const main = fn () i32 {
     // ① @memcpy：指针到指针

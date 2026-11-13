@@ -5,7 +5,7 @@
 // 变体名即隐式枚举（按声明顺序取值 0..n-1，union(enum(u8)) 可指定底层），
 // 载荷在前、标签在后（和 ?T 的 {值, ok} 同一布局方向）。
 // 访问、构造、switch、方法全部复用显式标签联合体那套机制。
-const std = module("std");
+const std = @mod("std");
 
 const Shape = union(enum) {
     circle: f64,

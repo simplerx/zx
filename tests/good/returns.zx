@@ -1,5 +1,5 @@
 // returns.zx —— 缺返回路径分析：下面每个函数都是"每条路径都返回"，一个都不该报错
-const std = module("std");
+const std = @mod("std");
 
 const Color = enum { red, green, blue };
 

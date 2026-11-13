@@ -547,8 +547,9 @@ static Type *base_type(const char *n) {
 }
 
 enum { BI_NONE, BI_PRINT, BI_PRINTLN, BI_FORMAT, BI_HEAP, BI_FILE, BI_FILE_FN,
-       BI_IO, BI_IO_FN, BI_IO_PRINT, BI_STACKALLOC, BI_HEAPALLOC, BI_PROC, BI_PROC_FN,
-       BI_DEBUG, BI_DEBUG_FN, BI_TASK, BI_TASK_FN, BI_SYNC, BI_SYNC_FN };
+       BI_IO, BI_IO_FN, BI_IO_PRINT, BI_STACKALLOC, BI_HEAPALLOC, BI_HEAPSLICE,
+       BI_PROC, BI_PROC_FN, BI_DEBUG, BI_DEBUG_FN, BI_TASK, BI_TASK_FN,
+       BI_SYNC, BI_SYNC_FN };
 
 /* ---------------- 内建类型 Allocator ----------------
  *
@@ -761,7 +762,7 @@ static Value *type_desc_value(Type *t, Node *inst) {
 static Symbol *std_builtin(const char *name) {
     static Symbol print_s, println_s, format_s, heap_s, page_s, file_s, alloc_s;
     static Symbol type_s, field_s;
-    static Symbol salloc_s, halloc_s;
+    static Symbol salloc_s, halloc_s, hslice_s;
     static Symbol f_read, f_write, f_append, f_exists, f_remove;
     static Symbol io_s, i_openr, i_openw, i_opena, i_read, i_write;
     static Symbol i_seek, i_tell, i_close, i_flush, i_stdin, i_stdout, i_stderr;
@@ -781,12 +782,18 @@ static Symbol *std_builtin(const char *name) {
         heap_s.name = "heap"; heap_s.kind = SK_NS; heap_s.builtin = BI_HEAP;
         heap_s.state = 2; heap_s.ty = ty_type(); heap_s.type_val = ty_void();
 
-        /* 统一的分配 API（decisions §44）：结果都是数组指针 `*[N]T`。
-         * 栈那份由后端发 alloca；堆那份显式拿分配器，OOM 直接 abort。 */
+        /* 分配 API（decisions §44 + §144）：
+         *   stackAlloc(T, N)    -> *[N]T   栈 alloca，N 编译期
+         *   heapAlloc(a, T, N)  -> *[N]T   堆，N 编译期，可进 §130 合并
+         *   heapSlice(a, T, n)  -> []T     堆，n 运行期，长度装进切片值
+         * 前两个的长度写进类型（界检查 / .len），第三个是 {ptr,len} 16B。
+         * 堆分配 OOM 一律 abort，所以三个都不返回 optional。 */
         salloc_s.name = "stackAlloc"; salloc_s.kind = SK_NS;
         salloc_s.builtin = BI_STACKALLOC; salloc_s.state = 2;
         halloc_s.name = "heapAlloc"; halloc_s.kind = SK_NS;
         halloc_s.builtin = BI_HEAPALLOC; halloc_s.state = 2;
+        hslice_s.name = "heapSlice"; hslice_s.kind = SK_NS;
+        hslice_s.builtin = BI_HEAPSLICE; hslice_s.state = 2;
 
         file_s.name = "file"; file_s.kind = SK_NS; file_s.builtin = BI_FILE;
         file_s.state = 2; file_s.ty = ty_type(); file_s.type_val = ty_void();
@@ -1000,6 +1007,7 @@ static Symbol *std_builtin(const char *name) {
 
     if (!strcmp(name, "stackAlloc")) return &salloc_s;
     if (!strcmp(name, "heapAlloc"))  return &halloc_s;
+    if (!strcmp(name, "heapSlice"))  return &hslice_s;
     if (!strcmp(name, "read"))      return &f_read;
     if (!strcmp(name, "write"))     return &f_write;
     if (!strcmp(name, "append"))    return &f_append;
@@ -1039,12 +1047,12 @@ static Symbol *std_builtin(const char *name) {
 /* 挂进 std 模块作用域的那些名字（std.zx 自己的声明另外由 hoist 加进来） */
 static const char *g_std_seeded[] = {
     "print", "println", "format", "heap", "file", "io", "Allocator",
-    "Type", "Field", "stackAlloc", "heapAlloc", "process",
+    "Type", "Field", "stackAlloc", "heapAlloc", "heapSlice", "process",
     "debug", "atomic", NULL
 };
 
 static Symbol *ns_member(Symbol *ns, const char *name, int line, int col) {
-    /* 模块本身没加载成功（打不开 / 解析失败）：那条错已经报在 module(...)
+    /* 模块本身没加载成功（打不开 / 解析失败）：那条错已经报在 @mod(...)
      * 调用点上了，这里再报 N 条 "has no member" 只会盖住真正的原因。
      * 尤其不能报 "module 'main' has no member"——'main' 是当前文件，
      * 等于告诉用户去一个根本没有该名字的模块里找。 */
@@ -3640,7 +3648,7 @@ static Symbol *ns_member_symbol(Node *field) {
     }
     if (!ns) return NULL;
     /* 惰性模块别名此刻可能还是未解析的 SK_CONST（文件根声明推迟了
-     * module("...") 的加载），先按需解析成 SK_NS 再看成员。 */
+     * @mod("...") 的加载），先按需解析成 SK_NS 再看成员。 */
     ensure(ns);
     if (ns->kind != SK_NS || !ns->mod) return NULL;
     return module_member(ns->mod, field->name);
@@ -4080,16 +4088,18 @@ static Type *check_call(Node *n, Type *expect) {
                 if (isfmt) return type_of(n, ty_err(ty_slice(ty_u8(), false)));
                 return type_of(n, ty_void());
             }
-            /* 统一分配 API：std.stackAlloc(T, N) / std.heapAlloc(alloc, T, N)
-             * 都返回数组指针 `*[N]T`（decisions §44）。N 必须编译期已知：
-             * 结果类型里带着长度，运行时长度得去堆上自己管。 */
-            if (m->builtin == BI_STACKALLOC || m->builtin == BI_HEAPALLOC) {
-                bool heap = (m->builtin == BI_HEAPALLOC);
-                if (n->nitems != (heap ? 3 : 2))
+            /* 分配 API：stackAlloc/heapAlloc 返回 *[N]T（长度在类型里），
+             * heapSlice 返回 []T（长度在值里，n 可运行期）。§130 的编译期
+             * 合并依赖 N 是常量算静态布局，所以只有 heapAlloc 进 region。 */
+            if (m->builtin == BI_STACKALLOC || m->builtin == BI_HEAPALLOC ||
+                m->builtin == BI_HEAPSLICE) {
+                bool stack = (m->builtin == BI_STACKALLOC);
+                bool slice = (m->builtin == BI_HEAPSLICE);
+                if (n->nitems != (stack ? 2 : 3))
                     return BAD(n, "std.%s takes %s, a type and a count", m->name,
-                               heap ? "an allocator" : "a type");
+                               stack ? "a type" : "an allocator");
                 int base = 0;
-                if (heap) {
+                if (!stack) {
                     Type *at = check_expr(n->items[0], sema_allocator_type());
                     coerce_node(n->items[0], at, sema_allocator_type(), "allocator");
                     base = 1;
@@ -4100,12 +4110,14 @@ static Type *check_call(Node *n, Type *expect) {
                     return BAD(n, "std.%s cannot allocate `%s`", m->name,
                                elem ? ty_str(elem) : "?");
                 check_expr(n->items[base + 1], ty_usize());
+                if (slice)
+                    return type_of(n, ty_slice(elem, false));
                 IntV c = ev_int(n->items[base + 1]);
                 if (!c.ok)
                     return BAD(n->items[base + 1],
                                "std.%s count must be known at compile time", m->name);
-                n->esc = !heap;          /* 栈那份指向当前帧：逃逸检查盯它 */
-                if (heap && !n->reg_slot) {
+                n->esc = stack;          /* 栈那份指向当前帧：逃逸检查盯它 */
+                if (!stack && !n->reg_slot) {
                     int sz = ty_size(elem), al = ty_align(elem);
                     n->reg_slot = region_new(n,
                         (uint64_t)(sz > 0 ? sz : 1) * c.v,
@@ -4501,6 +4513,10 @@ static Type *check_expr_raw(Node *n, Type *expect) {
     case NK_IDENT: {
         Symbol *s = lookup(n->name);
         if (!s) {
+            /* §144：module 关键字已换成内建 @mod。旧写法会落到这里，
+             * 给一条能照着改的提示，而不是含糊的 unknown identifier。 */
+            if (!strcmp(n->name, "module"))
+                return BAD(n, "`module` was removed: use @mod(\"name\")");
             /* `_` 丢弃占位；基础类型名在值位置表示类型本身（泛型实参） */
             if (!strcmp(n->name, "_")) return type_of(n, ty_void());
             Type *b = base_type(n->name);
@@ -4514,7 +4530,7 @@ static Type *check_expr_raw(Node *n, Type *expect) {
         /* 块内先声明后使用（fn_local）：作用域预登记让前向引用在 sema 悄悄
          * 解析到后面的声明，但后端按语句顺序发 C，到那边必然编不过，最后
          * 被包装成 B1001「编译器 bug」。在这里给出人话。顶层 hoist 是有意
-         * 的（互递归），不受影响；懒模块声明（fn 里的 `const std = module(..)`）
+         * 的（互递归），不受影响；懒模块声明（fn 里的 `const std = @mod(..)`）
          * 靠使用点触发解析，也豁免。 */
         if (s->fn_local && s->state == 0 && s->decl &&
             !(s->decl->kind == NK_DECL && decl_is_lazy_module(s->decl))) {
@@ -4699,7 +4715,7 @@ static Type *check_expr_raw(Node *n, Type *expect) {
         }
         Module *m = n->str ? module_load(n->str, n->line, n->col) : NULL;
         if (!m) {
-            if (!n->str) return BAD(n, "module(...) needs a file path");
+            if (!n->str) return BAD(n, "@mod(...) needs a file path");
             n->sym = NULL;
             return type_of(n, ty_type());
         }
@@ -4876,12 +4892,12 @@ static Symbol *module_member(Module *m, const char *name) {
     return NULL;
 }
 
-/* 顶层 const 的初值是不是"惰性模块引用"：module("...") 本身，或者指向
+/* 顶层 const 的初值是不是"惰性模块引用"：@mod("...") 本身，或者指向
  * 这类别名的成员链（std.zx 顶层的 `pub const HashMap = map.HashMap;`
  * 就是后者）。
  *
  * 为什么要惰性：模块加载走的是 check_stmts(m->root) → 每条顶层 decl
- * 都 ensure 一遍，于是 `pub const str = module("str.zx")` 在 std 一被
+ * 都 ensure 一遍，于是 `pub const str = @mod("str.zx")` 在 std 一被
  * 加载时就把 str/map/pool/fs/json/time/task 全部拉进编译——哪怕程序
  * 只用了 std.println。惰性声明不做这次急切解析，真正被引用时 ensure
  * 会沿原有路径（NK_MODULE 分支 / 别名 sym_link）照常解析并加载文件。
@@ -4894,7 +4910,7 @@ static bool decl_is_lazy_module(Node *d) {
     Node *init = d->b;
     if (init->kind == NK_MODULE) return true;
     if (init->kind != NK_FIELD) return false;
-    /* 成员链：根标识符必须解析到"初值是 module(...) 的 const 别名"，
+    /* 成员链：根标识符必须解析到"初值是 @mod(...) 的 const 别名"，
      * 普通 `const X = someStruct.field;` 不在此列，维持急切解析。 */
     Node *root = init;
     while (root->kind == NK_FIELD && root->a) root = root->a;
@@ -5219,7 +5235,7 @@ static void ensure_raw(Symbol *s) {
             s->state = 2;
             return;
         }
-        /* 模块加载失败：错误已经在 module(...) 那行报过。绑定照旧算"命名
+        /* 模块加载失败：错误已经在 @mod(...) 那行报过。绑定照旧算"命名
          * 空间"（类型检查要继续走），但标成 broken —— 后面 `mod.x` 全部
          * 静默退化成 invalid，不再刷一串 "module 'main' has no member"。 */
         s->broken = true;
@@ -5367,7 +5383,7 @@ static bool has_zx_suffix(const char *p) {
 /* 探一个候选路径：原样打得开就用它；否则（模块名没写扩展名时）再试
  * <候选>.zx。返回 malloc 的路径，都没找到返回 NULL。
  *
- * 为什么补后缀：`module("ext")` 比 `module("ext.zx")` 是文档里一直在写的
+ * 为什么补后缀：`@mod("ext")` 比 `@mod("ext.zx")` 是文档里一直在写的
  * 简写（README、init 生成的项目说明），但早期实现只认完整路径。补后缀
  * 是纯增量——显式写了 .zx 的老代码一个字都不用改。 */
 static char *find_module_file(const char *cand, bool allow_zx) {
@@ -5454,7 +5470,7 @@ static Module *module_load_full(const char *full_in, int line, int col) {
     m->root = fe_parse_file(m->path);
     if (m->root) stamp_mod(m->root, m->path);
     if (!m->root) {
-        /* 这条诊断属于导入方：位置是 module(...) 调用点，源码片段也得取
+        /* 这条诊断属于导入方：位置是 @mod(...) 调用点，源码片段也得取
          * 导入方那一行。之前 g_srcpath 还停在子模块上，于是行号是父文件的、
          * 内容却是子模块的同号行——把人指到一句无关的注释上。
          * 顺带把子模块的第一条错报出来，别让人只看到 failed to parse：

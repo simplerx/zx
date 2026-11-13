@@ -9,7 +9,7 @@ os.makedirs(TESTDIR, exist_ok=True)
 # 用 ZXLS_BIN 指到刚编出来的临时 exe。
 ZXLS_BIN = os.environ.get("ZXLS_BIN") or os.path.join(ROOT, "bin", "zxls-new.exe")
 
-MAIN = """const std = module("std");
+MAIN = """const std = @mod("std");
 
 const Obj = struct {
     count: i32,
@@ -115,8 +115,8 @@ open(os.path.join(TESTDIR, "vendor", "ext.zx"), "w", encoding="utf-8").write(
     'pub const Cfg = struct {\n    pub w: i32,\n    pub h: i32,\n};\n')
 open(os.path.join(TESTDIR, "libs", "util.zx"), "w", encoding="utf-8").write(
     'pub const twice = fn (x: i32) i32 {\n    return x * 2;\n};\n')
-EXTUSE = """const ext = module("ext");
-const util = module("util");
+EXTUSE = """const ext = @mod("ext");
+const util = @mod("util");
 
 const main = fn () i32 {
     ext.hello("x");
@@ -402,7 +402,7 @@ check("completion.snippet.semicolon",
 #     用户 2026-11-08 追加：写自定义类型也要能 Tab 展开完整声明。
 #     展开后是能直接编译的 `const Name = struct { … };` 整条声明；
 #     实例构造走 `new`。
-SNIP2 = """const std = module("std");
+SNIP2 = """const std = @mod("std");
 const t = type;
 const u = union;
 const e = enum;
@@ -850,7 +850,7 @@ send({"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {
 
 # 3p 参数名 inlay（含 struct 形参）+ 匿名 struct 绑定的类型推断
 #     守门：fn 定义 / if ( / 注释 / 字符串 / cast 前缀都不该被当成调用。
-PARAM = """const std = module("std");
+PARAM = """const std = @mod("std");
 const Person = struct{ age: i32, name: []const u8 };
 const add = fn (a: i32, b: i32) i32 { return a + b; };
 const take = fn (v: Person, n: i32) void { std.println("{}", n); };
@@ -893,7 +893,7 @@ check("inlayHint.type.namedStruct", ": Person" in types, pdetail)
 #    `std.arena.ArenaAllocator.init` 没有参数名提示、`var b = buf.?` 没有
 #    类型提示、`std.map.HashMap(i32).init` 与 `std.format(...)` 整条哑掉）。
 #    根因：被调方解析只认 `模块.成员`（n≤3）且不跨泛型括号，返回类型拿不到。
-DEEP = """const std = module("std");
+DEEP = """const std = @mod("std");
 pub const main = fn () i32 {
     var buf: ?std.BufReader = std.BufReader.init(std.heap.page, 0, 10);
     var b = buf.?;
@@ -968,8 +968,8 @@ extern "C" {
 
 pub const GL_QUADS: u32 = 0x0007;
 '''
-BIND = '''const g  = module("glue");
-const gl = module("gl.zx");
+BIND = '''const g  = @mod("glue");
+const gl = @mod("gl.zx");
 
 const main = fn () i32 {
     g.
@@ -1110,7 +1110,7 @@ items = ip_items(IPROBE, off, 88)
 imp = imports(items, "glue")
 check("completion.importModule.item", len(imp) == 1, str(items)[:240])
 check("completion.importModule.body",
-      bool(imp) and imp[0].get("insertText") == 'const ${1:glue} = module("glue");$0',
+      bool(imp) and imp[0].get("insertText") == 'const ${1:glue} = @mod("glue");$0',
       str(imp)[:240])
 check("completion.importModule.snippet",
       bool(imp) and imp[0].get("insertTextFormat") == 2, str(imp)[:240])
@@ -1137,7 +1137,7 @@ check("completion.importModule.noWorkspaceNoise",
       "glClearColor" not in {i["label"] for i in items},
       str([i["label"] for i in items])[:240])
 # 已经写过绑定的名字不再提示导入
-IBOUND = '''const glue = module("glue");
+IBOUND = '''const glue = @mod("glue");
 
 const main = fn () i32 {
     glu
@@ -1153,7 +1153,7 @@ check("completion.importModule.boundNameHidden",
       not imports(items, "glue"), str(imports(items, "glue"))[:240])
 
 # 别名绑定（绑定名 g != 模块名 glue）同样算已导入，不该反复提示
-IALIAS = '''const g = module("glue");
+IALIAS = '''const g = @mod("glue");
 
 const main = fn () i32 {
     glu
@@ -1308,8 +1308,8 @@ pub const handler = fn (cb: fn (i32) i32, info: struct{ count: i32, name: []cons
 };
 """
 open(os.path.join(SRC_DIR, "nestlib.zx"), "w", encoding="utf-8").write(NESTLIB)
-NESTUSE = """const a = module("nestlib");
-const std = module("std");
+NESTUSE = """const a = @mod("nestlib");
+const std = @mod("std");
 
 pub const main = fn () i32 {
     a.deepfn(.{ .opts = .{ .width = 1 }, .flag = true });
@@ -1369,7 +1369,7 @@ check("completion.std.allocSnippet",
       and st_.get("heapAlloc") == "heapAlloc(${1:alloc}, ${2:T}, ${3:n})$0"
       and st_.get("stackAlloc(...)") is None,
       str((st_.get("stackAlloc"), st_.get("heapAlloc"))))
-check("completion.std.moduleDetail", sd.get("str") == 'module("str.zx")', str(sd.get("str")))
+check("completion.std.moduleDetail", sd.get("str") == '@mod("str.zx")', str(sd.get("str")))
 # 2026-11-09 截图：`std.debug("create failed.")` 报 "called value has type
 # `type`"——命名空间被当函数。补全里它们按 Module(kind=9) 出、detail 写明
 # 不能直接调用，别再像个函数。
@@ -1436,7 +1436,7 @@ pub const make = fn () Box {
 };
 """
 open(os.path.join(SRC_DIR, "leaklib.zx"), "w", encoding="utf-8").write(LEAKLIB)
-LEAKUSE = """const m = module("leaklib.zx");
+LEAKUSE = """const m = @mod("leaklib.zx");
 
 pub const main = fn () i32 {
     let b = m.make();
@@ -1494,7 +1494,7 @@ check("inlayHint.anonNestedLiteral",
 #  3 std 类型实体（Task/ArenaAllocator/泛型 ArrayList）成员有类型、方法有签名
 #  4 std.zx 不设类型别名（用户第 4 条下午：别名和真身分不清）——
 #    类型只走 std.task.Task / std.map.HashMap 这类真实路径
-STDUSE = """const std = module("std");
+STDUSE = """const std = @mod("std");
 
 pub const main = fn () u8 {
     let g = std.task.Task.single();
@@ -1898,7 +1898,7 @@ cov_types = std_public_types()
 # 8i std.json.Obj 单独守门：容器体大（fields + 6 个方法）、字段全 pub、
 # norm 是唯一无 self 的静态成员。曾出现"整份覆盖率文档里唯独 Obj 双空"的
 # 非确定性回归（2026-11-11 调试），这里用最小文档钉住它。
-OBJTXT = ('const std = module("std");\n\npub const main = fn () u8 {\n'
+OBJTXT = ('const std = @mod("std");\n\npub const main = fn () u8 {\n'
           '    var o = std.json.Obj{ };\n    std.json.Obj.\n    o.\n    return 0;\n};\n')
 objuri = "file:///" + os.path.join(SRC_DIR, "objprobe.zx").replace("\\", "/")
 send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
@@ -1943,7 +1943,7 @@ pub const A = struct {
 };
 """
 open(os.path.join(SRC_DIR, "deep3.zx"), "w", encoding="utf-8").write(DEEPLIB)
-DEEPUSE = """const m = module("deep3");
+DEEPUSE = """const m = @mod("deep3");
 const AB = m.A.B;
 
 pub const main = fn () u8 {
@@ -2022,7 +2022,7 @@ pub const ChainRoot = struct {
 };
 """
 open(os.path.join(SRC_DIR, "chain3.zx"), "w", encoding="utf-8").write(CHAINLIB)
-CHAINUSE = """const c = module("chain3");
+CHAINUSE = """const c = @mod("chain3");
 
 pub const main = fn () u8 {
     let r = c.ChainRoot.chainMake();
@@ -2097,9 +2097,9 @@ for _tag, _needle in (
 
 # definition：std 里的类型/函数也要跳（泛型实例上的成员、再导出容器里的成员）。
 # `HashMap(i32).init` 的接收者带实例化实参，以前 base 只剩空的，一律 MISS；
-# `std.json.Obj.norm` 走的是 std.zx 的 `pub const json = module("json.zx")`
+# `std.json.Obj.norm` 走的是 std.zx 的 `pub const json = @mod("json.zx")`
 # 再导出，名字在全扫描集里撞不出正确文件。
-DEFSTD = """const std = module("std");
+DEFSTD = """const std = @mod("std");
 
 const main = fn () i32 {
     let al = std.heap.page;
@@ -2137,7 +2137,7 @@ for _tag, _path, _file in (
 # 守两件事：containerOfBinding 认形参（findDeclStmt 够不着，靠 name: Type 形状扫），
 # inferExprType 把链式 base（`t.PcP1`）当容器路径解。缺任一条，
 # `const P = t.P1.P2;` 就一个字提示都没有（用户 2026-11-11 截图 1）。
-PCHAIN = """const std = module("std");
+PCHAIN = """const std = @mod("std");
 
 const PcT = struct {
     pub const PcP1 = struct {
@@ -2215,7 +2215,7 @@ MCMOD = """pub const McRoot = struct {
 pub const McAlias = McRoot.McP1.McP2;
 """
 open(os.path.join(SRC_DIR, "modchain.zx"), "w", encoding="utf-8").write(MCMOD)
-MCUSE = """const m = module("modchain");
+MCUSE = """const m = @mod("modchain");
 
 const mcUse = fn () i32 {
     const McP = m.McRoot.McP1.McP2;
@@ -2295,8 +2295,8 @@ XTMOD = """pub const XtRoot = struct {
 };
 """
 open(os.path.join(SRC_DIR, "xtmod.zx"), "w", encoding="utf-8").write(XTMOD)
-XTUSE = """const std = module("std");
-const xt = module("xtmod");
+XTUSE = """const std = @mod("std");
+const xt = @mod("xtmod");
 
 const xtUse = fn () i32 {
     const XtP: type = xt.XtRoot.XtP1.XtP2;
@@ -2357,7 +2357,7 @@ check("definition.explicitType.fnInModule",
 #   inferExprType 先认 `@type(`——落到"调用"分支会当普通函数、返回 null
 #   builtinTyMembers 出 Type/Field 的字段（补全）
 #   builtinFieldTy 供 `info.fields` / `info.fields[0]` 继续推（inlay）
-TYUSE = """const std = module("std");
+TYUSE = """const std = @mod("std");
 
 const TyMake = fn (T: type) type {
     return struct{
@@ -2419,7 +2419,7 @@ LOSEMOD = """pub const LsP1 = struct {
 };
 """
 open(os.path.join(SRC_DIR, "losemod.zx"), "w", encoding="utf-8").write(LOSEMOD)
-LOSESRC = """const std = module("std");
+LOSESRC = """const std = @mod("std");
 
 const LsP: type = t.LsP1.LsP2;
 const LsQ = LsP.LsP3;
@@ -2470,7 +2470,7 @@ check("definition.looseChain.nestedType",
 
 # ---------------------------------------------------------- vendor 模块里的嵌套类型
 #
-# 用户 2026-11-11 第 7 张截图（真实工程：src/main.zx 里 `const t = module("test")`，
+# 用户 2026-11-11 第 7 张截图（真实工程：src/main.zx 里 `const t = @mod("test")`，
 # 模块文件在 vendor/test.zx）：
 #   const P: type = t.P1.P2;   →  P 有 : type，但 `const pp = P.P3;` 什么都没有
 # 根因：scanFiles 只扫**文档目录 + std**，vendor 里的容器体不在扫描集里，于是
@@ -2495,8 +2495,8 @@ VDMOD = """pub const VdP1 = struct{
 """
 os.makedirs(os.path.join(TESTDIR, "vendor"), exist_ok=True)
 open(os.path.join(TESTDIR, "vendor", "vendmod.zx"), "w", encoding="utf-8").write(VDMOD)
-VDSRC = """const std = module("std");
-const vt = module("vendmod");
+VDSRC = """const std = @mod("std");
+const vt = @mod("vendmod");
 
 const VdP: type = vt.VdP1.VdP2;
 const VdQ = VdP.VdP3;
@@ -2579,8 +2579,8 @@ DPMOD = """pub const DpRoot = struct{
 };
 """
 open(os.path.join(TESTDIR, "libs", "deepmod.zx"), "w", encoding="utf-8").write(DPMOD)
-DPSRC = """const std = module("std");
-const dm = module("deepmod");
+DPSRC = """const std = @mod("std");
+const dm = @mod("deepmod");
 
 const DpP: type = dm.DpRoot.DpMid;
 const DpQ = DpP.DpLeaf;
@@ -2646,7 +2646,7 @@ check("definition.depsChain.nestedType",
 # `val.a` 推不出类型（inlay 没有 : i32）。修法是从扫描集里的调用点反推：
 # `fill(P3, p)` 的 **T 位**实参就是具体类型，解析成容器后按实例出成员。
 # 注意取的是类型形参那一位的实参，不是 val 自己那位（那是值）。
-GPSRC = """const std = module("std");
+GPSRC = """const std = @mod("std");
 
 const GpT = struct {
     ga: i32,
@@ -2807,7 +2807,7 @@ _r, _ = recv_id("enumunion", _rid)
 _euhv = ((_r or {}).get("result") or {}).get("contents", {}).get("value", "")
 check("hover.enum.instanceMethod", "name" in _euhv and "self" in _euhv, _euhv[:120])
 
-cov_lines = ['const std = module("std");', "", "pub const main = fn () u8 {"]
+cov_lines = ['const std = @mod("std");', "", "pub const main = fn () u8 {"]
 cov_marks = []
 for _mod, _name, _shape, _factory in cov_types:
     _qn = ("std.%s.%s" % (_mod, _name)) if _mod else ("std.%s" % _name)
@@ -2879,7 +2879,7 @@ check("stdCoverage.hoverDefinition", not cov_badhover, str(cov_badhover)[:300])
 # 没提示）。点补全的 path 回扫遇 ')' 就截止，接收者表达式解析不出 → 空列表。
 # 修复后 recvExprStart 配平括号取整条接收者，inferContainer 统一解析：泛型实例
 # / 模块函数返回 / 工厂调用 / 本地函数返回四种链式的成员与 hover 都必须有。
-CHAIN = """const std = module("std");
+CHAIN = """const std = @mod("std");
 
 const P = struct {
     x: i32,
@@ -2981,7 +2981,7 @@ send({"jsonrpc": "2.0", "method": "textDocument/didClose",
 # 切片/字符串接收者的成员：`"hello".` 与 `[]const u8` 变量的 `.` 出 len/ptr。
 # 2026-11-09 用户：字符串字面量能不能 .ptr？有没有长度 len？——能，但补全里
 # 一个成员都没有（sema 的 TY_SLICE 只有 .ptr/.len/.0，源文件里没有声明）。
-STRM = """const std = module("std");
+STRM = """const std = @mod("std");
 
 pub const main = fn () i32 {
     var a: *const u8 = "hello".;
@@ -3058,7 +3058,7 @@ send({"jsonrpc": "2.0", "method": "textDocument/didClose",
 #   没有类型提示、`const s = strs.0` 没有类型提示。根因：成员补全走的是
 #   inferContainer（只认名字/调用），推导走的是 inferExprType（认表达式）——
 #   两条链在"初始化式是表达式"的位置断开了。
-ET = """const std = module("std");
+ET = """const std = @mod("std");
 pub const main = fn () i32 {
     var buf = std.BufReader.init(std.heap.page, 0, 10);
     var b = buf.?;
@@ -3149,7 +3149,7 @@ send({"jsonrpc": "2.0", "method": "textDocument/didClose",
 #   编译器侧 `pp.name` / `arrs.0.name` 一直是合法的（`.` 自动穿透指针、`.N`
 #   对数组指针取元素），断的是 LSP：`&p` 没有 `*T` 规则、成员补全只认路径
 #   末段（`arrs.0` 的末段是 `0`），链式接收者两边都落空。
-PT = """const std = module("std");
+PT = """const std = @mod("std");
 const Person = struct { name: i32, age: i32 };
 pub const main = fn () i32 {
     let p: Person = Person{ .name = 0, .age = 1 };
@@ -3237,7 +3237,7 @@ send({"jsonrpc": "2.0", "method": "textDocument/didClose",
 #     （切片/数组），元组 `{i32,i32,str}` 取第 N 项要 tupleElemTy。
 #   · `@` 内建补全里 @type 出 snippet：`type(${1:x})$0`（insertTextFormat=2），
 #     其余内建（@memcpy/…）仍是普通补全。
-TUPIDX = """const std = module("std");
+TUPIDX = """const std = @mod("std");
 
 const tup: {i32,i32,str} = .{10,23,"hello"};
 const s = tup[2];
@@ -3264,7 +3264,7 @@ for _need, _want, _tag in (
     _ln = TUPIDX[:TUPIDX.index(_need)].count("\n")
     check("inlayHint." + _tag, _tih.get(_ln) == _want, str(_tih))
 
-atdoc = "const std = module(\"std\");\n@\n"
+atdoc = "const std = @mod(\"std\");\n@\n"
 aturi = "file:///" + os.path.join(SRC_DIR, "atbuild.zx").replace("\\", "/")
 send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
     "textDocument": {"uri": aturi, "languageId": "zx", "version": 1, "text": atdoc}}})
@@ -3287,7 +3287,7 @@ check("completion.atOthers.plain",
 # Windows 对已有 HIDDEN 属性的文件 fopen(...,"wb") 重写直接 ACCESS_DENIED，
 # zxc fmt 静默写失败 → 读回原样 → 空编辑。守门：格式化必须真的给出缩进
 # 修正的 TextEdit（不是 []），且文档没有被格式化污染（影子用完即删）。
-FMTDOC = 'const std = module("std");\n\nconst main = fn () i32 {\n        return 0;\n      };\n'
+FMTDOC = 'const std = @mod("std");\n\nconst main = fn () i32 {\n        return 0;\n      };\n'
 fmturi = "file:///" + os.path.join(SRC_DIR, "fmttest.zx").replace("\\", "/")
 send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
     "textDocument": {"uri": fmturi, "languageId": "zx", "version": 1, "text": FMTDOC}}})
@@ -3457,7 +3457,7 @@ open(os.path.join(TESTDIR, "vendor", "zxls8zlib.zx"), "w", encoding="utf-8").wri
 # 外部模块分开两个文件：geolib.zx 里的字段类型引用 nestlib.zx 的 Sub，
 # 守的是「外部导入的 module 都要查一遍，它们和 src 不是同一条解析路径」。
 open(os.path.join(TESTDIR, "vendor", "zxls8zcross.zx"), "w", encoding="utf-8").write(
-    'const nl = module("zxls8zlib");\n'
+    'const nl = @mod("zxls8zlib");\n'
     'pub const Box = fn (T: type) type {\n'
     '    return struct {\n'
     '        pub v: T,\n'
@@ -3470,9 +3470,9 @@ open(os.path.join(TESTDIR, "vendor", "zxls8zcross.zx"), "w", encoding="utf-8").w
     '    pub meta: struct { pub a: i32, pub b: i32 },\n'
     '};\n')
 
-NESTUSE = """const std = module("std");
-const t = module("zxls8zlib");
-const g = module("zxls8zcross");
+NESTUSE = """const std = @mod("std");
+const t = @mod("zxls8zlib");
+const g = @mod("zxls8zcross");
 const Wrap = struct {
     pub const MAX: usize = 9;
     pub val: i32,
@@ -3859,8 +3859,8 @@ _klib_path = os.path.join(TESTDIR, "vendor", "zxls8zk.zx")
 open(_klib_path, "w", encoding="utf-8").write(KLIB)
 kliburi = "file:///" + _klib_path.replace("\\", "/")
 
-KUSE = """const std = module("std");
-const k = module("zxls8zk");
+KUSE = """const std = @mod("std");
+const k = @mod("zxls8zk");
 pub const main = fn () i32 {
     k.SG.Inner.
     k.SG.Deeper.Leaf.
@@ -4022,8 +4022,8 @@ _mlib_path = os.path.join(TESTDIR, "vendor", "zxls8zm.zx")
 open(_mlib_path, "w", encoding="utf-8").write(MLIB)
 mliburi = "file:///" + _mlib_path.replace("\\", "/")
 
-MUSE = """const std = module("std");
-const m = module("zxls8zm");
+MUSE = """const std = @mod("std");
+const m = @mod("zxls8zm");
 const GA = m.MM;
 pub const main = fn () i32 {
     m.FC(b: 0, data: struct{b:i32,data:struct{b:i32,i:i32}}.{ });
@@ -4285,7 +4285,7 @@ check("diagnostics.noCodeDescriptionForOldClients",
 # stderr 的 `path:line:col: error[CODE]: msg` -> publishDiagnostics，
 # codeDescription.href 按码小写自动拼出 docs/errors.md#e0510。用独立短命会话
 # 把这条链钉死——能力线以守门用例保存，不许删用例变绿。
-HANDLE_TABLE = """const std = module("std");
+HANDLE_TABLE = """const std = @mod("std");
 
 const Handle = struct { pos: usize };
 
@@ -4455,7 +4455,7 @@ def dup_open_guard():
                 break
         snd({"jsonrpc": "2.0", "method": "initialized", "params": {}})
         for i in range(30):
-            body = ("const std = module(\"std\");\n\n"
+            body = ("const std = @mod(\"std\");\n\n"
                     "pub const main = fn () i32 {\n"
                     + ("    let a%d = %d;\n" % (i, i)) * (1 + i % 7)
                     + "    return 0;\n};\n")
@@ -4506,7 +4506,7 @@ def inlay_perf():
     if os.name != "nt":
         return None
     n = 16000
-    body = ['const std = module("std");',
+    body = ['const std = @mod("std");',
             'const add = fn (left: i32, right: i32) i32 { return left + right; };',
             'pub const main = fn () u8 {']
     for i in range(n):

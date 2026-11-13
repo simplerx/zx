@@ -1,7 +1,7 @@
 // expect: is private to module
 // 私有成员只有本模块可见；别的模块必须看到 `pub`
-const std = module("std");
-const util = module("priv/priv-util.zx");
+const std = @mod("std");
+const util = @mod("priv/priv-util.zx");
 
 const main = fn () u8 {
     std.println("{} {}", util.ok(), util.secret(1));

@@ -945,7 +945,7 @@ static int help_sub(FILE *f, const char *cmd) {
             "\n"
             "build / run / test already do this automatically. Use sync when you\n"
             "want the generated vendor/<name>.zx to exist BEFORE typing code, so\n"
-            "the editor offers module(\"name\") completion and hover right away.\n"
+            "the editor offers @mod(\"name\") completion and hover right away.\n"
             "\n"
             "Only NEW C libraries are touched: an existing .clib or .zx is never\n"
             "overwritten (edit it freely, or use one to opt a directory out).\n"
@@ -992,7 +992,7 @@ static int help_sub(FILE *f, const char *cmd) {
             "  --force        overwrite an existing vendor/<name>.zx\n"
             "\n"
             "The generated file is ordinary, editable Zx source:\n"
-            "  const ray = module(\"raylib\");   ray.InitWindow(800, 600, \"hi\");\n"
+            "  const ray = @mod(\"raylib\");   ray.InitWindow(800, 600, \"hi\");\n"
             "Completion / hover / inlay hints work on it like any other module.\n"
             "Declarations clang cannot translate are listed as comments at the end.\n"
             "C sources are compiled into a static library and linked automatically;\n"
@@ -1008,14 +1008,14 @@ static int help_sub(FILE *f, const char *cmd) {
             "  zxc init demo     create demo/ and scaffold inside it\n"
             "\n"
             "generated:\n"
-            "  src/main.zx       entry (example: module(\"std\") + greet/main)\n"
+            "  src/main.zx       entry (example: @mod(\"std\") + greet/main)\n"
             "  zx.json           project manifest: name / version / main / out / deps / vendor\n"
             "  vendor/           external module root (see below)\n"
             "  README.md .gitignore\n"
             "\n"
             "vendor/:\n"
-            "  drop third-party *.zx modules here and module(\"name\") finds them:\n"
-            "  vendor/ext.zx -> module(\"ext\"), vendor/lib/util.zx -> module(\"lib/util\").\n"
+            "  drop third-party *.zx modules here and @mod(\"name\") finds them:\n"
+            "  vendor/ext.zx -> @mod(\"ext\"), vendor/lib/util.zx -> @mod(\"lib/util\").\n"
             "  search order: dir of the importing file -> vendor/ -> deps in zx.json;\n"
             "  vendor/ joins the search automatically once it exists, no deps entry needed.\n"
             "\n"
@@ -1054,7 +1054,7 @@ static int help_sub(FILE *f, const char *cmd) {
             "name filter is substring match.\n"
             "failure: @trap, returning false, returning a non-zero integer, or std.process.exit(non-zero).\n"
             "each case runs in its own process, so one crash does not affect the rest; tests\n"
-            "reference project sources via module(\"../xxx.zx\").\n");
+            "reference project sources via @mod(\"../xxx.zx\").\n");
         return 0;
     }
     if (!strcmp(cmd, "check")) {
@@ -1881,8 +1881,8 @@ static int cmd_check(int argc, char **argv, int argi) {
 }
 
 static const char *INIT_MAIN =
-    "/* main.zx — 工程入口。module(\"std\") 引标准库，自建模块放同目录 *.zx。 */\n"
-    "const std = module(\"std\");\n"
+    "/* main.zx — 工程入口。@mod(\"std\") 引标准库，自建模块放同目录 *.zx。 */\n"
+    "const std = @mod(\"std\");\n"
     "\n"
     "const greet = fn (name: []const u8) void {\n"
     "    std.println(\"hello, {}!\", name);\n"
@@ -1903,7 +1903,7 @@ static const char *INIT_GITIGNORE =
     ".zxls-*.zx\n"
     ".zc-cache/\n";
 
-/* vendor/ 是外部模块根：放进来就能被 module("名字") 找到。空目录进不了
+/* vendor/ 是外部模块根：放进来就能被 @mod("名字") 找到。空目录进不了
  * 版本控制，所以里面放一份说明——顺便把搜索顺序写在最容易被看到的地方。 */
 static const char *INIT_VENDOR_README =
     "# vendor/ — 外部模块根\n"
@@ -1911,8 +1911,8 @@ static const char *INIT_VENDOR_README =
     "把第三方 zx 模块（`*.zx`，可带子目录）放在这里，源码里直接引用：\n"
     "\n"
     "```zx\n"
-    "const ext = module(\"ext\");        // → vendor/ext.zx\n"
-    "const util = module(\"lib/util\");  // → vendor/lib/util.zx\n"
+    "const ext = @mod(\"ext\");        // → vendor/ext.zx\n"
+    "const util = @mod(\"lib/util\");  // → vendor/lib/util.zx\n"
     "```\n"
     "\n"
     "搜索顺序：相对导入所在的目录 → 工程根的 `vendor/` → `zx.json` 的\n"
@@ -1962,19 +1962,19 @@ static const char *INIT_README =
     "## 模块\n"
     "\n"
     "`src/` 下的 `*.zx` 都是可用模块（与导入文件同目录即可）：\n"
-    "`const m = module(\"m\");` 或 `module(\"m/inner.zx\")` 引子目录模块。\n"
+    "`const m = @mod(\"m\");` 或 `@mod(\"m/inner.zx\")` 引子目录模块。\n"
     "标准库见 `std.zx`。\n"
     "\n"
     "第三方 / 外部模块放 `vendor/`（外部模块根，存在即自动参与搜索）：\n"
-    "`vendor/ext.zx` → `module(\"ext\")`；再多层目录写\n"
-    "`module(\"lib/util\")` → `vendor/lib/util.zx`。要额外的搜索目录，\n"
+    "`vendor/ext.zx` → `@mod(\"ext\")`；再多层目录写\n"
+    "`@mod(\"lib/util\")` → `vendor/lib/util.zx`。要额外的搜索目录，\n"
     "把相对路径写进 `zx.json` 的 `\"deps\"` 数组。\n"
     "\n"
     "## 测试\n"
     "\n"
     "`src/test/` 下的 `*.zx` 都是测试模块：里面的零参 `pub` 函数全部是用例\n"
     "（不用 test_ 前缀；带参数/泛型的函数可当辅助）。引用工程源码用\n"
-    "`module(\"../xxx.zx\")`。`zxc test [名字过滤]` 运行，每个用例独立进程。\n";
+    "`@mod(\"../xxx.zx\")`。`zxc test [名字过滤]` 运行，每个用例独立进程。\n";
 
 static int write_text_file(const char *path, const char *content) {
     FILE *f = fopen(path, "wb");
@@ -2065,7 +2065,7 @@ static int cmd_init(int argc, char **argv, int argi) {
 /* ---- add：一条命令把 C 库接进工程 ------------------------------------
  * 不做包管理器：不联网、不拉源码。消灭的是手写 FFI 里最费心的那一步——
  * 抄函数签名、抄 C 结构体布局。头文件交给 vendored clang 解析，产物是
- * 一份普通 Zx 源码放进 vendor/，之后 module("名字") 直接调。
+ * 一份普通 Zx 源码放进 vendor/，之后 @mod("名字") 直接调。
  * 生成物是普通源码，所以 LSP 的补全 / hover / inlayHint 全部照常生效。
  */
 typedef struct {
@@ -2340,7 +2340,7 @@ static int vendor_autoscan(void) {
     return added;
 }
 
-/* 显式同步入口：编辑器里第一次写 module("foo") 之前先跑一次，
+/* 显式同步入口：编辑器里第一次写 @mod("foo") 之前先跑一次，
  * 生成的绑定才会出现在补全里（build/run 自己也会调，不必先 sync）。 */
 static int cmd_sync(int argc, char **argv, int argi) {
     (void)argc; (void)argv; (void)argi;
@@ -2446,7 +2446,7 @@ static int cmd_include_tree(const char *root, const char *uname,
     free(text);
     if (rc != 0) return 1;
     printf("zxc include: wrote %s (%d declaration(s) skipped)\n", zxpath, nskip);
-    printf("  use:  const %s = module(\"%s\");\n", modname, modname);
+    printf("  use:  const %s = @mod(\"%s\");\n", modname, modname);
     if (lib && lib[0])
         printf("  link: @link(\"%s\") is already in the binding\n", lib);
     else
@@ -2606,7 +2606,7 @@ static int cmd_include(int argc, char **argv, int argi) {
     if (rc != 0) return 1;
 
     printf("zxc include: wrote %s (%d declaration(s) skipped)\n", outpath, nskip);
-    printf("  use:  const %s = module(\"%s\");\n", stem, stem);
+    printf("  use:  const %s = @mod(\"%s\");\n", stem, stem);
     if (lib && lib[0])
         printf("  link: @link(\"%s\") is already in the binding\n", lib);
     else
@@ -3002,7 +3002,7 @@ static void setup_search_paths_for_file(const char *file) {
     *last = 0;
 
     /* 工程根不唯一也不重要：沿向上路径把**每一层**的 vendor/ 都收进搜索
-     * 列表（近→远），zx.json 命中层再读它的 deps。module("name") 依次
+     * 列表（近→远），zx.json 命中层再读它的 deps。@mod("name") 依次
      * 尝试：源文件目录 → 各层 vendor/ → deps。嵌套工程、测试影子目录
      * 都不会抢根——搜索路径本来就是一个列表，不需要"唯一的根"。 */
     char root[1024];
@@ -3058,7 +3058,7 @@ static int do_build(Proj *pj, bool release, OutKind kind, char *outpath, size_t 
     /* 只读、绝不联网：zx.lock 里登记的库若被删了，先给一条可操作的提示。
      * 构建本身永远不会去下载，缺库时交给用户显式跑 `zxc fetch`。 */
     fetch_check_local(0, stderr);
-    /* 必须在 fe_parse_file 之前：入口源码里 module("foo") 要能找到刚
+    /* 必须在 fe_parse_file 之前：入口源码里 @mod("foo") 要能找到刚
      * 生成的 vendor/foo.zx，否则第一次 `zxc run` 就报模块找不到。 */
     vendor_autoscan();
     mkdir_p(ZX_CACHE_DIR);
@@ -3197,7 +3197,7 @@ static int cmd_run(int argc, char **argv, int argi) {
  * 编一个 runner 小程序（.zxc-cache/<stem>_runner.zx 生成），main 按命令行
  * 参数分发到单个用例：驱动逐个拉起进程、汇总 PASS/FAIL。进程隔离——
  * 一个用例炸掉不影响后面的用例。测试文件引用工程源码用
- * module("../xxx.zx")（测试目录的上一级就是 src/）。 * ---- */
+ * @mod("../xxx.zx")（测试目录的上一级就是 src/）。 * ---- */
 
 /* 收集 src/test/ 下的 *.zx。返回 malloc 的路径数组。 */
 static char **collect_test_files(int *out_n) {
@@ -3252,7 +3252,7 @@ static void gen_test_call(Buf *b, const char *name, const Type *ft) {
  * 头文件与函数签名引用对不上号；每文件一个进程回到"单进程一次 emit"
  * 的既有假设，顺带获得崩溃隔离——一个文件把编译器搞炸不影响其余文件。 */
 static int test_run1(const char *file, const char *filter, bool release) {
-    /* 父进程经 cmd.exe 传参会把 '/' 换成 '\\'；runner 源码里 module("…")
+    /* 父进程经 cmd.exe 传参会把 '/' 换成 '\\'；runner 源码里 @mod("…")
      * 的反斜杠会被当转义序列，词法直接报错——统一换回正斜杠 */
     char fbuf[2048];
     snprintf(fbuf, sizeof fbuf, "%s", file);
@@ -3289,8 +3289,8 @@ static int test_run1(const char *file, const char *filter, bool release) {
     Buf b;
     buf_init(&b);
     buf_puts(&b, "// zxc test 自动生成的 runner —— 勿手改\n");
-    buf_printf(&b, "const t = module(\"%s\");\n", modrel);
-    buf_puts(&b, "const std = module(\"std\");\n\n");
+    buf_printf(&b, "const t = @mod(\"%s\");\n", modrel);
+    buf_puts(&b, "const std = @mod(\"std\");\n\n");
     buf_puts(&b, "const main = fn () i32 {\n");
     buf_puts(&b, "    let a = std.process.args();\n");   /* 不含程序名：a[0] 即测试名 */
     buf_puts(&b, "    if (a.len < 1) { std.process.exit(2); }\n");

@@ -1,7 +1,7 @@
 // control.zx —— if / while / for / switch / defer / 标签
 // 无标签块恒为 {}；带标签的作用域靠收割语句 tag: expr; 交值
 
-const std = module("std");
+const std = @mod("std");
 
 // ---------- 块：值靠收割交出 ----------
 const triple = calc: {

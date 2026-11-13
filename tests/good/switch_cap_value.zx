@@ -4,7 +4,7 @@
 // 各臂的类型仍然要一致——不同就是 unify 报错（见 tests/bad/switch-cap-value-mismatch.zx）。
 //
 // 注意裸名字**一定**读作捕获名。要外部常量请加括号：`1: (K)`。
-const std = module("std");
+const std = @mod("std");
 
 const Shape = union(enum) {
     circle: i32,

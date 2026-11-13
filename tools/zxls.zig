@@ -131,7 +131,7 @@ var g_in_reader: Io.File.Reader = undefined;
 // ---------------------------------------------------------------- tables
 
 const keywords = [_][]const u8{
-    "const",  "let",    "var",  "fn",     "module", "type",   "null",     "undefined",
+    "const",  "let",    "var",  "fn",     "type",   "null",     "undefined",
     "if",     "else",   "while", "for",  "inline", "switch", "continue", "return",
     "defer",  "errdefer", "struct", "union", "enum", "error",  "pub",    "extern",   "orelse",
     "try",
@@ -168,7 +168,7 @@ const snippets = [_]Snip{
     .{ .label = "const", .body = "const ${1:name} = $0;", .detail = "代码片段 const" },
     .{ .label = "let", .body = "let ${1:name} = $0;", .detail = "代码片段 let" },
     .{ .label = "var", .body = "var ${1:name} = $0;", .detail = "代码片段 var" },
-    .{ .label = "module", .body = "module(\"${1:std}\")", .detail = "代码片段 module" },
+    .{ .label = "mod", .body = "@mod(\"${1:std}\")", .detail = "代码片段 @mod" },
     .{ .label = "defer", .body = "defer $0;", .detail = "代码片段 defer" },
     .{ .label = "errdefer", .body = "errdefer $0;", .detail = "代码片段 errdefer" },
     .{ .label = "try", .body = "try $0", .detail = "代码片段 try" },
@@ -929,7 +929,7 @@ fn methodRetIn(files: []const []const u8, base: []const u8, method: []const u8) 
     return null;
 }
 
-/// `pub const NAME = module("X.zx")` 门面别名解析：返回 "X.zx"。
+/// `pub const NAME = @mod("X.zx")` 门面别名解析：返回 "X.zx"。
 /// std.zx 的子模块（str/map/pool/…）都长这样，模块绑定查找
 ///（moduleOfBinding）只认单段名字，二级路径 std.str. 靠这里接住。
 fn moduleAliasIn(text: []const u8, name: []const u8) ?[]const u8 {
@@ -946,8 +946,8 @@ fn moduleAliasIn(text: []const u8, name: []const u8) ?[]const u8 {
         if (k >= rest.len or rest[k] != '=') continue;
         k += 1;
         while (k < rest.len and (rest[k] == ' ' or rest[k] == '\t')) k += 1;
-        if (!std.mem.startsWith(u8, rest[k..], "module(")) continue;
-        k += 7;
+        if (!std.mem.startsWith(u8, rest[k..], "@mod(")) continue;
+        k += 5; // 跳过 `@mod(` —— 5 个字符
         if (k >= rest.len or rest[k] != '"') continue;
         k += 1;
         const e = std.mem.indexOfScalarPos(u8, rest, k, '"') orelse continue;
@@ -1356,8 +1356,8 @@ const MemberHit = struct {
 };
 
 /// 点路径 → 成员声明。逐段下钻：
-///   起点：模块绑定（`std` / `const m = module(…)`）或扫描集里的容器
-///   中间：容器体 / 模块别名（`pub const map = module("map.zx")`）/
+///   起点：模块绑定（`std` / `const m = @mod(…)`）或扫描集里的容器
+///   中间：容器体 / 模块别名（`pub const map = @mod("map.zx")`）/
 ///         类型别名（`pub const Task = task.Task`）
 ///   末段：声明语句本身
 /// KEEP — 用户 2026-11-09 第 14 条：`std.arena.ArenaAllocator.init` 没有
@@ -2018,7 +2018,7 @@ fn resolveContainerPathD(files: []const []const u8, doc: *const Document,
     } else {
         // 起始模块之后的第一段才是容器名（segs[0] 是绑定名 m / std）。
         // 那一段也可能是个**再导出的子模块**（std.zx 的
-        // `pub const json = module("json.zx")`）：这时先把它当模块下钻一层，
+        // `pub const json = @mod("json.zx")`）：这时先把它当模块下钻一层，
         // 再在子模块文件里找容器。
         //
         // 必须这样走——以前退化成"拿末段名字在全扫描集里找 `const X = struct`"，
@@ -3367,11 +3367,11 @@ fn modDirsInto(doc_dir: []const u8, out: *std.ArrayList([]const u8)) void {
     }
     for (g_mod_dirs[0..g_mod_dir_n]) |d| out.append(gpa, d) catch return;
     // std 兜底目录放最后：工程与 vendor/deps 都没命中才生效，
-    // 对齐编译器「module("std") 走 find_std_path 特例」的语义。
+    // 对齐编译器「@mod("std") 走 find_std_path 特例」的语义。
     if (g_std_dir) |sd| out.append(gpa, sd) catch return;
 }
 
-/// module("…") 字符串 → 模块基名（去 .zx 后缀）。编译器两种形式都收：
+/// @mod("…") 字符串 → 模块基名（去 .zx 后缀）。编译器两种形式都收：
 /// 裸名 "std"（解析 <d>/std.zx 或 <d>/std/std.zx）与路径 "std/str.zx"。
 fn moduleBase(m: []const u8) []const u8 {
     if (std.mem.endsWith(u8, m, ".zx")) return m[0 .. m.len - 3];
@@ -3426,7 +3426,7 @@ fn moduleDecls(doc_dir: []const u8, mod: []const u8, out: *std.ArrayList(Decl)) 
     }
 }
 
-// Zx 没有隐式跨文件名字：其它 .zx 里的标识符必须先 module("…") 绑定。
+// Zx 没有隐式跨文件名字：其它 .zx 里的标识符必须先 @mod("…") 绑定。
 // 早期把它们当裸补全列出来，输入 glfw 弹一堆不可用的 glfwInit，
 // 真正的模块名反而被淹没（用户 2026-11-08 反馈）。模块名改由
 // addImportModules 在声明位置给「插入绑定」项，成员走 `绑定名.` 补全。
@@ -3489,8 +3489,8 @@ fn findDeclLine(text: []const u8, word: []const u8) ?struct { line: u32, col: u3
     return null;
 }
 
-/// `const word = module("X")` → X。KEEP: 等号两侧的空白是任意的——
-/// 真实工程里为了对齐常写 `const g    = module("glfw3");`，旧版按单空格
+/// `const word = @mod("X")` → X。KEEP: 等号两侧的空白是任意的——
+/// 真实工程里为了对齐常写 `const g    = @mod("glfw3");`，旧版按单空格
 /// 拼字符串硬匹配，于是 `g.` 落回工作区标识符兜底：补全一堆噪音、hover
 /// 和签名全空。用户 2026-11-08 反馈的 vendor / 手写 extern 模块没提示，
 /// 除了 extern fn 没进索引，这一处是第二个根因。
@@ -3512,8 +3512,8 @@ fn moduleOfBinding(text: []const u8, word: []const u8) ?[]const u8 {
         e += 1;
         while (e < text.len and (text[e] == ' ' or text[e] == '\t' or
             text[e] == '\r' or text[e] == '\n')) e += 1;
-        if (!std.mem.startsWith(u8, text[e..], "module(\"")) continue;
-        const s = e + 8; // 跳过 `module("` —— 8 个字符
+        if (!std.mem.startsWith(u8, text[e..], "@mod(\"")) continue;
+        const s = e + 6; // 跳过 `@mod("` —— 6 个字符
         const q = std.mem.indexOfScalarPos(u8, text, s, '"') orelse continue;
         if (q == s) continue;
         return text[s..q];
@@ -3521,13 +3521,13 @@ fn moduleOfBinding(text: []const u8, word: []const u8) ?[]const u8 {
     return null;
 }
 
-/// off 在同行 module("…" 字符串内（含停在内容上）→ 完整模块名
+/// off 在同行 @mod("…" 字符串内（含停在内容上）→ 完整模块名
 fn moduleStringAt(text: []const u8, off: usize) ?[]const u8 {
     var ls = off;
     while (ls > 0 and text[ls - 1] != '\n') ls -= 1;
     const seg = text[ls..off];
-    const hit = std.mem.lastIndexOf(u8, seg, "module(\"") orelse return null;
-    const start = hit + 8; // 跳过 module("
+    const hit = std.mem.lastIndexOf(u8, seg, "@mod(\"") orelse return null;
+    const start = hit + 6; // 跳过 @mod("
     if (std.mem.indexOfScalar(u8, seg[start..], '"') != null) return null; // 已闭合
     // 模块名延伸到闭合引号
     var e = off;
@@ -3708,7 +3708,7 @@ fn resolveModuleFile(doc: *const Document, m_raw: []const u8) ?[]const u8 {
     return null;
 }
 
-/// 模块文件里 `pub const seg = module("x.zx")` 再导出的真实文件
+/// 模块文件里 `pub const seg = @mod("x.zx")` 再导出的真实文件
 ///（相对该模块文件所在目录解析）。
 fn aliasModuleFile(doc: *const Document, mod_path: []const u8, seg: []const u8) ?[]const u8 {
     const txt = readFileSmall(mod_path) orelse return null;
@@ -3725,7 +3725,7 @@ fn aliasModuleFile(doc: *const Document, mod_path: []const u8, seg: []const u8) 
 /// 限定路径（可能多段）→ 真实模块文件。
 ///   "std"           → std/std.zx
 ///   "glfw3"         → 绑定名 moduleOfBinding
-///   "std.task"      → std.zx 里 pub const task = module("task.zx") → std/task.zx
+///   "std.task"      → std.zx 里 pub const task = @mod("task.zx") → std/task.zx
 ///   "vp.util.walk"  → vendor 模块的二级再导出，同样逐段走
 fn qualModulePath(doc: *const Document, text: []const u8, path: []const u8) ?[]const u8 {
     if (path.len == 0) return null;
@@ -3755,9 +3755,9 @@ fn qualModulePath(doc: *const Document, text: []const u8, path: []const u8) ?[]c
     return mp;
 }
 
-/// `base` 是模块（`std` / `const t = module(…)` / 再导出子模块 `std.json`）时
+/// `base` 是模块（`std` / `const t = @mod(…)` / 再导出子模块 `std.json`）时
 /// 返回该模块文件的文本；不是模块返回 null。挂在 qualModulePath 上，因此
-/// 再导出的子模块（std.zx 里 `pub const json = module("json.zx")`）也认。
+/// 再导出的子模块（std.zx 里 `pub const json = @mod("json.zx")`）也认。
 fn moduleTextOf(doc: *const Document, text: []const u8, base: []const u8) ?[]const u8 {
     const mp = qualModulePath(doc, text, base) orelse return null;
     return readFileSmall(mp);
@@ -3838,7 +3838,7 @@ fn definitionAt(doc: *const Document, line: u32, character: u32) ?[]const u8 {
     const text = doc.text;
     const off = posToOffset(text, line, character);
 
-    // module("…") 字符串内（含停在名字上）：跳模块文件
+    // @mod("…") 字符串内（含停在名字上）：跳模块文件
     if (moduleStringAt(text, off)) |m| {
         if (resolveModuleFile(doc, m)) |p| return makeLocation(pathToUri(p), 0, 0, 0);
         return null;
@@ -3979,7 +3979,7 @@ fn documentSymbols(doc: *const Document) []const u8 {
             if (std.mem.indexOf(u8, after, "fn ") != null or std.mem.indexOf(u8, after, "fn(") != null) break :blk 12; // Function
             if (std.mem.indexOf(u8, after, "struct") != null or std.mem.indexOf(u8, after, "union") != null) break :blk 23; // Struct
             if (std.mem.indexOf(u8, after, "enum") != null) break :blk 10; // Enum
-            if (std.mem.indexOf(u8, after, "module(") != null) break :blk 2; // Module
+            if (std.mem.indexOf(u8, after, "@mod(") != null) break :blk 2; // Module
             break :blk if (is_var) 13 else 21; // Variable / Constant
         };
         if (!first) j.buf.append(gpa, ',') catch {};
@@ -4522,7 +4522,7 @@ fn memberIsTypeDecl(files: []const []const u8, body: []const u8, member: []const
 fn inferExprType(text: []const u8, doc: *const Document, expr: []const u8, depth: u8) ?[]const u8 {
     const e = trimSl(expr);
     if (e.len == 0) return null;
-    if (std.mem.startsWith(u8, e, "module(")) return null;
+    if (std.mem.startsWith(u8, e, "@mod(")) return null;
     // KEEP - 类型值别名上的调用（2026-11-12 用户截图：类型不显示）。
     // `const Hs: type = std.map.HashMap(V: i32);` 之后写
     // `var map = Hs.init(std.heap.page);`，旧链只认纯路径类型值绑定
@@ -4856,7 +4856,7 @@ fn inferExprType(text: []const u8, doc: *const Document, expr: []const u8, depth
             if (base.len == 0 or member.len == 0) return null;
             var sf = scanFiles(doc, text);
             defer sf.deinit(gpa);
-            // base 是模块绑定（std / const t = module(…)）：成员是容器/类型
+            // base 是模块绑定（std / const t = @mod(…)）：成员是容器/类型
             // 就写 `type`，函数值/普通常量就不再往下猜。以前一律 `return e`——
             // 类型路径原样返回，于是 `const P = t.Inner;` 推出来的是 "t.Inner"
             // 这串**文本**，行内提示要么不显示（和初值同名被当成冗余），要么
@@ -4999,7 +4999,7 @@ fn inferExprType(text: []const u8, doc: *const Document, expr: []const u8, depth
                     std.mem.startsWith(u8, iv, "struct") or
                     std.mem.startsWith(u8, iv, "union") or
                     std.mem.startsWith(u8, iv, "enum") or
-                    std.mem.startsWith(u8, iv, "module(");
+                    std.mem.startsWith(u8, iv, "@mod(");
                 if (!not_val) {
                     if (declTyOf(stmt2)) |dt| {
                         const t = trimSl(dt);
@@ -5636,7 +5636,7 @@ fn hoverAt(doc: *const Document, line: u32, character: u32) ?[]const u8 {
     const text = doc.text;
     const off = posToOffset(text, line, character);
 
-    // module("…") 字符串内
+    // @mod("…") 字符串内
     if (moduleStringAt(text, off)) |m| {
         var b: std.ArrayList(u8) = .empty;
         b.print(gpa, "```zx\nmodule `{s}`\n```", .{m}) catch return null;
@@ -5994,7 +5994,7 @@ fn genericContainerHover(name: []const u8, stmt: []const u8) ?[]const u8 {
 }
 
 /// `task.Task` / `std.task.Task` 形状（首段纯标识符，点之前没有空格/括号）。
-/// `fn (…)`、`module("x")`、`X{ .a = 1 }` 都不算。
+/// `fn (…)`、`@mod("x")`、`X{ .a = 1 }` 都不算。
 fn isTypePathExpr(e: []const u8) bool {
     if (e.len == 0 or !isIdentChar(e[0]) or (e[0] >= '0' and e[0] <= '9')) return false;
     const dot = std.mem.indexOfScalar(u8, e, '.') orelse return false;
@@ -6047,9 +6047,9 @@ fn hoverMarkdownForDecl(text: []const u8, name: []const u8, doc: ?*const Documen
             b.appendSlice(gpa, ";\n```") catch {};
             return b.items;
         }
-        // 模块别名（`pub const task = module("task.zx")`）：hover 只说这是
+        // 模块别名（`pub const task = @mod("task.zx")`）：hover 只说这是
         // 哪个模块，别掉进「值 + 初始化表达式」的打印里。
-        if (std.mem.startsWith(u8, it0, "module(")) {
+        if (std.mem.startsWith(u8, it0, "@mod(")) {
             if (std.mem.indexOfScalar(u8, it0, '"')) |a| {
                 if (std.mem.indexOfScalarPos(u8, it0, a + 1, '"')) |z| {
                     b.print(gpa, "{s} {s} = module `{s}`\n```", .{ kw, name, it0[a + 1 .. z] }) catch {};
@@ -6695,7 +6695,7 @@ fn inlayHintsAt(doc: *const Document, start_line: u32, end_line: u32) []const u8
             std.mem.startsWith(u8, init, "error") or
             std.mem.startsWith(u8, init, "fn ") or
             std.mem.startsWith(u8, init, "fn(") or
-            std.mem.startsWith(u8, init, "module(")) continue;
+            std.mem.startsWith(u8, init, "@mod(")) continue;
 
         const ty = inferExprType(text, doc, init, 0) orelse continue;
         // KEEP: 上限 64 → 120（嵌套匿名类型串如
@@ -7261,12 +7261,12 @@ fn isKeywordWord(w: []const u8) bool {
     return false;
 }
 
-/// KEEP - 模块导入补全。名字只能来自显式 `const <名> = module("…")` 绑定：
+/// KEEP - 模块导入补全。名字只能来自显式 `const <名> = @mod("…")` 绑定：
 /// 曾试过"模块名解析不到绑定就隐式当命名空间"，用户 2026-11-08 否掉——
 /// 隐式名一旦和别名/再导出撞名，就再没有语法能指回隐式命名空间
 /// （`pub const glfw3 = glfw3;` 右边会被自己的绑定吃掉），文件一多必乱。
 /// 所以这里不制造隐式名字：选中项插入的是**一条绑定语句**，$1 落在绑定名
-/// 上，直接输入即可改成缩写（const g = module("glfw3");）。再导出同理，
+/// 上，直接输入即可改成缩写（const g = @mod("glfw3");）。再导出同理，
 /// 由人显式写 `pub const`，名字冲突完全可见、可控。
 fn addImportItem(list: *Json, seen: *std.StringHashMapUnmanaged(void), stem: []const u8) void {
     if (seen.contains(stem)) return;
@@ -7274,7 +7274,7 @@ fn addImportItem(list: *Json, seen: *std.StringHashMapUnmanaged(void), stem: []c
     if (seen.count() > 1) list.raw(",", .{});
     var body: [1024]u8 = undefined;
     const ins = std.fmt.bufPrint(&body,
-        "const ${{1:{s}}} = module(\"{s}\");$0", .{ stem, stem }) catch return;
+        "const ${{1:{s}}} = @mod(\"{s}\");$0", .{ stem, stem }) catch return;
     var st: [1024]u8 = undefined;
     const sort = std.fmt.bufPrint(&st, "b{s}", .{stem}) catch return;
     list.raw("{{\"label\":", .{});
@@ -7291,14 +7291,14 @@ fn addImportItem(list: *Json, seen: *std.StringHashMapUnmanaged(void), stem: []c
 /// 破坏语法。必须放在 addIdents 之前：未绑定的裸名（写错的 `glue.`）
 /// 也会被 collectIdents 当普通标识符塞进 seen，把导入项静默挡掉；
 /// 已导入过的模块（含别名绑定）由 moduleImported 按路径排除。
-/// 已经导入过这个模块就不再提示——按 module("…") 里的路径判，而不是按
-/// 绑定名：`const g = module("glfw3");` 用的是别名，绑定名 g 与模块名不同，
+/// 已经导入过这个模块就不再提示——按 @mod("…") 里的路径判，而不是按
+/// 绑定名：`const g = @mod("glfw3");` 用的是别名，绑定名 g 与模块名不同，
 /// 只看绑定名会反复提示"导入 glfw3"。注释里的字样不算数。
 fn moduleImported(text: []const u8, stem: []const u8) bool {
     var b1: [1024]u8 = undefined;
-    const n1 = std.fmt.bufPrint(&b1, "module(\"{s}\")", .{stem}) catch return false;
+    const n1 = std.fmt.bufPrint(&b1, "@mod(\"{s}\")", .{stem}) catch return false;
     var b2: [1024]u8 = undefined;
-    const n2 = std.fmt.bufPrint(&b2, "module(\"{s}.zx\")", .{stem}) catch return false;
+    const n2 = std.fmt.bufPrint(&b2, "@mod(\"{s}.zx\")", .{stem}) catch return false;
     for ([_][]const u8{ n1, n2 }) |needle| {
         var from: usize = 0;
         while (std.mem.indexOfPos(u8, text, from, needle)) |p| {
@@ -7352,7 +7352,7 @@ fn addIdents(list: *Json, seen: *std.StringHashMapUnmanaged(void), doc_text: []c
 }
 
 /// 点补全的接收者是什么：
-///   module   模块命名空间（std.* / `const a = module("…")` 绑定）—— 全是模块成员
+///   module   模块命名空间（std.* / `const a = @mod("…")` 绑定）—— 全是模块成员
 ///   ty       类型（`Task.` / `std.BufReader.` / `HashMap(i32).`）—— 只有静态成员
 ///   instance 值（`t.` / `v.` / `arena.?.`）—— 只有实例成员
 /// 三者不能混。sema 的规则：`Task.id` 是 E0300（实例字段要先造值），
@@ -7851,7 +7851,7 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
             // 补（tier 3，detail 只写"编译器内建"，不再带 std 前缀）。
             const std_top = std.mem.eql(u8, path, "std");
 
-            // module 绑定？const <path> = module("…")（等号两侧可有对齐空格）
+            // module 绑定？const <path> = @mod("…")（等号两侧可有对齐空格）
             const mod: ?[]const u8 = moduleOfBinding(text, path);
             var decls: std.ArrayList(Decl) = .empty;
             defer decls.deinit(gpa);
@@ -8218,7 +8218,7 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                 }
             }
             // KEEP — std 门面子模块（用户 2026-11-09：std.str. 一个成员都不
-            // 出）：std.zx 里 pub const str = module("str.zx")，moduleOfBinding
+            // 出）：std.zx 里 pub const str = @mod("str.zx")，moduleOfBinding
             // 只认单段绑定名，二级路径落不到 moduleDecls；沿门面文件解析
             // 一层别名，成员当模块成员出（pub only）。
             if (!handled and std.mem.startsWith(u8, path, "std.")) {
@@ -8709,7 +8709,7 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                         }
                     }
                     // detail 四态：字段/带注解常量 → 声明类型；函数 → 完整签名
-                    // name(params) ret；模块绑定 → module("…")；容器 → struct/
+                    // name(params) ret；模块绑定 → @mod("…")；容器 → struct/
                     // union/enum；别名 → 初始化表达式。绝不落到绑定别名
                     //（`a.Cfg` 曾整列显示 `a`，用户看不出是类型——第 3 条）。
                     const detail: []const u8 = blk: {
@@ -8891,7 +8891,7 @@ fn childCwd() std.process.Child.Cwd {
 }
 
 /// 格式化：缓冲写影子文件 → `zxc fmt` 原地格式化 → 读回 → 全文 TextEdit。
-/// 复用诊断的影子文件机制（同目录保证 module(...) 解析路径一致）；影子名
+/// 复用诊断的影子文件机制（同目录保证 @mod(...) 解析路径一致）；影子名
 /// 用 .zxls-f 前缀与诊断的 .zxls- 错开，同一文档并发时互不踩。
 fn formatDoc(doc: *const Document) ?[]const u8 {
     const dir = dirName(doc.path);
@@ -8950,7 +8950,7 @@ fn formatDoc(doc: *const Document) ?[]const u8 {
 }
 
 fn runCheck(doc: *const Document, out_diags: *std.ArrayList(Diag)) void {    // 影子文件：把缓冲内容写到与源文件同目录的隐藏 .zx，zxc 检查它——
-    // 诊断反映的是编辑器缓冲，而不是磁盘旧状态；同目录保证 module(...)
+    // 诊断反映的是编辑器缓冲，而不是磁盘旧状态；同目录保证 @mod(...)
     // 的解析路径与真实文件一致。
     const dir = dirName(doc.path);
     const h = std.hash.Wyhash.hash(0, doc.path);

@@ -106,9 +106,9 @@ const r = blk: {
 1.2.0 把内建砍到九个；1.2.1 反射收敛成一个 `@type(x)`（x 可以是类型
 也可以是表达式），1.2.2 把 `@sizeOf` / `@alignOf` / `@typeName` 也并了进去——
 描述符 `Type{.name, .size, .align, .ty, .fieldCount,
-.fields[i]{.name, .ty, .offset}}` 全是编译期值。现在共七个：
+.fields[i]{.name, .ty, .offset}}` 全是编译期值。现在共八个：
 
-`@type` / `@memcpy` / `@memmove` / `@memset` / `@link` / `@compileError` / `@trap`。
+`@mod` / `@type` / `@memcpy` / `@memmove` / `@memset` / `@link` / `@compileError` / `@trap`（共八个）。
 
 | 老写法 | 换成 |
 | --- | --- |
@@ -120,6 +120,7 @@ const r = blk: {
 | `@field(v, "f")` | 无动态成员访问；字段写死为 `v.f` |
 | `@embedFile("p")` | 自己用 `std.fs` 读，或写成字面量 |
 | `@file()` `@line()` `@col()` `@fnName()` | 已移除；位置只由 `std.debug` 自动注入 |
+| `module("x")`（旧关键字） | `@mod("x")`；§144 起模块加载走内建，`module` 不再保留为关键字 |
 
 ---
 
@@ -504,7 +505,7 @@ let p = t.get(boxed.h).?;   // E0511：Handle 从字段取回，来源已断
 
 - 路径按**当前文件所在目录**解析，再看工程根与 `vendor/`
 - 循环依赖要去掉一条边（把共享类型挪到第三者）
-- 子模块**自己**解析失败时，这条诊断挂在 `module(...)` 调用点上，并带上
+- 子模块**自己**解析失败时，这条诊断挂在 `@mod(...)` 调用点上，并带上
   子模块第一条错的行列与消息：
 
   ```text
@@ -516,7 +517,7 @@ let p = t.get(boxed.h).?;   // E0511：Handle 从字段取回，来源已断
   免得一串 "has no member" 盖住真正的原因。
 
 ```zx
-const util = module("util");     // 找 util.zx：同目录 → 工程根 → vendor/
+const util = @mod("util");     // 找 util.zx：同目录 → 工程根 → vendor/
 ```
 
 ---

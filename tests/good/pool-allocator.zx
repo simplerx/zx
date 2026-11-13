@@ -15,7 +15,7 @@
 // B live before = 0
 // B debug_alloc deinit ok
 // done
-const std = module("std");
+const std = @mod("std");
 
 pub const main = fn () i32 {
     let p = std.pool.Pool.init(std.heap.page);

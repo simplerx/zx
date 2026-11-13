@@ -31,7 +31,7 @@
 // std.atomic 是编译器内建的纯函数（SEQ_CST），M58 起 mutex/cond 运行时
 // 已经收掉。SyncPool 直接借它造一把自旋锁：不往 C 运行时里加东西，
 // 按需发射的原子运行时本来就有。
-const std = module("std");
+const std = @mod("std");
 
 // 锁字单独从 gpa 分配，不放在任何值类型里。SyncPool 也是值类型：
 // unwrap ?SyncPool、复制、传参都可能产生副本；值里放锁字会复制出第二把

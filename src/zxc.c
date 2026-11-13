@@ -32,6 +32,10 @@ typedef struct { const char *match; const char *code; } DiagRule;
 static const DiagRule g_rules[] = {
     /* ---- 先匹配最具体的，笼统的放后面（第一条命中即用） ---- */
 
+    /* 已删除的旧语法要先于笼统的模块规则命中（§144：module -> @mod）。
+     * g_rules 是 strstr 顺序匹配，含 module 字样的旧拼写提示必须优先。 */
+    { "was removed:",                     "E0211" },
+
     /* 模块 */
     { "standard library",                 "E0601" },
     { "module",                           "E0601" },
@@ -42,7 +46,6 @@ static const DiagRule g_rules[] = {
     { "type parameters",                  "E0701" },
 
     /* 内建与格式串 */
-    { "was removed:",                     "E0211" },
     { "format specifier",                 "E0802" },
     { "format string",                    "E0802" },
     { "sequence(s) but",                  "E0802" },

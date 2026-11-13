@@ -54,7 +54,7 @@ void diag_note(const char *path, int line, int col, const char *fmt, ...);
 extern int g_error_count;
 extern int g_diag_shown;       /* 实际打印过多少条（超过上限后只计数） */
 extern int g_diag_max_print;   /* 打印上限 */
-/* 摸清"这一轮新冒出来的第一条错"：导入方报 module(...) 失败时带上它，
+/* 摸清"这一轮新冒出来的第一条错"：导入方报 @mod(...) 失败时带上它，
  * 否则用户只看到一句 failed to parse，真正的原因藏在校验过的那份文件里。 */
 void diag_first_error_reset(void);
 int  diag_first_error(int *line, int *col, char *code, size_t ccap,
@@ -93,12 +93,11 @@ void   buf_free(Buf *b);
     X(FLOAT,    "float")                                                       \
     X(CHAR,     "char")                                                        \
     X(STRING,   "string")                                                      \
-    /* keywords (25) */                                                        \
+    /* keywords (24) */                                                        \
     X(KW_CONST,   "'const'")                                                   \
     X(KW_LET,     "'let'")                                                     \
     X(KW_VAR,     "'var'")                                                     \
     X(KW_FN,      "'fn'")                                                      \
-    X(KW_MODULE,  "'module'")                                                  \
     X(KW_TYPE,    "'type'")                                                    \
     X(KW_NULL,    "'null'")                                                    \
     X(KW_UNDEF,   "'undefined'")                                               \

@@ -10,7 +10,7 @@
 // expect-output:io:67108864
 // expect-output:parallel:true
 // expect-output:explicit:5
-const std = module("std");
+const std = @mod("std");
 const Task = std.task.Task;
 
 const PATH = "io_task_explicit.tmp";

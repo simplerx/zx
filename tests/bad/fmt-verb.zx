@@ -1,5 +1,5 @@
 // expect: format specifier `{s}` needs a slice, found `Point`
-const std = module("std");
+const std = @mod("std");
 const Point = struct { x: i32, y: i32 };
 
 const main = fn () u8 {

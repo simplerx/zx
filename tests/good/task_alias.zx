@@ -3,7 +3,7 @@
 // （不调用 zx_task_new），全程只调 Group 方法 -> 没有任何 zx_task_* 引用：
 // 旧扫描器认不出形状，运行时不发射，链接报 B2001 module `tg` has no definition。
 // expect-output:alias:400
-const std = module("std");
+const std = @mod("std");
 const tk = std.task;
 const T = tk.Task;
 

@@ -1,4 +1,4 @@
-const std = module("std");
+const std = @mod("std");
 const F = "v={}";
 
 // 运行时格式串：fmt 是变量，走运行时解析器——输出必须和编译期路径一致

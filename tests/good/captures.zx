@@ -4,7 +4,7 @@
 // 分支体"和"第二个 if 是兄弟语句"，两种读法都能过，语义却完全不同
 // （后者会先判断 o、丢掉结果，然后无条件判断 v）。所以现在直接报错，
 // 反例见 tests/bad/capture-stmt.zx。
-const std = module("std");
+const std = @mod("std");
 
 const describe = fn (o: ?i32) void {
     if (o) v {

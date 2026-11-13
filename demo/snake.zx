@@ -9,7 +9,7 @@
 // 渲染用绝对定位（ESC[r;cH），不依赖滚动，窗口多高都不会错位。
 // 棋盘 36x16 格，每格两个字符宽，整帧 76 列 x 21 行，一帧一次 write。
 
-const std = module("std");
+const std = @mod("std");
 
 const W: usize = 36;
 const H: usize = 16;

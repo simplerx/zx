@@ -5,7 +5,7 @@
 // expect-output:sum:20
 // expect-output:awaitAll:ok
 // expect-output:main-after:ok
-const std = module("std");
+const std = @mod("std");
 const Task = std.task.Task;
 
 var order: usize = 0;

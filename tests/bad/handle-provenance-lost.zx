@@ -4,7 +4,7 @@
 // expect: cannot prove this handle is alive
 // expect-code: E0511
 // expect-count: 1
-const std = module("std");
+const std = @mod("std");
 
 const Handle = struct { pos: usize };
 const Holder = struct { h: Handle };

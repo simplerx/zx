@@ -1,7 +1,7 @@
 // §130 预分配：同一词法区间里两次 std.heapAlloc（N 编译期已知、同一
 // 分配器、指针只经下标访问）合并成一次 alloc + 静态偏移，区间末一次 free。
 // 合并是否发生由 ZX_REGION=1 的账本在 test.sh 里守门，这里只守运行结果。
-const std = module("std");
+const std = @mod("std");
 
 const main = fn () u8 {
     const al = std.heap.page;

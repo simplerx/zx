@@ -1,6 +1,6 @@
 // bench/str.zx —— 分配器 + 格式化 + 字节追加。
 // 2 万次整数格式化，逐字节追加进 ArrayList(u8)，末尾做校验和。
-const std = module("std");
+const std = @mod("std");
 
 const main = fn () u8 {
     let al = std.heap.page;

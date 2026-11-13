@@ -1,7 +1,7 @@
 // 守门：解构临时与 `_ = expr` 丢弃临时共用 `_ds` 前缀但计数器独立，
 // `_ = p;` 跟在 `const {a,b} = t;` 后面会发两个 `_ds0` → B1001 redefinition。
 // 修复：丢弃临时前缀改 `_ig`（2026-11-11 reference 校对踩中）。
-const std = module("std");
+const std = @mod("std");
 
 const main = fn () u8 {
     const t = {1, 2};

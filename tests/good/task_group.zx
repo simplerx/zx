@@ -3,7 +3,7 @@
 // （调度交给内核），分组只是原子计数，wait 让步退避。
 // 共享数据的线程安全由 std.atomic 保证 —— 计数归零即写入全部可见。
 // expect-output:group:400
-const std = module("std");
+const std = @mod("std");
 const Task = std.task.Task;
 
 var hits: usize = 0;

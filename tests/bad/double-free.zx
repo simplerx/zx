@@ -4,7 +4,7 @@
 // expect: this allocation was already freed
 // expect-code: E0509
 // expect-count: 1
-const std = module("std");
+const std = @mod("std");
 
 const main = fn () u8 {
     const al = std.heap.page;

@@ -19,7 +19,7 @@
 // syntax-code=1 at=1:7
 // rt-int=42 rt-str=true
 // flt=3.14159 flt2=0.5 exp=1e+21
-const std = module("std");
+const std = @mod("std");
 
 // ---- 判别辅助：测试里反复用的按类型取载荷 ----
 const asInt = fn (v: std.json.Value) ?i64 {

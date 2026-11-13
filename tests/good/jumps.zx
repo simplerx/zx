@@ -1,5 +1,5 @@
 // jumps.zx —— defer / continue / 嵌套标签 的交互
-const std = module("std");
+const std = @mod("std");
 
 const main = fn () u8 {
     // continue 前必须先跑本轮 defer

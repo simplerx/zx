@@ -10,11 +10,12 @@
 
 ## 语言事实（写文档/示例前必看）
 - **无 trait / interface / 重载 / 子类型**；函数指针可作 struct 字段（`cb: fn (i32) i32`），但调用点全靠 `(T)bits` 强转，不是多态。
-- 内建七个：`@type @memcpy @memmove @memset @link @compileError @trap`。`@type(x)` 是唯一反射；老拼写报 **E0211**。
+- 内建八个：`@mod @type @memcpy @memmove @memset @link @compileError @trap`（§144 起 `module` 关键字收成 `@mod`）。`@type(x)` 是唯一反射；老拼写与旧 `module("x")` 都报 **E0211**。
 - **转换只有 `(T)val`**；无 GC/析构/RAII/生命周期/异常（只有 `!T`）/协程/宏/运算符重载/`private`（可见性只有 `pub`）/默认参数/变参。
 - 函数定义只有 `const F = fn(…) ret {…};` —— **没有 `pub fn`**，pub 是前缀修饰符。
 - **容器方法不能泛型（E0701）**；容器字段/方法/静态成员默认私有（只在声明文件内可见），`pub` 才对外，跨文件访问私有成员报 **E0404**；enum / union(enum) 变体恒公开。锚点 `sema.c member_hidden/deny_member/stamp_mod`；自举要先重建 zxfe。
-- **Zx 没有数组值类型**：`*[N]T` 就是指针（`TY_PTR`+`has_len`，`ty_size`→8），长度只写在类型里做界检查与 `.len`，C 后端发 `T *`；`[]T` 是 `{ptr,len}` 16 字节。存储用 `std.stackAlloc(T,N)` / `std.heapAlloc(alloc,T,N)`；`&.{…}` 是"匿名存储+指针"的糖。**表述红线**：`&xs` 是取指针变量的地址，文档不许写"数组的地址"。守门 `tests/good/addr-array.zx`。
+- **Zx 没有数组值类型**：`*[N]T` 就是指针（`TY_PTR`+`has_len`，`ty_size`→8），长度只写在类型里做界检查与 `.len`，C 后端发 `T *`；`[]T` 是 `{ptr,len}` 16 字节。存储用 `std.stackAlloc(T,N)` / `std.heapAlloc(alloc,T,N)`（N 编译期常量）/ `std.heapSlice(alloc,T,n)`（§144，n 运行期 → `[]T`，不进 §130 合并）；`&.{…}` 是"匿名存储+指针"的糖。**表述红线**：`&xs` 是取指针变量的地址，文档不许写"数组的地址"。守门 `tests/good/addr-array.zx`。
+- **`*[N]T` 同一个指针值两种下标都能读写**（§144 实测，非新增能力）：`ptr.0/.1/.7` 编译期常量下标、`ptr[0]/ptr[i]` 运行期下标（带界检查，越界 abort）；函数参数/结构体字段/`?*[N]T`/泛型 N/`&.{…}` 全通过。类型始终只有一个 8 字节 `*[N]T`。守门 `tests/good/array-pointer-index.zx`。
 - `std.process.args()` 不含 argv[0]；`orelse return …` 不合法；没有 `anytype`；switch 模式无区间；`if (c) { x } else { y }` 块臂不给值（要 `lbl: x;` 收割）。
 - **`fn (N: u64) type` 是泛型**：返回 `type` 的函数即类型构造函数，值参数可当数组长度（`*[N]u64`、`*[N + 1]u64`）。`fn_is_generic` 曾只认 `T: type`，是会复发的坑。
 - `ct_clear_stmts` 只擦语句子树：结构体字面量里折值字段访问（`N{.a=@type(T).size}`）的 ct 不能擦，否则后端发 `0.size`。
@@ -33,6 +34,7 @@
 - **`Pool.allocator()`（§141）**：`Allocator{ .ctx = (*u8)self, .alloc = poolAlloc, .free = poolFree }`，ctx 直接装 `*Pool`、不另造堆上 State。差异：`free` 的 bool 吞掉、`n` 绑 `_` 忽略（池从块头反查档位）。zx 无生命周期 → Pool 必须比视图活得久、`deinit` 后视图失效。守门 `tests/good/pool-allocator.zx`。
 - **职责分开：`std.pool.SyncPool`（§143，推翻 §142 的 `Pool.initThreadSafe`）**：用户裁定「同一个 Pool 值是否线程安全只看构造器，类型上看不出来；`init()` 造的 Pool 仍有 pub alloc/free 会诱使误用」，并否掉「私有化 alloc/free 只留 allocator」（会多一层函数转发）。现 `Pool` 回到纯无锁（删 `guard`/`initThreadSafe`/`*Impl` 分层），新类型 `SyncPool{ pool: Pool, guard: *u64, gpa: Allocator }` 挂同一个 `std.pool` 命名空间，自有 `alloc`/`free`/`used`/`allocator`（`syncPoolAlloc`/`syncPoolFree` 转发，ctx=*SyncPool），`deinit` 归还锁字。公开入口 guardTake→pool.xxx→guardGive→显式单一出口，不依赖 defer 修复。**guard 是堆上 u64 的地址**（值副本共享一把锁），不是值里的 u64；锁仍是 std.atomic TTAS。三条边界同 §142（backing 得线程安全、deinit 在线程收工后、极短临界区）。守门 `tests/good/pool-threadsafe.zx`（6 线程×500，10/10 绿；换 `Pool.init` 的对照组 3/3 段错误；另验 Pool 公开 API 未被私有化、值副本共享锁）。**简约的判断标准是有无重复逻辑，不是有无新增类型**。
 - **`std.heapAlloc` 的 N 必须编译期常量**（问询结论，未改动）：sema `check_expr` 用 `ev_int` 硬取常量，运行期 N 报 **E0501 `count must be known at compile time`**；所以 `*[N]T` 成立（N 写进类型做界检查/`.len`，运行期是 8 字节 `TY_PTR`+`has_len`）。运行期长度走 `Allocator.alloc(a.ctx, n*@type(T).size)` → `?*u8` → `(*T)` 用 `[]` 下标，或 `p[0..n]` 组 `[]T`（运行期 len）。§130 编译期合并**正是依赖** N 常量算 `RegionSlot` 静态布局，保持现状零冲突、不删；改成运行期切片才会逼合并作废（且要推翻 §44 与十余份用例）。
+- **`@mod` 改动要动四处**（§144）：C `lex.c/parse.c/zxc.h`（删 `TOK_KW_MODULE`，`TOK_AT` 特判 `mod` 造 `NK_MODULE`）、自举前端 `bootstrap/lex.zx/parse.zx`（token 枚举与 C 一一对应，删 `kw_module` 必须同步；`zxc` 默认走 zxfe，改 C parser 只对 `--fe=c` 生效）、`tools/zxls.zig`（关键字/snippet + 三处硬编码长度 `module("`8→`@mod("`6、`module(`7→`@mod(`5）、`g_std_seeded[]`（新增 std 注入符号必须登记，否则 E0601）。重建 zxfe 要先移走旧 exe 强制 `--fe=c`。
 - **§138 工厂链去虚拟化是假绿（§141 定位，未修）**：`DebugAllocator.init` / `ArenaAllocator.init` / `Pool.allocator()` 这类**容器方法工厂**返回的 Allocator 仍是间接调用。两层根因：`allocator_target` 的 NK_CALL 只认 `fs->decl == NK_DECL`（容器方法 decl 是 NK_FN，NK_FIELD callee 常无 sym、只有 `->inst = Method.fn`）；且工厂体 `schedule_body` 延迟检查，`return Allocator{…}` 的字面量 `ty` 为空、`.alloc = f` 标识符 `sym` 也为空，拿不到可直调目标。彻底修要改检查顺序或跨模块符号解析，本轮回退了 sema 实验。`Allocator{…}` 字面量链不受影响。`test.sh` §138 已改成按**调用点**断言（含刻意断言工厂链仍间接），别再只 grep 函数名。
 - **容器体内裸名互调（§139 已修）**：`struct { pub const a = fn () i32 {…}; pub const b = fn () i32 { return a() + 1; }; }` 曾经编不过（B1001 `call to undeclared 'a'`：定义发 `a_i0`，裸名发 `a`）。修法：`Symbol.in_agg` 记容器体节点，`check_expr` 的 NK_IDENT 遇到体里的 NK_FN 就填 `n->inst = s->decl`，后端 NK_IDENT 分支看到 `inst` 就发 `inst_name`。守门 `tests/good/member-bare-call.zx`（六种形状：链式/当值传/enum/泛型容器/方法体内/同名隔离）。`std/debug_alloc` 的 `shutdown` 仍在模块级，不必回改。
 - `zx_debug_panic` 先 `fflush(stdout)`：重定向时 stdout 全缓冲，abort 不走退出清理，报告会整块丢。

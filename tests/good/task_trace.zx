@@ -3,7 +3,7 @@
 // 期望 stdout 见文件末尾的 expect-output 块：printTrace 走 stderr，runner
 // 合并 stdout/stderr 比对，所以 trace 两行也在断言里。放末尾是为了不改动
 // 前面代码的行号 —— trace 文本里含 tests/good/task_trace.zx:15:5。
-const std = module("std");
+const std = @mod("std");
 const Task = std.task.Task;
 
 const may_fail = fn (x: usize) !i32 {

@@ -1,5 +1,5 @@
 // views.zx —— 编译期视图折叠：切片 / 下标 / .len / .ptr 都能算出值（R1）
-const std = module("std");
+const std = @mod("std");
 
 const str = "hello";
 const head = str[0..2];          // "he"："hello" 的视图，编译期就是一小段字符串

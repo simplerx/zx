@@ -17,7 +17,7 @@
 //      （可选 `// expect-code:` 断码、`// expect-count:` 断条数）
 //   2. 其他：必须编译通过（--check）；源码里有 `// expect-output` 时还要
 //      编成二进制跑一遍，stdout 逐行对得上
-const std = module("std");
+const std = @mod("std");
 
 extern fn system(cmd: *const u8) i32;
 

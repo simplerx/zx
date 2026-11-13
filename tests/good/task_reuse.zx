@@ -9,7 +9,7 @@
 // expect-output:last:7
 // expect-output:stale:7
 // expect-output:after-close:closed
-const std = module("std");
+const std = @mod("std");
 const Task = std.task.Task;
 
 var total: usize = 0;

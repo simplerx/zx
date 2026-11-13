@@ -8,7 +8,7 @@
 //
 // 用户还提了另一种写法："或者可以接收用 null 给 error 赋值"——落点是
 // `error` 时裸 `null` 也定型成 65535，和 `error.null` 同一个值（后半段验它）。
-const std = module("std");
+const std = @mod("std");
 
 const Err = error{boom};
 

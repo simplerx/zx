@@ -2,7 +2,7 @@
 //
 // `Pair(i32)` 是一次编译期调用，结果是个类型值：`const P = Pair(i32);` 之后
 // P 就是类型。类型名来自构造式（`Pair(i32)`），不来自谁先给它起别名。
-const std = module("std");
+const std = @mod("std");
 
 const Pair = fn (T: type) type {
     return struct { a: T, b: T };

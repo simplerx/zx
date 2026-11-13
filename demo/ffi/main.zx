@@ -9,9 +9,9 @@
 // ChoosePixelFormat 或 wglMakeCurrent 断掉——能打出 GL 字符串，
 // 就是三层结构体布局全部正确的运行时证据。
 
-const win = module("user32.zx");
-const gdi = module("gdi32.zx");
-const gl = module("opengl32.zx");
+const win = @mod("user32.zx");
+const gdi = @mod("gdi32.zx");
+const gl = @mod("opengl32.zx");
 
 // ---- GL 常量（只列用到的） ----
 const GL_VENDOR: u32 = 0x1F00;
@@ -105,4 +105,4 @@ const main = fn () u8 {
     return 0;
 };
 
-const std = module("std");
+const std = @mod("std");

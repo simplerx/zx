@@ -6,7 +6,7 @@
 //
 // 块臂里两个名字的区分：紧跟 `{` 的是**捕获**（绑定的就是匹配到的东西），
 // 紧跟 `:` 的是**标签**（块内 `lbl: v;` 交出值）。两者可以同时出现，捕获在前。
-const std = module("std");
+const std = @mod("std");
 
 const Shape = union(enum) {
     circle: f64,

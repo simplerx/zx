@@ -7,7 +7,7 @@
 // expect-output
 // argc=0
 // first=<none>
-const std = module("std");
+const std = @mod("std");
 
 const main = fn () u8 {
     let argv = std.process.args();

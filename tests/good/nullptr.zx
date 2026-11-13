@@ -9,7 +9,7 @@
 // opt-empty=1
 // field-null ok
 // q-null=0
-const std = module("std");
+const std = @mod("std");
 
 const Node = struct {
     v: i32,

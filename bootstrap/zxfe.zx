@@ -12,9 +12,9 @@
 //   kind/op 是与 C 侧 ast.h NodeKind / zxc.h TokKind **同序的编号**（两边都有
 //   静态顺序注释钉住）；fvbits 是 fval 的 64 位原样位型；字符串带转义，
 //   null 记作 "-"。flg 位 0/1/2 = flag / is_pub / is_extern。
-const std = module("std");
-const lex = module("lex.zx");
-const parse = module("parse.zx");
+const std = @mod("std");
+const lex = @mod("lex.zx");
+const parse = @mod("parse.zx");
 
 // ---- 数字 → 十进制 ----
 

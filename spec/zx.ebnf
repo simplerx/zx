@@ -10,7 +10,7 @@ top_decl    = [ "pub" ] ( const_decl | let_decl | var_decl | extern_decl ) ;
 (* pub 只出现在文件作用域：决定这个声明是否对别的模块可见 *)
 
 (* 没有 import："把名字拿进来"就是 const 绑定模块成员——
-     const math = module("lib/m.zx");   命名空间
+     const math = @mod("lib/m.zx");   命名空间
      const sq   = math.square;          函数 / 类型 / 常量，都是别名 *)
 
 const_decl  = "const" pattern "=" expr ";" ;
@@ -160,7 +160,7 @@ primary     = INT | FLOAT | CHAR | STRING
             | dot_brace                                (* .{…}：强制字面量 *)
             | typed_lit                                (* Person{ .f = e } *)
             | builtin                                  (* @type(T).size *)
-            | module_call                              (* module("std") *)
+            | module_call                              (* @mod("std") *)
             | labeled_expr                             (* tag: { … } / tag: for … *)
             | ctrl_expr ;
 
@@ -272,7 +272,7 @@ builtin     = "@" IDENT [ "(" [ args ] ")" ] ;         (* @type, @memcpy, @trap 
 (* @memcpy / @memmove / @memset（v0.25）：三个实参全是运行时值——
    (dest, src, bytes) 或 (dest, byte, bytes)，没有类型参数；
    dest / src 是指针或切片，返回 void。 *)
-module_call = "module" "(" STRING ")" ;
+module_call = "@mod" "(" STRING ")" ;
 
 (* ---------------- 词法 ---------------- *)
 

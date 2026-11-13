@@ -3,7 +3,7 @@
 // 调用点传常量错误码时会被顺带 ensure 而侥幸通过，传运行期值就
 // 编不过（B1003: unknown type name 'ZxSlice_u8'）。
 
-const std = module("std");
+const std = @mod("std");
 
 const mayFail = fn (x: usize) !usize {
     if (x > 100) { return error.too_big; }

@@ -2,7 +2,7 @@
 // 旧实现每建一个实例就永久留下一个 ZxSched + 1024 槽的表。
 // expect-output:rounds:24
 // expect-output:closed:ok
-const std = module("std");
+const std = @mod("std");
 const Task = std.task.Task;
 
 var sum: usize = 0;

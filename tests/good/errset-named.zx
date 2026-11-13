@@ -10,7 +10,7 @@
 // same=true
 // ok 7
 // err 1
-const std = module("std");
+const std = @mod("std");
 
 const Err = error{
     no,

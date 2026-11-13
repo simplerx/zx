@@ -13,7 +13,7 @@
 // epoch=1970-1-1 y2k=2000-2-29 bil=2001-9-9
 // y2038=2038-1-19 ms=123
 // fmt len=24 z=true
-const std = module("std");
+const std = @mod("std");
 
 const main = fn () i32 {
     const al = std.heap.page;

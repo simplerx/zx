@@ -25,4 +25,4 @@ const main = fn () u8 {
     return 0;
 };
 
-const std = module("std");
+const std = @mod("std");

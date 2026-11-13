@@ -1,5 +1,5 @@
 // std.map.HashMap(V)：字符串键的哈希表。开放寻址 + 线性探测，负载过 3/4 翻倍。
-const std = module("std");
+const std = @mod("std");
 
 const WORDS = &.{
     "alpha", "beta", "gamma", "delta", "epsilon",

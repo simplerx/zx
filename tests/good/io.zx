@@ -1,7 +1,7 @@
 // std.io —— 句柄 + 缓冲流。
 // ① BufWriter 攒够才写；② BufReader 一次读一块、按行交付；
 // ③ 行比缓冲还长时缓冲自己翻倍，不会只给半行。
-const std = module("std");
+const std = @mod("std");
 
 const main = fn () u8 {
     const al = std.heap.page;

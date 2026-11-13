@@ -9,7 +9,7 @@
 // malloc ok
 // freed
 
-const std = module("std");
+const std = @mod("std");
 
 extern fn puts(s: *const u8) i32;
 extern fn strlen(s: *const u8) usize;

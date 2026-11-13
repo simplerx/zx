@@ -906,7 +906,7 @@ struct ZxAnyType {
 **并进 std 模块的作用域**——于是 `std.println` 和 `std.ArrayList` 是同一条
 "模块成员查找"路径，不需要两套逻辑。
 
-`std/str.zx` 同理，由 `std.zx` 里的 `pub const str = module("str.zx");` 挂上去。
+`std/str.zx` 同理，由 `std.zx` 里的 `pub const str = @mod("str.zx");` 挂上去。
 路径相对**引用者所在文件**，所以 `std/` 内部互相引用不受调用者目录影响。
 
 顺手修掉的三个真 bug（都不是为了标准库打的补丁）：
@@ -2478,8 +2478,8 @@ cmd 的"系统找不到指定的文件"，而 `check` 只看退出码，把"前�
 版本号单一来源 `ZXC_VERSION`（`src/zxc.h`），编号跟里程碑走：次版本 =
 里程碑号（M46 → 0.46），修订号留给同一里程碑内的修补。
 
-**`module("x")` 省 `.zx`**：文档（README、`init` 生成的工程说明）一直写
-`module("m")`，实现只认完整路径——新建的工程照着说明写就报
+**`@mod("x")` 省 `.zx`**：文档（README、`init` 生成的工程说明）一直写
+`@mod("m")`，实现只认完整路径——新建的工程照着说明写就报
 `cannot open module 'src/m'`。现在 `module_load` 打不开原路径时补一次
 `.zx` 再探，相对目录与搜索路径两侧都补。**纯增量**：显式写 `.zx` 的
 老代码零影响；判定条件是 rel 末尾没有 `.zx`，与"路径里带不带点"无关
@@ -2488,11 +2488,11 @@ cmd 的"系统找不到指定的文件"，而 `check` 只看退出码，把"前�
 **`init` 建 `vendor/`**：外部模块根，存在即由 `setup_search_paths`
 自动加入搜索路径（不用写进 `deps`，也不该写——`deps` 是为"目录在工程
 外"准备的）。空目录进不了版本控制，所以里面放一份 `README.md`，把
-"放进来 → `module("ext")` → `vendor/ext.zx`"和搜索顺序写在使用现场。
+"放进来 → `@mod("ext")` → `vendor/ext.zx`"和搜索顺序写在使用现场。
 
 **回归**：`test.sh` 新增 2.5 节 CLI 冒烟 6 项（版本行 / 用法行 + 子命令
 帮助 / init 出 `vendor/` / 新工程 check 通过 / 坏文件报出 `E0301` /
-`vendor/ext.zx` 被 `module("ext")` 找到）。第 5 项就是这次那个 bug 的
+`vendor/ext.zx` 被 `@mod("ext")` 找到）。第 5 项就是这次那个 bug 的
 守门员——只断言"返回非 0"根本挡不住它。
 
 ## 80. 模块解析链只允许有一份（M48）
@@ -3337,7 +3337,7 @@ lbl: 其余（{} / {a,b} / expr）→ 收割
 
 ## 102. 1.0.0：x/ 扩展库 + 折叠器的两处诚实化（M67）
 
-1.0.0 的最后一块拼图不是塞进 std，而是**站在 std 旁边**：新目录 `x/` 放扩展库，想用才 `module("../x/…")` 拉进来——std 的编译速度一毫秒都不多付。首批三件：
+1.0.0 的最后一块拼图不是塞进 std，而是**站在 std 旁边**：新目录 `x/` 放扩展库，想用才 `@mod("../x/…")` 拉进来——std 的编译速度一毫秒都不多付。首批三件：
 
 - **`x/stair.zx`（稀疏表）**：静态数组上的 O(1) 区间聚合，O(n log n) 预处理，只服务可重复贡献运算（min/max/与/或/gcd）。比较器是 `fn(T,T) bool`，换向即换语义；存储是一块 n·k 扁平大数组 + 行指针表。
 - **`x/lattice.zx`（多重数组）**：任意维数、运行时形状，行主序步长折算一维下标；跟稀疏表同一个底子——一块扁平大数组扛所有数据。`get/set` 收下标切片，rank==2 另有 `get2/set2/rows/cols` 便捷。
@@ -3358,7 +3358,7 @@ lbl: 其余（{} / {a,b} / expr）→ 收割
 
 首发三件（stair/lattice/numkit）review 之后砍到一件：**`x/` 只留 `stair.zx`**。lattice 与 numkit 删除。原因：扩展库的价值在"少而精"——每个成员都得是发布理由，凑数的东西放进目录只会稀释信噪比；真需要多重数组或数学小件，到时候单独进，目录结构不动。
 
-连带改动：stair.zx 原本 `module("numkit.zx")` 借用 `floorLog2`（init 算层数、query 算覆盖宽度两处），现在就地内联为私有 `floorLog2`——**扩展库成员应当自包含**，单文件拷走就能用，这是 x/ 的准入标准之一。
+连带改动：stair.zx 原本 `@mod("numkit.zx")` 借用 `floorLog2`（init 算层数、query 算覆盖宽度两处），现在就地内联为私有 `floorLog2`——**扩展库成员应当自包含**，单文件拷走就能用，这是 x/ 的准入标准之一。
 
 `x/demo.zx` 相应收窄：只验收稀疏表（37 个伪随机数全子区间与暴力对拍、单点相等、越界 null、比较器换向取最大）。README 的 x/ 小节与代码结构表同步。
 
@@ -3457,7 +3457,7 @@ pool）是物理隔离的用户态调度器；组是零设施——spawn 即起�
    **语句子树**（块/if/while/for/switch），普通表达式的折叠结果就是最终值，
    不能擦（`ct_clear_stmts`）。
 4. LSP：`std.task.Task` 这类**再导出模块的成员**此前跳不到源码。新增
-   `qualModulePath` / `aliasModuleFile`：沿 `pub const x = module("x.zx")`
+   `qualModulePath` / `aliasModuleFile`：沿 `pub const x = @mod("x.zx")`
    逐段解析到真实文件；`std.task` 本身也直接落 `task.zx`，不停在门面声明上。
    守门：lsptest `definition.stdReexport.{task,map,alias}`。
 5. std 精简守则（重申既有约定，本轮执行）：别名不做（类型只走一条真实路径）；
@@ -3561,7 +3561,7 @@ base 成空串，整条不解析 → 一律 MISS。两处补齐：
    得到 `f`（不是容器）→ 返回 null，行为与旧版一致。
 
 再导出一侧 §109 已经修好（`std.json.Obj` 经 `std.zx` 的
-`pub const json = module("json.zx")` 逐段落到真实文件），这里只是把守门补上。
+`pub const json = @mod("json.zx")` 逐段落到真实文件），这里只是把守门补上。
 
 **守门（lsptest 248 项）**：definition.def.genericInstMethod（`init` → map.zx）、
 def.genericInstType（`HashMap` → map.zx）、def.reexportTypeMember
@@ -3602,7 +3602,7 @@ fixture `paramchain.zx`（`Pc*` 前缀，形参 `t: *PcT`，两级嵌套类型 +
 
 `inferExprType` 的点路径分支对模块有两条互不衔接的出口：
 
-1. `base` 是**模块绑定**（`std` / `const m = module(…)`）→ 直接 `return e`，
+1. `base` 是**模块绑定**（`std` / `const m = @mod(…)`）→ 直接 `return e`，
    把整条路径文本当类型返回。于是 `const Q = m.Root;` 推出来是 `"m.Root"`：
    和初值同名，行内提示被当成冗余吞掉（`t` 是 module 时"还是不会显示"）；
    多层时又显示成 `: m.Root` 这种路径串。
@@ -3714,7 +3714,7 @@ C 里会漏出 `info.size` 这种 Zx 源码形态——真要修得给 Field 加
 
 **裁定（2026-11-11，用户第 7 张截图：真实工程 `src/main.zx` + `vendor/test.zx`）**：
 
-`const t = module("test");` 之后
+`const t = @mod("test");` 之后
 
 ```zx
 const P: type = t.P1.P2;   // P 有 : type
@@ -5590,7 +5590,7 @@ M58 起 `mutex` / `cond` / `thread` 的 C 运行时已收掉（§128 的裁定�
 临界区只有几十条指令（空闲链出入栈、块头改 flags），自旋比阻塞更合适。
 **零新增运行时、零新增类型、零新增命名空间**。
 
-`pool.zx` 首行加 `const std = module("std")` 反向 import 拿 `std.atomic`（§138
+`pool.zx` 首行加 `const std = @mod("std")` 反向 import 拿 `std.atomic`（§138
 `debug_alloc.zx` 已经验证过这条路）。
 
 ### 3. 三条边界（写进 zx-spec §13.3）
@@ -5753,3 +5753,77 @@ unwrap、复制、传参都可能产生副本；堆上那一个 `u64` 由所有�
 
 `zx-spec.md` §8.6（示例引用）、§13.1（表）、§13.3（整节重写）；
 `std/std.zx` 模块注释；`tools/lsptest.py` 的 Pool 类型补全断言。
+
+## §144 运行期切片 heapSlice、@mod 内建、数组指针下标（2026-11-13 用户三条）
+
+### 1. 新增 `std.heapSlice(a, T, n) -> []T`
+
+上一轮问询的结论是「`heapAlloc` 的 N 必须编译期常量，`*[N]T` 成立，运行期
+长度走 `Allocator.alloc` 手写」。用户认可，但希望有一行拿到运行期切片的 API，
+并明确「不动 heapAlloc、不删编译期合并」。
+
+做成与 `heapAlloc(a, T, N)` **参数顺序完全一致**的第三个编译器注入符号
+`BI_HEAPSLICE`（不是 `@` 内建，不新增语言类型）：
+
+- sema：`check_expr` 的分配分支里，`slice` 形状直接返回 `ty_slice(elem, false)`，
+  **不调 `ev_int`、不调 `region_new`**。§130 合并只认 `BI_HEAPALLOC`，所以零冲突。
+- 符号要加进 `g_std_seeded[]`，否则 `std.heapSlice` 会报 E0601「has no member」——
+  第一版就漏了这一处。
+- 后端：复用 `zx_heapalloc`（OOM abort 语义不变），按 `[]T` 生成一份特化助手
+  `zx_heapslice_ZxSlice_i32(al, n)`。原因是**不能**直接发
+  `((ZxSlice_i32){ .ptr = ..., .len = n })`：那样 n 会在 C 表达式里出现两次，
+  `heapSlice(a, T, f())` 会把 f 调用两遍。助手把 n 当唯一实参，内部算 bytes
+  与 len。`tests/good/heap-slice.zx` 用带副作用的 `bump(n)` 钉住 `calls = 1`。
+- 类型收集是全局数组，定义统一落在 zxrt 单元（与 `zx_heapalloc` 同处），
+  原型进共享头；`ensure_type` 写的是独立 `g_btypes` 区，不受单元重置影响。
+
+### 2. 关键字 `module` → 内建 `@mod`
+
+用户要求把 `module` 换成 `@mod`（名字由用户在两选项里拍板）。做法的关键是
+**复用 `NK_MODULE` 节点**：模块加载、sema 作用域、后端全都认它，只是语法入口
+从关键字搬进 `@` 内建，所以 sema/backend 一行没改。
+
+- C 侧：`lex.c` 删关键字、`zxc.h` 删 `TOK_KW_MODULE`（25 → 24 个关键字）、
+  `parse.c` 在 `TOK_AT` 分支特判 `mod` 直接收字符串 token 造 `NK_MODULE`。
+  `zxc.c` 的 `g_rules` 把 `was removed:` 提到 `module` 规则**之前**，否则旧写法
+  提示会被 strstr 判成 E0601。
+- 旧写法 `module("x")` 不再是关键字（`module` 可当普通标识符），落到 sema 的
+  unknown identifier 分支时点名报 **E0211** 并给出 `@mod("x")`。
+- **自举前端必须同步**：`zxc` 默认用 `bin/zxfe.exe` 解析，改 C lexer/parser
+  只影响 `--fe=c`。`bootstrap/lex.zx` 的 token 枚举与 C 侧一一对应，删
+  `kw_module` 必须两边同步，否则 AST 编号错位；`bootstrap/parse.zx` 的 `@`
+  分支同样特判 `mod` 造 `module_` 节点。重建 zxfe 要先移走旧 exe 强制 `--fe=c`。
+- LSP：`tools/zxls.zig` 的关键字表、snippet、以及三处硬编码长度都要改
+  ——`module("` 8 字符 / `module(` 7 字符 → `@mod("` 6 字符 / `@mod(` 5 字符。
+  漏掉 `moduleAliasIn` 的 `k += 7` 会一次性挂 23 条 std 门面断言。
+- 全库 `module(` → `@mod(` 命中 206 个文件。替换是纯文本，误伤了一处
+  C 函数名 `decl_is_lazy_module(`，用「标识符字符紧邻 `@mod(`」的规则扫回来；
+  历史 memory 日志按 append-only 原则全部还原，不篡改当时记录。
+
+### 3. 数组指针的 `arr[i]`：结论是**已经支持**，缺的是文档与守门
+
+用户澄清：「读写用 arr[i] 这样的形式，不是类型哦，类型始终只有指针 `*[N]T`，
+就是 ptr 可以 ptr.0、ptr.1，也可以 ptr[0]、ptr[i]」。
+
+实测（默认自举前端 + `--fe=c` 双路）四种形式**全部可用**：`ptr.0` / `.1` /
+`.7` 编译期常量下标、`ptr[0]` / `ptr[i]` 运行期下标，读写、函数参数、结构体
+字段、`?*[N]T` 捕获、泛型 N、`&.{…}` 匿名存储、`stackAlloc` 与 `heapAlloc`
+都通过；`ptr[i]` 带运行期界检查（越界 abort：`index 40 is out of bounds
+(len 4)`）。有符号 i32 索引、取元素地址 `&ptr[i]`、子切片 `ptr[1..4]` 也正常。
+
+所以本轮**没有新增语言能力**，只做两件规范化的事：
+`tests/good/array-pointer-index.zx` 逐字钉住四种形式 + 函数内读改写 +
+栈/堆两种来源；`zx-spec.md` §3.2 补一段明确写出两种下标都可用、类型始终
+只有一个 `*[N]T`。之前文档只写了 `.len` 与 `.0`，容易让人误以为运行期
+下标不存在。`test.sh` 另断言生成 C 里确实有界检查。
+
+### 4. 守门
+
+- `tests/good/heap-slice.zx`：运行期 n、带副作用 count 只求值一次、与
+  `heapAlloc` 常量 N 并存、显式 free。
+- `tests/good/array-pointer-index.zx`：`ptr.0/.1/.7`、`ptr[0]/ptr[i]`、
+  函数参数、栈/堆、界检查生成代码。
+- `tests/bad/removed-module.zx`：旧关键字写法 → E0211 + 替代写法。
+- `test.sh` §144 三段（助手结构 / 旧写法诊断 / 界检查）。
+- `zxc explain E0211` 的 details 与 `docs/errors.md` 三段覆盖同步；
+  `zx-spec.md` §3.2 / §13.1 / §13.4 / §14 关键字与内建表；`spec/zx.ebnf`。

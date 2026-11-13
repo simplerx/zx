@@ -1,7 +1,7 @@
 // 标准库能写到什么程度：ArrayList、字符串比较/查找/切分、文件读写。
 // 这三样齐了，一般的小程序就不用自己手搓容器和字符串处理了。
 
-const std = module("std");
+const std = @mod("std");
 
 // 自建 arena：容器要内存时向它要，一块都不碰 malloc。
 var pool: *[256]u8 = undefined;

@@ -2,7 +2,7 @@
 //   if (c) return x;      if (o) v return v;      if (c) continue;
 //   if (c) call(); else other();                  （M20：表达式语句 + 分号）
 // 语义和写块完全一样（解析时就是包一层单语句块）。
-const std = module("std");
+const std = @mod("std");
 
 const grade = fn (n: i32) []const u8 {
     if (n >= 90) return "A";

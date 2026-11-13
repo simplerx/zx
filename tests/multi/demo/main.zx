@@ -1,7 +1,7 @@
 // 多文件：一个文件一个模块，`pub` 决定对外接口
-const std = module("std");
-const util = module("util.zx");
-const geo = module("geo.zx");
+const std = @mod("std");
+const util = @mod("util.zx");
+const geo = @mod("geo.zx");
 
 const main = fn () u8 {
     std.println("add={} twice={}", util.add(2, 3), util.twice(21));

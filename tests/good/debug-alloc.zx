@@ -8,7 +8,7 @@
 // after deinit: live 0 bytes 0
 // raw: 48 48
 // direct: ok
-const std = module("std");
+const std = @mod("std");
 
 pub const main = fn () i32 {
     var da = std.debug_alloc.DebugAllocator.init(std.heap.page);

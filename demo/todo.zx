@@ -7,7 +7,7 @@
 //
 // 存储就是当前目录的 todo.txt，一行一条：<0|1>|<内容>
 // 函数一律写成 `const 名字 = fn (参数) 返回 { … };`——函数是值。
-const std = module("std");
+const std = @mod("std");
 
 const Item = struct { done: bool, text: []const u8 };
 

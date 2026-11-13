@@ -19,7 +19,7 @@
 // expect-output:used64:0
 // expect-output:poolused:0
 // expect-output:live:0
-const std = module("std");
+const std = @mod("std");
 
 var g_pool: usize = 0;    // *SyncPool（主线程设好，Group 的任务只能带一个 usize）
 var g_ok: usize = 0;

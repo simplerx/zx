@@ -1,6 +1,6 @@
 // std.process：命令行参数、环境变量、退出。
 // exit 是 noreturn——它之后的代码编译器直接拒收。
-const std = module("std");
+const std = @mod("std");
 
 const eqlStr = fn (a: []const u8, b: []const u8) bool {
     if (a.len != b.len) { return false; }

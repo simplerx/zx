@@ -3,7 +3,7 @@
 // expect: handle table closed by deinit
 // expect-code: E0510
 // expect-count: 1
-const std = module("std");
+const std = @mod("std");
 
 const Handle = struct { pos: usize };
 

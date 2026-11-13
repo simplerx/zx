@@ -1,7 +1,7 @@
 // 方法调用出现在"会被编译期折叠的函数体"里（M19 修的回归）。
 // ct_call 折叠调用时会 clone 已检查过的函数体再 check 一遍；
 // 方法调用第一次检查已把接收者塞进参数表，克隆体复检必须幂等。
-const std = module("std");
+const std = @mod("std");
 
 const P = struct {
     x: i32,

@@ -8,7 +8,7 @@
 //   map-get    命中查找 20 万次 + 未命中 5 万次
 //
 // 校验和用简单的 FNV 混合，避免常量折叠把负载吃掉：种子是上一轮的结果。
-const std = module("std");
+const std = @mod("std");
 
 const mix = fn (h: u64, v: u64) u64 {
     var x = h ^ v;

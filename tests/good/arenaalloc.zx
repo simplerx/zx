@@ -1,6 +1,6 @@
 // std.arena.ArenaAllocator：有状态分配器（ctx 机制）的功能与生命周期。
 // 检查点：bump 快路径、跨块慢路径、reset 后复用、deinit 总清算。
-const std = module("std");
+const std = @mod("std");
 
 const main = fn () u8 {
     var ar = std.arena.ArenaAllocator.init(std.heap.page);
