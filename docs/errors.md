@@ -108,7 +108,7 @@ const r = blk: {
 描述符 `Type{.name, .size, .align, .ty, .fieldCount,
 .fields[i]{.name, .ty, .offset}}` 全是编译期值。现在共八个：
 
-`@mod` / `@type` / `@memcpy` / `@memmove` / `@memset` / `@link` / `@compileError` / `@trap`（共八个）。
+`@mod` / `@type` / `@cShim` / `@memcpy` / `@memmove` / `@memset` / `@link` / `@compileError` / `@trap`（共九个）。
 
 | 老写法 | 换成 |
 | --- | --- |
@@ -533,6 +533,20 @@ let p = t.get(boxed.h).?;   // E0511：Handle 从字段取回，来源已断
 
 ```zx
 const util = @mod("util");     // 找 util.zx：同目录 → 工程根 → vendor/
+```
+
+<a id="e0602"></a>
+### E0602 `@cShim` 的 C 文件打不开
+
+**典型消息**：`@cShim: cannot open C shim "impl.c" (resolved to …)`
+
+- 路径按**写 `@cShim(...)` 的那份 `.zx` 所在目录**解析，不是当前工作目录
+- 库把 shim 和 `.zx` 放同一目录就能自带实现（`std/simd.zx` → `std/xxx.c`）
+- 只是**打不开**才报这个码；文件打得开但 C 本身编不过，是 `B1004`，
+  行号直接指到那份 `.c`（zxc 用同一套 cc/flags 编它，不做行列映射）
+
+```zx
+@cShim("impl.c");      // 找 impl.c：与这份 .zx 同目录
 ```
 
 ---

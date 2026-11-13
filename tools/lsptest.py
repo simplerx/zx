@@ -4605,6 +4605,7 @@ const main = fn () u8 {
     var p5 = std.math.;
     var p6 = std.simd.addF32;
     var p7 = std.simd.;
+    var p8 = @cSh;
     return 0;
 };
 """
@@ -4722,6 +4723,18 @@ _g159_members = {i["label"] for i in g157_comp("var p7 = std.simd.", 5210)}
 check("completion.simd.members",
       {"Vec4f", "Vec4i", "addF32", "dotF32", "fillI32"} <= _g159_members,
       str(sorted(_g159_members))[:240])
+
+# §160：`@cShim` 要出现在 `@` 补全里；写到一半（`@cSh`）同样要走这条路。
+# 旧行为：identBefore 不吃 '@'，`@cSh` 的前缀是 `cSh`，`off-1` 也不是 '@'
+# ——两条判据都不命中，掉进全局标识符分支，用户看到一条同名变量。
+_g160_shim = g157_comp("var p8 = @cSh", 5212)
+check("completion.cShim.partialAtIsBuiltin",
+      len(_g160_shim) == 1
+      and _g160_shim[0].get("label") == "cShim"
+      and _g160_shim[0].get("kind") == 3
+      and "@cShim(" in (_g160_shim[0].get("detail") or ""),
+      str(_g160_shim)[:260])
+
 
 
 try:

@@ -164,11 +164,11 @@ typedef struct {
     char cpath[2048];
     char cmd[4096];
     char log[2048];        /* C 编译器的输出重定向到这里，失败后再翻译 */
-    int  unit;             /* 单元下标（-1 = zxrt 运行时支持） */
+    int  unit;             /* 单元下标（-1 = zxrt 运行时支持，-2 = C shim） */
     int  rc;
 } CCJob;
 
-static CCJob g_jobs[65];   /* 单元数上限 64 + zxrt */
+static CCJob g_jobs[65 + ZXC_MAX_C_SHIMS];   /* 64 单元 + zxrt + C shim */
 
 /* ---------------- 后端诊断的翻译 ----------------
  *
@@ -277,7 +277,14 @@ static int report_cc_log(CCJob *j, int mode) {
             if (mode == 1 && mapped)  continue;
             if (seen_before(msg)) continue;
 
-            if (j->unit < 0) {
+            if (j->unit == -2) {
+                /* C shim：报错的行号本来就属于那份 .c（我们没生成、没复制
+                 * 它），所以原样带路径打出来，编辑器和终端都能直接点开。 */
+                fprintf(stderr, "%s:%d:%d: error[B1004]: the C shim does not compile: %s\n",
+                        path, ln, col > 0 ? col : 1, msg);
+                fprintf(stderr, "  help: this file came from @cShim(...); zxc compiles it with the same\n"
+                                "        cc and flags as zx code, so the fix belongs in that .c\n");
+            } else if (j->unit < 0) {
                 fprintf(stderr, "error[B1003]: the bundled C runtime (zxrt) does not compile: %s\n", msg);
                 fprintf(stderr, "  help: this is the compiler's own support code, not your zx source;\n"
                                 "        check ZX_CC / .toolchain, or rerun with ZX_VERBOSE=1\n");
@@ -320,8 +327,14 @@ static int run_cc_jobs(CCJob *jobs, int njobs) {
     const char *np = getenv("NUMBER_OF_PROCESSORS");
     if (np && atoi(np) > 0) nproc = atoi(np) > 16 ? 16 : atoi(np);
     if (nproc <= 1 || njobs == 1) {
-        for (int i = 0; i < njobs; i++)
-            if (system(jobs[i].cmd) != 0) return 1;
+        /* 串行路径也必须把 rc 写回 job：诊断翻译（report_cc_log）只认
+         * g_jobs[i].rc。以前这里直接 return，单个单元编译失败时 rc 恒 0，
+         * 于是只剩一句 "build failed in the C backend"、具体错误被吞掉
+         * （§160 的 C shim 单独重编时最容易撞到：那时 njobs 正好是 1）。 */
+        for (int i = 0; i < njobs; i++) {
+            jobs[i].rc = (system(jobs[i].cmd) != 0);
+            if (jobs[i].rc) return 1;
+        }
         return 0;
     }
     int rc = 0;
@@ -708,6 +721,53 @@ static int build_program(Node *root, const char *out, const char *cachedir, OutK
         buf_printf(&objs, "\"%s\"", opath);
     }
 
+    /* C shim（@cShim）：每份独立编成一个 .o。
+     *
+     * 直接编**用户那份文件**（不复制、不改名、不生成包装 TU）：
+     *   ① C 编译器的报错行号就是真实行号，不需要行列映射；
+     *   ② shim 看不见 zx 的内部布局与运行时代码，只依赖自己 include 的头，
+     *      库改内部实现不会连累它；
+     *   ③ 增量判据与 zx 单元同一条：参数盖章变了全作废，否则比 mtime。
+     * shim 改名/换路径会让 .o 名字跟着变（名字里带序位 + 文件 stem），
+     * 不会出现"旧 .o 顶着新名字"的脏状态。 */
+    for (int si = 0; si < zx_c_shim_count(); si++) {
+        const char *spath = zx_c_shim(si);
+        char sbase[512];
+        path_basename(spath, sbase, sizeof sbase);
+        path_strip_ext(sbase);
+        for (char *q = sbase; *q; q++) {
+            int ok = (*q >= 'a' && *q <= 'z') || (*q >= 'A' && *q <= 'Z') ||
+                     (*q >= '0' && *q <= '9') || *q == '_';
+            if (!ok) *q = '_';
+        }
+        char opath[2048], lpath[2048];
+        snprintf(opath, sizeof opath, "%s_cshim%d_%s.o", stem, si, sbase);
+        snprintf(lpath, sizeof lpath, "%s_cshim%d_%s.log", stem, si, sbase);
+        {
+            long long om = fmtime(opath);
+            if (om > maxobj) maxobj = om;
+        }
+        if (fchanged || fmtime(opath) < fmtime(spath)) {
+            remove(opath);
+            if (njobs >= (int)(sizeof g_jobs / sizeof g_jobs[0])) {
+                fprintf(stderr, "zxc: too many units\n");
+                return 1;
+            }
+            if (getenv("ZX_VERBOSE")) fprintf(stderr, "  cc %s (C shim)\n", spath);
+            CCJob *j = &g_jobs[njobs++];
+            j->unit = -2;                    /* -2 = C shim：报错指回 .c 本身 */
+            snprintf(j->cpath, sizeof j->cpath, "%s", spath);
+            snprintf(j->log, sizeof j->log, "%s", lpath);
+            const char *warnflag = getenv("ZX_VERBOSE") ? "-Wall" : "-w";
+            snprintf(j->cmd, sizeof j->cmd,
+                     "%s %s %s -fno-caret-diagnostics -fno-color-diagnostics "
+                     "-c -o \"%s\" \"%s\" > \"%s\" 2>&1",
+                     g_cc, g_cflags, warnflag, opath, spath, lpath);
+        }
+        buf_puts(&objs, " ");
+        buf_printf(&objs, "\"%s\"", opath);
+    }
+
     double t_cc = prog_clock();
     if (njobs > 0) prog("compiling %d unit%s...", njobs, njobs == 1 ? "" : "s");
     int ccfail = run_cc_jobs(g_jobs, njobs);
@@ -719,12 +779,18 @@ static int build_program(Node *root, const char *out, const char *cachedir, OutK
         for (int i = 0; i < njobs; i++) remove(g_jobs[i].log);
     if (ccfail) {
         /* 把 C 编译器的抱怨翻成 zx 侧诊断（模块 + 行 + 人话），逐条报出来 */
-        int nerr = 0;
+        int nerr = 0, nshim = 0;
         for (int pass = 0; pass < 2; pass++)
             for (int i = 0; i < njobs; i++)
                 if (g_jobs[i].rc) nerr += report_cc_log(&g_jobs[i], pass);
+        for (int i = 0; i < njobs; i++)
+            if (g_jobs[i].rc && g_jobs[i].unit == -2) nshim++;
         if (nerr == 0)
             fprintf(stderr, "zxc: build failed in the C backend (rerun with ZX_VERBOSE=1 for raw output)\n");
+        else if (nshim)
+            /* shim 是用户自己的 C：说成"编译器 bug"会把人指错方向。 */
+            fprintf(stderr, "zxc: build failed: %d error(s) in the C shim(s) "
+                            "registered with @cShim(...)\n", nerr);
         else
             fprintf(stderr, "zxc: build failed: %d code-generation error(s) "
                             "(compiler bug, not a problem in your zx source)\n", nerr);
@@ -3631,6 +3697,16 @@ int main(int argc, char **argv) {
                 Buf csrc;
                 buf_init(&csrc);
                 backend_emit(root, &csrc);
+                /* --emit-c 是一条"把整份程序摊成单个 C 文件"的检查路径，
+                 * 而 @cShim 在真实构建里是独立 TU。这里把它按登记顺序贴在
+                 * 末尾：原型都在前面的共享头里，顺序无关紧要，但整份 C
+                 * 仍然自成一体（可以直接丢给 cc 编）。 */
+                for (int si = 0; si < zx_c_shim_count(); si++) {
+                    size_t slen = 0;
+                    char *ssrc = read_source(zx_c_shim(si), &slen);
+                    buf_printf(&csrc, "\n/* ======== C shim: %s ======== */\n", zx_c_shim(si));
+                    if (ssrc) { buf_putn(&csrc, ssrc, slen); free(ssrc); }
+                }
                 fwrite(csrc.data, 1, csrc.len, stdout);
             }
         }

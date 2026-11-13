@@ -1,0 +1,70 @@
+// cshim.zx —— @cShim：把一份自己的 C 源文件编进程序（§160）。
+//
+// @cShim("impl.c") 不是 include、也不是新类型：那份 .c 是一份自包含的 C
+// 翻译单元，用与 zx 相同的 cc/flags 编成独立 .o 后一起链接。路径相对
+// **声明它的这份 .zx** 解析，所以库可以把自己的 shim 放在同目录发布。
+//
+// 什么时候该用它：需要真正的手写 intrinsic（SSE/AVX/NEON）、需要只有 C
+// 才有的构造、或者要把一段已经调优过的 C 代码搬进来。能用 extern "C"
+// 直接调现成符号的，就别写 shim——那是多一层要人维护的东西。
+//
+// C 侧报错指回那份 .c 的真实行号（B1004），不会被翻译成 zx 的行号。
+// expect-output
+// sum=10
+// fill=42 -42
+// add4=4 6 8 10
+// vec=ok
+// twice=ok
+
+@cShim("cshim_impl.c");
+
+extern "C" {
+    fn zx_shim_sum_f32(a: *f32, n: usize) f32;
+    fn zx_shim_fill_i32(dst: *i32, n: usize, v: i32) void;
+    fn zx_shim_add4(dst: *f32, a: *f32, b: *f32) void;
+    fn zx_shim_vec_ok() i32;
+}
+
+const vecOk = fn () bool {
+    let v = zx_shim_vec_ok();
+    return v == 0 || v == 1;
+};
+
+pub const main = fn () u8 {
+    var xs: *[4]f32 = stackAlloc(f32, 4);
+    xs.0 = 1.0;
+    xs.1 = 2.0;
+    xs.2 = 3.0;
+    xs.3 = 4.0;
+    println("sum={}", zx_shim_sum_f32((*f32)xs, 4));
+
+    var ns: *[2]i32 = stackAlloc(i32, 2);
+    zx_shim_fill_i32((*i32)ns, 2, 21);
+    zx_shim_fill_i32((*i32)ns + 1, 1, -21);
+    println("fill={} {}", ns.0, ns.1);
+
+    var ys: *[4]f32 = stackAlloc(f32, 4);
+    var zs: *[4]f32 = stackAlloc(f32, 4);
+    ys.0 = 1.5;
+    ys.1 = 2.5;
+    ys.2 = 3.5;
+    ys.3 = 4.5;
+    zs.0 = 2.5;
+    zs.1 = 3.5;
+    zs.2 = 4.5;
+    zs.3 = 5.5;
+    zx_shim_add4((*f32)ys, (*f32)ys, (*f32)zs);
+    println("add4={} {} {} {}", ys.0, ys.1, ys.2, ys.3);
+
+    if (vecOk()) {
+        println("vec=ok");
+    } else {
+        println("vec=bad");
+    }
+
+    // 第二处 @cShim 指向同一份 .c：按完整路径去重，只会编一遍。
+    println("twice=ok");
+    return 0;
+};
+
+@cShim("cshim_impl.c");

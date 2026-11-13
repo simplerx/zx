@@ -70,3 +70,11 @@
 - **没有向量类型时的 SIMD 就靠下游 C 编译器**：`std/simd.zx` 两层 —— `Vec4f/Vec4i` 是 4 分量值类型（16B、按值传、标量方法）；切片内核（f32 11 个 + i32 3 个）写成最朴素的逐元素单循环，`--release`（-O2）下 zig cc 发 `vaddps %zmm`，dev（-O0）不向量化。**不手工展开**（实测普通循环得到同样的 zmm，展开只让代码长一倍）、不加运行时、不动编译器。
 - 语义契约：按 `min(各 len)` 处理并**返回个数**；逐元素内核允许 `dst` 与输入同块（原地安全）；归约用 4 条累加链（不改浮点顺序、不需 fast-math）；`normalize` 零向量原样返回；`length` 走私有 `extern sqrtf(f32) f32`（`sqrtf` 不在 libc_declared，生成 C 有 `extern float sqrtf(float x);`）。
 - 守门 `tests/good/std-simd.zx`（尾块/别名/不等长/两类型）、`test.sh §159`（release 输出与 dev 一致 + sqrtf 原型 + 单文件检查 + C 前端）、`lsptest` 两条补全断言。实测 4M f32 add×20：dev 118ms/8.4GB/s，release 31ms/约31GB/s。
+
+## §160 C shim 通道 @cShim（2026-11-13）
+- **内建 9 个**：`@mod @type @cShim @memcpy @memmove @memset @link @compileError @trap`。加内建要动：`src/sema.c check_builtin` + 可能新错误码三张表（`zxc.c g_rules` / `errors.c` / `docs/errors.md` 含锚点 + reference §15 计数）+ `tools/zxls.zig` 的 `builtin_docs` / `toplevel_builtins` / snippets + 文档四处名单（reference §10、manual §8、errors.md E0211 段、spec/zx-spec.md）。**词法/语法不用改**：`@name(...)` 是通用的，`bootstrap/` 也不用动。
+- `@cShim("impl.c")`：那份 `.c` 是**自包含 C TU**，zxc 用同一套 cc/flags 编成独立 `.o` 一起链接，**直接编真实路径**（不复制不改名）⇒ C 报错行号即真实行号，报 **B1004**；文件打不开报 **E0602**。路径相对 `g_srcpath` 目录（库可自带实现）；按完整路径去重；`--emit-c` 把 shim 文本贴末尾（自洽单 TU）。shim 看不见 zx 生成的任何东西（只 include 自己的 C 头）。
+- `shim 编不过`时构建总结走「N error(s) in the C shim(s)」，**不许**说 "compiler bug"。
+- **`run_cc_jobs()` 串行分支必须写回 `jobs[i].rc`**：诊断翻译 `report_cc_log` 只认 rc，漏写时 njobs==1 的失败只剩一句 "build failed in the C backend"（§160 第一轮就是这么被吞的）。
+- zxls `@` 补全：`identBefore` 不吃 `'@'`，所以 `@cSh` 这种半截内建名要靠 `ps-1 == '@'` 判（与 dotted 同口径），否则掉进全局标识符分支、只弹一条同名变量。改 `tools/zxls.zig` 后必须先 `mv bin/zxls.exe …` 绕 Zed 锁再重建，用户重启 Zed 生效。
+- 守门：`tests/good/cshim.zx` + `tests/good/cshim_impl.c`、`test.sh §160` 四条、`lsptest` 的 `completion.cShim.partialAtIsBuiltin`。

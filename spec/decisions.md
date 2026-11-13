@@ -6362,3 +6362,53 @@ zmm；普通循环得到的指令一样，代码却短一半。结论：展开�
 `tools/lsptest.py` 两条（`std.simd.addF32` 补全详情 + `std.simd.` 成员表）。
 实测 4M 个 f32 的 `addF32` ×20 轮：dev 118 ms（8.4 GB/s）、release 31 ms
 （约 31 GB/s，三流内存带宽饱和，约 3.8×）。
+
+## §160 C shim 通道：`@cShim`（2026-11-13 23:5x）
+
+用户点名要「C shim 通道」——§159 的 SIMD 只靠下游 C 编译器向量化，真正要写
+`_mm256_add_ps` 这类 intrinsic 时，语言里没有入口。三条候选：
+
+1. **把 C 文本 include 进生成的 C**：省一次编译，但 shim 会看见 zx 的全部
+   内部布局、`ZX_INLINE`、运行时辅助函数；一次 typedef 改名就连累别人的 C，
+   生成的 C 行号也全被打乱（必须再搭一套映射）。（否）
+2. **给语言加向量类型 + intrinsic 内建（`@Vector` / `@splat` …）**：等于新增
+   一套类型与 ABI，sema / 后端 / LSP / 自举前端四处同步，换来的只是"标准库
+   不用写 shim"。（否，用户要的是通道，不是语言扩展）
+3. **`@cShim("impl.c")` = 一份独立的 C 翻译单元**（选它）：zxc 用与 zx 相同的
+   cc/flags 把它编成 `.o` 一起链接。（选它）
+
+**契约**（写进 reference §10.2）：
+
+- shim **自包含**：不 include zx 生成的任何东西，只依赖自己 include 的 C 头。
+  边界干净 ⇒ 库换内部实现不牵动 shim，shim 换实现不牵动 zx。
+- 路径相对**写 `@cShim(...)` 的那份 `.zx`** 解析（`g_srcpath` 的目录），所以
+  `std/simd.zx` 能把实现放在 `std/` 里一起发布——这是 §157 之后"库自带资源"
+  的第一例（`@mod` 早就按同一规则解析）。
+- 符号声明仍走 `extern "C"`：shim 给实现，zx 侧给原型。没有第二套绑定语法。
+- **直接编用户那份文件**：不复制、不改名、不生成包装 TU ⇒ C 编译器的行号就是
+  真实行号，不需要列映射表。去重按完整路径，两份 `@cShim` 指向同一份只编一遍。
+- `--emit-c` 是"整份程序摊成一个 C"的检查路径，所以把 shim 按登记顺序贴末尾
+  （原型都在前面的共享头里，顺序无关）；真实构建永远是独立 `.o`。
+
+**诊断**：C 编不过报 `B1004`，格式 `路径:行:列: error[B1004]: the C shim does
+not compile: …`，并且构建总结换一句「N error(s) in the C shim(s)」，不再说
+"compiler bug"（那是我们自己的代码生成问题，shim 是用户自己的 C）。文件打不开
+报 **E0602**，没有复用 `@mod` 的 E0601：两者的 help 是两件事（一个查 `@mod`
+路径，一个查 `@cShim` 路径）。
+
+**顺手修掉的既有缺口**：`run_cc_jobs()` 的串行分支（`nproc <= 1 || njobs == 1`）
+以前只 `if (system(...) != 0) return 1`，**没把 rc 写回 job**。诊断翻译
+`report_cc_log()` 只认 `g_jobs[i].rc`，于是"只有一个单元要编、且它编不过"时
+只剩一句 `build failed in the C backend`，具体错误被吞。日常构建 njobs 至少 2
+（zxrt + 入口）所以从没暴露；§160 的 shim 单独重编时 njobs 正好是 1，第一轮就
+撞上了。现在串行路径也写 rc。
+
+**为什么标准库一份 shim 都没有**：§159 的 `std.simd` 已经在 -O2 下拿到 zmm，
+再手写 AVX2 + 运行期 cpuid 分派只会多一条要人维护的 C 路径；能力该在语言里
+（通道），不该在标准库里堆第二套实现。这条写进了 reference §10.2。
+
+**守门**：`tests/good/cshim.zx` + `tests/good/cshim_impl.c`（SSE2 intrinsic +
+static 私有助手 + 两处 `@cShim` 去重）、`tests/multi/cshim/`（**模块**里的
+`@cShim` 按模块目录解析、符号能被入口链接到）、`test.sh §160` 四条（`--emit-c` 里 shim
+只出现一次且贴在末尾 / C 前端通过 / 坏 shim 报 B1004 且行号来自 `.c` 且不说
+"compiler bug" / 缺文件报 E0602）、`tools/lsptest.py` 的 `@cShim` 补全断言。

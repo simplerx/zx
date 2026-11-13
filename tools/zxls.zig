@@ -5,7 +5,7 @@
 //     解析 stderr 的 `path:line:col: error[CODE]: msg` 行 → publishDiagnostics。
 //     直接复用自举前端（zxfe），诊断与编译器 100% 同源。
 //   - 补全：
-//       `@` 前缀      → 顶层内建（@type/@memcpy/@trap/… 共七个）
+//       `@` 前缀      → 顶层内建（@type/@memcpy/@cShim/@trap/… 共九个）
 //       `X.`          → std 内建命名空间 / module 绑定的顶层 pub 声明 /
 //                       容器（struct/union/enum）的成员与方法（含实例推断：
 //                       `let v = Obj.init(...)` 后 `v.` 出 Obj 的成员）
@@ -169,6 +169,7 @@ const snippets = [_]Snip{
     .{ .label = "let", .body = "let ${1:name} = $0;", .detail = "代码片段 let" },
     .{ .label = "var", .body = "var ${1:name} = $0;", .detail = "代码片段 var" },
     .{ .label = "mod", .body = "@mod(\"${1:std}\")", .detail = "代码片段 @mod" },
+    .{ .label = "cshim", .body = "@cShim(\"${1:impl.c}\");", .detail = "代码片段 @cShim" },
     .{ .label = "defer", .body = "defer $0;", .detail = "代码片段 defer" },
     .{ .label = "errdefer", .body = "errdefer $0;", .detail = "代码片段 errdefer" },
     .{ .label = "try", .body = "try $0", .detail = "代码片段 try" },
@@ -317,13 +318,14 @@ const builtin_docs = [_]BuiltinDoc{
     .{ .name = "memmove", .detail = "@memmove(dest, src, count) 内存移动" },
     .{ .name = "memset", .detail = "@memset(dest, fill, count) 内存填充" },
     .{ .name = "link", .detail = "@link(\"lib\") 链接外部库" },
+    .{ .name = "cShim", .detail = "@cShim(\"impl.c\") 把一份 C 源文件编进程序（自包含 TU，路径相对本文件）" },
     .{ .name = "trap", .detail = "@trap() 触发断点/中止" },
     .{ .name = "compileError", .detail = "@compileError(msg) 编译期报错" },
 };
 
 const toplevel_builtins = [_][]const u8{
     "type",   "memcpy",  "memmove", "memset",
-    "link",   "trap",    "compileError",
+    "link",   "cShim",   "trap",    "compileError",
 };
 
 // ---------------------------------------------------------------- utils
@@ -7936,12 +7938,19 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
     const full_prefix = identBefore(text, off);
     var prefix = full_prefix;
     var is_at_ctx = false;
+    const ps = off - full_prefix.len;
     if (std.mem.startsWith(u8, prefix, "@")) {
         prefix = prefix[1..];
         is_at_ctx = true;
     } else if (off > 0 and text[off - 1] == '@') {
         // 光标紧跟 '@'（identBefore 不吃 '@'，这里单独识别）
         prefix = "";
+        is_at_ctx = true;
+    } else if (ps > 0 and text[ps - 1] == '@') {
+        // `@cSh`：内建名输到一半。identBefore 不吃 '@'，前缀里自然没有它，
+        // 上面两条都不命中——旧行为是掉进全局标识符分支，用户看到一条同名
+        // 变量而不是内建列表（§160 打 @cShim 时必现）。判法与下面 dotted
+        // 同口径：看前缀起点前面那个字符。
         is_at_ctx = true;
     }
 
@@ -7955,7 +7964,6 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
     // 点补全：部分标识符前一个字符是 '.'。之前只认"光标紧贴点"，
     // 输入 std.p 时走的是关键字分支，std 成员一个都不出——现在
     // 空前缀（贴点）与带前缀（std.p / obj.fi）都走这条。
-    const ps = off - full_prefix.len;
     var dotted = ps > 0 and text[ps - 1] == '.';
     // KEEP — 匿名 struct 字面量刚开括号 `.{` 就要给字段：Zed 在 `{` 后
     // 立刻弹补全时，光标前是 '{' 不是 '.'，旧链落到全局标识符（用户

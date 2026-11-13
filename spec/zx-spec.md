@@ -2361,6 +2361,7 @@ a.free(a.ctx, (*u8)xs.ptr, xs.len * @type(i32).size);
 | `@memmove(d, s, n)` | 同上 | 批量复制（可重叠） |
 | `@memset(d, byte, n)` | `fn(ptr\|slice, int, usize) void` | 批量填充 |
 | `@link("lib")` | `fn(str) void` | 链接外部库（FFI 唯一入口） |
+| `@cShim("impl.c")` | `fn(str) void` | 把一份 C 源文件编进程序：自包含 TU，同一套 cc/flags，路径相对声明它的 `.zx` |
 | `@compileError(msg)` | `fn([]const u8) noreturn` | 编译期报错并停下 |
 | `@trap()` | `fn() noreturn` | 编译期可达就报错，否则运行期 trap |
 

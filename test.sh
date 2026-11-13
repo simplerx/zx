@@ -1400,6 +1400,61 @@ else
     head -12 "$TPFX.s159c.log"; fail=1
 fi
 
+# §160：C shim 通道（@cShim）。真实构建里 shim 是**独立 TU**（用真实路径编，
+# 报错指回那份 .c 的行号）；--emit-c 要自洽就把它贴在末尾；两处 @cShim 指向
+# 同一份 .c 只编一遍。shim 编不过报 B1004（不是"编译器 bug"），缺文件报 E0602。
+$ZXC tests/good/cshim.zx --emit-c > "$TPFX.s160.c" 2>/dev/null
+n160=$(grep -cF 'C shim: tests/good/cshim_impl.c' "$TPFX.s160.c")
+if [ "$n160" = "1" ] && grep -qF 'zx_shim_vec_ok(void)' "$TPFX.s160.c"; then
+    printf "  ok   §160 @cShim 按路径去重并贴在 --emit-c 末尾\n"
+else
+    printf "  FAIL §160 --emit-c 里 shim 出现 %s 次\n" "$n160"; fail=1
+fi
+
+if $ZXC tests/good/cshim.zx --check --fe=c > "$TPFX.s160c.log" 2>&1; then
+    printf "  ok   §160 cshim 在 C 前端通过\n"
+else
+    printf "  FAIL §160 cshim 在 C 前端失败\n"
+    head -12 "$TPFX.s160c.log"; fail=1
+fi
+
+# 坏 shim：报 B1004，行列来自那份 .c（第 2 行），并且不把责任推给编译器
+mkdir -p "$TPFX.shim" 2>/dev/null || true
+cat > "$TPFX.shim/bad.zx" <<'ZXEOF'
+@cShim("bad.c");
+
+pub const main = fn () u8 { return 0; };
+ZXEOF
+cat > "$TPFX.shim/bad.c" <<'CEOF'
+int zx_bad_helper(void) { return 1; }
+int zx_bad(void) { return not_a_symbol; }
+CEOF
+if $ZXC "$TPFX.shim/bad.zx" -o "$TPFX.shim/bad.exe" > "$TPFX.s160bad.log" 2>&1; then
+    printf "  FAIL §160 坏 shim 居然编过了\n"; fail=1
+elif grep -q "error\[B1004\]" "$TPFX.s160bad.log" \
+     && grep -q "bad.c:2" "$TPFX.s160bad.log" \
+     && ! grep -q "compiler bug" "$TPFX.s160bad.log"; then
+    printf "  ok   §160 shim 编不过时报 B1004 并指回 .c 的行号\n"
+else
+    printf "  FAIL §160 坏 shim 的诊断不对\n"
+    head -8 "$TPFX.s160bad.log"; fail=1
+fi
+
+# 缺文件：E0602（自己一个码，不复用 @mod 的 E0601，help 不是同一件事）
+cat > "$TPFX.shim/miss.zx" <<'ZXEOF'
+@cShim("nope.c");
+
+pub const main = fn () u8 { return 0; };
+ZXEOF
+if $ZXC "$TPFX.shim/miss.zx" -o "$TPFX.shim/miss.exe" > "$TPFX.s160miss.log" 2>&1; then
+    printf "  FAIL §160 缺失的 shim 居然编过了\n"; fail=1
+elif grep -q "error\[E0602\]" "$TPFX.s160miss.log"; then
+    printf "  ok   §160 缺失的 shim 报 E0602\n"
+else
+    printf "  FAIL §160 缺失的 shim 没报 E0602\n"
+    head -6 "$TPFX.s160miss.log"; fail=1
+fi
+
 # 用例会在仓库根留下自己的临时文件：io_fmt.zx 写 io_fmt.tmp，stdfs.zx 建
 # fs_t_dir / fs_t_dir2。跑完统一带走——测试不该往工作区里堆东西。
 rm -rf io_fmt.tmp fs_t_dir fs_t_dir2 2>/dev/null || true
