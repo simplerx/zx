@@ -6322,3 +6322,43 @@ hover 也拼成 `let n: i32 = n = gen.mem`；③ `addExprSnippets` 把 `fn(...) 
 `hypot(double x, double y)`，并反向断言生成 C 里不出现 `double _p0`。
 判断「extern 形参是否具名」要拿会发射的原型当样本，不要拿被 libc 名单
 吞掉的名字。
+
+## §159 std.simd：没有向量类型时的 SIMD 库（2026-11-13 23:xx）
+
+用户要求「实现一个 simd 库」。语言现状决定了做法：**Zx 没有向量类型、
+没有内联汇编、没有 intrinsic 通道**，只有 `extern "C"`、`@link` 与八个内建。
+
+三条候选：
+1. **给语言加 `@Vector(N, T)` + 一组内建**：等于新增一套类型与 ABI，sema /
+   后端 / LSP / 自举前端全要改；用户要的是库，不是语言扩展（否）。
+2. **后端发射 `immintrin` 运行时，std/simd.zx 声明 extern 调它**：只有 x86
+   有效，还要为 ARM 写 NEON 分支；这是平行运行时，与「std 是纯 Zx +
+   少量 extern」的既有形态冲突（否）。
+3. **纯 Zx 两层库，靠下游 C 编译器向量化**（选它）：切片内核写成最普通的
+   逐元素循环，zxc 在 `--release`（-O2）下交给 zig cc；实测 zig cc 把
+   `addF32` 的循环展宽成 `vaddps %zmm`（一轮 16 个 float，4 条并行），
+   dev 档 -O0 不向量化——这一点写进库头注释与 reference，不当隐含承诺。
+
+**手工 4 路展开也被否**：先写了 4 路展开版，汇编里 clang 仍然自己重排成
+zmm；普通循环得到的指令一样，代码却短一半。结论：展开交给编译器，库只
+负责语义。
+
+**语义契约**（都是可守门的、与向量化无关的部分）：
+- 长度取 `min(各输入 len)` 并返回处理个数；不 trap、不补零。
+- 逐元素内核允许 `dst` 与输入同一块内存（原地更新安全）；归约只读。
+- 归约（`dotF32` / `sumF32`）用 4 条独立累加链：不改变浮点加法顺序，
+  因此不需要 `-ffast-math`，也不依赖编译器改写归约；拿到的是 ILP 与 FMA。
+- `Vec4f.normalize()` 对零向量原样返回（不除零、不返回 `?Self`）。
+- `Vec4f.length()` 用私有 `extern sqrtf(f32) f32`，不做 f32→f64→f32 往返；
+  符号私有，不往公开面加东西。`sqrtf` 不在 `libc_declared()` 名单里，
+  生成的 C 会有一条 `extern float sqrtf(float x);`（与 math.h 兼容）。
+
+**规模**：`Vec4f` 19 个方法、`Vec4i` 10 个；f32 内核 11 个、i32 内核 3 个。
+不做 Mat4 / 四元数——那是引擎的数学层，不是语言标准库该替它决定的事。
+
+**验证**：`tests/good/std-simd.zx` 覆盖尾块（10 个元素）、原地别名、
+不等长、两个向量类型；`test.sh §159` 钉 release 档输出与 dev 一致、
+`sqrtf` 原型、`std/simd.zx` 单文件 `--check` 零诊断、C 前端通过；
+`tools/lsptest.py` 两条（`std.simd.addF32` 补全详情 + `std.simd.` 成员表）。
+实测 4M 个 f32 的 `addF32` ×20 轮：dev 118 ms（8.4 GB/s）、release 31 ms
+（约 31 GB/s，三流内存带宽饱和，约 3.8×）。

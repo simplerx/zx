@@ -805,6 +805,37 @@ if (std.net.TcpListener.open(0)) ls {
 
 ---
 
+### 14.13 std.simd —— 向量与批量运算（`std/simd.zx`）
+
+Zx 没有向量类型（没有 `@Vector` 那类内建），`std.simd` 分两层，各管各的：
+
+- **4 分量值类型**：`Vec4f{x,y,z,w: f32}` / `Vec4i{x,y,z,w: i32}`。16 字节、按值传，
+  方法是一次 4 条标量运算：`add / sub / mul / scale / neg / dot / lengthSq /
+  length / normalize / min / max / clamp / lerp / abs / sum / eq / approxEq`，
+  整数侧是 `add / sub / mul / neg / abs / min / max / eq`。`normalize` 对零向量
+  原样返回（不除零、不 trap）。
+- **切片内核**：`addF32 / subF32 / mulF32 / scaleF32 / saxpyF32 / lerpF32 /
+  clampF32 / absF32 / fillF32 / dotF32 / sumF32`，整数侧 `addI32 / subI32 / fillI32`。
+  处理 `min(各输入长度)` 个元素并返回实际个数；`dst` 允许与输入是同一块内存。
+  内核体就是普通逐元素循环，**`--release`（-O2）下由 C 编译器自动向量化**
+  （实测 zig cc 发 `vaddps %zmm`，一轮 16 个 float，尾块由标量循环收掉）；
+  dev 档是 `-O0`，不向量化。归约用 4 条独立累加链，不改变浮点加法顺序，
+  不需要 `-ffast-math`。
+
+```zx
+var a: *[4]f32 = std.stackAlloc(f32, 4);
+var b: *[4]f32 = std.stackAlloc(f32, 4);
+var dst: *[4]f32 = std.stackAlloc(f32, 4);
+var i: usize = 0;
+while (i < 4) { (a + i).0 = 1.5; (b + i).0 = 2.0; i = i + 1; }
+
+let n = std.simd.addF32(dst[0..4], a[0..4], b[0..4]);      // 返回处理个数 4
+let v = std.simd.Vec4f{ .x = 3.0, .y = 4.0, .z = 0.0, .w = 0.0 };
+std.println("{} {} {}", n, (dst + 0).0, v.length());       // 4 3.5 5
+```
+
+---
+
 ## 15. 错误码索引（37 个，详见 `docs/errors.md` / `zxc explain CODE`）
 
 | 类别 | 码 |

@@ -4603,6 +4603,8 @@ const main = fn () u8 {
     var p3 = std.;
     var p4 = std.math.sqrt;
     var p5 = std.math.;
+    var p6 = std.simd.addF32;
+    var p7 = std.simd.;
     return 0;
 };
 """
@@ -4707,6 +4709,19 @@ _h_sqrt = g157_hover_sqrt(5208)
 check("hover.mathSqrt.zxSignature",
       "sqrt(x: f64) f64" in _h_sqrt and "sqrt(f64)" not in _h_sqrt,
       _h_sqrt[:160])
+
+# §159：std.simd 的公开面（类型 + 内核）在补全里要带完整 Zx 签名。
+_g159_add = g157_comp("var p6 = std.simd.addF32", 5209)
+check("completion.simd.addF32.zxSignature",
+      len(_g159_add) == 1
+      and _g159_add[0].get("label") == "addF32"
+      and _g159_add[0].get("detail") == "addF32(dst: []f32, a: []const f32, b: []const f32) usize"
+      and _g159_add[0].get("insertText") == "addF32(${1:dst}, ${2:a}, ${3:b})$0",
+      str(_g159_add)[:260])
+_g159_members = {i["label"] for i in g157_comp("var p7 = std.simd.", 5210)}
+check("completion.simd.members",
+      {"Vec4f", "Vec4i", "addF32", "dotF32", "fillI32"} <= _g159_members,
+      str(sorted(_g159_members))[:240])
 
 
 try:

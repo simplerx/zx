@@ -65,3 +65,8 @@
 - **`std/math.zx` 的 extern 形参一律具名**：无名形参虽能编译（`_p0/_p1`），LSP 的 `sigOfStmt` 会把它显示成 C 原型 `sqrt(f64) f64`，snippet 占位落成类型名 `f64`；具名后是 `sqrt(x: f64) f64` / `sqrt(${1:x})$0`。`_p0/_p1` 能力改由 `tests/good/extern-unnamed.zx` 单独守门。**常量不要跟函数同前缀**（`sqrt2` → `root2`），否则输入 `sqrt` 会连带弹出常量，看起来像重复定义。
 - **LSP 假诊断的根因是作用域不对称，不是 zxls 解析**：`runCheck` 写同目录影子文件再 `zxc <影子> --check`，入口单元若不种 `g_std_seeded`，`std/net.zx` 的 `stackAlloc`、`std/fs.zx` 的 `file` 都会假报 E0401。根治 = 入口也种同一张表（纯放宽，不动 zxls、不做按文件名过滤）。`test.sh §158` 直接钉「单文件 --check 零输出」。
 - **守门别拿 libc 名字当样本**：`backend.c libc_declared()` 会把 `sqrt/pow/floor/ceil/fmod/fabs` 等 math.h 已声明的 extern 原型从生成 C 里排除；钉「形参具名」要用会发射的 `cbrt/atan2/hypot`，否则断言恒假（§158 首轮全量唯一假红）。
+
+## §159 std.simd（2026-11-13）
+- **没有向量类型时的 SIMD 就靠下游 C 编译器**：`std/simd.zx` 两层 —— `Vec4f/Vec4i` 是 4 分量值类型（16B、按值传、标量方法）；切片内核（f32 11 个 + i32 3 个）写成最朴素的逐元素单循环，`--release`（-O2）下 zig cc 发 `vaddps %zmm`，dev（-O0）不向量化。**不手工展开**（实测普通循环得到同样的 zmm，展开只让代码长一倍）、不加运行时、不动编译器。
+- 语义契约：按 `min(各 len)` 处理并**返回个数**；逐元素内核允许 `dst` 与输入同块（原地安全）；归约用 4 条累加链（不改浮点顺序、不需 fast-math）；`normalize` 零向量原样返回；`length` 走私有 `extern sqrtf(f32) f32`（`sqrtf` 不在 libc_declared，生成 C 有 `extern float sqrtf(float x);`）。
+- 守门 `tests/good/std-simd.zx`（尾块/别名/不等长/两类型）、`test.sh §159`（release 输出与 dev 一致 + sqrtf 原型 + 单文件检查 + C 前端）、`lsptest` 两条补全断言。实测 4M f32 add×20：dev 118ms/8.4GB/s，release 31ms/约31GB/s。

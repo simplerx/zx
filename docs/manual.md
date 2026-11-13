@@ -359,6 +359,13 @@ if (t.spawn(job, 21)) h {
 // 数学：浮点函数 extern 到 C 运行时的 libm，整数工具是纯 Zx 代码
 std.println("{} {}", std.math.sqrt(16.0), std.math.gcd(12, 18));   // 4 6
 
+// 向量与批量运算：Vec4f/Vec4i 是 4 分量值类型；切片内核在 --release 下
+// 由 C 编译器向量化（dev 档 -O0 不向量化）。dst 可以和输入同一块内存。
+var vo: *[4]f32 = std.stackAlloc(f32, 4);
+_ = std.simd.fillF32(vo[0..4], 1.5);
+_ = std.simd.scaleF32(vo[0..4], vo[0..4], 2.0);
+std.println("{} {}", (vo + 3).0, std.simd.Vec4f.splat(2.0).sum());   // 3 8
+
 // 网络：同步 IPv4 TCP/UDP（Windows Winsock2），init/deinit 包住
 if (!std.net.init()) { return 1; }
 defer std.net.deinit();
@@ -369,8 +376,8 @@ if (std.net.TcpListener.open(0)) ls {
 }
 ```
 
-`std.math` / `std.net` 的完整签名见 `docs/reference.md` §14.11 / §14.12；网络目前
-只有 Windows 版，POSIX 版会保持同一套对外 API。
+`std.math` / `std.simd` / `std.net` 的完整签名见 `docs/reference.md` §14.11 /
+§14.13 / §14.12；网络目前只有 Windows 版，POSIX 版会保持同一套对外 API。
 
 编译器 seed 的内建面（不是 Zx 代码）：`std.print/println/format`、
 `std.heap.page`、`std.stackAlloc/heapAlloc`、`std.file.*`、`std.io.*`、

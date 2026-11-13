@@ -1,0 +1,96 @@
+// std-simd.zx —— std/simd.zx 守门：切片内核（含尾块、别名、不等长）与
+// Vec4f / Vec4i 的 4 分量运算。
+// 向量化本身不在用例里断言：dev 档是 -O0，本来就不产生向量指令；库的契约
+// 是数值语义、长度语义与原地安全（--release 下的 vaddps 记在 decisions §159）。
+// expect-output
+// kernel add: n=10 first=2.5 last=11.5
+// kernel scale: sum=100
+// kernel saxpy: first=1.5 last=10.5
+// kernel clamp: 2 2.5 6 6
+// kernel dot=100 sum=4.5
+// kernel fillabs: 3 3
+// kernel inplace: 2.5 11.5
+// kernel minlen: n=4 last=7.5
+// kernel i32: add=3 sub=-1 fill=-9
+// vec4f: add=(5,6,2,2) len=5 lenSq=25 norm=(0.6,0.8) dot=14 sum=7
+// vec4f: clamp=(2.5,1) lerp=3 abs=4 min=(0,0,0,0) max=(3,4,2,2) approx=true eq=false
+// vec4i: add=3 mul=8 neg=-1 abs=2 min=3 max=3 eq=true
+const std = @mod("std");
+
+pub const main = fn () u8 {
+    var a: *[10]f32 = std.stackAlloc(f32, 10);
+    var b: *[10]f32 = std.stackAlloc(f32, 10);
+    var d: *[10]f32 = std.stackAlloc(f32, 10);
+    var i: usize = 0;
+    while (i < 10) { (a + i).0 = (f32)i + 0.5; (b + i).0 = 2.0; i = i + 1; }
+
+    // 三元内核 + 尾块：10 不是 4 的倍数，最后 2 个元素走标量收尾。
+    let n = std.simd.addF32(d[0..10], a[0..10], b[0..10]);
+    std.println("kernel add: n={} first={} last={}", n, (d + 0).0, (d + 9).0);
+
+    // 二元内核 + 归约（scale 后每个元素翻倍，和正好是原来的 2 倍）。
+    _ = std.simd.scaleF32(d[0..10], a[0..10], 2.0);
+    std.println("kernel scale: sum={}", std.simd.sumF32(d[0..10]));
+
+    _ = std.simd.saxpyF32(d[0..10], a[0..10], b[0..10], 0.5);
+    std.println("kernel saxpy: first={} last={}", (d + 0).0, (d + 9).0);
+
+    _ = std.simd.clampF32(d[0..10], a[0..10], 2.0, 6.0);
+    std.println("kernel clamp: {} {} {} {}", (d + 0).0, (d + 2).0, (d + 6).0, (d + 9).0);
+
+    std.println("kernel dot={} sum={}",
+                std.simd.dotF32(a[0..10], b[0..10]), std.simd.sumF32(a[0..3]));
+
+    // fill 之后原地 abs（dst 与 a 同一块：逐元素内核允许别名）。
+    _ = std.simd.fillF32(d[0..10], -3.0);
+    _ = std.simd.absF32(d[0..10], d[0..10]);
+    std.println("kernel fillabs: {} {}", (d + 0).0, (d + 9).0);
+
+    // 原地加：dst == a，读写的都是同一格。
+    _ = std.simd.addF32(a[0..10], a[0..10], b[0..10]);
+    std.println("kernel inplace: {} {}", (a + 0).0, (a + 9).0);
+
+    // 不等长：按最短的长度处理，返回 4。
+    let short = std.simd.addF32(d[0..4], a[0..10], b[0..10]);
+    std.println("kernel minlen: n={} last={}", short, (d + 3).0);
+
+    // 整数内核。
+    var x: *[8]i32 = std.stackAlloc(i32, 8);
+    var y: *[8]i32 = std.stackAlloc(i32, 8);
+    var z: *[8]i32 = std.stackAlloc(i32, 8);
+    i = 0;
+    while (i < 8) { (x + i).0 = (i32)i + 1; (y + i).0 = 2; i = i + 1; }
+    _ = std.simd.addI32(z[0..8], x[0..8], y[0..8]);
+    _ = std.simd.subI32(z[0..8], x[0..8], y[0..8]);
+    let sub0 = (z + 0).0;
+    _ = std.simd.fillI32(z[0..8], -9);
+    std.println("kernel i32: add={} sub={} fill={}",
+                (x + 0).0 + 2, sub0, (z + 7).0);
+
+    // Vec4f：16 字节的值类型，按值传。
+    let p = std.simd.Vec4f{ .x = 3.0, .y = 4.0, .z = 0.0, .w = 0.0 };
+    let q = std.simd.Vec4f.splat(2.0);
+    let pq = p.add(q);
+    let pn = p.normalize();
+    std.println("vec4f: add=({},{},{},{}) len={} lenSq={} norm=({},{}) dot={} sum={}",
+                pq.x, pq.y, pq.z, pq.w, p.length(), p.lengthSq(), pn.x, pn.y,
+                p.dot(q), p.sum());
+    std.println("vec4f: clamp=({},{}) lerp={} abs={} min=({},{},{},{}) max=({},{},{},{}) approx={} eq={}",
+                p.clamp(1.0, 2.5).x, p.clamp(1.0, 2.5).z,
+                p.lerp(q, 0.5).y, p.neg().abs().y,
+                p.min(std.simd.Vec4f.zero()).x, p.min(std.simd.Vec4f.zero()).y,
+                p.min(std.simd.Vec4f.zero()).z, p.min(std.simd.Vec4f.zero()).w,
+                p.max(q).x, p.max(q).y, p.max(q).z, p.max(q).w,
+                p.approxEq(p, 0.0), p.eq(q));
+
+    // Vec4i：整数向量（回绕语义与 i32 一致）。
+    let ti = std.simd.Vec4i{ .x = 1, .y = 2, .z = 3, .w = 4 };
+    std.println("vec4i: add={} mul={} neg={} abs={} min={} max={} eq={}",
+                ti.add(std.simd.Vec4i.splat(2)).x,
+                ti.mul(std.simd.Vec4i.splat(2)).w,
+                ti.neg().x, ti.neg().abs().y,
+                ti.min(std.simd.Vec4i.splat(3)).w,
+                ti.max(std.simd.Vec4i.splat(3)).x,
+                ti.eq(std.simd.Vec4i{ .x = 1, .y = 2, .z = 3, .w = 4 }));
+    return 0;
+};

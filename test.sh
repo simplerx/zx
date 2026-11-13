@@ -1364,6 +1364,42 @@ for f158c in extern-unnamed seeded-builtins-entry; do
     fi
 done
 
+# §159：std.simd。dev 与 release 是两条不同的代码路径（-O0 / -O2，后者才
+# 向量化），数值语义必须一致；库文件单文件检查不能假报；f32 的 sqrt 走
+# sqrtf 而不是 f32→f64→f32 往返。
+$ZXC tests/good/std-simd.zx --release -o "$TPFX.s159.exe" > "$TPFX.s159.log" 2>&1 || true
+"$TPFX.s159.exe" > "$TPFX.s159.run" 2>&1 || true
+if grep -qF 'kernel add: n=10 first=2.5 last=11.5' "$TPFX.s159.run" \
+   && grep -qF 'kernel minlen: n=4 last=7.5' "$TPFX.s159.run" \
+   && grep -qF 'vec4f: add=(5,6,2,2) len=5 lenSq=25 norm=(0.6,0.8) dot=14 sum=7' "$TPFX.s159.run"; then
+    printf "  ok   §159 release 档内核输出与 dev 一致\n"
+else
+    printf "  FAIL §159 release 档内核输出漂移\n"
+    head -14 "$TPFX.s159.run"; head -6 "$TPFX.s159.log"; fail=1
+fi
+
+$ZXC tests/good/std-simd.zx --emit-c > "$TPFX.s159.c" 2>/dev/null
+if grep -qF 'extern float sqrtf(float x);' "$TPFX.s159.c"; then
+    printf "  ok   §159 Vec4f.length 走 f32 的 sqrtf\n"
+else
+    printf "  FAIL §159 生成了 f64 往返的 sqrt\n"
+    grep -nE 'sqrtf?\(double|sqrt\(' "$TPFX.s159.c" | head -6; fail=1
+fi
+
+if $ZXC std/simd.zx --check > "$TPFX.s159m.log" 2>&1; then
+    printf "  ok   §159 std/simd.zx 单文件检查无假诊断\n"
+else
+    printf "  FAIL §159 std/simd.zx 单文件检查有诊断\n"
+    head -12 "$TPFX.s159m.log"; fail=1
+fi
+
+if $ZXC tests/good/std-simd.zx --check --fe=c > "$TPFX.s159c.log" 2>&1; then
+    printf "  ok   §159 std-simd 在 C 前端通过\n"
+else
+    printf "  FAIL §159 std-simd 在 C 前端失败\n"
+    head -12 "$TPFX.s159c.log"; fail=1
+fi
+
 # 用例会在仓库根留下自己的临时文件：io_fmt.zx 写 io_fmt.tmp，stdfs.zx 建
 # fs_t_dir / fs_t_dir2。跑完统一带走——测试不该往工作区里堆东西。
 rm -rf io_fmt.tmp fs_t_dir fs_t_dir2 2>/dev/null || true
