@@ -2123,7 +2123,7 @@ if (raw) p {
 | `std.heap.page` | `Allocator` | 唯一的现成分配器（malloc/free） |
 | `std.arena.ArenaAllocator` | `init(backing)` → `?Allocator` | 一次性批量释放：`alloc` 推指针，`free` 空操作，`deinit(a)` 全还 |
 | `std.debug_alloc.DebugAllocator` | `init(backing)` → `?Allocator` | 记账分配器：泄漏 / 重复释放 / 长度不符当场报（§13.2） |
-| `std.pool.Pool` | `init(backing)` → `?Pool` | 尺寸分级池：`alloc(n)` → `?*u8` 指向**负载起点**（块头在它之前 16B），`free(p)` 收同一个指针自己反查头，`deinit()` 整批归还 |
+| `std.pool.Pool` | `init(backing)` → `?Pool` | 尺寸分级池：`alloc(n)` → `?*u8` 指向**负载起点**（块头在它之前 16B），`free(p)` 收同一个指针自己反查头；`allocator()` → `Allocator` 视图（ctx 指 this，Pool 必须活得比它久），`deinit()` 整批归还 |
 | `std.print` / `std.println` / `std.format` | 内建 | 见 §11.1 |
 | `std.file.read(alloc, path)` | `?[]const u8` | 整个文件读进分配器给的缓冲，末尾补 0 |
 | `std.file.write(path, data)` / `append` | `bool` | 覆盖写 / 追加写 |
@@ -2216,8 +2216,11 @@ if (std.BufReader.open(al, "big.txt", 4096)) r0 {
 - `std.heap.page`（编译器内建）；
 - `Allocator{ .ctx = …, .alloc = f, .free = g }` 字面量；
 - `if (x) v { … }` 的捕获（初值就是条件表达式）；
-- 工厂调用（`ArenaAllocator.init(…)` / `DebugAllocator.init(…)`），且被调函数
-  体里**恰好一条** `return Allocator{…}`。
+- 工厂调用（`ArenaAllocator.init(…)` / `DebugAllocator.init(…)` /
+  `Pool.allocator()`），且被调函数体里**恰好一条** `return Allocator{…}`。
+  **注意**：容器方法工厂目前实际推不出目标（函数体是延迟检查的，返回字面量
+  里的函数标识符尚未解析），仍是间接调用；见 `decisions.md` §141。上一条
+  `Allocator{…}` 字面量与 `std.heap.page` 是实测可直调的。
 
 任何一条反证成立就放弃，保持间接调用：变量被重新赋值过、被 `&` 取过地址、
 工厂有多条返回。

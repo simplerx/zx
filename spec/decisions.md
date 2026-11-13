@@ -5215,7 +5215,9 @@ seq/magic`，活跃块挂双向链，账本（Tracker）自己从 backing 出、
 - `Allocator{ .alloc = f, .free = g }` 字面量 → `f` / `g` 的符号；
 - `if (x) v { … }` 捕获 → 递归到条件表达式（`Symbol.cap_src`）；
 - 工厂调用 `F.init(…)` → 被调函数体里**恰好一条** `return Allocator{…}`，
-  取那条字面量的对应字段。
+  取那条字面量的对应字段。**但容器方法工厂（`DebugAllocator.init` /
+  `ArenaAllocator.init`）实际走不通，见 §141**：这条是设计意图，不是已生效的
+  能力；`Allocator{…}` 字面量和 `std.heap.page` 两条链才是实测直调的。
 
 否定证据（任一成立就放弃）：变量被赋值过（`Symbol.nassign`）、被 `&` 取过
 地址（`Symbol.escaped`）、工厂有多条返回（多义）。改完的节点是 `NK_IDENT`，
@@ -5275,8 +5277,10 @@ const C = struct {
 - `tests/good/debug-alloc.zx`：正常路径记账（`pushes: len 4 live 1 bytes 32
   peak 32`）、`deinit` 后归零、裸 48B 分配释放。
 - `tests/good/devirt-alloc.zx`：page / 字面量 / 工厂 / 重新绑定四条链，行为
-  一致；生成 C 里 `zx_page_alloc(` / `countAlloc(` / `debug_alloc_trackedAlloc(`
-  三个直调名 + 仍存在的 `\.alloc(`（容器字段那处不可证明）。
+  一致；生成 C 里按**调用点**断言 `zx_page_alloc(a.ctx, 32)` / `countAlloc(b.ctx,
+  16)` / `countFree(b.ctx, …)` 是直调，而工厂链 `d.alloc(d.ctx, 40)` 与运行期
+  链仍是间接（工厂链为什么没直调见 §141）。原先只 grep 三个函数名，定义里
+  本来就有，是假绿。
 - `tests/good/debug-alloc-abort.zx` + test.sh：泄漏 / 重复释放 / 长度不符三条
   致命路径，各起一个进程断言 stdout 报告与 stderr 的 panic 原因（abort 会带走
   测试进程，不能塞进 runner）。
@@ -5438,3 +5442,89 @@ panic —— 只要 `alloc`/`free` 里有任何一处把地址或 `bytes` 算错
 - `tests/good/pool-header-layout.zx`：裸池的头字段 / 解引用 / 对齐，加上
   `Pool over DebugAllocator` 两层头的归还校验（16 行 `expect-output`）。
 - 既有 `tests/good/std-pool.zx` 保持通过（分级、复用、重复释放、大块）。
+
+## §141 Pool.allocator()：把池接进 Allocator 通道（2026-11-13 用户提问）
+
+**用户原话**：「pool 添加 allocator 方法获取 Allocator，是否可行。」
+
+**结论：可行，已实现。** 而且几乎没有语言障碍 —— `Allocator` 是普通结构体
+值（不是接口、没有子类型），`std/arena.zx` 早已用 `Allocator{…}` 字面量
+把有状态分配器接进来了。Pool 要做的是补一层薄适配。
+
+### 1. 三处签名差异
+
+| Allocator 契约 | Pool 现有 API | 适配 |
+|---|---|---|
+| `alloc(ctx, n) ?*u8` | `alloc(self: *Pool, size) ?*u8` | `let pl = (*Pool)c; return pl.alloc(n);` |
+| `free(ctx, p, n) void` | `free(p) bool`（拒绝重复释放） | 吞掉 bool：`_ = pl.free(p);` |
+| 第三个参数 `n` | 不需要（从块头反查档位） | 忽略，绑成 `_`；与 arena 的 `bumpFree` 同一惯例 |
+
+`ctx` 直接装 `(*u8)self`，**不在堆上另造 State**。这是与 arena 的关键差别：
+`ArenaAllocator.init` 直接返回一个 `Allocator`，调用方手里没有可持有的对象，
+状态只好堆分配；Pool 本来就是 `var pp`，ctx 指它即可，零额外分配。
+
+```zx
+pub const allocator = fn (self: *Pool) Allocator {
+    return Allocator{ .ctx = (*u8)self, .alloc = poolAlloc, .free = poolFree };
+};
+```
+
+`poolAlloc` / `poolFree` 是模块级私有函数（与 arena 的 `bumpAlloc` /
+`bumpFree` 对称）。容器方法里引用模块级名字走的是外层作用域，§139 的
+`Symbol.in_agg` 只标记容器体内的函数，两者互不干扰。
+
+### 2. 生命周期（唯一的真约束）
+
+zx 没有生命周期检查，`ctx` 是裸指针，所以：
+
+- Pool 必须活得比这个 `Allocator` 久；
+- 别在取出视图之后再复制/移动那个 Pool 变量（`classes` 是共享的堆指针，
+  副本仍能工作，但 `deinit` 用哪个副本要自己想清楚）；
+- `Pool.deinit()` 之后视图立即失效；
+- 多个视图指向同一个池是安全的 —— 状态都在 `classes` 指向的堆区，
+  用例里验证过「用 a2 分配、用 a 释放」。
+
+### 3. 已验证（`tests/good/pool-allocator.zx`）
+
+直接 `a.alloc/a.free`、喂给 `std.ArrayList(i32)`（20 次 push + deinit）、
+两个视图交叉释放、600000B 大块路径（绕过分级但仍走同一对函数指针）、
+以及 `Pool over DebugAllocator` 两层头 + 转发链：`deinit` 后 `liveBytes == 0`，
+`DebugAllocator.deinit` 不 panic。
+
+### 4. 顺带查出来的：§138 工厂链是假绿（**未修，如实记录**）
+
+给 `allocator()` 写完适配后查 `--emit-c`，发现 `a.alloc(a.ctx, 64)` 仍是
+间接调用。往回追，`devirt-alloc.zx` ③ 的工厂链 `d.alloc(d.ctx, 40)` 也一直
+是间接的 —— §138 的 test.sh 断言只 grep 了 `debug_alloc_trackedAlloc(` 这个
+**函数名**，而函数定义/原型里本来就有，所以「三条链直调」是假的。
+
+根因有两层，都试过并定位清楚：
+
+1. `allocator_target` 的 `NK_CALL` 分支只认 `fs->decl` 是 `NK_DECL`。容器方法
+   的 decl 直接是 `NK_FN`，且 `Type.method(...)` 的 `NK_FIELD` callee 常常没有
+   `sym`（方法符号在类型的方法表里，节点带的是 `->inst` = `Method.fn`）。
+   改用 `callee->inst` 能拿到正确的函数体。
+2. 但 `collect_allocator_returns` 用 `ty_is_allocator(n->a->ty)` 当门槛，
+   而工厂函数体是 `schedule_body` **延迟检查**的：此刻 `return Allocator{…}`
+   的字面量 `ty` 还是空的（诊断 `cnt=0`）。改成按结构判定（`NK_STRUCT_LIT`
+   且有 `.alloc` 字段）后 `cnt=1`，可 `.alloc = trackedAlloc` 那个标识符的
+   `sym` 同样还没填 —— 依然拿不到可直调的目标符号。
+
+彻底修要改检查顺序（等工厂体检查完再做一遍去虚拟化）或做跨模块符号解析，
+范围已经超出「加一个 allocator 方法」，本轮**回退了这些 sema 实验**，不留下
+半吊子。实际影响有限：
+
+- `Allocator{…}` 字面量链不受影响，需要零分发就直接写字面量；
+- release 档 `-O2` 本来就会内联；
+- dev 档工厂返回值多一次取字段 + 间接跳转，与 §138 已写明的
+  「容器字段 `self.alloc`、函数形参消不掉」是同一类代价。
+
+`test.sh` 的 §138 段已改成按**调用点**断言：`zx_page_alloc(a.ctx, 32)` /
+`countAlloc(b.ctx, 16)` / `countFree(b.ctx, …)` 确实直调，而工厂链
+`d.alloc(d.ctx, 40)`、运行期链 `c.alloc(c.ctx, 8)` 确实仍间接。将来若把
+工厂链修好，这条断言会主动提醒同步文档，不会再假绿。
+
+### 守门
+
+- `tests/good/pool-allocator.zx`：`expect-output` 十行，覆盖上面五组场景。
+- `test.sh` §138 断言改为查调用点（不再只看函数名）。

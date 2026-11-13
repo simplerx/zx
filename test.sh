@@ -838,14 +838,21 @@ fi
 
 printf "\n== §138 分配器去虚拟化：能证明目标就直调\n"
 $ZXC tests/good/devirt-alloc.zx --emit-c > "$TPFX.dv.c" 2>/dev/null
-if grep -q 'zx_page_alloc(' "$TPFX.dv.c" \
-   && grep -q 'countAlloc(' "$TPFX.dv.c" \
-   && grep -q 'debug_alloc_trackedAlloc(' "$TPFX.dv.c" \
-   && grep -q '\.alloc(' "$TPFX.dv.c"; then
-    printf "  ok   page / 字面量 / 工厂三条链直调，证明不了的仍是间接\n"
+# 断言要看**调用点**，不能只 grep 函数名：函数定义/原型里本来就有那个名字，
+# 只查名字会让「工厂链根本没去虚拟化」也变绿（§141 查出来的假绿）。
+# 工厂（DebugAllocator.init / Pool.allocator）返回的分配器目前仍是间接调用：
+# 它的函数体是延迟检查的，return Allocator{…} 里的 .alloc 标识符此刻还没有
+# sym/ty，推不出可直调的目标。见 decisions §141。这条刻意断言「仍是间接」，
+# 哪天修好了测试会提醒同步文档。
+if grep -Eq 'zx_page_alloc\([a-z_0-9]+\.ctx, 32\)' "$TPFX.dv.c" \
+   && grep -Eq 'countAlloc\([a-z_0-9]+\.ctx, 16\)' "$TPFX.dv.c" \
+   && grep -Eq 'countFree\([a-z_0-9]+\.ctx,' "$TPFX.dv.c" \
+   && grep -q 'd\.alloc(d\.ctx, 40)' "$TPFX.dv.c" \
+   && grep -Eq 'c_[a-z_0-9]+\.alloc\(c_[a-z_0-9]+\.ctx, 8\)' "$TPFX.dv.c"; then
+    printf "  ok   page / 字面量两条链直调；工厂与运行期分配器仍间接（§141）\n"
 else
     printf "  FAIL 去虚拟化没按预期生效\n"
-    grep -n 'alloc(' "$TPFX.dv.c" | head -n 8
+    grep -n 'alloc(' "$TPFX.dv.c" | head -n 12
     fail=1
 fi
 # 自动内联（§138）：入口模块的小函数在 -O0 也展开

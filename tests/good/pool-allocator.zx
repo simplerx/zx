@@ -1,0 +1,92 @@
+// pool-allocator.zx —— Pool.allocator() 把池接进既有 Allocator 通道。
+//
+// 复用的是 std.ArrayList / DebugAllocator 这些原本就吃 Allocator 的模块，
+// 没有为池另开一套接口。ctx 指向 *Pool 本身，所以多个视图共享同一个池，
+// 也可以用一个视图释放另一个视图发出的块。
+// expect-exit: 0
+// expect-output
+// direct = 12345
+// used64 after free = 0
+// list len = 20
+// list deinit used = 0
+// second view used32 = 1
+// cross view free used32 = 0
+// big = 7
+// B live before = 0
+// B debug_alloc deinit ok
+// done
+const std = module("std");
+
+pub const main = fn () i32 {
+    let p = std.pool.Pool.init(std.heap.page);
+    if (p) pv {
+        var pp = pv;
+        let a = pp.allocator();
+
+        // ① 直接走 Allocator 的两个函数指针
+        let q = a.alloc(a.ctx, 64);
+        if (q) qv {
+            let w = (*u64)qv;
+            w.0 = 12345;
+            std.println("direct = {}", w.0);
+            a.free(a.ctx, qv, 64);
+        } else { return 1; }
+        std.println("used64 after free = {}", pp.used(64));
+
+        // ② 喂给 ArrayList：增长、释放都走池
+        var list = std.ArrayList(i32).init(a);
+        var i: usize = 0;
+        while (i < 20) {
+            _ = list.push((i32)i);
+            i = i + 1;
+        }
+        std.println("list len = {}", list.len);
+        list.deinit();
+        std.println("list deinit used = {}", pp.used(64));
+
+        // ③ 两个视图指向同一个池，交叉释放
+        let a2 = pp.allocator();
+        let r = a2.alloc(a2.ctx, 32);
+        if (r) rv {
+            std.println("second view used32 = {}", pp.used(32));
+            a.free(a.ctx, rv, 32);
+            std.println("cross view free used32 = {}", pp.used(32));
+        } else { return 1; }
+
+        // ④ 大块（> 256KiB）绕过分级，但仍走同一对函数指针
+        let big = a.alloc(a.ctx, 600000);
+        if (big) bb {
+            bb.0 = 7;
+            std.println("big = {}", bb.0);
+            a.free(a.ctx, bb, 600000);
+        } else { return 1; }
+
+        pp.deinit();
+    }
+
+    // ⑤ 池架在 DebugAllocator 上，再用 allocator() 视图跑一遍：
+    //    两层头 + 转发链，任何一笔没归还都会在 deinit 报泄漏并 panic。
+    let da = std.debug_alloc.DebugAllocator.init(std.heap.page);
+    if (da) backing {
+        let p2 = std.pool.Pool.init(backing);
+        if (p2) pv2 {
+            var pp2 = pv2;
+            let a3 = pp2.allocator();
+            var v = std.ArrayList(i32).init(a3);
+            var j: usize = 0;
+            while (j < 8) {
+                _ = v.push((i32)j);
+                j = j + 1;
+            }
+            v.deinit();
+            pp2.deinit();
+        }
+        std.println("B live before = {}",
+            std.debug_alloc.DebugAllocator.liveBytes(backing));
+        std.debug_alloc.DebugAllocator.deinit(backing);
+        std.println("B debug_alloc deinit ok");
+    }
+
+    std.println("done");
+    return 0;
+};
