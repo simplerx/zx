@@ -444,11 +444,14 @@ typedef struct { Node *fn; Module *mod; struct Scope *scope; } Pending;
 static Pending *g_pending;
 static int g_npending, g_cappending;
 
-/* §148：工厂（DebugAllocator.init / Pool.allocator / ArenaAllocator.init）
+/* §148/§149：工厂（DebugAllocator.init / Pool.allocator / ArenaAllocator.init）
  * 住在**惰性加载**的子模块里，调用方 main 的体先查时它还没查过：return
- * 的 Allocator 字面量没有 ty，`.alloc = f` 的标识符也没有 sym。所有体查完
- * 后把这些调用点再证明一遍（见 devirt_retry_all）。 */
-static Node **g_devirt_retry;
+ * 的 Allocator 字面量没有 ty，`.alloc = f` 的标识符也没有 sym。
+ * 反过来，否定证据（nassign / escaped）也可能在别的功能体里、比调用点
+ * 更晚才置上。所以每个候选调用点都登记**原始的 NK_FIELD**，到所有排队体
+ * 查完后用完整信息统一复核一次：该直调的直调，后来被抹源就回退。 */
+typedef struct { Node *call; Node *field; } DevirtPending;
+static DevirtPending *g_devirt_retry;
 static int g_ndr, g_cdr;
 static bool g_devirt_final;
 
@@ -3970,31 +3973,32 @@ static Symbol *allocator_target(Node *e, bool want_alloc, int depth) {
     }
 }
 
-static void devirt_retry_add(Node *n) {
+static void devirt_retry_add(Node *n, Node *field) {
     if (g_ndr == g_cdr) {
         g_cdr = g_cdr ? g_cdr * 2 : 64;
-        g_devirt_retry = realloc(g_devirt_retry, sizeof(Node *) * (size_t)g_cdr);
+        g_devirt_retry = realloc(g_devirt_retry,
+                                 sizeof(DevirtPending) * (size_t)g_cdr);
     }
-    g_devirt_retry[g_ndr++] = n;
+    g_devirt_retry[g_ndr++] = (DevirtPending){ .call = n, .field = field };
 }
 
-/* `a.alloc(a.ctx, n)` / `a.free(a.ctx, p, n)`：证明得了就直调。 */
-static void devirt_allocator_call(Node *n) {
-    if (!n || !n->a || n->a->kind != NK_FIELD || !n->a->name) return;
-    bool want_alloc = !strcmp(n->a->name, "alloc");
-    bool want_free  = !strcmp(n->a->name, "free");
-    if (!want_alloc && !want_free) return;
-    if (n->meth_done) return;                    /* 方法调用：不是字段分发 */
-    if (!n->a->ty || n->a->ty->kind != TY_FN) return;
-    Node *recv = n->a->a;
-    if (!recv || !ty_is_allocator(recv->ty)) return;
+/* 只做证明，不改树。field 必须是调用点**原始**的 NK_FIELD：末轮复核时
+ * n->a 可能已经被换成 NK_IDENT，得靠它拿回接收者。 */
+static Symbol *devirt_prove(Node *n, Node *field) {
+    if (!field || field->kind != NK_FIELD || !field->name) return NULL;
+    bool want_alloc = !strcmp(field->name, "alloc");
+    bool want_free  = !strcmp(field->name, "free");
+    if (!want_alloc && !want_free) return NULL;
+    if (n->meth_done) return NULL;                    /* 方法调用：不是字段分发 */
+    if (!field->ty || field->ty->kind != TY_FN) return NULL;
+    Node *recv = field->a;
+    if (!recv || !ty_is_allocator(recv->ty)) return NULL;
     /* 实参个数这时已经对齐（check_call 前面报过错），签名与字段类型逐字相同 */
-    if (n->nitems != (want_alloc ? 2 : 3)) return;
-    Symbol *tgt = allocator_target(recv, want_alloc, 0);
-    if (!tgt || !tgt->ty || tgt->ty->kind != TY_FN) {
-        if (!g_devirt_final) devirt_retry_add(n);
-        return;
-    }
+    if (n->nitems != (want_alloc ? 2 : 3)) return NULL;
+    return allocator_target(recv, want_alloc, 0);
+}
+
+static void devirt_rewrite(Node *n, Symbol *tgt) {
     Node *id = node_new(NK_IDENT, n->a->line, n->a->col);
     id->name = tgt->name;
     id->sym  = tgt;
@@ -4003,11 +4007,34 @@ static void devirt_allocator_call(Node *n) {
     n->ct = NULL;      /* 别留旧被调（函数指针字段）的编译期折叠结果 */
 }
 
-/* 所有排队的函数体都查过之后再证明一次：惰性子模块里的工厂此刻才有
- * 类型戳与符号。只重试登记过的调用点，不改任何已成功的证明。 */
+/* `a.alloc(a.ctx, n)` / `a.free(a.ctx, p, n)`：能证明就直调；无论成不成
+ * 都登记候选点，给末轮复核留一份原始节点。 */
+static void devirt_allocator_call(Node *n) {
+    if (!n || !n->a || n->a->kind != NK_FIELD) return;
+    Node *field = n->a;
+    if (!g_devirt_final) devirt_retry_add(n, field);
+    Symbol *tgt = devirt_prove(n, field);
+    if (tgt && tgt->ty && tgt->ty->kind == TY_FN) devirt_rewrite(n, tgt);
+}
+
+/* 所有排队的函数体都查过之后，用**完整信息**复核每个候选点：
+ *   - 惰性子模块的工厂此刻才有 sym/ty，第一次证明不了的现在能直调；
+ *   - 别的功能体里后出现的 `a.alloc = f` / `&a.alloc` 此刻已打上
+ *     nassign/escaped，第一次误直调的在这里回退成间接分发（§149）。
+ * 已经改成 NK_IDENT 且仍能证明的点不动。 */
 static void devirt_retry_all(void) {
     g_devirt_final = true;
-    for (int i = 0; i < g_ndr; i++) devirt_allocator_call(g_devirt_retry[i]);
+    for (int i = 0; i < g_ndr; i++) {
+        DevirtPending *e = &g_devirt_retry[i];
+        Node *n = e->call;
+        Symbol *tgt = devirt_prove(n, e->field);
+        if (tgt && tgt->ty && tgt->ty->kind == TY_FN) {
+            if (n->a->kind != NK_IDENT) devirt_rewrite(n, tgt);
+        } else if (n->a->kind == NK_IDENT) {
+            n->a = e->field;      /* 后来被抹源：回退，不回退就是假安全 */
+            n->ct = NULL;
+        }
+    }
     g_devirt_final = false;
     free(g_devirt_retry);
     g_devirt_retry = NULL;

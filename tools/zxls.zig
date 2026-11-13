@@ -8880,8 +8880,28 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                 // KEEP — 类型命名空间"空列表"不等于解析失败：只有字段、
                 // 没有静态成员的嵌套 struct/union 在 .ty 下被语义过滤全
                 // 剔掉时，补一条构造骨架（textEdit 吃掉刚输入的 '.'）。
+                // §149 - 构造骨架的语义是 `T.` -> `T{...}`，T 必须是**已声明的
+                // 容器/类型名**。多段点路径的末段常常只是字段名
+                //（`person.child.`），给它弹 `child{...}` 会把编辑器带进编译
+                // 不过的写法（用户 2026-11-13 截图：tup 取出的值再下钻，
+                // 只弹构造骨架、name/school 一个都不出）。末段不是类型名就
+                // 不兜底：宁可空列表，也不推荐错误写法。
                 if (visible == 0 and !lit_ctx and recv_kind == .ty and prefix.len == 0) {
-                    tyCtorFallback(&list, &seen, text, path, ps - 1, off, decls.items);
+                    var tname = path;
+                    if (std.mem.lastIndexOfScalar(u8, path, '.')) |ld| tname = path[ld + 1 ..];
+                    if (std.mem.indexOfScalar(u8, tname, '(')) |lp| tname = tname[0..lp];
+                    var sf149 = scanFiles(doc, text);
+                    defer sf149.deinit(gpa);
+                    var tprobe: std.ArrayList(Decl) = .empty;
+                    defer tprobe.deinit(gpa);
+                    // `const KT: type = k.GG.F;` 这类**类型值别名**没有容器
+                    // 声明文本，但 `KT.` 的构造骨架是合法的（kchain 守门）。
+                    const is_ty_name = isContainerIn(sf149.items, tname) or
+                        genericBodyOf(sf149.items, tname) != null or
+                        builtinTyMembers(tname, &tprobe) or
+                        isTypeValuedRecv(sf149.items, doc, text, tname, 0);
+                    if (is_ty_name)
+                        tyCtorFallback(&list, &seen, text, path, ps - 1, off, decls.items);
                 }
             } else if (!std.mem.eql(u8, path, "std")) {
                 // 未知容器：不给工作区噪音，宁可空列表

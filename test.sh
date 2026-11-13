@@ -877,6 +877,40 @@ else
     grep -n 'alloc(' "$TPFX.dvn.c" | head -n 12
     fail=1
 fi
+
+printf "\n== §149 已知边界：跨函数后置抹源要回退已证明的调用点\n"
+$ZXC tests/good/devirt-alloc-crossfn.zx --emit-c > "$TPFX.dvx.c" 2>/dev/null
+# useIt() 的体先于 spoil() / main 检查：第一次按 G 的声明初值证明成功，
+# 之后才出现 `G.alloc = cAllocB` / `G = Allocator{…}`。§148 只重试首次
+# 失败的点，不回退已成功的改写 → 生成 `cAlloc(G.ctx, 8)`，spoil 之后
+# useIt 仍走旧函数（假安全）。§149 用原始 NK_FIELD 统一复核并回退。
+if grep -qF 'G.alloc(G.ctx, 8)' "$TPFX.dvx.c" \
+   && grep -qF 'G.free_(G.ctx, p, 8)' "$TPFX.dvx.c" \
+   && ! grep -qF '= cAlloc(G.ctx, 8)' "$TPFX.dvx.c"; then
+    printf "  ok   后置否定证据让已证明的调用点回退成间接分发\n"
+else
+    printf "  FAIL 跨函数后置抹源没回退\n"
+    grep -n 'alloc(' "$TPFX.dvx.c" | head -n 10
+    fail=1
+fi
+$ZXC tests/good/devirt-alloc-crossfn.zx -o "$TPFX.dvx.exe" > /dev/null 2>&1 || true
+"$TPFX.dvx.exe" > "$TPFX.dvx.run" 2>&1 || true
+if grep -q '^cross: 1 1$' "$TPFX.dvx.run"; then
+    printf "  ok   实跑：spoil 后 useIt 走新目标（§148 版会输出 cross: 2 0）\n"
+else
+    printf "  FAIL 回退后行为不对\n"
+    sed -n '1,6p' "$TPFX.dvx.run"
+    fail=1
+fi
+$ZXC tests/good/devirt-alloc-crossfn.zx --emit-c --fe=c > "$TPFX.dvx.fec.c" 2>/dev/null
+if grep -qF 'G.alloc(G.ctx, 8)' "$TPFX.dvx.fec.c" \
+   && ! grep -qF '= cAlloc(G.ctx, 8)' "$TPFX.dvx.fec.c"; then
+    printf "  ok   --fe=c 下同样回退\n"
+else
+    printf "  FAIL --fe=c 下没回退\n"
+    fail=1
+fi
+
 # 自动内联（§138）：入口模块的小函数在 -O0 也展开
 if [ "$(grep -c '^ZX_INLINE ' "$TPFX.dv.c")" -ge 1 ]; then
     printf "  ok   小函数自动带 ZX_INLINE（dev 档 -O0 也内联）\n"

@@ -5926,7 +5926,70 @@ unwrap、复制、传参都可能产生副本；堆上那一个 `u64` 由所有�
 间接分发，双前端实跑 `w: ok` / `esc: ok`。`devirt-alloc.zx` 四条链实跑输出
 不变。
 
-已知边界：调用点若在另一个函数体置上 `nassign`/`escaped` **之前**就检查并
-改写，末轮不会复核已成功的证明（不回退）。当前 std 的分配器都是函数内的
-局部值，按语句顺序检查，未触发；跨函数共享全局分配器时若要严格证明，得把
-改写全部推迟到末轮统一做，代价是 `mark_uses` 要跟着改。本轮不做。
+当时留下的已知边界（调用点先检查并直调、另一函数体之后才置上
+`nassign`/`escaped` 时不回退）已在下一节 §149 关闭。
+
+## §149 元组取值的嵌套成员补全 + 去虚拟化末轮双向复核（2026-11-13）
+
+### LSP：`tup.2` 取出的值再下钻只弹构造骨架
+
+用户截图：`let person: Person = tup.2;` 之后 `var child = person.child.`
+只弹一条 `child{…} 构造实例 · struct { name: …, school: … }`，
+`name` / `school` 一个都不出。
+
+`child{…}` 来自 `tyCtorFallback`：`recv_kind == .ty` 且成员被 `.ty`
+命名空间过滤成空时，它用 textEdit 吃掉刚输入的 `.`，把 `T.` 改写成
+`T{ .f = … }`。detail 里的 `struct { name, school }` 说明字段**已经解析
+出来**，只是被当成类型命名空间的成员剔掉了。这个兜底的前提是「接收者是
+一个类型名」，而多段点路径的末段往往只是字段名（`person.child`），给它弹
+构造骨架会把编辑器带进编译不过的写法。另外当前 `bin/zxls.exe` 在四种写法
+（有无显式标注、无空格字面量、同名容器干扰、容器定义跨文件）下都能正确
+出 `name` / `school`；截图与 §145 记录的旧链现象逐字吻合——Zed 里的
+zxls 进程大概率是 exe 替换前启动的，替换后需重启 Zed 重新协商 capabilities。
+
+修法（`tools/zxls.zig`）：`tyCtorFallback` 前先判接收者末段是不是**真的
+是类型名**——`isContainerIn` / `genericBodyOf` / `builtinTyMembers` /
+`isTypeValuedRecv` 命中一条才兜底。末段含 `(` 先截到 `(`（泛型实例
+`X(i32).` 的骨架仍是 `X{…}`）；`const KT: type = k.GG.F;` 这类**类型值
+别名**没有容器声明文本，靠 `isTypeValuedRecv` 保留（kchain 守门）。
+
+守门：`tools/lsptest.py` 的 §145 fixture 加 `let person2: Pv145Person =
+tup.2;`（显式标注）与 `var ch2 = person2.child.` / `person2.child.` 两个
+位置，四条断言：出 `name`/`age`/`child`、出 `name`/`school`、**不出任何
+构造骨架**、嵌套成员齐全。旧 exe 下 `completion.tupleIdx.child.assign`
+与 `.members` 两条 FAIL（`[]`），新 exe 411 项全过。
+
+### 编译器：§148 的已知边界关闭
+
+边界复现（`tests/good/devirt-alloc-crossfn.zx`）：模块级 `var G` 是
+Allocator，`useIt()` 通过 `G.alloc(...)` 分发；`spoil()` 在**另一个函数体**
+里把 `G.alloc` 换成 `cAllocB`。函数体按队列顺序检查，`useIt` 先查时 `G`
+还没打 `nassign`，第一次证明成功并直调；`spoil` 之后才置上否定证据。
+§148 的末轮只重试「首次证明失败」的点，不回退已成功的改写，生成
+`cAlloc(G.ctx, 8)`——`spoil` 之后 `useIt` 仍走旧函数，是假安全。
+
+修法（`src/sema.c`）：把 `devirt_allocator_call` 拆成 `devirt_prove` /
+`devirt_rewrite`，用 `DevirtPending{call, field}` 登记**每一个**候选点的
+原始 NK_FIELD（不再只登记失败点）。`devirt_retry_all()` 在所有排队体查完
+后用完整信息统一复核：证明不了且已改成 NK_IDENT 的**回退**成原始
+NK_FIELD；第一次证明不了、此刻能证明的补上直调；仍能证明的不动。这样
+无论工厂体惰性加载、还是否定证据后置，最终状态都基于完整信息。没采用
+「把改写全推迟到末轮」：那要改检查期时序并牵动 `mark_uses`，双向复核只
+多存一个指针，行为等价、风险更小。
+
+守门：`test.sh` §149 按调用点断言 `G.alloc(G.ctx, 8)` /
+`G.free_(G.ctx, p, 8)` 存在、`cAlloc(G.ctx, 8)` 不存在，`--fe=c` 复核；
+再加**行为级**断言——`cAlloc` / `cAllocB` 各记一次命中，回退正确时实跑
+`cross: 1 1`，§148 版输出 `cross: 2 0`（已用 §148 版 exe 对照验证）。
+`sh test.sh` 全绿（LSP 411 项、snake --sim 300 局）。
+
+### 本轮发现但未修的既有缺口（不在本轮范围）
+
+- 模块级 `var` 的**聚合字面量初值**不发进静态初始化：`var G = Allocator{…}`
+  生成 `static ZxS2 G = { {0}, {0}, {0} }`，`zx_init_main()` 为空，解引用
+  `G.alloc` 直接段错误；`const INIT = Allocator{…}; var G = INIT;` 同样全 0。
+  守门用例因此在 `main` 里显式补一次赋值（它同时也是一个后置否定证据）。
+  要修得动后端的模块级变量静态/运行时初始化。
+- 直接写 `std.heap.page.alloc(null, n)`（不经局部变量）会报
+  `E0401 unknown identifier 'zx_page_alloc'`：去虚拟化造的 C 运行时符号
+  不在当前作用域里。§148 版 exe 同样报错，与本轮无关；本轮用例绕开它。

@@ -3288,6 +3288,10 @@ const main = fn () i32 {
     var tup = {1, 22, Pv145Person{ .name = "w", .age = 100, .child = .{ .name = "c", .school = "s" } }};
     let person = tup.2;
     person.
+    let person2: Pv145Person = tup.2;
+    person2.
+    var ch2 = person2.child.
+    person2.child.
     let arr: *[2]Pv145Person = &.{
         Pv145Person{ .name = "a", .age = 1, .child = .{ .name = "x", .school = "y" } },
         Pv145Person{ .name = "b", .age = 2, .child = .{ .name = "x", .school = "y" } },
@@ -3354,6 +3358,21 @@ check("completion.tuple.noEmptyLabel",
 # 三层内联 struct：anonTyOfPath 每一段都重新判匿名串 / 具名容器，深度不设限。
 _pv_deep = pv145_labels("    d.lvl.inner.")
 check("completion.nested.threeLevel", {"leaf", "tag"} <= _pv_deep, str(sorted(_pv_deep)))
+
+# §149 - tup 取出的值（含显式类型标注）再下钻内联 struct：
+# 出 name/school，绝不弹 `child{...}` 构造骨架。值的字段访问不是类型命名空间，
+# 给构造实例会把编辑器带进编译不过的写法（用户 2026-11-13 截图）。
+_pv_p2 = pv145_labels("    person2.")
+check("completion.tupleIdx.annotated", {"name", "age", "child"} <= _pv_p2,
+      str(sorted(_pv_p2)))
+_pv_p2c = pv145_labels("    var ch2 = person2.child.")
+check("completion.tupleIdx.child.assign", {"name", "school"} <= _pv_p2c,
+      str(sorted(_pv_p2c)))
+check("completion.tupleIdx.child.noCtor",
+      not any("{" in l and "..." in l for l in _pv_p2c), str(sorted(_pv_p2c)))
+_pv_p2d = pv145_labels("    person2.child.")
+check("completion.tupleIdx.child.members", {"name", "school"} <= _pv_p2d,
+      str(sorted(_pv_p2d)))
 
 _rid += 1
 send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/hover", "params": {

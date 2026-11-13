@@ -1,0 +1,51 @@
+// devirt-alloc-crossfn.zx —— 去虚拟化的跨函数后置抹源（§149）。
+//
+// `G` 是模块级分配器：useIt() 通过 G.alloc(...) 分发，spoil() 在**另一个
+// 函数体**里把分发目标换成 cAllocB。函数体按队列顺序检查——useIt 先查时
+// G 还没被打上 nassign，会被证明成直调；spoil 之后才置上否定证据。
+// §148 的末轮只重试「首次证明失败」的调用点，不回退已成功的改写，生成
+// 代码里会留下 `cAlloc(G.ctx, 8)`：spoil 之后 useIt 仍走旧函数，是假安全。
+// §149 登记每个候选点的原始 NK_FIELD，所有体查完后统一复核，证明不了
+// 就回退成间接分发。
+//
+// 行为级守门：cAlloc / cAllocB 各记一次命中。回退正确时两次 useIt 分别
+// 命中 A、B（`cross: 1 1`）；误直调时两次都命中 A（`cross: 2 0`）。
+// test.sh 另按调用点 grep 生成代码，双前端都验。
+// expect-exit: 0
+// expect-output
+// cross: 1 1
+const std = @mod("std");
+
+var hitsA = 0;
+var hitsB = 0;
+
+const cAlloc = fn (_: ?*u8, _: usize) ?*u8 {
+    hitsA = hitsA + 1;
+    return null;
+};
+const cAllocB = fn (_: ?*u8, _: usize) ?*u8 {
+    hitsB = hitsB + 1;
+    return null;
+};
+const cFree = fn (_: ?*u8, _: *u8, _: usize) void { };
+
+var G = Allocator{ .ctx = null, .alloc = cAlloc, .free = cFree };
+
+const useIt = fn () void {
+    if (G.alloc(G.ctx, 8)) p { G.free(G.ctx, p, 8); }
+};
+
+const spoil = fn () void {
+    G.alloc = cAllocB;
+};
+
+pub const main = fn () i32 {
+    // 模块级 var 的**聚合字面量初值**当前不发进 zx_init_main（后端静态初始化
+    // 一律清零），这里显式补一次；它同样是一个比 useIt 更晚检查的否定证据。
+    G = Allocator{ .ctx = null, .alloc = cAlloc, .free = cFree };
+    useIt();
+    spoil();
+    useIt();
+    std.println("cross: {} {}", hitsA, hitsB);
+    return 0;
+};
