@@ -6,13 +6,13 @@
 - 能力线用 **git commit + 守门用例** 保存；实现被删会连挂，**不许删用例来变绿**。定位历史：`git log --oneline --grep=关键词`。
 - 改动完成即提交推送；精确指定路径，不捎带并行任务的工作区改动。每轮只测本轮结果，全部做完再统一全量。用户偏好实际运行验证交付。Git Bash 多行提交用 `printf '%s\n' … | git commit -F -`。
 - 控制台输出（进度/诊断/help/usage/explain）**只用 ASCII**；中文只进注释与写进文件的模板。GBK 控制台会把 `—`/`…` 渲成乱码。
-- **行尾**：`src/{main,parse,sema}.c`、`src/{ast.h,astload.c,ty.c,ty.h}`、`tools/{zxls.zig,lsptest.py}`、`std/std.zx`、`test.sh` 是 **CRLF**（**ast.h / sema.c 是混合**，同一文件里两种都有）；`src/backend.c`、`src/errors.c`、`bootstrap/`、`docs/`、`spec/`、memory 是 **LF**。Python 一律 bytes 读写，改完 `git diff --numstat` 确认没炸整文件（炸了就按 HEAD 每条行尾回填）。
+- **行尾**：`src/{main,parse,sema}.c`、`src/{astload.c,ty.c,ty.h}`、`tools/{zxls.zig,lsptest.py}`、`std/std.zx` 是 **CRLF**；`src/ast.h`、`spec/decisions.md` 是**混合**（同一文件两种都有）；`src/backend.c`、`src/errors.c`、`bootstrap/`、`docs/`、`test.sh`、`build.sh`、memory 是 **LF**。Python 一律 bytes 读写，改完 `git diff --numstat` 确认没炸整文件（炸了就按 HEAD 每条行尾回填）。
 - `// expect-output` 两种写法 runner 都认；runner **合并 stdout/stderr** 比对，期望里含相对路径+行号 → 编译必须传相对路径。bad 用例用 `// expect: <诊断子串>`。`tests/good|bad/*.zx` 自动发现，新增文件不用改 test.sh（但特性级断言要单写一节）。
-- 改 `tools/zxls.zig` 后必须确认 `bin/zxls.exe` 真被替换（Zed 锁 exe 会让 build skip：`mv bin/zxls.exe bin/zxls-bak.exe`，再 `./.toolchain/zig.exe build-exe tools/zxls.zig -O ReleaseFast -femit-bin=bin/zxls.exe`），用户要重启 Zed。验证：`ZXLS_BIN=bin/zxls.exe python tools/lsptest.py`；编译器改动 `sh build.sh` 再 `sh test.sh`（当前基线 passed 426 / failed 0 + LSP SMOKE ALL PASS）。
+- 改 `tools/zxls.zig` 后必须确认 `bin/zxls.exe` 真被替换（Zed 锁 exe 会让 build skip：`mv bin/zxls.exe bin/zxls-bak.exe`，再 `./.toolchain/zig.exe build-exe tools/zxls.zig -O ReleaseFast -femit-bin=bin/zxls.exe`），用户要重启 Zed。验证：`ZXLS_BIN=bin/zxls.exe python tools/lsptest.py`；编译器改动 `sh build.sh` 再 `sh test.sh`（当前基线 passed 429 / failed 0 + LSP SMOKE ALL PASS）。
 
 ## 语言事实（写文档/示例前必看）
 - **无 trait / interface / 重载 / 子类型**；函数指针可作 struct 字段，调用点靠 `(T)bits` 强转。
-- 值内建十个：`@mod @type @shim @memcpy @memmove @memset @link @compileError @trap @select`；另有**类型内建** `@Vec(T, N)`（只在类型位置/类型值，**不进 `check_builtin`**）。`@type(x)` 是唯一反射；旧拼写报 **E0211**。
+- 值内建十个：`@mod @type @shim @memcpy @memmove @memset @link @compileError @trap @select`；另有**类型内建** `@Vec(T, N)`（只在类型位置/类型值，**不进 `check_builtin`**）。掩码判真是值内建 `@any` / `@all`（§164，只接整数向量，落成随类型发的 `zx_any_*` / `zx_all_*` 助手）。`@type(x)` 是唯一反射；旧拼写报 **E0211**。
 - **转换只有 `(T)val`**；无 GC/析构/RAII/生命周期/异常（只有 `!T`）/协程/宏/运算符重载/`private`/默认参数/变参。函数定义只有 `const F = fn(…) ret {…};`（**没有 `pub fn`**，pub 是前缀修饰符）。
 - **容器方法不能泛型（E0701）**；容器字段/方法/静态成员默认私有，跨文件访问报 **E0404**；enum / union(enum) 变体恒公开。锚点 `sema.c member_hidden/deny_member/stamp_mod`。
 - **没有数组值类型**：`*[N]T` 就是指针（`TY_PTR`+`has_len`，`ty_size`→8），长度只写在类型里；`[]T` 是 `{ptr,len}` 16B。存储：`std.stackAlloc` / `heapAlloc(alloc,T,N)`（N 编译期常量，否则 E0501）/ `heapSlice(alloc,T,n)`（运行期 n → `[]T`）/ `&.{…}`（匿名存储糖）。**表述红线**：`&xs` 是取指针变量的地址，文档不许写"数组的地址"。
