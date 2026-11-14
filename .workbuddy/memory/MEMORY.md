@@ -1,6 +1,6 @@
 # zx 项目长期约定
 
-> 根因、守门用例、实测数据都在 `spec/decisions.md` §N；本文件只留跨会话必须遵守的红线与索引。当前版本 **1.4.0**。
+> 根因、守门用例、实测数据都在 `spec/decisions.md` §N；本文件只留跨会话必须遵守的红线与索引。当前版本 **1.4.2**。
 
 ## 元规则
 - 能力线用 **git commit + 守门用例** 保存；实现被删会连挂，**不许删用例来变绿**。定位历史：`git log --oneline --grep=关键词`。
@@ -8,7 +8,7 @@
 - 控制台输出（进度/诊断/help/usage/explain）**只用 ASCII**；中文只进注释与写进文件的模板。GBK 控制台会把 `—`/`…` 渲成乱码。
 - **行尾**：`src/{main,parse,sema}.c`、`src/{astload.c,ty.c,ty.h}`、`tools/{zxls.zig,lsptest.py}`、`std/std.zx` 是 **CRLF**；`src/ast.h`、`spec/decisions.md` 是**混合**（同一文件两种都有）；`src/backend.c`、`src/errors.c`、`bootstrap/`、`docs/`、`test.sh`、`build.sh`、memory 是 **LF**。Python 一律 bytes 读写，改完 `git diff --numstat` 确认没炸整文件（炸了就按 HEAD 每条行尾回填）。
 - `// expect-output` 两种写法 runner 都认；runner **合并 stdout/stderr** 比对，期望里含相对路径+行号 → 编译必须传相对路径。bad 用例用 `// expect: <诊断子串>`。`tests/good|bad/*.zx` 自动发现，新增文件不用改 test.sh（但特性级断言要单写一节）。
-- 改 `tools/zxls.zig` 后必须确认 `bin/zxls.exe` 真被替换（Zed 锁 exe 会让 build skip：`mv bin/zxls.exe bin/zxls-bak.exe`，再 `./.toolchain/zig.exe build-exe tools/zxls.zig -O ReleaseFast -femit-bin=bin/zxls.exe`），用户要重启 Zed。验证：`ZXLS_BIN=bin/zxls.exe python tools/lsptest.py`；编译器改动 `sh build.sh` 再 `sh test.sh`（当前基线 passed 427 / failed 0 + LSP 冒烟 450 项全过 / SMOKE ALL PASS；§166 已根治旧的 diagnostics.* 假崩溃）。
+- 改 `tools/zxls.zig` 后必须确认 `bin/zxls.exe` 真被替换（Zed 锁 exe 会让 build skip：`mv bin/zxls.exe bin/zxls-bak.exe`，再 `./.toolchain/zig.exe build-exe tools/zxls.zig -O ReleaseFast -femit-bin=bin/zxls.exe`），用户要重启 Zed。验证：`ZXLS_BIN=bin/zxls.exe python tools/lsptest.py`；编译器改动 `sh build.sh` 再 `sh test.sh`（当前基线 passed 427 / failed 0 + LSP 冒烟 454 项全过 / SMOKE ALL PASS；§166 已根治旧的 diagnostics.* 假崩溃）。
 
 ## 语言事实（写文档/示例前必看）
 - **无 trait / interface / 重载 / 子类型**；函数指针可作 struct 字段，调用点靠 `(T)bits` 强转。
@@ -31,7 +31,7 @@
 - **方法接收者（§151/§152）**：首参只有 `Self` / `*Self`；`Self` 不可变，按 `ty_size` 选 ABI（`ZX_SELF_VALUE_MAX=16`，>16 按 `const Self*`）；`self_by_ptr` 标记，后端发 `(*self)`；`&self` 恒是 `*const Self`，写入 E0403、返回地址 E0503。**size==0 不退化成关联函数**，后端补 `uint8_t _zx_pad;`。
 - **LSP（§136/137、§149-§150、§159-§162）**：inlay/hover/snippet 三处配套；命名空间三分、类型与实例列表不许有交集；`tyMembersOf` 统一类型串→成员表；`tyCtorFallback` 只在末段确为类型名时兜底；`namedTypeNear` 挡空 needle；**fixture 容器名全局唯一**；0 项补全大多是 `.ty` 语义过滤；`sigOfStmt` 取两种 fn 拼写里**最靠前**的那个。
 - **Task 并发（§125/128/129）**：`Task.` 7 项、`t.` 12 项、`Group` 4 项；scope/chan/timer 不对外；`std.io` 纯同步。
-- **std 库（§157-§161）**：`std/math.zx`（`extern "C"` 直接公开 C 符号，形参**必须具名**，常量别跟函数同前缀）、`std/net.zx`（同步 IPv4 TCP/UDP，`@link("ws2_32")`，只 Windows）、`std/simd.zx`（§165 起是**纯 Zx 数学层**：形参就是 `@Vec(f32,4)`，掩码、度量、逐分量、cross/reflect、四元数 `Quat`；**`simd_impl.c` 已删**，标准库现在一份 shim 都没有）。`min/max/clamp/abs` 走「比较 + select」，NaN 原样留下、不清 -0.0 符号位；`dot` 加法顺序固定 `((0+1)+(2+3))`。
+- **std 库（§157-§161、§165、§167）**：`std/math.zx`（`extern "C"` 直接公开 C 符号，形参**必须具名**，常量别跟函数同前缀）、`std/net.zx`（同步 IPv4 TCP/UDP，`@link("ws2_32")`，只 Windows）、`std/simd.zx`（§165 起是**纯 Zx 数学层**：形参就是 `@Vec(f32,4)`，掩码、度量、逐分量、cross/reflect、四元数 `Quat`；§167 起再加列主序 `Mat3`(3 列) / `Mat4`(4 列) 与四元数互转；**`simd_impl.c` 已删**，标准库现在一份 shim 都没有）。`min/max/clamp/abs` 走「比较 + select」，NaN 原样留下、不清 -0.0 符号位；`dot` 加法顺序固定 `((0+1)+(2+3))`。
 - **`@shim("impl.c")`（§160）**：自包含 C TU，真实路径编成独立 `.o`（报错行号即真实行号，编不过报 **B1004** 且不许说 compiler bug；缺文件 **E0602**）；路径相对写它的 `.zx`；按完整路径去重；`--emit-c` 贴末尾。旧名 `@cShim` 报 E0211。
 - **`@Vec` 实现锚点**：`ty.h TY_VEC`、`ast.h NK_VEC_TYPE`（末尾追加）、`bootstrap/parse.zx` 的 `vec` + **值位置入口**（只在类型位置接会报 unknown builtin；别名与泛型实参都写在值位置）。后端 `tsuffix/tn/ensure_type/ctype` + `.len/.N/下标/lvalue/cast/描述符`。**LSP**：`vecHead/vecTyParse/vecBinOp` + `inferExprType` 三分支 + `addVecMembers`；**inlay 类型串白名单必须含 `@`**，且 inlay 遇第一个语法错就停。
 
@@ -51,6 +51,18 @@
 - **LSP 导入补全不能扫 `g_std_dir`（§166）**：std/ 里的 .zx 是 std 模块内部文件，
   顶层入口只有 `@mod("std")`。`addImportModules` 走专用 `modImportDirsInto`；
   否则推荐 `@mod("arena")` 这种编译不过的 E0601。补全 detail 不许露 snippet `$1`。
+- **大聚合的 ABI 红线（§167 实测）**：① 别写 `Mat4.fromMat3(m: Mat3)` 这类
+  「跨容器关联函数收 >16B 聚合」——同一函数若又被 `self`（`*const Mat3`）形态
+  调一次，形参会被钉成指针，所有传值调用报 **E0301**。互转统一走 `toXxx(self)`
+  方法链。② >16B 容器的方法按 `const Self*` 收接收者，**临时值不能调方法**
+  （`Mat4.identity().mul(m)` 报 **E0403**），中间值先 `let tmp = ...;`。Quat 正好
+  16B 按值，不受影响。
+- **矩阵数值契约（§167）**：`determinant` 与 `invert` 共用同一批 3x3 余子式
+  （`minors` + `drop0..drop3` + `det3=dot3(a,cross(b,c))`），是通用伴随矩阵，
+  投影矩阵也能求逆；`det==0` 时 `invert` 返回零矩阵。`toQuat` 只认纯旋转矩阵，
+  结果可能是 `q` 或 `-q`（比较旋转效果，别比分量）。
+- **LSP 补全两套列表（§167）**：`Type.` 只列关联函数（构造入口），实例 `.` 才列
+  方法；写守门时别把方法断言挂在 `Mat4.` 上。
 - **影子文件要先抹属性**：`hideFile` 设 HIDDEN|TEMPORARY，LSP 被杀会留下点文件；
   Windows 对 HIDDEN 文件 `CREATE_ALWAYS` 重写 ACCESS_DENIED，会让那个文档永久没诊断。
   `unhideFile` 写前/删前各调一次。
