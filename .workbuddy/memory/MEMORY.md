@@ -8,7 +8,7 @@
 - 控制台输出（进度/诊断/help/usage/explain）**只用 ASCII**；中文只进注释与写进文件的模板。GBK 控制台会把 `—`/`…` 渲成乱码。
 - **行尾**：`src/{main,parse,sema}.c`、`src/{astload.c,ty.c,ty.h}`、`tools/{zxls.zig,lsptest.py}`、`std/std.zx` 是 **CRLF**；`src/ast.h`、`spec/decisions.md` 是**混合**（同一文件两种都有）；`src/backend.c`、`src/errors.c`、`bootstrap/`、`docs/`、`test.sh`、`build.sh`、memory 是 **LF**。Python 一律 bytes 读写，改完 `git diff --numstat` 确认没炸整文件（炸了就按 HEAD 每条行尾回填）。
 - `// expect-output` 两种写法 runner 都认；runner **合并 stdout/stderr** 比对，期望里含相对路径+行号 → 编译必须传相对路径。bad 用例用 `// expect: <诊断子串>`。`tests/good|bad/*.zx` 自动发现，新增文件不用改 test.sh（但特性级断言要单写一节）。
-- 改 `tools/zxls.zig` 后必须确认 `bin/zxls.exe` 真被替换（Zed 锁 exe 会让 build skip：`mv bin/zxls.exe bin/zxls-bak.exe`，再 `./.toolchain/zig.exe build-exe tools/zxls.zig -O ReleaseFast -femit-bin=bin/zxls.exe`），用户要重启 Zed。验证：`ZXLS_BIN=bin/zxls.exe python tools/lsptest.py`；编译器改动 `sh build.sh` 再 `sh test.sh`（当前基线 passed 427 / failed 0；LSP 冒烟的 diagnostics.* 三条在本沙箱必然失败——cmd.exe 被拦，zxfe 经 cmd 拿不到影子文件，§164 基线同样复现）。
+- 改 `tools/zxls.zig` 后必须确认 `bin/zxls.exe` 真被替换（Zed 锁 exe 会让 build skip：`mv bin/zxls.exe bin/zxls-bak.exe`，再 `./.toolchain/zig.exe build-exe tools/zxls.zig -O ReleaseFast -femit-bin=bin/zxls.exe`），用户要重启 Zed。验证：`ZXLS_BIN=bin/zxls.exe python tools/lsptest.py`；编译器改动 `sh build.sh` 再 `sh test.sh`（当前基线 passed 427 / failed 0 + LSP 冒烟 450 项全过 / SMOKE ALL PASS；§166 已根治旧的 diagnostics.* 假崩溃）。
 
 ## 语言事实（写文档/示例前必看）
 - **无 trait / interface / 重载 / 子类型**；函数指针可作 struct 字段，调用点靠 `(T)bits` 强转。
@@ -43,6 +43,17 @@
 - zxls 文档表：换/关文档先 `dirty.fetchRemove(path)` 再 free，否则悬垂键扩容 panic。
 - 诊断码由 `src/zxc.c` 的 `g_rules` strstr 顺序决定；新规则放 `found \`` 这类笼统规则**之前**。加码要同时改 `zxc.c` / `errors.c` / `docs/errors.md`（含 `id="eNNNN"` 锚点）/ reference §15 计数。
 - `zx_debug_panic` 先 `fflush(stdout)`：abort 不走退出清理，重定向时报告会整块丢。
+- **前端 spawn 不经命令解释器（§166）**：`src/fe.c fe_spawn_zxfe` 在 Windows 用
+  `CreateProcessA` + 可继承日志句柄填 `STARTUPINFOA.hStdError`，zxls 的 `runCheck`
+  也直接 `argv={zxc,shadow,--check}`。以前 `system("zxfe ... 2> log")` 两层壳，
+  受限宿主里重定向建不出来 → rc=1 + 空日志 → 编辑器把正常 `@mod` 标成
+  "compiler bug"。**关缓存（`ZXC_NO_AST_CACHE=1`）才测得到这段**。
+- **LSP 导入补全不能扫 `g_std_dir`（§166）**：std/ 里的 .zx 是 std 模块内部文件，
+  顶层入口只有 `@mod("std")`。`addImportModules` 走专用 `modImportDirsInto`；
+  否则推荐 `@mod("arena")` 这种编译不过的 E0601。补全 detail 不许露 snippet `$1`。
+- **影子文件要先抹属性**：`hideFile` 设 HIDDEN|TEMPORARY，LSP 被杀会留下点文件；
+  Windows 对 HIDDEN 文件 `CREATE_ALWAYS` 重写 ACCESS_DENIED，会让那个文档永久没诊断。
+  `unhideFile` 写前/删前各调一次。
 - 守门常客：`demo/snake.zx --sim` 300 局、`casts-one-way.zx`、`tests/bad/removed-*.zx`（E0211）、`tests/multibad/private-member`。
 - 测试环境坑：`test.sh` 的 fixture 是 `.tmp/zxc_test.<PID>.cli.proj`，Windows 会复用 PID；沙箱里 `rm -rf` 可能静默失败留下旧 `zx.json`，让 5 条 CLI 冒烟假红。先清残留再重跑。
 

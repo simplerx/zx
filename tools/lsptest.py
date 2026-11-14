@@ -1088,6 +1088,7 @@ glu
 foo(glu)
 st
 glC
+are
 '''
 ipath = os.path.join(SRC_DIR, "importprobe.zx")
 open(ipath, "w", encoding="utf-8").write(IPROBE)
@@ -1136,6 +1137,18 @@ items = ip_items(IPROBE, off, 94)
 check("completion.importModule.noWorkspaceNoise",
       "glClearColor" not in {i["label"] for i in items},
       str([i["label"] for i in items])[:240])
+# §166：std/ 里的 .zx 是 std 模块的内部文件，不是顶层模块。以前补全会把
+# std/arena.zx 当 "arena" 推荐，用户一接受就是 @mod("arena") -> E0601。
+off = IPROBE.index("\nare\n") + len("\nare")
+items = ip_items(IPROBE, off, 95)
+check("completion.importModule.noStdInternals",
+      not any(i.get("label") in ("arena", "math", "simd", "json", "fs")
+              for i in items if i.get("kind") == 9),
+      str([i.get("label") for i in items if i.get("kind") == 9])[:240])
+# detail 是给用户看的，不该把 snippet 占位符 $1 露出来
+check("completion.importModule.detailNoSnippetVar",
+      bool(imp) and all("$1" not in i.get("detail", "") for i in imp),
+      str([i.get("detail") for i in imp])[:240])
 # 已经写过绑定的名字不再提示导入
 IBOUND = '''const glue = @mod("glue");
 

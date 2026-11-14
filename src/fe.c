@@ -21,6 +21,9 @@
 
 static bool g_fe_zx = true;
 static const char *g_fe_argv0 = NULL;
+#ifdef _WIN32
+static unsigned long g_fe_spawn_winerr = 0;  /* CreateProcess/CreateFile 失败原因 */
+#endif
 
 void fe_set_mode(bool use_zx) { g_fe_zx = use_zx; }
 bool fe_is_zx(void) { return g_fe_zx; }
@@ -219,6 +222,88 @@ static int fe_replay_stderr(const char *logpath) {
     return nlines;
 }
 
+/* zxfe 的启动：不再借 cmd.exe 的 `2>` 重定向。
+ *
+ * 以前是 system("zxfe.exe ... 2> <log>")，两层 cmd（LSP 拉 zxc 一层、zxc
+ * 拉 zxfe 一层）。宿主环境一旦限制命令解释器创建文件，重定向就失败，
+ * 子进程压根没跑起来，rc=1、日志为空——上层只看到一句
+ * "the Zx frontend failed without a diagnostic ... this is a compiler bug"，
+ * 编辑器里连正常的 `@mod("std")` 都会被标红说编译器崩了。
+ * 直接 CreateProcess + 把 stderr 句柄指到日志文件：不需要 shell，
+ * 少一层进程，也少一类"其实不是编译器问题"的假崩溃。
+ */
+#ifdef _WIN32
+static HANDLE fe_std_or_nul(DWORD which, bool *owned) {
+    *owned = false;
+    HANDLE h = GetStdHandle(which);
+    if (h && h != INVALID_HANDLE_VALUE) return h;
+    SECURITY_ATTRIBUTES sa;
+    ZeroMemory(&sa, sizeof sa);
+    sa.nLength = sizeof sa;
+    sa.bInheritHandle = TRUE;
+    HANDLE nul = CreateFileA("NUL", GENERIC_READ | GENERIC_WRITE,
+                             FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
+                             OPEN_EXISTING, 0, NULL);
+    if (nul != INVALID_HANDLE_VALUE) *owned = true;
+    return nul;
+}
+
+/* 返回子进程退出码；-1 表示根本没能启动（附 GetLastError 给上层） */
+static int fe_spawn_zxfe(const char *cmdline, const char *logp) {
+    SECURITY_ATTRIBUTES sa;
+    ZeroMemory(&sa, sizeof sa);
+    sa.nLength = sizeof sa;
+    sa.bInheritHandle = TRUE;
+    HANDLE hlog = CreateFileA(logp, GENERIC_WRITE,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                              &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hlog == INVALID_HANDLE_VALUE) {
+        g_fe_spawn_winerr = (unsigned long)GetLastError();
+        return -1;
+    }
+
+    bool in_owned = false, out_owned = false;
+    HANDLE hin  = fe_std_or_nul(STD_INPUT_HANDLE, &in_owned);
+    HANDLE hout = fe_std_or_nul(STD_OUTPUT_HANDLE, &out_owned);
+
+    STARTUPINFOA si;
+    PROCESS_INFORMATION pi;
+    ZeroMemory(&si, sizeof si);
+    ZeroMemory(&pi, sizeof pi);
+    si.cb = sizeof si;
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput  = hin;
+    si.hStdOutput = hout;
+    si.hStdError  = hlog;
+
+    /* CreateProcessA 会改写 lpCommandLine，不能传只读字面量 */
+    char *buf = (char *)malloc(strlen(cmdline) + 1);
+    if (!buf) { CloseHandle(hlog); return -1; }
+    strcpy(buf, cmdline);
+    BOOL ok = CreateProcessA(NULL, buf, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi);
+    if (!ok) g_fe_spawn_winerr = (unsigned long)GetLastError();
+    free(buf);
+
+    CloseHandle(hlog);  /* 子进程已有自己的副本 */
+    if (in_owned && hin && hin != INVALID_HANDLE_VALUE) CloseHandle(hin);
+    if (out_owned && hout && hout != INVALID_HANDLE_VALUE) CloseHandle(hout);
+    if (!ok) return -1;
+    if (pi.hThread) CloseHandle(pi.hThread);
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD code = 1;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hProcess);
+    return (int)code;
+}
+#else
+/* POSIX 仍走 shell 重定向（那里没有 cmd.exe 的句柄继承坑） */
+static int fe_spawn_zxfe(const char *cmdline, const char *logp) {
+    char full[3600];
+    snprintf(full, sizeof full, "%s 2> \"%s\"", cmdline, logp);
+    return system(full);
+}
+#endif
+
 static Node *fe_parse_zx(const char *path) {
     fe_last_error_reset();
     /* 缓存路径先行：源读不出来就让 spawn 路径去报错（zxfe 的诊断
@@ -283,31 +368,43 @@ static Node *fe_parse_zx(const char *path) {
     }
     char logp[1300];
     snprintf(logp, sizeof logp, "%s.log", tmp);
+#ifdef _WIN32
+    const char *sep = "\\";
+#else
+    const char *sep = "/";
+#endif
+    char exe[1400];
+    if (*dir) snprintf(exe, sizeof exe, "%s%szxfe.exe", dir, sep);
+    else snprintf(exe, sizeof exe, "zxfe.exe");
+    /* CreateProcess 自己按首 token 拆程序名，引号不会被 shell 吃掉；
+     * 这里不再写 `2> ...`，stderr 由 fe_spawn_zxfe 直接接到日志文件。 */
     char cmd[2800];
-    if (*dir) {
-        /* 注意：Windows 的 system() 会让 cmd /c 吃掉首尾引号——命令行
-         * 不能以引号开头（与 main.c 里 zig cc 的拼法同一约束）。 */
-        snprintf(cmd, sizeof cmd, "%s\\zxfe.exe \"%s\" -o \"%s\" 2> \"%s\"",
-                 dir, path, tmp, logp);
-    } else {
-        snprintf(cmd, sizeof cmd, "zxfe.exe \"%s\" -o \"%s\" 2> \"%s\"",
-                 path, tmp, logp);
-    }
+    snprintf(cmd, sizeof cmd, "\"%s\" \"%s\" -o \"%s\"", exe, path, tmp);
     free(dir);
 
-    int rc = system(cmd);
+    int rc = fe_spawn_zxfe(cmd, logp);
     int ndiag = fe_replay_stderr(logp);   /* 诊断原样回放，顺带记下第一条 */
     remove(logp);
     if (rc != 0) {
         /* 前端挂了却一条诊断都没有（栈爆掉、OOM、内部断言）——以前这里直接
          * return NULL，上层只看到"检查失败、零条消息"。补一条能定位的话。 */
         if (ndiag == 0) {
-            if (rc == 139 || rc == 134)
+            if (rc < 0) {
+#ifdef _WIN32
+                err_at(1, 1, "cannot launch the Zx frontend (zxfe): win32 error %lu -- "
+                             "check that zxfe.exe sits next to zxc.exe and that its "
+                             "directory is writable", g_fe_spawn_winerr);
+#else
+                err_at(1, 1, "cannot launch the Zx frontend (zxfe): check the executable "
+                             "next to zxc and the directory permissions");
+#endif
+            }
+            else if (rc == 139 || rc == 134)
                 err_at(1, 1, "the Zx frontend (zxfe) crashed while parsing this file "
                              "(signal %d) -- this is a compiler bug", rc - 128);
             else
                 err_at(1, 1, "the Zx frontend (zxfe) failed without a diagnostic "
-                             "(exit %d) -- this is a compiler bug", rc);
+                             "(exit %d) -- check zxfe.exe next to zxc.exe, or use --fe=c", rc);
         }
         return NULL;
     }

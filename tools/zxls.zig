@@ -3425,6 +3425,21 @@ fn modDirsInto(doc_dir: []const u8, out: *std.ArrayList([]const u8)) void {
     if (g_std_dir) |sd| out.append(gpa, sd) catch return;
 }
 
+/// 导入补全专用的模块目录：与 modDirsInto 相同，但**不含 g_std_dir**。
+/// std/ 下的每个 .zx 都是 std 模块的内部文件（std/std.zx 用 @mod("arena.zx")
+/// 之类相对路径再导出成 std.arena），编译器给 std 的顶层入口只有一个
+/// `@mod("std")`。把 std/ 里的文件当顶层模块提示，用户一接受就得到
+/// `const arena = @mod("arena");` —— 编译期 E0601，还平白多出一堆
+/// "导入模块" 的补全项。std 本身由 addImportModules 显式补一条即可。
+fn modImportDirsInto(doc_dir: []const u8, out: *std.ArrayList([]const u8)) void {
+    ensureDocDirs(doc_dir);
+    out.append(gpa, doc_dir) catch return;
+    if (root_path) |r| {
+        if (!std.mem.eql(u8, r, doc_dir)) out.append(gpa, r) catch return;
+    }
+    for (g_mod_dirs[0..g_mod_dir_n]) |d| out.append(gpa, d) catch return;
+}
+
 /// @mod("…") 字符串 → 模块基名（去 .zx 后缀）。编译器两种形式都收：
 /// 裸名 "std"（解析 <d>/std.zx 或 <d>/std/std.zx）与路径 "std/str.zx"。
 fn moduleBase(m: []const u8) []const u8 {
@@ -7821,7 +7836,7 @@ fn addImportItem(list: *Json, seen: *std.StringHashMapUnmanaged(void), stem: []c
     const sort = std.fmt.bufPrint(&st, "b{s}", .{stem}) catch return;
     list.raw("{{\"label\":", .{});
     list.str(stem);
-    list.raw(",\"kind\":9,\"detail\":\"导入模块（$1 可改别名）\"", .{});
+    list.raw(",\"kind\":9,\"detail\":\"导入模块（可改别名）\"", .{});
     list.raw(",\"sortText\":", .{});
     list.str(sort);
     list.raw(",\"insertText\":", .{});
@@ -7864,7 +7879,7 @@ fn addImportModules(list: *Json, seen: *std.StringHashMapUnmanaged(void),
         addImportItem(list, seen, "std");
     var dirs: std.ArrayList([]const u8) = .empty;
     defer dirs.deinit(gpa);
-    modDirsInto(doc_dir, &dirs);
+    modImportDirsInto(doc_dir, &dirs);
     for (dirs.items) |d| {
         var dir = Io.Dir.cwd().openDir(g_io, d, .{ .iterate = true }) catch continue;
         defer dir.close(g_io);
@@ -9503,6 +9518,18 @@ fn hideFile(sub_path: []const u8) void {
     const FILE_ATTRIBUTE_TEMPORARY: u32 = 0x100;
     _ = SetFileAttributesW(w.ptr, FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_TEMPORARY);
 }
+/// 写/删前抹掉隐藏属性。Zed 重启 LSP、诊断线程被杀，都会留下一个
+/// HIDDEN|TEMPORARY 的影子文件；Windows 对带 HIDDEN 属性的现有文件用
+/// CREATE_ALWAYS 重写会 ACCESS_DENIED（fmt 那条路径的注释记过同一个坑）。
+/// 不抹属性，这个文档就永久卡在「写失败 -> 没诊断」，还会在项目里堆一些
+/// 奇怪的点文件。
+fn unhideFile(sub_path: []const u8) void {
+    if (@import("builtin").os.tag != .windows) return;
+    const w = std.unicode.utf8ToUtf16LeAllocZ(gpa, sub_path) catch return;
+    defer gpa.free(w);
+    const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
+    _ = SetFileAttributesW(w.ptr, FILE_ATTRIBUTE_NORMAL);
+}
 extern "kernel32" fn SetFileAttributesW(lpFileName: [*:0]const u16, dwFileAttributes: u32) i32;
 
 const Diag = struct {
@@ -9593,22 +9620,18 @@ fn runCheck(doc: *const Document, out_diags: *std.ArrayList(Diag)) void {    // 
     shadow.appendSlice(gpa, "/.zxls-") catch return;
     shadow.print(gpa, "{x}", .{h}) catch return;
     shadow.appendSlice(gpa, ".zx") catch return;
+    unhideFile(shadow.items);  // 先清上一轮残留的 HIDDEN|TEMPORARY
     Io.Dir.cwd().writeFile(g_io, .{ .sub_path = shadow.items, .data = doc.text }) catch return;
     hideFile(shadow.items);
-    defer Io.Dir.cwd().deleteFile(g_io, shadow.items) catch {};
-    // 经 cmd /c 包装：zig 直接拉起 zxc 时，zxfe（zxc 的孙进程）的 stderr
-    // 句柄继承会断链——诊断全部丢失，连好文件都会静默返回 1；
-    // cmd 中转后句柄继承恢复正常（见 README M39 环境）。
-    // 注意：命令串不能再加内层引号——zig 会把整个串作为单个参数包一层
-    // 引号，cmd /c 规则只剥这一对外层引号；内层引号反而会被切碎
-    //（Windows 引号陷阱的又一变种，与 zxc system() 的教训同源）。
-    var cmdline: std.ArrayList(u8) = .empty;
-    defer cmdline.deinit(gpa);
-    cmdline.appendSlice(gpa, zxc_path) catch return;
-    cmdline.append(gpa, ' ') catch return;
-    cmdline.appendSlice(gpa, shadow.items) catch return;
-    cmdline.appendSlice(gpa, " --check") catch return;
-    const argv = [_][]const u8{ "C:\\Windows\\System32\\cmd.exe", "/c", cmdline.items };
+    defer {
+        unhideFile(shadow.items);
+        Io.Dir.cwd().deleteFile(g_io, shadow.items) catch {};
+    }
+    // 不再经命令解释器包装。以前 zxc 用 system("zxfe ... 2> log")，孙进程
+    // 的 stderr 句柄继承会断链，只能靠中转恢复；现在 zxc 直接 CreateProcess
+    // 并把 stderr 接到日志文件（src/fe.c fe_spawn_zxfe），句柄链不再参与，
+    // 中转也就没必要了——还少一层在受限环境里会 ACCESS_DENIED 的进程。
+    const argv = [_][]const u8{ zxc_path, shadow.items, "--check" };
     const res = std.process.run(gpa, g_io, .{
         .argv = &argv,
         .stderr_limit = .unlimited,

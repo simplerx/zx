@@ -6854,9 +6854,12 @@ error[E0501]: @Vec length must be a non-negative compile-time integer
   `conflicting types for 'buf_puts'`——那不是类型问题，是括号问题。
 - **`! grep -qF 'zx_any_'` 会误命中**：输出格式化助手叫 `zx_any_put`，要钉具体
   到 `zx_any_vi32_4`。
-- **LSP 冒烟 6 条 diagnostics 失败与本节无关**：`git stash push -u` 回到 §164
-  基线同样复现（`the Zx frontend (zxfe) failed without a diagnostic (exit 1)`），
-  是环境既有问题。判别方法是回基线重跑，不是读代码猜。
+- **LSP 冒烟的 diagnostics 失败与本节无关，但「环境既有问题」这个结论是错的**：
+  回 §164 基线确实同样复现，可那只说明它不是 §165 引入的。真正的根因是
+  zxc 借 `system()` + `2>` 重定向拉起 zxfe，宿主环境一拦命令解释器就整链
+  静默失败；**§166 已根治**（CreateProcess + stderr 句柄直连日志，两端都不再
+  经命令解释器）。教训改成：回基线只能证明"不是本轮引入的"，不能证明
+  "不是 bug"；要顺着 rc=1 + 空日志一路查到子进程到底有没有起来。
 - **库里的字面量别名要先绑**：`std.simd.V4{…}` 这种「带路径 + 花括号」不合法
   （`expected ';', found '{'`），必须 `const V4 = std.simd.V4;` 再 `V4{…}`。
   文档示例已按此改。
@@ -6866,3 +6869,83 @@ error[E0501]: @Vec length must be a non-negative compile-time integer
 - `@Vec` 长度的泛型化（见上，E0501）。
 - 归约到标量的通用 `reduce`：`sum` / `dot` 够用，不必再铺一层。
 - 位运算 / `%` / 移位：不变，仍不半支持。
+
+## §166 修编辑器里的"导入模块报编译器 bug"与多余的导入补全（2026-11-14）
+
+**用户原话**：「导入模块出问题了, 还多出一些奇怪的东西, 请修复」，附两张 Zed 截图：
+一张是 `const std = @mod("std");` 那一行被标红
+`the Zx frontend (zxfe) failed without a diagnostic (exit 1) -- this is a compiler bug`；
+另一张是行首敲 `are`，补全里冒出 `arena 导入模块（$1 可改别名）`。
+
+### 一、假崩溃：两层命令解释器把诊断链弄断了
+
+`zxls → 命令解释器 /c → zxc → system("zxfe ... 2> log") → 命令解释器 → zxfe`。
+在受限宿主里，内层命令解释器**建不出重定向文件**（`Access is denied.`），
+zxfe 根本没启动：rc=1、日志为空，zxc 的 `fe_parse_zx` 于是补了那句
+"failed without a diagnostic ... compiler bug"。编辑器里表现为**正常的
+`@mod("std")` 被标成编译器崩了**，且红色内联诊断直接糊在代码行上（用户说的
+"多出一些奇怪的东西"）。
+
+判别过程（比"回基线"更靠得住）：临时在 `fe.c` 记下 cmd / rc / 日志内容，
+看到 rc=1 且日志 0 字节；再用最小复现（`tools/lsptest.py` 的 `diag_client`
+单开一个 zxls）对比：
+- 同一个影子文件，直接 `bin/zxfe.exe <file>` → rc=0；
+- 经命令解释器包一层 → `zxfe: cannot open <file>` / `Access is denied.`。
+
+所以不是源文件权限、也不是 AST 缓存，是**命令解释器那一层**。
+
+**修法**：`src/fe.c` 新增 `fe_spawn_zxfe`。Windows 走 `CreateProcessA`：
+自己 `CreateFileA` 一个可继承的日志句柄，填进 `STARTUPINFOA.hStdError`，
+`STARTF_USESTDHANDLES` + `bInheritHandles=TRUE`，等子进程退出取
+`GetExitCodeProcess`。命令行不再写 `2> ...`，也不需要命令解释器拆引号
+（CreateProcess 自己按首 token 找程序）。POSIX 保留 `system()` + 重定向。
+zxls 那一侧 `runCheck` 也去掉 `/c` 中转，直接 `argv = { zxc_path, shadow, "--check" }`：
+孙进程的 stderr 已经落文件，旧的"句柄继承断链"前提不存在了。
+
+失败文案分三种：启动不了（带 win32 error + 位置提示）、信号崩、
+退出码非零但无诊断（改成"检查 zxfe.exe / 或用 --fe=c"，不再张口就
+"this is a compiler bug"）。
+
+顺带修影子文件生命周期：`hideFile` 给诊断影子设了 HIDDEN|TEMPORARY，
+Zed 重启 / LSP 被杀会留下它；Windows 对带 HIDDEN 的现有文件用
+`CREATE_ALWAYS` 重写会 ACCESS_DENIED，于是那个文档**永久**卡在
+"写失败 → 没诊断"，还在项目里堆一堆 `.zxls-*.zx` 点文件。新增
+`unhideFile`（写前、删前各抹一次属性），并清掉了仓库里 99 个历史残留。
+
+### 二、多余的导入补全：把 std/ 的内部文件当顶层模块
+
+`addImportModules` 走 `modDirsInto`，而后者为了对齐编译器的兜底解析会把
+`g_std_dir` 放最后。于是 `std/arena.zx` / `std/math.zx` / `std/simd.zx` …
+全被当成顶层模块名，行首敲 `are` 就给一条
+`const arena = @mod("arena");`。**编译器并不这么解析**：std 的顶层入口只有
+`@mod("std")`，`std/std.zx` 用 `@mod("arena.zx")` 这类相对路径再导出成
+`std.arena`。实测 `const arena = @mod("arena");` 是 E0601。用户接受补全即报错，
+这就是"导入模块出问题了"，那一堆无端冒出来的导入项就是"奇怪的东西"。
+
+**修法**：新增 `modImportDirsInto`（与 `modDirsInto` 相同但不含 `g_std_dir`），
+只给导入补全用；`std` 仍由 `addImportModules` 显式补一条。其余模块解析
+（点补全 / 跳转）保持原样。补全项的 `detail` 里 `$1` 是 snippet 内部占位符，
+不该给用户看，改成「导入模块（可改别名）」。
+
+### 守门
+
+- `tools/lsptest.py`：新增 `completion.importModule.noStdInternals`
+  （行首 `are` 不再出现 arena/math/simd/json/fs 的导入项）与
+  `completion.importModule.detailNoSnippetVar`（detail 不含 `$1`）。
+  原有的 3 条 `diagnostics.*` 从"必然失败"变回真断言——它们本来就在守
+  这条诊断链，之前只是被假崩溃顶掉了。
+- `test.sh §166` 两条：`ZXC_NO_AST_CACHE=1` 强制真跑 zxfe，
+  `@mod("nope_s166")` 必须报 E0601 且**不含** `failed without a diagnostic`
+  / `compiler bug`；语法错文件必须原样回放 E0201。缓存命中会把这段整个
+  掩盖过去，所以必须关缓存。
+- 实测：`sh build.sh` 过；`sh test.sh` **passed 427 / failed 0**、
+  LSP 冒烟 **450 项全过 / SMOKE ALL PASS**、`all checks passed`。
+
+### 教训
+
+- **"回基线也红" ≠ "环境既有问题"**：只能证明不是本轮引入。要查到
+  rc=1 + 空日志到底是哪个子进程没起来，别停在"两条基线一样红"。
+- 诊断链里每多一层进程，就多一类"其实不是编译器问题"的假崩溃；
+  能直接 CreateProcess 就别借 shell 的 `2>`。
+- 补全的**候选名**和编译器的**可解析路径**必须是同一套规则：
+  为了"兜底解析"把 std/ 塞进搜索目录，不能顺手拿去当导入建议。

@@ -1488,6 +1488,37 @@ else
     grep -n 'mask' "$TPFX.s159.dev" | head -4; fail=1
 fi
 
+# §166：前端 spawn 不借命令解释器的 `2>` 重定向（CreateProcess + stderr 句柄
+# 直连日志）。以前被编辑器拉起时那条链会静默失败，连正常的 `@mod("std")`
+# 都被标一句 "the Zx frontend failed without a diagnostic ... compiler bug"。
+# ZXC_NO_AST_CACHE=1 强制真跑一次 zxfe，不让缓存命中把这段掩盖过去。
+cat > "$TPFX.s166mod.zx" <<'ZXEOF'
+const std = @mod("std");
+const nope = @mod("nope_s166");
+pub const main = fn () i32 { std.println("{}", nope.x); return 0; };
+ZXEOF
+if ZXC_NO_AST_CACHE=1 $ZXC "$TPFX.s166mod.zx" --check > "$TPFX.s166mod.log" 2>&1; then
+    printf "  FAIL §166 导入错误居然通过了\n"; fail=1
+elif grep -qF 'error[E0601]' "$TPFX.s166mod.log" \
+     && ! grep -qF 'failed without a diagnostic' "$TPFX.s166mod.log" \
+     && ! grep -qF 'compiler bug' "$TPFX.s166mod.log"; then
+    printf "  ok   §166 导入诊断正常（没有假的 compiler bug）\n"
+else
+    printf "  FAIL §166 前端 spawn 诊断不对\n"
+    head -6 "$TPFX.s166mod.log"; fail=1
+fi
+
+printf 'const x = fn ( {\n' > "$TPFX.s166parse.zx"
+if ZXC_NO_AST_CACHE=1 $ZXC "$TPFX.s166parse.zx" --check > "$TPFX.s166parse.log" 2>&1; then
+    printf "  FAIL §166 语法错误居然通过了\n"; fail=1
+elif grep -qF 'error[E0201]' "$TPFX.s166parse.log" \
+     && ! grep -qF 'failed without a diagnostic' "$TPFX.s166parse.log"; then
+    printf "  ok   §166 缓存失效时前端诊断原样回放\n"
+else
+    printf "  FAIL §166 缓存失效时前端诊断丢失\n"
+    head -6 "$TPFX.s166parse.log"; fail=1
+fi
+
 # §160：C shim 通道（@shim）。真实构建里 shim 是**独立 TU**（用真实路径编，
 # 报错指回那份 .c 的行号）；--emit-c 要自洽就把它贴在末尾；两处 @shim 指向
 # 同一份 .c 只编一遍。shim 编不过报 B1004（不是"编译器 bug"），缺文件报 E0602。
