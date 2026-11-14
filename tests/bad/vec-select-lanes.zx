@@ -1,9 +1,0 @@
-// expect: the mask has 4 lanes but the values have 8
-// 掩码和值的 lane 数必须一致：逐个分量一一对应，长度不同就没有对应关系。
-const main = fn () u8 {
-    let a = @Vec(f32, 4){1.0, 2.0, 3.0, 4.0};
-    let b = @Vec(f32, 8){1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0};
-    let m = a < a;
-    let c = @select(m, b, b);
-    return 0;
-};

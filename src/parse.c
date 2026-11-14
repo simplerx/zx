@@ -1182,9 +1182,7 @@ static Node *parse_primary(P *p) {
          *   1.2.2 反射全收敛到 @type。） */
         bool value_first = n->name &&
             (!strcmp(n->name, "memcpy") || !strcmp(n->name, "memmove") ||
-             !strcmp(n->name, "memset") || !strcmp(n->name, "select") ||
-             !strcmp(n->name, "any") || !strcmp(n->name, "all") ||
-             !strcmp(n->name, "type"));
+             !strcmp(n->name, "memset") || !strcmp(n->name, "type"));
         expect(p, TOK_LPAREN);
         if (!at(p, TOK_RPAREN)) {
             int ai = 0;

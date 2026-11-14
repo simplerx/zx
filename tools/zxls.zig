@@ -322,16 +322,12 @@ const builtin_docs = [_]BuiltinDoc{
     .{ .name = "trap", .detail = "@trap() 触发断点/中止" },
     .{ .name = "compileError", .detail = "@compileError(msg) 编译期报错" },
     .{ .name = "Vec", .detail = "@Vec(T, N) 向量类型：N 个 T 的向量值（N 只能是 1/2/4/8/16/32/64），`(@Vec(T, N))x` 把标量铺满各分量，`@Vec(T, N){a, b, …}` 是字面量" },
-    .{ .name = "select", .detail = "@select(mask, a, b) 按掩码逐分量选（mask 来自向量比较，分量 0 / -1）" },
-    .{ .name = "any", .detail = "@any(mask) 掩码整体判真：至少一个分量为真（参数是整数向量）" },
-    .{ .name = "all", .detail = "@all(mask) 掩码整体判真：每个分量都为真" },
 };
 
 const toplevel_builtins = [_][]const u8{
     "type",   "memcpy",  "memmove", "memset",
     "link",   "shim",    "trap",    "compileError",
-    "Vec",    "select",
-    "any",    "all",
+    "Vec",
 };
 
 // ---------------------------------------------------------------- utils
@@ -4661,40 +4657,6 @@ fn inferExprType(text: []const u8, doc: *const Document, expr: []const u8, depth
             if (rest[0] == '{') return h.ty;
         }
         return null;
-    }
-    // §164 — @any(mask) / @all(mask) 的结果是 bool：整份掩码判真，不再是向量。
-    if (std.mem.startsWith(u8, e, "@any(") or std.mem.startsWith(u8, e, "@all("))
-        return "bool";
-    // §162 — @select(mask, a, b) 的类型就是 a 的类型（sema 要求 a、b 同型）。
-    if (std.mem.startsWith(u8, e, "@select(")) {
-        var i: usize = 8;
-        var d: usize = 1;
-        var seg: usize = 8;
-        var args = [_][]const u8{ "", "", "" };
-        var ai: usize = 0;
-        while (i < e.len) : (i += 1) {
-            const ch = e[i];
-            if (ch == '(' or ch == '[' or ch == '{') {
-                d += 1;
-                continue;
-            }
-            if (ch == ')' or ch == ']' or ch == '}') {
-                d -= 1;
-                if (d == 0) break;
-                continue;
-            }
-            if (ch == ',' and d == 1 and ai < 2) {
-                args[ai] = trimSl(e[seg..i]);
-                ai += 1;
-                seg = i + 1;
-            }
-        }
-        if (ai != 2 or i >= e.len) return null;
-        args[2] = trimSl(e[seg..i]);
-        const rest = trimSl(e[i + 1 ..]);
-        if (rest.len != 0) return null;
-        if (depth >= 4) return null;
-        return inferExprType(text, doc, args[1], depth + 1);
     }
     // §157 — 泛型构造式实例的字段 / 方法：`var gen = Gen(i32,10){…};`
     // 之后 `gen.mem` 要出 `: i32`、`gen.get()` 要出方法返回类型。

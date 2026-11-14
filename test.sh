@@ -1364,23 +1364,26 @@ for f158c in extern-unnamed seeded-builtins-entry; do
     fi
 done
 
-# §159：std.simd。dev 与 release 是两条不同的代码路径（-O0 / -O2，后者才
-# 向量化），数值语义必须一致；库文件单文件检查不能假报；f32 的 sqrt 走
-# sqrtf 而不是 f32→f64→f32 往返。
-$ZXC tests/good/std-simd.zx --release -o "$TPFX.s159.exe" > "$TPFX.s159.log" 2>&1 || true
-"$TPFX.s159.exe" > "$TPFX.s159.run" 2>&1 || true
-if grep -qF 'kernel add: n=10 first=2.5 last=11.5' "$TPFX.s159.run" \
-   && grep -qF 'kernel minlen: n=4 last=7.5' "$TPFX.s159.run" \
-   && grep -qF 'vec4f: add=(5,6,2,2) len=5 lenSq=25 norm=(0.6,0.8) dot=14 sum=7' "$TPFX.s159.run"; then
-    printf "  ok   §159 release 档内核输出与 dev 一致\n"
+# §159 / §165：std.simd 是 `@Vec` 的数学层。dev（-O0）与 release（-O2）是
+# 两条代码路径（后者会把 select 的四次循环展开），数值语义必须一致；库文件
+# 单文件检查不能假报；f32 的平方根走 sqrtf，不做 f32→f64→f32 往返。
+$ZXC tests/good/std-simd.zx -o "$TPFX.s159.exe" > "$TPFX.s159.log" 2>&1 || true
+"$TPFX.s159.exe" > "$TPFX.s159.dev" 2>&1 || true
+$ZXC tests/good/std-simd.zx --release -o "$TPFX.s159r.exe" > "$TPFX.s159r.log" 2>&1 || true
+"$TPFX.s159r.exe" > "$TPFX.s159.run" 2>&1 || true
+if cmp -s "$TPFX.s159.dev" "$TPFX.s159.run" \
+   && grep -qF 'metric: dot=25 lenSq=25 len=5 dist=5' "$TPFX.s159.run" \
+   && grep -qF 'quat slerp: true true' "$TPFX.s159.run"; then
+    printf "  ok   §159 std.simd 数学层 dev / release 数值一致\n"
 else
-    printf "  FAIL §159 release 档内核输出漂移\n"
-    head -14 "$TPFX.s159.run"; head -6 "$TPFX.s159.log"; fail=1
+    printf "  FAIL §159 std.simd 数学层输出漂移\n"
+    diff "$TPFX.s159.dev" "$TPFX.s159.run" | head -8
+    head -6 "$TPFX.s159.log"; head -6 "$TPFX.s159r.log"; fail=1
 fi
 
 $ZXC tests/good/std-simd.zx --emit-c > "$TPFX.s159.c" 2>/dev/null
 if grep -qF 'extern float sqrtf(float x);' "$TPFX.s159.c"; then
-    printf "  ok   §159 Vec4f.length 走 f32 的 sqrtf\n"
+    printf "  ok   §159 length() 走 f32 的 sqrtf\n"
 else
     printf "  FAIL §159 生成了 f64 往返的 sqrt\n"
     grep -nE 'sqrtf?\(double|sqrt\(' "$TPFX.s159.c" | head -6; fail=1
@@ -1438,104 +1441,52 @@ else
     diff "$TPFX.s162zx.out" "$TPFX.s162rel.out" | head -6; fail=1
 fi
 
-# §162 续：字面量 / 比较 / @select 三条都必须是"真的落到 C 的向量操作"，
-# 而不是被包成逐分量循环或整数运算：
+# §162 续：字面量 / 比较必须是"真的落到 C 的向量操作"，而不是被包成逐分量
+# 循环或整数运算：
 #   字面量 → 复合字面量 `(ZxVec_vf32_4){…}`（不是 4 次下标赋值）
 #   比较   → 一次向量比较后再 cast 成掩码类型（C 里本来就是 0 / -1）
-#   select → 掩码位运算 `& _selN | … & ~_selN`（没有三元、不重复求值掩码）
+# 掩码**选择**不再由编译器发：`std.simd.select` 是普通函数，C 里看不到
+# `_selN` 临时量，也看不到随类型发的 `zx_any_*` 助手（§165 撤掉了内建）。
 if grep -qF '(ZxVec_vf32_4){(float)(1.0)' "$TPFX.s162.c" \
    && grep -qF 'ZxVec_vi32_4 lt_' "$TPFX.s162.c" \
-   && grep -qF ') & _sel' "$TPFX.s162.c" \
-   && grep -qF '& ~_sel' "$TPFX.s162.c"; then
-    printf "  ok   §162 字面量 = 复合字面量、比较 = 掩码 cast、select = 掩码位运算\n"
+   && ! grep -qF 'zx_any_vi32_4' "$TPFX.s162.c" \
+   && ! grep -qF '_sel' "$TPFX.s162.c"; then
+    printf "  ok   §162 字面量 = 复合字面量、比较 = 掩码 cast（选择已不在编译器里）\n"
 else
-    printf "  FAIL §162 字面量/比较/select 的 C 发射不是向量操作\n"
+    printf "  FAIL §162 字面量/比较的 C 发射不是向量操作\n"
     grep -n 'ZxVec_' "$TPFX.s162.c" | head -8; fail=1
 fi
 
-# 别名写法必须和直接写法等价：`V4{1, 2, 3, 4}` 与 `@Vec(f32, 4){…}` 都在
-# good/vec.zx 里，上面那份输出同时覆盖两种；这里只钉住 C 侧真的都是
-# 复合字面量（如果别名退化成结构体赋值，上面的 grep 就只剩一条）。
-# 计数下限 3 = splat 助手 1 条 + 两个字面量（别名 / 直接写法各一）。
-if [ "$(grep -cF '(ZxVec_vf32_4){' "$TPFX.s162.c")" -ge 3 ]; then
-    printf "  ok   §162 别名字面量 V4{…} 与 @Vec(f32, 4){…} 都是复合字面量\n"
+# §165：向量的三个内建撤掉——`@Vec` 是唯一的向量内建，掩码选择与判真是
+# std.simd 里的普通函数。两件事各自守住：
+#   旧拼写 → E0211 + "moved to std.simd.xxx"，两个前端说同一句；
+#   库函数 → 纯 Zx（没有 @shim、没有 intrinsic），语义见 good/std-simd.zx。
+for vgone in removed-select removed-any removed-all; do
+    $ZXC "tests/bad/$vgone.zx" --check > "$TPFX.$vgone.log" 2>&1 || true
+    $ZXC "tests/bad/$vgone.zx" --check --fe=c > "$TPFX.$vgone.c.log" 2>&1 || true
+    if grep -q 'E0211' "$TPFX.$vgone.log" && grep -q 'std\.simd\.' "$TPFX.$vgone.log" \
+       && grep -q 'E0211' "$TPFX.$vgone.c.log"; then
+        printf "  ok   §165 %s 报 E0211 + std.simd 迁移提示（双前端）\n" "$vgone"
+    else
+        printf "  FAIL §165 %s 没有迁移提示\n" "$vgone"
+        head -6 "$TPFX.$vgone.log"; fail=1
+    fi
+done
+
+$ZXC tests/good/std-simd.zx --emit-c > "$TPFX.s165.c" 2>/dev/null
+if grep -qF 'vector_size' "$TPFX.s165.c" && ! grep -qE '_mm[0-9]*_' "$TPFX.s165.c"; then
+    printf "  ok   §165 std.simd 是纯 Zx（没有 C shim / intrinsic）\n"
 else
-    printf "  FAIL §162 别名字面量没有落成复合字面量\n"
-    grep -n '(ZxVec_vf32_4)' "$TPFX.s162.c" | head -6; fail=1
+    printf "  FAIL §165 std.simd 仍挂着 C 实现\n"; fail=1
 fi
 
-# §164：掩码整体判真 @any / @all。它们必须是"整份掩码一次判"的助手，
-# 不是把 N 个分量摊到源码里手写——分量个数是类型的一部分，摊开就只能按
-# 具体类型写死。断言落在 C 上：两个助手都发出来了，而且调用点直接是
-# 函数调用（`zx_any_vi32_4(` 后面接实参）。
-if grep -qF 'static bool zx_any_vi32_4(ZxVec_vi32_4 v) { return (v[0] | v[1]' "$TPFX.s162.c" \
-   && grep -qF 'static bool zx_all_vi32_4(ZxVec_vi32_4 v) { return (v[0] != 0)' "$TPFX.s162.c" \
-   && grep -qF 'zx_any_vi32_4(' "$TPFX.s162.c"; then
-    printf "  ok   §164 @any/@all 落成按类型发的助手（any = 按位或，all = 逐分量非 0）\n"
+if grep -qF 'mask: sel=1,2,3,7 any=true all=false' "$TPFX.s159.dev" \
+   && grep -qF 'mask edges: allT=true anyF=false allF=false' "$TPFX.s159.dev"; then
+    printf "  ok   §165 select / any / all 的语义正确（半真 / 全 0 / 全 -1）\n"
 else
-    printf "  FAIL §164 @any/@all 的 C 发射不是类型助手\n"
-    grep -n 'zx_any_\|zx_all_' "$TPFX.s162.c" | head -6; fail=1
+    printf "  FAIL §165 掩码函数语义不对\n"
+    grep -n 'mask' "$TPFX.s159.dev" | head -4; fail=1
 fi
-
-# 语义两条边：半真掩码 any=true / all=false，全 0 掩码 any=false，
-# 全 -1 掩码 all=true；并且结果能直接进 if（bool 上下文，不需要转换）。
-if grep -qF 'anyall: any=true all=false none=false full=true' "$TPFX.s162zx.out" \
-   && grep -qF 'anyall: if ok' "$TPFX.s162zx.out"; then
-    printf "  ok   §164 半真 / 全 0 / 全 -1 三种掩码判真正确（可直接进 if）\n"
-else
-    printf "  FAIL §164 掩码判真语义不对\n"
-    grep -n 'anyall' "$TPFX.s162zx.out" | head -4; fail=1
-fi
-
-# §161：std.simd 换成手写 SIMD（std/simd_impl.c 经 @shim 挂进来）。三条实现
-# （scalar / sse2 / avx2）必须逐位一致——用 ZX_SIMD_ISA 强制降档跑同一份二进制
-# 来证明，而不是"看起来对"；--emit-c 里要看得见 intrinsic，证明不再是靠 -O2
-# 自动向量化的普通循环。
-$ZXC tests/good/std-simd.zx -o "$TPFX.s161.exe" > "$TPFX.s161.log" 2>&1 || true
-ZX_SIMD_ISA=scalar "$TPFX.s161.exe" > "$TPFX.s161.scalar" 2>&1 || true
-ZX_SIMD_ISA=sse2   "$TPFX.s161.exe" > "$TPFX.s161.sse2"   2>&1 || true
-ZX_SIMD_ISA=avx2   "$TPFX.s161.exe" > "$TPFX.s161.avx2"   2>&1 || true
-if cmp -s "$TPFX.s161.scalar" "$TPFX.s161.sse2" \
-   && cmp -s "$TPFX.s161.scalar" "$TPFX.s161.avx2" \
-   && grep -qF 'kernel special: nan=true clampHi=true negzero=true neg5=true' "$TPFX.s161.scalar"; then
-    printf "  ok   §161 scalar/sse2/avx2 三路逐位一致（含 NaN 与 -0.0）\n"
-else
-    printf "  FAIL §161 三路输出不一致\n"
-    diff "$TPFX.s161.scalar" "$TPFX.s161.sse2" | head -6
-    diff "$TPFX.s161.scalar" "$TPFX.s161.avx2" | head -6
-    head -6 "$TPFX.s161.log"; fail=1
-fi
-
-$ZXC tests/good/std-simd.zx --emit-c > "$TPFX.s161.c" 2>/dev/null
-if grep -qF '_mm256_add_ps' "$TPFX.s161.c" && grep -qF '_mm_add_ps' "$TPFX.s161.c"; then
-    printf "  ok   §161 --emit-c 里是 intrinsic，不是普通循环\n"
-else
-    printf "  FAIL §161 shim 没进 --emit-c\n"; fail=1
-fi
-
-# isaName()：强制降档要如实报告；默认档必须是三档之一（x86 上不该是 scalar）
-cat > "$TPFX.s161isa.zx" <<'ZXEOF'
-const std = @mod("std");
-
-pub const main = fn () u8 {
-    println("isa={}", std.simd.isaName());
-    return 0;
-};
-ZXEOF
-$ZXC "$TPFX.s161isa.zx" -o "$TPFX.s161isa.exe" > "$TPFX.s161isa.log" 2>&1 || true
-isa_forced=$(ZX_SIMD_ISA=scalar "$TPFX.s161isa.exe" 2>/dev/null)
-isa_auto=$(ZX_SIMD_ISA= "$TPFX.s161isa.exe" 2>/dev/null)
-case "$isa_forced" in
-    isa=scalar)
-        case "$isa_auto" in
-            isa=sse2|isa=avx2)
-                printf "  ok   §161 isaName 如实报告（强制 scalar / 默认 %s）\n" "${isa_auto#isa=}" ;;
-            *)
-                printf "  FAIL §161 默认档是 %s，x86 上不该是 scalar\n" "$isa_auto"; fail=1 ;;
-        esac ;;
-    *)
-        printf "  FAIL §161 强制 scalar 却报 %s\n" "$isa_forced"; head -6 "$TPFX.s161isa.log"; fail=1 ;;
-esac
 
 # §160：C shim 通道（@shim）。真实构建里 shim 是**独立 TU**（用真实路径编，
 # 报错指回那份 .c 的行号）；--emit-c 要自洽就把它贴在末尾；两处 @shim 指向

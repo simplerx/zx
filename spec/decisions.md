@@ -6745,3 +6745,124 @@ static bool zx_all_vi32_4(ZxVec_vi32_4 v) { return (v[0] != 0) & (v[1] != 0) & (
   `std.simd` 的切片内核。
 - 位运算 / `%` / 移位 / `&&` `||`：不变，仍不半支持。
 - 掩码取反：`!m` 不成立（`!` 只作用于 `bool`），要写反面的比较。
+
+## §165 向量只剩 `@Vec` 类型内建，`std.simd` 重写成纯 Zx 数学层（2026-11-14）
+
+**用户原话**：「我不要这么多 @ 的方法, 把他们放进 std.simd 里 可以吧 (select, any,
+all, 还有以后的关于 @Vec 的操作的函数), 内建的只有 @Vec 类型」；「std.simd 现在的
+方法都不要, 换成直接操作 @Vec 的函数形似, 包括点乘,叉乘等等, 再加上四元数的」。
+
+两条合起来是一条判定：**语言层只留类型与运算符，`@Vec` 的一切运算都是库**。
+"还有以后的"是这次的关键——它关掉了"再补一个 `@reduce` / `@splat` / `@dot`
+内建"这条路，往后无论多常用，都写在 `std/simd.zx` 里。
+
+### 为什么内建撑不住
+
+§163 / §164 的内建每加一个，就要在**七处**同步一遍：`sema.c check_builtin`
+（类型规则）、`backend.c ex_builtin`（C 发射）、`parse.c` + `bootstrap/parse.zx`
+（`value_first`，实参是表达式不能按类型读）、`zxc.h` 的计数、`tools/zxls.zig`
+三处（`builtin_docs` / `toplevel_builtins` / `inferExprType`）、E0211 的 `gone[]`
+表、文档四处。而库函数只需要写一遍，**零处联动**。
+
+更实际的原因是掩码语义本来就不需要内建：掩码分量只有 0 与 -1，所以
+"分量非 0 就选 a" 与"按位选 `(a & m) | (b & ~m)`"完全等价，四次循环在 `-O0`
+下也只是一串 `if`，`-O2` 直接展开。为了省一次循环而多三个内建，是把联动成本
+换成编译期成本，不划算。
+
+### `@Vec` 长度不能泛型（实测）
+
+想写 `fn (N: usize, a: @Vec(f32, N)) V4` 一次覆盖 2/4/8/16 分量——不行：
+
+```
+error[E0501]: @Vec length must be a non-negative compile-time integer
+```
+
+模块级函数签名在**泛型实例化之前**就过 `resolve_type`，那时 `N` 还是未绑定的
+类型变量。所以库里写死两种别名：`pub const V4 = @Vec(f32, 4)`、
+`pub const M4 = @Vec(i32, 4)`（掩码）。这也是 SIMD 数学库的通行形状：4 lane
+正好一个 SSE 寄存器，3D 用 `(x, y, z, 0)`、2D 用 `(x, y, 0, 0)`；8 分量的批量
+计算直接用运算符，不需要这一层包装。
+
+要泛型化得先让 `resolve_type` 认得"长度是类型参数的 `@Vec`"，那是另一条
+能力线（泛型依赖类型），本轮不做。
+
+### 连带改动
+
+- `src/sema.c`：删 `check_builtin` 的 `select`（27 行）与 `any` / `all`（14 行）
+  两段；`gone[]` 追三条（`@select` 的说明顺带点出「`@Vec` 是唯一向量内建」）。
+- `src/backend.c`：删 `ex_builtin` 的 `_selN` 位运算发射与 `zx_any_*` /
+  `zx_all_*` 调用发射（-51 行）、`ensure_type` 的 `TY_VEC` 分支里两个助手
+  （-16 行）。`zx_splat_%s` 留着——`(T)v` 铺开还要用。
+- `src/parse.c` / `bootstrap/parse.zx`：`value_first` 白名单收回成
+  `memcpy/memmove/memset/type`（两端必须一起改，否则双前端分叉）。
+- `tools/zxls.zig`：`builtin_docs` 只留 `Vec`；`toplevel_builtins` 收成九项 +
+  `Vec`；`inferExprType` 删 `@any(` / `@all(` → `bool` 与 `@select(` 参数切分。
+  补全面回到「`std.simd.` 的成员表」，不再有 `@` 开头的东西抢位置。
+- `std/simd.zx` 整文件重写（277 行，纯 Zx）：
+  - 掩码 `select / any / all`；
+  - 度量 `dot / lengthSq / length / distance / distanceSq / normalize / sum`；
+  - 逐分量 `splat / zero / min / max / clamp / abs / lerp`；
+  - 3D `cross / reflect`；
+  - `Quat`（`v: V4` 存 `(x,y,z,w)`，w 实部）：
+    `identity / fromAxisAngle / mul / conj / len / norm / rotate / slerp /
+    eq / approxEq`。
+- `std/simd_impl.c` **删除**（581 行）：手写 SSE2/AVX2 三路内核没了。
+  `@Vec` 落到 C 的 `vector_size`，`-O0` 就已经是真指令，手写 intrinsic 换不到
+  额外收益，只换来三路逐位一致的维护负担和一份必须靠 `@shim` 编译的 C。
+- `std/std.zx` 的 `simd` 模块注释改成「全是普通函数，没有额外的向量内建」。
+
+### 数值契约（写进注释也写进用例）
+
+- `min / max / clamp / abs` 一律「比较 + `select`」，所以 **NaN 原样留下**、
+  `abs(-0.0)` 仍是 `-0.0`。不用 C 的 `fmin/fmax`——那两个会把 NaN 换成另一侧。
+- `dot` 的加法顺序固定 `((0+1)+(2+3))`，同一输入在任何优化档下同一个浮点结果。
+- `normalize` 对零向量原样返回；`Quat.fromAxisAngle` 零轴退化成单位四元数；
+  `Quat.norm` 零四元数返回 `identity()`——不返回 `?Self`，归一化零值没有有意义
+  的答案。
+- `slerp` 在 `|dot| > 0.9995` 时退化成 nlerp（`acos` 接近 1 时精度崩塌），
+  点乘为负先取反（`-q` 与 `q` 是同一个旋转）。
+- 方法名避开模块级同名函数（`len` / `norm` 而不是 `length` / `normalize`）：
+  **容器体内裸名优先解析到成员**，同名会自己调自己。
+
+### 守门
+
+- `tests/good/std-simd.zx` 重写：19 行输出覆盖度量、归一化、min/max/clamp/abs
+  （含 `-0.0`）、lerp、sum、掩码（select/any/all + 边界）、cross、reflect、
+  四元数（id / rot / mul / conj / slerp + 退化档）。浮点近似用本地
+  `near(a, b, eps)` 判 `true`，不钉末位。
+- `tests/good/vec.zx`：`@select` / `@any` / `@all` 四行删掉，改成直接打印掩码
+  分量与 `.len`。
+- `tests/bad/` 删 `vec-select-{mask,lanes}.zx`、`vec-any-{argc,notmask}.zx`、
+  `vec-all-scalar.zx`（内建没了，这些诊断也不存在）；新增
+  `removed-select/any/all.zx`，`// expect: @select was removed` +
+  `// expect-code: E0211`。
+- `test.sh §165` 四条：三个 `removed-*` 在双前端下都报 E0211；`std.simd` 生成的
+  C 里**有** `vector_size`、**没有** `_mm*_`（纯 Zx 的证明）；`select/any/all`
+  的语义输出；旧的 `zx_any_vi32_4` / `_sel` 不再出现在生成的 C 里。
+- `test.sh §159` 保留「dev / release 逐字一致」那一半（`cmp` 比两次输出），
+  它守的是 `dot` 的固定加法顺序，与内核实现无关。
+- `tools/lsptest.py`：GEN157 fixture 改成 `std.simd.select / any / all`；
+  断言换成 `completion.simd.members`（`V4 M4 Quat dot cross select any all`）、
+  `completion.noSelectBuiltin` / `noAnyBuiltin` / `noAllBuiltin`（**期望空列表**，
+  守的就是"内建真没了"）、`inlayHint.vec.select == ": V4"`（别名按库里的签名
+  源码呈现，不是展开成 `@Vec(f32, 4)`）。
+
+### 教训
+
+- **删块的顺序**：`backend.c` 里两段删除区间有先后依赖，先删靠后的
+  `ex_builtin`、再删前面的助手段，否则偏移全乱。删完多出来的 `}` 会报
+  `conflicting types for 'buf_puts'`——那不是类型问题，是括号问题。
+- **`! grep -qF 'zx_any_'` 会误命中**：输出格式化助手叫 `zx_any_put`，要钉具体
+  到 `zx_any_vi32_4`。
+- **LSP 冒烟 6 条 diagnostics 失败与本节无关**：`git stash push -u` 回到 §164
+  基线同样复现（`the Zx frontend (zxfe) failed without a diagnostic (exit 1)`），
+  是环境既有问题。判别方法是回基线重跑，不是读代码猜。
+- **库里的字面量别名要先绑**：`std.simd.V4{…}` 这种「带路径 + 花括号」不合法
+  （`expected ';', found '{'`），必须 `const V4 = std.simd.V4;` 再 `V4{…}`。
+  文档示例已按此改。
+
+### 仍然没做
+
+- `@Vec` 长度的泛型化（见上，E0501）。
+- 归约到标量的通用 `reduce`：`sum` / `dot` 够用，不必再铺一层。
+- 位运算 / `%` / 移位：不变，仍不半支持。

@@ -4594,13 +4594,13 @@ const Gen157 = fn (T: type, n: T) type {
 
 const main = fn () u8 {
     var gen = Gen157(i32, 10){ .mem = 10 };
-    // §162：向量的行内类型：字面量 / 比较掩码 / @select。
+    // §162 / §165：向量的行内类型：字面量 / 比较掩码 / std.simd 的返回类型。
     // 必须放在下面 `var p1 = gen.;` 之前：行内提示遍历到第一个语法错就停。
     var va = @Vec(f32, 4){1.0, 2.0, 3.0, 4.0};
     let vc = va < va;
-    let vd = @select(vc, va, va);
-    let vany = @any(vd);
-    let vall = @all(vd);
+    let vd = std.simd.select(vc, va, va);
+    let vany = std.simd.any(vd);
+    let vall = std.simd.all(vd);
     let n = gen.mem;
     _ = n;
     std.println("{} {}", gen.get(), n);
@@ -4610,7 +4610,7 @@ const main = fn () u8 {
     var p3 = std.;
     var p4 = std.math.sqrt;
     var p5 = std.math.;
-    var p6 = std.simd.addF32;
+    var p6 = std.simd.dot;
     var p7 = std.simd.;
     var p8 = @sh;
     var p9 = @Ve;
@@ -4723,18 +4723,19 @@ check("hover.mathSqrt.zxSignature",
       "sqrt(x: f64) f64" in _h_sqrt and "sqrt(f64)" not in _h_sqrt,
       _h_sqrt[:160])
 
-# §159：std.simd 的公开面（类型 + 内核）在补全里要带完整 Zx 签名。
-_g159_add = g157_comp("var p6 = std.simd.addF32", 5209)
-check("completion.simd.addF32.zxSignature",
-      len(_g159_add) == 1
-      and _g159_add[0].get("label") == "addF32"
-      and _g159_add[0].get("detail") == "addF32(dst: []f32, a: []const f32, b: []const f32) usize"
-      and _g159_add[0].get("insertText") == "addF32(${1:dst}, ${2:a}, ${3:b})$0",
-      str(_g159_add)[:260])
-_g159_members = {i["label"] for i in g157_comp("var p7 = std.simd.", 5210)}
+# §165：std.simd 是 `@Vec` 的数学层，补全里要带完整 Zx 签名（形参类型就是
+# `@Vec` 的别名，不再是包一层的 Vec4f/Vec4i）。
+_g165_dot = g157_comp("var p6 = std.simd.dot", 5209)
+check("completion.simd.dot.zxSignature",
+      len(_g165_dot) == 1
+      and _g165_dot[0].get("label") == "dot"
+      and _g165_dot[0].get("detail") == "dot(a: V4, b: V4) f32"
+      and _g165_dot[0].get("insertText") == "dot(${1:a}, ${2:b})$0",
+      str(_g165_dot)[:260])
+_g165_members = {i["label"] for i in g157_comp("var p7 = std.simd.", 5210)}
 check("completion.simd.members",
-      {"Vec4f", "Vec4i", "addF32", "dotF32", "fillI32"} <= _g159_members,
-      str(sorted(_g159_members))[:240])
+      {"V4", "M4", "Quat", "dot", "cross", "select", "any", "all"} <= _g165_members,
+      str(sorted(_g165_members))[:240])
 
 # §160：`@shim` 要出现在 `@` 补全里；写到一半（`@sh`）同样要走这条路。
 # 旧行为：identBefore 不吃 '@'，`@sh` 的前缀是 `sh`，`off-1` 也不是 '@'
@@ -4763,37 +4764,26 @@ check("completion.vec.partialAtIsBuiltin",
 #   类型串 `@Vec(f32, 4)` 现算（`.len/.size` + 分量 `.0`..`.3`）。
 check("inlayHint.vec.literal", g157_hint("var va") == ": @Vec(f32, 4)", _g157_detail)
 check("inlayHint.vec.cmpMask", g157_hint("let vc") == ": @Vec(i32, 4)", _g157_detail)
-check("inlayHint.vec.select", g157_hint("let vd") == ": @Vec(f32, 4)", _g157_detail)
+check("inlayHint.vec.select", g157_hint("let vd") == ": V4", _g157_detail)  # 类型按签名源码写，别名就是 V4
 _g162_members = {i["label"] for i in g157_comp("var vb = va.", 5216)}
 check("completion.vec.members",
       {"len", "size", "0", "1", "2", "3"} <= _g162_members and "4" not in _g162_members,
       str(sorted(_g162_members))[:240])
 
-# §162 — `@select` 也是内建，`@se` 要出它（掩码选择没有别的写法）。
-_g162_sel = g157_comp("var p10 = @se", 5217)
-check("completion.select.partialAtIsBuiltin",
-      len(_g162_sel) == 1
-      and _g162_sel[0].get("label") == "select"
-      and _g162_sel[0].get("kind") == 3,
-      str(_g162_sel)[:240])
+# §165 — `@select` 不再是内建：`@se` 不该弹出任何 `@` 内建（它现在是
+# `std.simd.select`）。
+_g165_sel = g157_comp("var p10 = @se", 5217)
+check("completion.noSelectBuiltin", len(_g165_sel) == 0, str(_g165_sel)[:240])
 
-# §164 — 掩码判真：
-#   @any/@all 的行内类型是 bool（向量已经收敛成一个值）；
-#   `@an` / `@al` 要出对应的内建。
+# §165 — 掩码判真也是普通函数：
+#   `std.simd.any` / `std.simd.all` 的行内类型是 bool（向量收敛成一个值）；
+#   `@an` / `@al` 两个前缀不该再弹出任何内建。
 check("inlayHint.vec.any", g157_hint("let vany") == ": bool", _g157_detail)
 check("inlayHint.vec.all", g157_hint("let vall") == ": bool", _g157_detail)
-_g164_any = g157_comp("var p11 = @an", 5218)
-check("completion.any.partialAtIsBuiltin",
-      len(_g164_any) == 1
-      and _g164_any[0].get("label") == "any"
-      and _g164_any[0].get("kind") == 3,
-      str(_g164_any)[:240])
-_g164_all = g157_comp("var p12 = @al", 5219)
-check("completion.all.partialAtIsBuiltin",
-      len(_g164_all) == 1
-      and _g164_all[0].get("label") == "all"
-      and _g164_all[0].get("kind") == 3,
-      str(_g164_all)[:240])
+_g165_any = g157_comp("var p11 = @an", 5218)
+check("completion.noAnyBuiltin", len(_g165_any) == 0, str(_g165_any)[:240])
+_g165_all = g157_comp("var p12 = @al", 5219)
+check("completion.noAllBuiltin", len(_g165_all) == 0, str(_g165_all)[:240])
 
 
 

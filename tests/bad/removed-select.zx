@@ -1,0 +1,10 @@
+// expect: @select was removed
+// expect-code: E0211
+// §165：向量内建只剩 `@Vec` 类型。掩码选择是普通函数
+// `std.simd.select(mask, a, b)`——旧拼写要给迁移提示，不能只说 unknown builtin。
+const main = fn () u8 {
+    let a = @Vec(f32, 4){1.0, 2.0, 3.0, 4.0};
+    let c = @select(a < a, a, a);
+    _ = c;
+    return 0;
+};

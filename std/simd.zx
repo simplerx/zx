@@ -1,351 +1,277 @@
-// simd.zx —— 向量值类型与批量内核（真 SIMD，§161）。
+// simd.zx —— `@Vec` 的数学层：向量度量、逐分量工具、掩码选择、四元数。
 //
-// 两层，各管各的：
+// 语言那边只有**类型** `@Vec(T, N)` 和它的运算符（`+ - *`、浮点 `/`、一元
+// `-`、六个比较）。其余的一切都在这个文件里，写成普通函数，形参就是
+// `@Vec` 本身——不包一层 Vec4f/Vec4i 门面：
 //
-//   Vec4f / Vec4i   4 分量值类型：几何、颜色、整数向量。16 字节，按值传，
-//                   单条向量的运算是 4 条标量指令——SIMD 的收益来自"跨元素"，
-//                   不来自"一个向量的 4 个分量"。这一层刻意保持纯 Zx：它是
-//                   值语义的门面，换实现不会更快，只会更难调试。
+//   const std = @mod("std");
+//   const V4 = @Vec(f32, 4);
 //
-//   切片内核        addF32 / mulF32 / saxpy / dotF32 …：逐元素处理 []f32。
-//                   实现在 simd_impl.c（@shim 挂进来的独立 C TU），手写
-//                   SSE2 / AVX2 intrinsic，运行期按 CPU 选，非 x86 走标量。
-//                   所以 **dev（-O0）也是真向量指令**，不再依赖 -O2 的自动
-//                   向量化；AVX2 一轮 8 个 float，SSE2 一轮 4 个。
+//   let a = V4{0.0, 3.0, 4.0, 0.0};
+//   std.println("len={} dot={}", std.simd.length(a), std.simd.dot(a, a));
 //
-// **数值契约：三条实现逐位一致。**
+// **没有 @select / @any / @all 内建**（1.4.1 撤掉）。它们的语义用普通 Zx
+// 就写得出来：掩码分量只有 0 与 -1，"非 0 就是真"，四次循环在 -O2 下
+// 完全展开。少三个内建，就少三处需要跟 N 一起同步的实现。旧拼写报 E0211
+// 并指到这里的同名函数。
 //
-//   - 逐元素内核：每个下标只读写自己那一格，与标量实现逐位相同。
-//   - 归约（dotF32 / sumF32）：固定 8 条累加链，按
-//     ((t0+t1)+(t2+t3)) + ((t4+t5)+(t6+t7)) 合并，尾块并进第 0 条链。
-//     AVX2 一个 8 lane 寄存器、SSE2 两个 4 lane、标量八个变量，分组相同 =>
-//     加法结合顺序相同。**不用 FMA**（SSE2 没有；一融合两种 CPU 的结果就分叉）。
-//     这比 §159 的 4 链并行度更高，末位可能与旧版不同——4 链是实现细节，
-//     不是对外承诺。
-//   - clamp / abs：NaN 与 -0.0 保持原样（C 侧用有序比较 + 选择，不用
-//     min/max，也不清符号位）。
+// 形状：4 个分量是这一层唯一的形状。3D 用 (x, y, z, 0)，2D 用 (x, y, 0, 0)。
+// `@Vec` 的长度只能是 2 的幂，没有 3 分量向量；第 4 个分量留 0 是 SIMD
+// 数学库的通行做法（4 lane 正好一个 SSE 寄存器）。8 分量（AVX）的批量
+// 计算直接用运算符，不需要这一层包装。
 //
-// 别名：逐元素内核允许 dst 与 a / b 是同一块内存（原地更新安全）。归约只读。
-//
-// 长度：所有内核处理 min(各输入长度)，返回实际处理的元素个数。不 trap、
-// 不补零：调用方拿返回值就能知道尾部有没有漏。
-//
-// 想看跑的是哪条路径：std.simd.isaName()；调试或做对照实验可用环境变量
-// ZX_SIMD_ISA=scalar|sse2|avx2 强制降档（没有对应指令集时按实际能力回退）。
-
-@shim("simd_impl.c");
+// 数值契约：逐分量运算就是运算符本身，没有快路径也没有近似；`min` / `max`
+// / `clamp` / `abs` 走比较 + `select`，所以 **NaN 按"比较为假"处理**
+// （NaN 原样留下，不会被换成另一侧的值，也不会清掉 -0.0 的符号位）。
 
 extern "C" {
-    fn zx_simd_add_f32(dst: *f32, a: *const f32, b: *const f32, n: usize) void;
-    fn zx_simd_sub_f32(dst: *f32, a: *const f32, b: *const f32, n: usize) void;
-    fn zx_simd_mul_f32(dst: *f32, a: *const f32, b: *const f32, n: usize) void;
-    fn zx_simd_scale_f32(dst: *f32, a: *const f32, s: f32, n: usize) void;
-    fn zx_simd_saxpy_f32(dst: *f32, a: *const f32, b: *const f32, s: f32, n: usize) void;
-    fn zx_simd_lerp_f32(dst: *f32, a: *const f32, b: *const f32, t: f32, n: usize) void;
-    fn zx_simd_clamp_f32(dst: *f32, a: *const f32, lo: f32, hi: f32, n: usize) void;
-    fn zx_simd_abs_f32(dst: *f32, a: *const f32, n: usize) void;
-    fn zx_simd_fill_f32(dst: *f32, v: f32, n: usize) void;
-    fn zx_simd_add_i32(dst: *i32, a: *const i32, b: *const i32, n: usize) void;
-    fn zx_simd_sub_i32(dst: *i32, a: *const i32, b: *const i32, n: usize) void;
-    fn zx_simd_fill_i32(dst: *i32, v: i32, n: usize) void;
-    fn zx_simd_dot_f32(a: *const f32, b: *const f32, n: usize) f32;
-    fn zx_simd_sum_f32(a: *const f32, n: usize) f32;
-    fn zx_simd_isa_level() i32;
-
-    // f32 的平方根直接用 libm 的 sqrtf：和 math.zx 的 sqrt(f64) 是两个符号，
-    // 这里不做 f32->f64->f32 的往返（向量长度在热路径上）。
+    // f32 的平方根 / 三角直接用 libm 的单精度符号：和 math.zx 的 f64 版本
+    // 是两个符号，这里不做 f32→f64→f32 的往返（向量长度在热路径上）。
     fn sqrtf(x: f32) f32;
+    fn sinf(x: f32) f32;
+    fn cosf(x: f32) f32;
+    fn acosf(x: f32) f32;
 }
 
-// ---- 私有小工具 ----
+// 4 分量浮点向量（几何 / 颜色 / 任意 4 元组）。
+pub const V4 = @Vec(f32, 4);
 
-// 长度取 min：几处长度可能不同，只处理够得着的那一段。
-const min2 = fn (a: usize, b: usize) usize {
-    if (a < b) { return a; }
-    return b;
+// 掩码：两个向量比较的结果，分量 0 或 -1（同 lane 宽的有符号整数）。
+pub const M4 = @Vec(i32, 4);
+
+// ---- 私有工具 ----
+
+// 取 xyz、w 置 0：四元数的虚部就是 3D 向量。
+const xyz = fn (v: V4) V4 {
+    return V4{ v.0, v.1, v.2, 0.0 };
 };
 
-const min3 = fn (a: usize, b: usize, c: usize) usize {
-    return min2(min2(a, b), c);
+// 只算前三个分量的点乘：四元数的实部不参与虚部的内积。
+const dot3 = fn (a: V4, b: V4) f32 {
+    return a.0 * b.0 + a.1 * b.1 + a.2 * b.2;
 };
 
-// Vec4f.clamp 用（切片版的 clamp 在 C 里，NaN 语义与这里一致）：
-// 两个比较对 NaN 都是 false，原样留下。
-const clampOne = fn (v: f32, lo: f32, hi: f32) f32 {
-    var r = v;
-    if (r < lo) { r = lo; }
-    if (r > hi) { r = hi; }
+// ---- 掩码 ----
+
+// 按掩码逐分量选：m 的分量为 -1 取 a，为 0 取 b。
+//
+// 写法是"逐分量拷"，不是位运算：`@Vec` 没有位运算符（浮点向量的按位与在
+// C 里也不成立），而掩码只有 0 / -1 两种值，所以"分量非 0 就选 a"与
+// "按位选"完全等价，NaN 的位模式也照搬。
+pub const select = fn (m: M4, a: V4, b: V4) V4 {
+    var r = b;
+    var i: usize = 0;
+    while (i < b.len) {
+        if (m[i] != 0) { r[i] = a[i]; }
+        i = i + 1;
+    }
     return r;
 };
 
-// ---- 4 分量浮点向量 ----
-
-pub const Vec4f = struct {
-    pub x: f32,
-    pub y: f32,
-    pub z: f32,
-    pub w: f32,
-
-    pub const zero = fn () Self {
-        return Self{ .x = 0.0, .y = 0.0, .z = 0.0, .w = 0.0 };
-    };
-
-    pub const splat = fn (v: f32) Self {
-        return Self{ .x = v, .y = v, .z = v, .w = v };
-    };
-
-    pub const add = fn (self: Self, o: Self) Self {
-        return Self{ .x = self.x + o.x, .y = self.y + o.y,
-                     .z = self.z + o.z, .w = self.w + o.w };
-    };
-
-    pub const sub = fn (self: Self, o: Self) Self {
-        return Self{ .x = self.x - o.x, .y = self.y - o.y,
-                     .z = self.z - o.z, .w = self.w - o.w };
-    };
-
-    pub const mul = fn (self: Self, o: Self) Self {
-        return Self{ .x = self.x * o.x, .y = self.y * o.y,
-                     .z = self.z * o.z, .w = self.w * o.w };
-    };
-
-    pub const scale = fn (self: Self, s: f32) Self {
-        return Self{ .x = self.x * s, .y = self.y * s,
-                     .z = self.z * s, .w = self.w * s };
-    };
-
-    pub const neg = fn (self: Self) Self { return self.scale(-1.0); };
-
-    pub const dot = fn (self: Self, o: Self) f32 {
-        return (self.x * o.x + self.y * o.y) + (self.z * o.z + self.w * o.w);
-    };
-
-    pub const lengthSq = fn (self: Self) f32 { return self.dot(self); };
-
-    pub const length = fn (self: Self) f32 { return sqrtf(self.lengthSq()); };
-
-    // 零向量原样返回：不做除零陷阱，也不返回 ?Self —— 归一化零向量没有
-    // 有意义的答案，但"保持零"是唯一不会传播 NaN 的选择。
-    pub const normalize = fn (self: Self) Self {
-        let l = self.length();
-        if (l == 0.0) { return self; }
-        return self.scale((f32)1.0 / l);
-    };
-
-    pub const min = fn (self: Self, o: Self) Self {
-        var x = self.x; if (o.x < x) { x = o.x; }
-        var y = self.y; if (o.y < y) { y = o.y; }
-        var z = self.z; if (o.z < z) { z = o.z; }
-        var w = self.w; if (o.w < w) { w = o.w; }
-        return Self{ .x = x, .y = y, .z = z, .w = w };
-    };
-
-    pub const max = fn (self: Self, o: Self) Self {
-        var x = self.x; if (o.x > x) { x = o.x; }
-        var y = self.y; if (o.y > y) { y = o.y; }
-        var z = self.z; if (o.z > z) { z = o.z; }
-        var w = self.w; if (o.w > w) { w = o.w; }
-        return Self{ .x = x, .y = y, .z = z, .w = w };
-    };
-
-    pub const clamp = fn (self: Self, lo: f32, hi: f32) Self {
-        return Self{ .x = clampOne(self.x, lo, hi), .y = clampOne(self.y, lo, hi),
-                     .z = clampOne(self.z, lo, hi), .w = clampOne(self.w, lo, hi) };
-    };
-
-    pub const lerp = fn (self: Self, o: Self, t: f32) Self {
-        return self.add(o.sub(self).scale(t));
-    };
-
-    pub const abs = fn (self: Self) Self {
-        var x = self.x; if (x < 0.0) { x = -x; }
-        var y = self.y; if (y < 0.0) { y = -y; }
-        var z = self.z; if (z < 0.0) { z = -z; }
-        var w = self.w; if (w < 0.0) { w = -w; }
-        return Self{ .x = x, .y = y, .z = z, .w = w };
-    };
-
-    pub const sum = fn (self: Self) f32 { return (self.x + self.y) + (self.z + self.w); };
-
-    pub const eq = fn (self: Self, o: Self) bool {
-        return self.x == o.x && self.y == o.y && self.z == o.z && self.w == o.w;
-    };
-
-    // 逐分量比较 + 一个 eps，等价于 max(|self - o|) <= eps。
-    pub const approxEq = fn (self: Self, o: Self, eps: f32) bool {
-        let d = self.sub(o).abs();
-        var m = d.x;
-        if (d.y > m) { m = d.y; }
-        if (d.z > m) { m = d.z; }
-        if (d.w > m) { m = d.w; }
-        return m <= eps;
-    };
+// 至少一个分量为真（非 0）。结果可直接进 `if`。
+pub const any = fn (m: M4) bool {
+    var i: usize = 0;
+    while (i < m.len) {
+        if (m[i] != 0) { return true; }
+        i = i + 1;
+    }
+    return false;
 };
 
-// ---- 4 分量整数向量 ----
-
-pub const Vec4i = struct {
-    pub x: i32,
-    pub y: i32,
-    pub z: i32,
-    pub w: i32,
-
-    pub const zero = fn () Self { return Self{ .x = 0, .y = 0, .z = 0, .w = 0 }; };
-
-    pub const splat = fn (v: i32) Self { return Self{ .x = v, .y = v, .z = v, .w = v }; };
-
-    pub const add = fn (self: Self, o: Self) Self {
-        return Self{ .x = self.x + o.x, .y = self.y + o.y,
-                     .z = self.z + o.z, .w = self.w + o.w };
-    };
-
-    pub const sub = fn (self: Self, o: Self) Self {
-        return Self{ .x = self.x - o.x, .y = self.y - o.y,
-                     .z = self.z - o.z, .w = self.w - o.w };
-    };
-
-    pub const mul = fn (self: Self, o: Self) Self {
-        return Self{ .x = self.x * o.x, .y = self.y * o.y,
-                     .z = self.z * o.z, .w = self.w * o.w };
-    };
-
-    pub const neg = fn (self: Self) Self { return self.mul(Self.splat(-1)); };
-
-    pub const abs = fn (self: Self) Self {
-        var x = self.x; if (x < 0) { x = -x; }
-        var y = self.y; if (y < 0) { y = -y; }
-        var z = self.z; if (z < 0) { z = -z; }
-        var w = self.w; if (w < 0) { w = -w; }
-        return Self{ .x = x, .y = y, .z = z, .w = w };
-    };
-
-    pub const min = fn (self: Self, o: Self) Self {
-        var x = self.x; if (o.x < x) { x = o.x; }
-        var y = self.y; if (o.y < y) { y = o.y; }
-        var z = self.z; if (o.z < z) { z = o.z; }
-        var w = self.w; if (o.w < w) { w = o.w; }
-        return Self{ .x = x, .y = y, .z = z, .w = w };
-    };
-
-    pub const max = fn (self: Self, o: Self) Self {
-        var x = self.x; if (o.x > x) { x = o.x; }
-        var y = self.y; if (o.y > y) { y = o.y; }
-        var z = self.z; if (o.z > z) { z = o.z; }
-        var w = self.w; if (o.w > w) { w = o.w; }
-        return Self{ .x = x, .y = y, .z = z, .w = w };
-    };
-
-    pub const eq = fn (self: Self, o: Self) bool {
-        return self.x == o.x && self.y == o.y && self.z == o.z && self.w == o.w;
-    };
+// 每个分量都为真（非 0）。注意空掩码在数学上是"全真"，但 `@Vec` 的 N
+// 至少是 1，所以不需要讨论空的情况。
+pub const all = fn (m: M4) bool {
+    var i: usize = 0;
+    while (i < m.len) {
+        if (m[i] == 0) { return false; }
+        i = i + 1;
+    }
+    return true;
 };
 
-// ---- 批量内核：f32 ----
+// ---- 度量 ----
+
+// 点乘。一次向量乘 + 三个标量加：加法顺序固定为 ((0+1)+(2+3))，
+// 同一份输入在任何优化档下都得到同一个浮点结果。
+pub const dot = fn (a: V4, b: V4) f32 {
+    let m = a * b;
+    return (m.0 + m.1) + (m.2 + m.3);
+};
+
+// 模长平方：不需要开方时用它，省一次 sqrtf。
+pub const lengthSq = fn (v: V4) f32 {
+    return dot(v, v);
+};
+
+pub const length = fn (v: V4) f32 {
+    return sqrtf(lengthSq(v));
+};
+
+pub const distance = fn (a: V4, b: V4) f32 {
+    return length(a - b);
+};
+
+pub const distanceSq = fn (a: V4, b: V4) f32 {
+    return lengthSq(a - b);
+};
+
+// 单位化。零向量原样返回：不做除零陷阱，也不返回 `?V4`——归一化零向量
+// 没有有意义的答案，"保持零"是唯一不传播 NaN 的选择。
+pub const normalize = fn (v: V4) V4 {
+    let l = length(v);
+    if (l == 0.0) { return v; }
+    return v * (V4)(1.0 / l);
+};
+
+// 分量和（不是点乘；点乘要先乘）。
+pub const sum = fn (v: V4) f32 {
+    return (v.0 + v.1) + (v.2 + v.3);
+};
+
+// ---- 逐分量工具 ----
 //
-// 每个内核只做三件事：算 n（min 各输入长度）、调 C 实现、返回 n。长度语义
-// 留在 Zx 这一侧——C 那边只认 (ptr, ptr, n)，两处各算一遍 min 迟早会漂。
+// 全部走 `select`：比较出掩码、按掩码选。NaN 参与比较时结果为假，所以
+// NaN 分量原样留下——这与"用 C 的 fmin/fmax"不同，后者会把 NaN 换成
+// 另一个操作数。要"遇 NaN 就换"的语义，自己写比较。
 
-// 当前实际使用的指令集路径："avx2" / "sse2" / "scalar"。
-pub const isaName = fn () []const u8 {
-    let k = zx_simd_isa_level();
-    if (k >= 3) { return "avx2"; }
-    if (k == 2) { return "sse2"; }
-    return "scalar";
+pub const splat = fn (x: f32) V4 {
+    return (V4)x;
 };
 
-// dst = a + b
-pub const addF32 = fn (dst: []f32, a: []const f32, b: []const f32) usize {
-    let n = min3(dst.len, a.len, b.len);
-    zx_simd_add_f32(dst.ptr, a.ptr, b.ptr, n);
-    return n;
+pub const zero = fn () V4 {
+    return (V4)0.0;
 };
 
-// dst = a - b
-pub const subF32 = fn (dst: []f32, a: []const f32, b: []const f32) usize {
-    let n = min3(dst.len, a.len, b.len);
-    zx_simd_sub_f32(dst.ptr, a.ptr, b.ptr, n);
-    return n;
+pub const min = fn (a: V4, b: V4) V4 {
+    return select(a < b, a, b);
 };
 
-// dst = a * b
-pub const mulF32 = fn (dst: []f32, a: []const f32, b: []const f32) usize {
-    let n = min3(dst.len, a.len, b.len);
-    zx_simd_mul_f32(dst.ptr, a.ptr, b.ptr, n);
-    return n;
+pub const max = fn (a: V4, b: V4) V4 {
+    return select(a > b, a, b);
 };
 
-// dst = a * s
-pub const scaleF32 = fn (dst: []f32, a: []const f32, s: f32) usize {
-    let n = min2(dst.len, a.len);
-    zx_simd_scale_f32(dst.ptr, a.ptr, s, n);
-    return n;
+// 逐分量夹逼：先夹上界再夹下界（顺序不影响结果，lo > hi 时落在 lo 上）。
+pub const clamp = fn (v: V4, lo: f32, hi: f32) V4 {
+    let l = (V4)lo;
+    let h = (V4)hi;
+    return select(v < l, l, select(v > h, h, v));
 };
 
-// dst = a + b * s（BLAS 的 saxpy：y = y + alpha * x 的通用形式）
-pub const saxpyF32 = fn (dst: []f32, a: []const f32, b: []const f32, s: f32) usize {
-    let n = min3(dst.len, a.len, b.len);
-    zx_simd_saxpy_f32(dst.ptr, a.ptr, b.ptr, s, n);
-    return n;
+// 绝对值：`-0.0 < 0.0` 为假，所以 -0.0 保持 -0.0（不清符号位）。
+pub const abs = fn (v: V4) V4 {
+    return select(v < (V4)0.0, -v, v);
 };
 
-// dst = a + (b - a) * t
-pub const lerpF32 = fn (dst: []f32, a: []const f32, b: []const f32, t: f32) usize {
-    let n = min3(dst.len, a.len, b.len);
-    zx_simd_lerp_f32(dst.ptr, a.ptr, b.ptr, t, n);
-    return n;
+// 线性插值：t=0 得 a，t=1 得 b。t 不夹逼（要夹逼先 clamp(t, 0, 1)）。
+pub const lerp = fn (a: V4, b: V4, t: f32) V4 {
+    return a + (b - a) * (V4)t;
 };
 
-// dst = clamp(a, lo, hi)；NaN 原样留下
-pub const clampF32 = fn (dst: []f32, a: []const f32, lo: f32, hi: f32) usize {
-    let n = min2(dst.len, a.len);
-    zx_simd_clamp_f32(dst.ptr, a.ptr, lo, hi, n);
-    return n;
+// ---- 3D 几何（4 分量承载 xyz）----
+
+// 叉乘：只取前三个分量，结果的 w 恒为 0。
+pub const cross = fn (a: V4, b: V4) V4 {
+    return V4{
+        a.1 * b.2 - a.2 * b.1,
+        a.2 * b.0 - a.0 * b.2,
+        a.0 * b.1 - a.1 * b.0,
+        0.0,
+    };
 };
 
-// dst = |a|
-pub const absF32 = fn (dst: []f32, a: []const f32) usize {
-    let n = min2(dst.len, a.len);
-    zx_simd_abs_f32(dst.ptr, a.ptr, n);
-    return n;
+// 反射：v 关于法线 n 的镜面反射（n 必须单位化），结果是 v - 2(v·n)n。
+pub const reflect = fn (v: V4, n: V4) V4 {
+    return v - n * (V4)(2.0 * dot(v, n));
 };
 
-// dst[i] = v
-pub const fillF32 = fn (dst: []f32, v: f32) usize {
-    let n = dst.len;
-    zx_simd_fill_f32(dst.ptr, v, n);
-    return n;
-};
+// ---- 四元数 ----
+//
+// 存成 `@Vec(f32, 4)` 的 (x, y, z, w)：w 是实部，xyz 是虚部。这样拷贝、
+// 取分量、传给 `@Vec` 的函数都不需要拆装；代价是没法直接 `+`/`*` 两个
+// 四元数（那是四元数乘法，不是逐分量乘法），所以全走方法。
+//
+// 方法名刻意避开模块级同名函数（`len` / `norm` 而不是 `length` /
+// `normalize`）：容器体内裸名优先解析到成员，同名会自己调自己。
 
-// 点积：8 条累加链（见文件头），空切片返回 0。
-pub const dotF32 = fn (a: []const f32, b: []const f32) f32 {
-    let n = min2(a.len, b.len);
-    return zx_simd_dot_f32(a.ptr, b.ptr, n);
-};
+pub const Quat = struct {
+    pub v: V4,
 
-// 求和：同 dot 的 8 链累加，空切片返回 0。
-pub const sumF32 = fn (a: []const f32) f32 {
-    return zx_simd_sum_f32(a.ptr, a.len);
-};
+    // 单位四元数：没有旋转。
+    pub const identity = fn () Self {
+        return Self{ .v = V4{0.0, 0.0, 0.0, 1.0} };
+    };
 
-// ---- 批量内核：i32 ----
+    // 轴角：绕 axis 转 rad 弧度（右手定则）。axis 在这里归一化，长度 0
+    // 时退化成单位四元数——和 normalize 对零向量的处理一致。
+    pub const fromAxisAngle = fn (axis: V4, rad: f32) Self {
+        let n = normalize(xyz(axis));
+        let s = sinf(rad * 0.5);
+        let c = cosf(rad * 0.5);
+        return Self{ .v = V4{ n.0 * s, n.1 * s, n.2 * s, c } };
+    };
 
-// dst = a + b（回绕语义与 i32 的 + 一致，不检查溢出）
-pub const addI32 = fn (dst: []i32, a: []const i32, b: []const i32) usize {
-    let n = min3(dst.len, a.len, b.len);
-    zx_simd_add_i32(dst.ptr, a.ptr, b.ptr, n);
-    return n;
-};
+    // 四元数乘法（复合旋转）：`a.mul(b)` 表示先 b 后 a。
+    pub const mul = fn (self: Self, o: Self) Self {
+        let a = self.v;
+        let b = o.v;
+        let w = a.3 * b.3 - dot3(a, b);
+        let u = cross(a, b) + xyz(a) * (V4)b.3 + xyz(b) * (V4)a.3;
+        return Self{ .v = V4{ u.0, u.1, u.2, w } };
+    };
 
-// dst = a - b
-pub const subI32 = fn (dst: []i32, a: []const i32, b: []const i32) usize {
-    let n = min3(dst.len, a.len, b.len);
-    zx_simd_sub_i32(dst.ptr, a.ptr, b.ptr, n);
-    return n;
-};
+    // 共轭：旋转的逆（单位四元数下）。
+    pub const conj = fn (self: Self) Self {
+        let a = self.v;
+        return Self{ .v = V4{ -a.0, -a.1, -a.2, a.3 } };
+    };
 
-// dst[i] = v
-pub const fillI32 = fn (dst: []i32, v: i32) usize {
-    let n = dst.len;
-    zx_simd_fill_i32(dst.ptr, v, n);
-    return n;
+    // 模长；单位四元数是 1。
+    pub const len = fn (self: Self) f32 {
+        return length(self.v);
+    };
+
+    // 单位化。零四元数返回单位四元数（除以 0 只会得到一串 NaN）。
+    pub const norm = fn (self: Self) Self {
+        let l = self.len();
+        if (l == 0.0) { return Self.identity(); }
+        return Self{ .v = self.v * (V4)(1.0 / l) };
+    };
+
+    // 旋转一个向量：v' = q · (v,0) · q*，展开成两次叉乘（少一次四元数乘）。
+    pub const rotate = fn (self: Self, v: V4) V4 {
+        let q = self.v;
+        let u = xyz(q);
+        let t = cross(u, v) * (V4)2.0;
+        return v + t * (V4)q.3 + cross(u, t);
+    };
+
+    // 球面插值：t=0 得 self，t=1 得 o，中间按等角速度走。
+    // 点乘为负时先取反（-q 与 q 是同一个旋转），否则会绕远路。
+    pub const slerp = fn (self: Self, o: Self, t: f32) Self {
+        var d = dot(self.v, o.v);
+        var b = o;
+        if (d < 0.0) { d = -d; b = Self{ .v = -o.v }; }
+        if (d > 0.9995) {
+            // 几乎重合：线性插值再归一化，避免 acos 接近 1 时的精度崩塌。
+            let mid = Self{ .v = lerp(self.v, b.v, t) };
+            return mid.norm();
+        }
+        let th = acosf(d);
+        let s = sinf(th);
+        let w0 = sinf((1.0 - t) * th) / s;
+        let w1 = sinf(t * th) / s;
+        return Self{ .v = self.v * (V4)w0 + b.v * (V4)w1 };
+    };
+
+    // 逐分量相等。要判断"同一个旋转"不能只比分量——q 与 -q 表示同一个
+    // 旋转，两种符号都合法。
+    pub const eq = fn (self: Self, o: Self) bool {
+        return all(self.v == o.v);
+    };
+
+    // 规范化之后的近似相等：eps 逐分量比较（不取最大误差，省一趟归约）。
+    pub const approxEq = fn (self: Self, o: Self, eps: f32) bool {
+        let d = abs(self.v - o.v);
+        return all(d < (V4)eps);
+    };
 };

@@ -106,12 +106,14 @@ const r = blk: {
 1.2.0 把内建砍到九个；1.2.1 反射收敛成一个 `@type(x)`（x 可以是类型
 也可以是表达式），1.2.2 把 `@sizeOf` / `@alignOf` / `@typeName` 也并了进去——
 描述符 `Type{.name, .size, .align, .ty, .fieldCount,
-.fields[i]{.name, .ty, .offset}}` 全是编译期值。现在共十二个：
+.fields[i]{.name, .ty, .offset}}` 全是编译期值。1.4.1 又把向量的三个搬进了
+`std.simd`，**内建只剩九个**：
 
-`@mod` / `@type` / `@shim` / `@memcpy` / `@memmove` / `@memset` / `@link` / `@compileError` / `@trap` / `@select` / `@any` / `@all`（共十二个）。
+`@mod` / `@type` / `@shim` / `@memcpy` / `@memmove` / `@memset` / `@link` / `@compileError` / `@trap`（共九个）。
 
 另有**类型内建** `@Vec(T, N)`：只写在类型位置（或当类型值），没有运行期存在，
-不占上面这十二个的位置。
+不占上面这九个的位置。**`@Vec` 是唯一的向量内建**——按掩码选值、把掩码归约成
+`bool`、点乘叉乘、四元数，全在 `std.simd` 里当普通函数写（`reference.md` §14.13）。
 
 | 老写法 | 换成 |
 | --- | --- |
@@ -122,6 +124,8 @@ const r = blk: {
 | `@fieldName/@fieldType/@offsetOf(T, …)` | `@type(T).fields[i].name / .ty / .offset` |
 | `@field(v, "f")` | 无动态成员访问；字段写死为 `v.f` |
 | `@cShim("impl.c")` | `@shim("impl.c")`——同一条通道，名字更短 |
+| `@select(m, a, b)` | `std.simd.select(m, a, b)`——纯 Zx 循环，语义相同 |
+| `@any(m)` `@all(m)` | `std.simd.any(m)` / `std.simd.all(m)` |
 | `@embedFile("p")` | 自己用 `std.fs` 读，或写成字面量 |
 | `@file()` `@line()` `@col()` `@fnName()` | 已移除；位置只由 `std.debug` 自动注入 |
 | `module("x")`（旧关键字） | `@mod("x")`；§144 起模块加载走内建，`module` 不再保留为关键字 |
@@ -547,7 +551,7 @@ const util = @mod("util");     // 找 util.zx：同目录 → 工程根 → vend
 **典型消息**：`@shim: cannot open C shim "impl.c" (resolved to …)`
 
 - 路径按**写 `@shim(...)` 的那份 `.zx` 所在目录**解析，不是当前工作目录
-- 库把 shim 和 `.zx` 放同一目录就能自带实现（`std/simd.zx` → `std/xxx.c`）
+- 库把 shim 和 `.zx` 放同一目录就能自带实现（`std/foo.zx` → `std/foo_impl.c`）
 - 只是**打不开**才报这个码；文件打得开但 C 本身编不过，是 `B1004`，
   行号直接指到那份 `.c`（zxc 用同一套 cc/flags 编它，不做行列映射）
 

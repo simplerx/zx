@@ -118,23 +118,23 @@ let bits = (@Vec(i32, 4))b;      // 同大小重解释，按位搬
 std.println("{} {}", b.len, b.size);   // 4 16
 ```
 
-要按分量挑值，就写比较 + `@select`：
+要按分量挑值，就写比较 + `std.simd.select`：
 
 ```zx
 let a = V4{1.0, 2.0, 3.0, 4.0};
 let b = V4{4.0, 3.0, 2.0, 1.0};
-let m  = a < b;                  // 掩码向量 @Vec(i32, 4)：分量 0 或 -1
-let lo = @select(m, a, b);       // 真取 a、假取 b ⇒ 逐分量 min
-let hi = @select(m, b, a);       // 换一下就是 max
+let m  = a < b;                      // 掩码向量 @Vec(i32, 4)：分量 0 或 -1
+let lo = std.simd.select(m, a, b);   // 真取 a、假取 b ⇒ 逐分量 min
+let hi = std.simd.select(m, b, a);   // 换一下就是 max
 std.println("{} {} {} {}", m.0, lo.0, hi.0, m.len);   // -1 1 4 4
 ```
 
-要问"这份掩码整体如何"，用 `@any` / `@all` 归约成一个 `bool`：
+要问"这份掩码整体如何"，用 `std.simd.any` / `std.simd.all` 归约成一个 `bool`：
 
 ```zx
-std.println("any={} all={}", @any(m), @all(b >= a));   // true false
-if (@any(m)) { std.println("至少一个分量满足"); }
-if (!@any(m)) { std.println("一个都不满足"); }          // 全都不 = 不存在
+std.println("any={} all={}", std.simd.any(m), std.simd.all(b >= a));  // true false
+if (std.simd.any(m)) { std.println("至少一个分量满足"); }
+if (!std.simd.any(m)) { std.println("一个都不满足"); }   // 全都不 = 不存在
 ```
 
 `!` 只作用于 `bool`，所以"取反的掩码"不是 `!m`，而是把比较写反（`b >= a`）。
@@ -145,11 +145,14 @@ if (!@any(m)) { std.println("一个都不满足"); }          // 全都不 = 不
   `a + 1.0` 是 E0301。
 - **比较得到掩码，不是 bool**：六个比较的结果是同 lane 数的有符号整数向量
   （分量 0 或 -1），这既是 C 里 `a < b` 的定义，也是 SIMD 掩码寄存器的形状。
-  所以 `if (m)` 不成立——要看整体就用 `@any(m)` / `@all(m)` 归约成 `bool`。
-- `@select` 是**按位**选：只看掩码位，不看值，NaN 分量也照搬位模式。
+  所以 `if (m)` 不成立——要看整体就用 `std.simd.any(m)` / `std.simd.all(m)`
+  归约成 `bool`。
+- **语言只有 `@Vec` 这个类型内建**：按掩码挑值、归约、点乘叉乘、四元数全是
+  `std.simd` 里的普通函数（`docs/reference.md` §14.13）。自己写循环也对——
+  掩码分量只有 0 与 -1，"非 0 就选 a" 就是正确判定。
 - 位运算、`%`、移位、整数向量的 `/` 都不支持：C 里没有对应的向量语义，
   半支持比不支持更难查。向量直接落成 clang 的 `vector_size` 类型，`-O0` 下
-  也是真向量指令；成批的切片内核仍走 `std.simd`（§14.13）。
+  也是真向量指令。
 
 ---
 
@@ -412,12 +415,15 @@ if (t.spawn(job, 21)) h {
 // 数学：浮点函数 extern 到 C 运行时的 libm，整数工具是纯 Zx 代码
 std.println("{} {}", std.math.sqrt(16.0), std.math.gcd(12, 18));   // 4 6
 
-// 向量与批量运算：Vec4f/Vec4i 是 4 分量值类型；切片内核在 --release 下
-// 由 C 编译器向量化（dev 档 -O0 不向量化）。dst 可以和输入同一块内存。
-var vo: *[4]f32 = std.stackAlloc(f32, 4);
-_ = std.simd.fillF32(vo[0..4], 1.5);
-_ = std.simd.scaleF32(vo[0..4], vo[0..4], 2.0);
-std.println("{} {}", (vo + 3).0, std.simd.Vec4f.splat(2.0).sum());   // 3 8
+// 向量数学：形参就是 @Vec 本身，没有门面类型。V4 = std.simd.V4（= @Vec(f32, 4)）
+// 注意别名要先 const 绑一下：`std.simd.V4{…}` 这种带路径的字面量不合法。
+const V4 = std.simd.V4;
+var va = V4{ 0.0, 3.0, 4.0, 0.0 };
+var vb = std.simd.V4{ 1.0, 0.0, 0.0, 0.0 };
+std.println("{} {} {}", std.simd.length(va), std.simd.dot(va, va),
+            std.simd.cross(va, vb).2);                    // 5 25 -3
+let qz = std.simd.Quat.fromAxisAngle(std.simd.V4{0.0, 0.0, 1.0, 0.0}, 1.5707964);
+std.println("{}", qz.rotate(vb).1);                       // ≈1（x 转 90° 成 y）
 
 // 网络：同步 IPv4 TCP/UDP（Windows Winsock2），init/deinit 包住
 if (!std.net.init()) { return 1; }
@@ -488,5 +494,5 @@ zxc init myproj            # 生成工程骨架
 
 ---
 
-*本文按 Zx 1.4.0 实现逐片段实测写成；语言演进以编译器行为为准，
+*本文按 Zx 1.4.1 实现逐片段实测写成；语言演进以编译器行为为准，
 API 细节以 `std/` 源码与 `docs/reference.md` 为准。*

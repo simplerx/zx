@@ -1,7 +1,0 @@
-// expect: needs exactly 1 argument
-// 判真是"整份掩码"，没有第二个参数可给；传两个说明想写的是别的（比如 @select）。
-const main = fn () u8 {
-    let a = @Vec(i32, 4){1, 0, 1, 0};
-    let b = @any(a, a);
-    return 0;
-};

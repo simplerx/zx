@@ -1,7 +1,0 @@
-// expect: must be a mask vector
-// 标量判真直接写 `if (x != 0)`，不该借 @all —— 这里报错而不是给 bool 开洞，
-// 免得 `@all(true)` 这种写法看起来像支持。
-const main = fn () u8 {
-    let b = @all(true);
-    return 0;
-};

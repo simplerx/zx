@@ -1,6 +1,6 @@
 # Zx 语言查阅文档（Reference）
 
-> 版本 1.4.0 · 一份文档看完全部定义和用法。
+> 版本 1.4.1 · 一份文档看完全部定义和用法。
 > 语言细则与设计理由在 `spec/zx-spec.md`；错误码逐条解释在 `docs/errors.md`；
 > 本文是**查阅用**的完整速查：语法、类型、内建、模块、std 全 API、工具链。
 
@@ -172,9 +172,11 @@ d[i] = 3.0;                      // 运行期下标，带界检查
 let bits = (@Vec(i32, 4))d;      // 同大小重解释（按位搬，不转换）
 
 let m = a < c;                   // 比较 → 掩码向量 `@Vec(i32, 4)`，分量 0 或 -1
-let lo = @select(m, a, c);       // 逐分量按掩码选（真取前一个，假取后一个）
-std.println("{} {} {} {}", lo.0, m.0, d.len, d.size);  // 1 -1 4 16
+std.println("{} {} {}", m.0, d.len, d.size);  // -1 4 16
 ```
+
+语言层**只有 `@Vec` 这个类型内建**，外加作用于它的运算符。按掩码挑值、把掩码
+归约成 `bool`、点乘叉乘、四元数——这些全是 `std.simd` 里的普通函数（§14.13）。
 
 - **字面量**：`@Vec(T, N){a, b, c, d}`，写在别名上就是 `V4{a, b, c, d}`。
   分量个数必须正好是 `N`（少写报 E0306），每个分量按元素类型各自转换一次。
@@ -185,21 +187,19 @@ std.println("{} {} {} {}", lo.0, m.0, d.len, d.size);  // 1 -1 4 16
 - **比较得到掩码**：两边是同一个向量类型时，`== != < <= > >=` 的结果是同 lane 数的
   **有符号整数**向量，每个分量 0 或 -1。这既是 C 里 `a < b` 的定义，也是 SSE/AVX
   掩码寄存器的形状；不展平成 `bool` 向量（C 里没有 `_Bool` 向量，且多一趟压缩）。
-- **`@select(mask, a, b)`**：逐分量按掩码选，**按位**选——只看掩码位，不看值，
-  所以 NaN 分量也照搬位模式。`@select(a < b, a, b)` 就是逐分量 min。
-- **`@any(m)` / `@all(m)`**：把整份掩码判成一个 `bool`——`@any` 是"至少一位真"，
-  `@all` 是"每一位都真"。只接整数向量（掩码就是整数向量）：浮点向量的判真没有
-  唯一答案（`NaN != 0` 恒真），要写明确比较再判。结果直接进 `if`，不需要转换。
-  `@any` 管"是否存在"，`@all` 管"是否全都"。
+- **掩码怎么用**：语言只负责产生掩码，不提供消费它的内建。要按掩码挑值是
+  `std.simd.select(m, a, b)`，要把整份掩码判成一个 `bool` 是 `std.simd.any(m)` /
+  `std.simd.all(m)`（§14.13）。也可以自己写循环：掩码分量只有 0 与 -1，所以
+  "分量非 0 就选 a" 就是正确的判定。
 - 允许：`+ - *`、浮点向量的 `/`、一元 `-`、六个比较、`.N` / `[i]` 读写、
   `.len` / `.size`、同大小向量互转。不允许：`%`、位运算、移位、`&&` / `||`
   （掩码不是 bool）、`&v`、越界长度与其他向量互转。
 - 布局与 clang 的 `vector_size` 一致（**对齐 = 大小**）：`@Vec(f32, 8)` 是 32 字节、
   32 对齐，所以放进结构体时前后的偏移和 C 侧算出来的一样。
 - **语言层不做 SIMD 抽象**：向量落到 C 的 `vector_size` 类型上，用不用 SSE/AVX
-  由 C 编译器决定（`-O0` 下向量操作也已经是真指令）。成批的切片内核仍用
-  `std.simd`（§14.13），那里是按 ISA 手写的 SSE2/AVX2。
-- `@Vec` 是**类型内建**，不占 §10 那十二个值内建的位置：它只能写在类型位置，
+  由 C 编译器决定（`-O0` 下向量操作也已经是真指令）。向量数学（点乘、叉乘、
+  四元数）在 `std.simd`（§14.13），那层是纯 Zx，没有额外内建、没有手写内核。
+- `@Vec` 是**类型内建**，不占 §10 那九个值内建的位置：它只能写在类型位置，
   或者当类型值用（`const V4 = @Vec(f32, 4);`、`@type(@Vec(f32, 4)).size`）。
 
 ---
@@ -418,7 +418,7 @@ castable 表覆盖全部合法转换；不合法的转换编译期报 E0301/E030
 
 ---
 
-## 10. 内建（`@` 前缀，共 12 个）
+## 10. 内建（`@` 前缀，共 9 个）
 
 | 内建                      | 签名                                     | 用途              |
 | ----------------------- | -------------------------------------- | --------------- |
@@ -430,13 +430,11 @@ castable 表覆盖全部合法转换；不合法的转换编译期报 E0301/E030
 | `@link("lib")`          | `fn(str) void`                         | 链接外部库（FFI 唯一入口） |
 | `@shim("impl.c")`      | `fn(str) void`                         | 把一份 C 源文件编进程序，见 §10.2 |
 | `@compileError(msg)`    | `fn([]const u8) noreturn`              | 编译期报错           |
-| `@select(mask, a, b)`   | `(vec, vec, vec) vec`                  | 按掩码向量逐分量选，见 §4.1 |
-| `@any(mask)`            | `(vec) bool`                           | 掩码至少一位为真，见 §4.1 |
-| `@all(mask)`            | `(vec) bool`                           | 掩码每一位都为真，见 §4.1 |
 | `@trap()`               | `fn() noreturn`                        | 运行期断点/中止        |
 
 另有一个**类型内建** `@Vec(T, N)`（§4.1）：它只写在类型位置（或当类型值），
-没有运行期存在，所以不在上表的十个之类。
+没有运行期存在，所以不在上表的九个之类。**`@Vec` 是唯一的向量内建**——早先的
+`@select` / `@any` / `@all` 已全部搬进 `std.simd`（§14.13），旧拼写报 E0211。
 
 ### 10.1 `@type(x)` —— 唯一的反射
 
@@ -509,9 +507,10 @@ pub const main = fn () u8 {
 };
 ```
 
-标准库目前只有一份 shim：`std/simd_impl.c`（§14.13 的向量内核，要手写
-intrinsic 才拿得到 -O0 下的真指令）。**能用 `extern "C"` 直接调现成符号的，
-就别写 shim**——多一层要人维护的 C 是负债，不是能力。
+标准库目前**一份 shim 都没有**。曾经有一份 `std/simd_impl.c`（手写 SSE2/AVX2
+内核），1.4.1 随 `std.simd` 重写删掉了——`@Vec` 落到 C 的 `vector_size` 上，
+`-O0` 就已经是真指令，手写 intrinsic 换不到额外收益。**能用 `extern "C"` 直接
+调现成符号的，就别写 shim**；多一层要人维护的 C 是负债，不是能力。
 
 ---
 
@@ -896,36 +895,54 @@ if (std.net.TcpListener.open(0)) ls {
 
 ---
 
-### 14.13 std.simd —— 向量与批量运算（`std/simd.zx`）
+### 14.13 std.simd —— `@Vec` 的数学层（`std/simd.zx`）
 
-`std.simd` 分两层，各管各的（语言级向量见 §4.1，那里只管"这是个 N 分量的值"，
-按 ISA 手写的内核仍然在这里）：
+语言层只有类型 `@Vec(T, N)` 和它的运算符（§4.1）；**其余一切都在这里**，写成
+形参就是 `@Vec` 的普通函数，不包 `Vec4f` / `Vec4i` 之类的门面类型。这一层是
+纯 Zx，没有 `@shim`、没有手写 intrinsic，也不需要——向量运算落到 C 的
+`vector_size` 上，`-O0` 就已经是真指令。
 
-- **4 分量值类型**：`Vec4f{x,y,z,w: f32}` / `Vec4i{x,y,z,w: i32}`。16 字节、按值传，
-  方法是一次 4 条标量运算：`add / sub / mul / scale / neg / dot / lengthSq /
-  length / normalize / min / max / clamp / lerp / abs / sum / eq / approxEq`，
-  整数侧是 `add / sub / mul / neg / abs / min / max / eq`。`normalize` 对零向量
-  原样返回（不除零、不 trap）。
-- **切片内核**：`addF32 / subF32 / mulF32 / scaleF32 / saxpyF32 / lerpF32 /
-  clampF32 / absF32 / fillF32 / dotF32 / sumF32`，整数侧 `addI32 / subI32 / fillI32`。
-  处理 `min(各输入长度)` 个元素并返回实际个数；`dst` 允许与输入是同一块内存。
-  实现在 `std/simd_impl.c`——一份经 `@shim` 挂进来的独立 C TU，**手写 SSE2 /
-  AVX2 intrinsic**，运行期按 CPU 选，非 x86 走标量：AVX2 一轮 8 个 float，
-  SSE2 一轮 4 个，所以 dev（`-O0`）也是真向量指令，不再依赖 `-O2` 的自动向量化。
-  三条实现**逐位一致**（逐元素天然一致；归约固定 8 条累加链、不用 FMA；
-  clamp / abs 保住 NaN 与 -0.0）。`std.simd.isaName()` 报当前走哪条；
-  `ZX_SIMD_ISA=scalar|sse2|avx2` 可强制降档（调试或做对照实验）。
+形状只有两种别名：`V4 = @Vec(f32, 4)`、`M4 = @Vec(i32, 4)`（掩码）。3D 用
+`(x, y, z, 0)`，2D 用 `(x, y, 0, 0)`；`@Vec` 的长度只能是 2 的幂，没有 3 分量
+向量，第 4 分量留 0 正是 4 lane 一个 SSE 寄存器。**长度写死 4**：`@Vec` 的长度
+参数不能是泛型（`fn (N: usize, a: @Vec(f32, N))` 报 E0501），模块级签名在做实例化
+之前就被检查了，所以这一层不做 N 泛化；8 分量的批量计算直接用运算符。
+
+- **掩码**：`select(m, a, b)` 逐分量选（-1 取 a、0 取 b）、`any(m)` / `all(m)`
+  把整份掩码归约成 `bool`。这就是 1.4.1 撤掉的 `@select` / `@any` / `@all`
+  内建，语义一模一样，旧拼写报 E0211 并指到这里。
+- **度量**：`dot / lengthSq / length / distance / distanceSq / normalize / sum`。
+  `dot` 的加法顺序固定为 `((0+1)+(2+3))`，任何优化档下同一个浮点结果；
+  `normalize` 对零向量原样返回（不除零、不产 NaN）。
+- **逐分量**：`splat / zero / min / max / clamp / abs / lerp`。全部走"比较 +
+  `select`"，所以 **NaN 原样留下**、`abs(-0.0)` 仍是 `-0.0`（不用 C 的
+  `fmin/fmax`，那两个会把 NaN 换成另一侧）。
+- **3D**：`cross(a, b)`（只取 xyz，结果的 w 恒 0）、`reflect(v, n)`
+  （`n` 须单位化）。
+- **四元数** `std.simd.Quat`：`v: V4` 存 `(x, y, z, w)`，`w` 是实部。方法
+  `identity / fromAxisAngle(axis, rad) / mul / conj / len / norm / rotate(v) /
+  slerp(o, t) / eq / approxEq`。`mul` 用一次叉乘 + 一次虚部内积展开，
+  `rotate` 用两次叉乘（省一次四元数乘），`slerp` 在 `|dot| > 0.9995` 时退化成
+  nlerp。方法名用 `len` / `norm` 而不是 `length` / `normalize`——容器体内裸名
+  优先解析到成员，同名会自己调自己。
 
 ```zx
-var a: *[4]f32 = std.stackAlloc(f32, 4);
-var b: *[4]f32 = std.stackAlloc(f32, 4);
-var dst: *[4]f32 = std.stackAlloc(f32, 4);
-var i: usize = 0;
-while (i < 4) { (a + i).0 = 1.5; (b + i).0 = 2.0; i = i + 1; }
+const std = @mod("std");
+const V4 = std.simd.V4;
 
-let n = std.simd.addF32(dst[0..4], a[0..4], b[0..4]);      // 返回处理个数 4
-let v = std.simd.Vec4f{ .x = 3.0, .y = 4.0, .z = 0.0, .w = 0.0 };
-std.println("{} {} {}", n, (dst + 0).0, v.length());       // 4 3.5 5
+var a = V4{0.0, 3.0, 4.0, 0.0};
+var b = V4{0.0, 0.0, 0.0, 1.0};
+std.println("{} {} {}", std.simd.length(a), std.simd.dot(a, a), std.simd.sum(a));  // 5 25 7
+
+let m = a > std.simd.zero();                                  // 掩码
+std.println("{} {}", std.simd.any(m), std.simd.all(m));       // true false
+let pick = std.simd.select(m, a, b);                          // -1 处取 a，0 处取 b
+
+let z = V4{0.0, 0.0, 1.0, 0.0};
+let q = std.simd.Quat.fromAxisAngle(z, (f32)(std.math.pi * 0.5));
+let r = q.rotate(V4{1.0, 0.0, 0.0, 0.0});                     // ≈ (0, 1, 0, 0)
+std.println("{}", std.simd.cross(V4{1.0, 0.0, 0.0, 0.0},
+                                V4{0.0, 1.0, 0.0, 0.0}).2);   // 1（x×y=z）
 ```
 
 ---

@@ -1,8 +1,0 @@
-// expect: must be a mask vector
-// @any / @all 的语义是"这份掩码里有几位是真"，所以只接整数向量。浮点向量
-// 的判真没有唯一答案（NaN != 0 恒真），要写明确比较再判。
-const main = fn () u8 {
-    let a = @Vec(f32, 4){1.0, 2.0, 3.0, 4.0};
-    let b = @any(a);
-    return 0;
-};

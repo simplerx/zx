@@ -1,0 +1,9 @@
+// expect: @all was removed
+// expect-code: E0211
+// §165：掩码判真是 `std.simd.all(m)`，不是内建。
+const main = fn () u8 {
+    let a = @Vec(f32, 4){1.0, 2.0, 3.0, 4.0};
+    let m = a < a;
+    if (@all(m)) { return 1; }
+    return 0;
+};

@@ -4708,52 +4708,6 @@ static Type *check_builtin(Node *n, Type *expect) {
 
     if (!strcmp(nm, "trap")) return type_of(n, ty_noreturn());
 
-    if (!strcmp(nm, "select")) {
-        /* §162：@select(mask, a, b) —— 逐分量按掩码选，**按位**选而不是按值
-         * 判断：mask 的分量是真/假不影响，只有全 1 位（-1）和 0 两种合法
-         * 输入，正好是向量比较给出的东西。所以 NaN 分量也照搬位模式，
-         * 不会被 "a 是不是非零" 这种判断弄坏。
-         *
-         * 为什么必须是内建：语言里没有三元运算符（`if (c) {x} else {y}` 的
-         * 块臂不给值），C 的 `mask ? a : b` 又是扩展写法。一个三参原语
-         * 比给语言加一个只在向量上有意义的运算符便宜。 */
-        if (n->nitems != 3)
-            return BAD(n, "@select needs 3 arguments: @select(mask, a, b)");
-        Type *m = check_expr(n->items[0], NULL);
-        Type *x = check_expr(n->items[1], NULL);
-        Type *y = check_expr(n->items[2], NULL);
-        if (!m || m->kind != TY_VEC || !ty_is_int(m->elem))
-            return BAD(n, "@select: the first argument must be a mask vector "
-                          "(what a vector comparison returns), found `%s`", ty_str(m));
-        if (!x || x->kind != TY_VEC)
-            return BAD(n, "@select: the second argument must be a vector, found `%s`", ty_str(x));
-        if (!ty_eq(x, y))
-            return BAD(n, "@select: both value arguments must have the same type, "
-                          "found `%s` and `%s`", ty_str(x), ty_str(y));
-        if (m->len != x->len)
-            return BAD(n, "@select: the mask has %llu lanes but the values have %llu",
-                       (unsigned long long)m->len, (unsigned long long)x->len);
-        return type_of(n, x);
-    }
-
-    if (!strcmp(nm, "any") || !strcmp(nm, "all")) {
-        /* §164：掩码的整体判真。@any(m) = 至少一个分量为真，@all(m) = 每个
-         * 分量都为真。掩码的分量只有 0 与 -1（见 vec_mask_ty），所以"分量
-         * 非 0"就是"这一位是真"。
-         *
-         * 只接整数向量：浮点向量的判真要写明确比较（`v != (V4)0.0`），
-         * 因为 NaN != 0 恒真，让 @any 去猜"这个 NaN 算不算真"没有正确答案。
-         * 也没有给 @Vec 加 any()/all() 方法：@Vec 没有方法表，而且这是
-         * **掩码**的语义，不是任意向量的语义。 */
-        if (n->nitems != 1)
-            return BAD(n, "@%s needs exactly 1 argument: @%s(mask)", nm, nm);
-        Type *m = check_expr(n->items[0], NULL);
-        if (!m || m->kind != TY_VEC || !ty_is_int(m->elem))
-            return BAD(n, "@%s: the argument must be a mask vector (what a vector "
-                          "comparison returns), found `%s`", nm, ty_str(m));
-        return type_of(n, ty_bool());
-    }
-
     if (!strcmp(nm, "link")) {
         /* @link("ws2_32") / @link("./vendor/foo.lib")：把外部库交给链接器。
          * 编译期动作，运行时是 no-op；名字去重后由 build_program 转成
@@ -4854,6 +4808,10 @@ static Type *check_builtin(Node *n, Type *expect) {
             { "fnName",   "source-location builtins are gone" },
             /* §160 落地当天就改名：@cShim 太长，通道本身没有变化。 */
             { "cShim",    "renamed to @shim -- same channel, shorter name" },
+            /* 1.4.1：向量的三个内建换成 std.simd 里的普通函数，内建只剩 @Vec 类型。 */
+            { "select",   "moved to std.simd.select -- `@Vec` is the only vector builtin" },
+            { "any",      "moved to std.simd.any" },
+            { "all",      "moved to std.simd.all" },
         };
         for (size_t i = 0; i < sizeof gone / sizeof gone[0]; i++)
             if (!strcmp(nm, gone[i].name))

@@ -38,10 +38,11 @@ static const ErrDoc g_errs[] = {
       "usually a statement at top level, a declaration inside an expression, or an unterminated switch arm" },
 
     /* ---- 类型 ---- */
-    { "E0211", "builtin removed (1.2.2 trimmed the set to seven)",
+    { "E0211", "builtin removed (`@Vec` is the only vector builtin now)",
       "write conversions as `(T)value`; reflection is the single `@type(x)` "
-      "(`.size` / `.align` / `.name` / `.fields`); `zxc explain E0211` lists "
-      "which names went away and what to write instead" },
+      "(`.size` / `.align` / `.name` / `.fields`); vector math lives in "
+      "`std.simd` (select / any / all / dot / cross / Quat); "
+      "`zxc explain E0211` lists which names went away and what to write instead" },
 
     { "E0300", "type error (uncategorized)",
       "compare the expression's type at the caret with the expected type" },
