@@ -178,10 +178,12 @@ let n = o.coutn;          // E0304
 <a id="e0305"></a>
 ### E0305 类型形状不合法
 
-**典型消息**：`cannot nest optional`、`pointer has no count`
+**典型消息**：`cannot nest optional`、`pointer has no count`、`@Vec length must be 1, 2, 4, 8, 16, 32 or 64`
 
 - `?T` 不能再套 `?`（`??i32` 非法）；要两层就显式建模
 - 多级指针写全：`* *T`，不写 `**T`
+- `@Vec(T, N)` 的分量数只能是 1 / 2 / 4 / 8 / 16 / 32 / 64：C 的 `vector_size`
+  只接受 2 的幂（§162）。三个分量要建模就用 `{a, b, c}` 元组或结构体
 
 <a id="e0306"></a>
 ### E0306 运算符或操作数类型不匹配

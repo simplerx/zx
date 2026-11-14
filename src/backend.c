@@ -213,6 +213,12 @@ static void tsuffix(Buf *b, Type *t) {
     case TY_SLICE: buf_puts(b, "s"); tsuffix(b, t->elem); break;
     case TY_OPT:   buf_puts(b, "o"); tsuffix(b, t->elem); break;
     case TY_ERR:   buf_puts(b, "e"); tsuffix(b, t->elem); break;
+    case TY_VEC:
+        /* 分量数与元素都进名字：@Vec(f32,4) → vf32_4 */
+        buf_puts(b, "v");
+        tsuffix(b, t->elem);
+        buf_printf(b, "_%llu", (unsigned long long)t->len);
+        break;
     case TY_TUPLE:
         buf_puts(b, "t");
         for (int i = 0; i < t->nfields; i++) {
@@ -240,6 +246,7 @@ static void tn(Buf *b, Type *t) {
     case TY_ERR:   buf_puts(b, "ZxErr_");   tsuffix(b, t->elem); break;
     case TY_TUPLE: buf_puts(b, "ZxTup_");   tsuffix(b, t);       break;
     case TY_FN:    buf_puts(b, "ZxFn_");    tsuffix(b, t);       break;
+    case TY_VEC:   buf_puts(b, "ZxVec_");   tsuffix(b, t);       break;
     default: agg_name(b, t); break;
     }
 }
@@ -280,7 +287,7 @@ static void ensure_type(Type *t) {
     if (t->kind == TY_PTR) { ensure_type(t->elem); return; }
     switch (t->kind) {
     case TY_SLICE: case TY_OPT: case TY_ERR: case TY_TUPLE:
-    case TY_FN: case TY_STRUCT: case TY_UNION: case TY_ENUM:
+    case TY_FN: case TY_STRUCT: case TY_UNION: case TY_ENUM: case TY_VEC:
         break;
     default: return;
     }
@@ -388,6 +395,32 @@ static void ensure_type(Type *t) {
             ctype(g_out, t->params[k]);
         }
         buf_puts(g_out, ");\n");
+        break;
+    }
+    case TY_VEC: {
+        /* §162：语言级向量直接落到 clang/gcc 的 vector_size 类型上——
+         * 语言层不做 SIMD 抽象，用不用向量指令交给 C 编译器。
+         * 对齐规则与 ty_align 一致（对齐 = 大小），否则同一种值在 zx 侧
+         * 和 C 侧算出来的结构体布局会错位。
+         *
+         * 随类型一起发一个 splat 助手：C 的 vector_size 类型不接受
+         * scalar cast（clang 直接报 invalid conversion），只能靠复合
+         * 字面量逐分量铺。写成函数是为了让实参只求值一次。 */
+        ensure_type(t->elem);
+        int vbytes = ty_size(t);
+        Buf sn; buf_init(&sn);
+        tsuffix(&sn, t);
+        buf_puts(g_out, "typedef ");
+        ctype(g_out, t->elem);
+        buf_printf(g_out, " %s __attribute__((vector_size(%d)));\n",
+                   n.data, vbytes > 0 ? vbytes : 1);
+        buf_printf(g_out, "static %s zx_splat_%s(", n.data, sn.data);
+        ctype(g_out, t->elem);
+        buf_puts(g_out, " x) { return (");
+        buf_puts(g_out, n.data);
+        buf_puts(g_out, "){");
+        for (uint64_t k = 0; k < t->len; k++) buf_printf(g_out, "%sx", k ? ", " : "");
+        buf_puts(g_out, "}; }\n");
         break;
     }
     case TY_STRUCT: case TY_UNION: {
@@ -586,7 +619,7 @@ static void ctype(Buf *b, Type *t) {
         buf_puts(b, " *");
         break;
     case TY_SLICE: case TY_OPT: case TY_ERR: case TY_TUPLE:
-    case TY_FN: case TY_STRUCT: case TY_UNION: case TY_ENUM: {
+    case TY_FN: case TY_STRUCT: case TY_UNION: case TY_ENUM: case TY_VEC: {
         if (t->kind == TY_OPT && ty_opt_flat(t)) {   /* ?*T：C 表示就是 T* */
             ctype(b, t->elem);
             return;
@@ -1113,7 +1146,8 @@ static void bounds_loc(Buf *b, Node *n) {
 /* `base[i]` 里的 i：能拿到长度就包一层 zx_bound */
 static void emit_index_checked(Buf *b, Node *n, Type *bt) {
     bool is_slice = bt && bt->kind == TY_SLICE;
-    bool is_arr   = bt && bt->kind == TY_PTR && bt->has_len;
+    bool is_arr   = (bt && bt->kind == TY_PTR && bt->has_len) ||
+                    (bt && bt->kind == TY_VEC);   /* §162：分量数在类型里 */
     if ((!is_slice && !is_arr) || !simple_index_base(n->a)) {
         ex(b, n->b);
         return;
@@ -1189,6 +1223,11 @@ static void lvalue(Buf *b, Node *n) {
             if (bt && bt->kind == TY_SLICE) {
                 ex(b, n->a);
                 buf_puts(b, ".ptr[0]");
+                return;
+            }
+            if (bt && bt->kind == TY_VEC) {   /* §162：v.2 是分量左值 */
+                ex(b, n->a);
+                buf_printf(b, "[%llu]", (unsigned long long)n->ival);
                 return;
             }
             if (bt && bt->kind == TY_PTR && bt->has_len) {
@@ -1843,7 +1882,7 @@ static bool any_has_desc(Type *t) {
     if (!t) return false;
     switch (t->kind) {
     case TY_STRUCT: case TY_UNION: case TY_TUPLE: case TY_OPT: case TY_ERR:
-    case TY_ENUM: case TY_PTR: case TY_SLICE:
+    case TY_ENUM: case TY_PTR: case TY_SLICE: case TY_VEC:
         return true;
     default: return false;
     }
@@ -1867,6 +1906,7 @@ static bool default_any(Type *t) {
     if (!t) return false;
     switch (t->kind) {
     case TY_STRUCT: case TY_UNION: case TY_TUPLE: case TY_OPT: case TY_ERR:
+    case TY_VEC:
         return true;
     case TY_PTR: return !str_ptr_ty(t);   /* 字符串按文本打，不展开地址 */
     case TY_SLICE: return !any_is_str(t);
@@ -1965,6 +2005,21 @@ static int any_desc(Type *t) {
             nf++;
         }
         break;
+    case TY_VEC: {
+        /* §162：向量按 N 个同类型分量展开——`v.0 … v.N-1` 本来就是编译期
+         * 成员，打印成 `{1.5, 1.5, 1.5, 1.5}` 才和索引看到的是一回事。
+         * C 的 vector 类型不支持 offsetof，偏移自己按元素大小算。 */
+        kind = AK_STRUCT;
+        int es = t->elem ? ty_size(t->elem) : 0;
+        if (es <= 0) es = 1;
+        int child = any_desc(t->elem);
+        for (uint64_t i = 0; i < t->len; i++) {
+            buf_printf(&fld, "{ 0, %llu, %d },\n",
+                       (unsigned long long)(i * (uint64_t)es), child);
+            nf++;
+        }
+        break;
+    }
     case TY_STRUCT:
         kind = AK_STRUCT;
         for (int i = 0; i < t->nfields; i++) {
@@ -5295,6 +5350,11 @@ static void ex(Buf *b, Node *n) {
                     buf_printf(b, "((size_t)%d)", bt->nfields);
                     return;
                 }
+                if (bt->kind == TY_VEC) {
+                    /* §162：分量数与数组一样写在类型里，是编译期常量 */
+                    buf_printf(b, "((size_t)%llu)", (unsigned long long)bt->len);
+                    return;
+                }
             }
         }
         if (!n->name) {                    /* .N */
@@ -5313,6 +5373,13 @@ static void ex(Buf *b, Node *n) {
                 buf_printf(b, "(");
                 ex(b, n->a);
                 buf_printf(b, ").f%llu", (unsigned long long)n->ival);
+                return;
+            }
+            if (bt && bt->kind == TY_VEC) {
+                /* v.0 / v.3：编译期分量，C 的向量类型本来就支持下标 */
+                buf_putc(b, '(');
+                ex(b, n->a);
+                buf_printf(b, ")[%llu]", (unsigned long long)n->ival);
                 return;
             }
             if (bt && bt->kind == TY_SLICE) {
@@ -5613,6 +5680,28 @@ static void ex(Buf *b, Node *n) {
 
     case NK_CAST: {
         Type *to = n->ty;
+        Type *vt = n->b ? n->b->ty : NULL;
+        if (to && to->kind == TY_VEC && vt) {
+            if (vt->kind == TY_VEC) {
+                /* 向量之间只有同大小的重解释（sema 已保证），C 里必须写
+                 * 显式 cast：隐式转换在 clang 上是错。 */
+                buf_puts(b, "((");
+                ctype(b, to);
+                buf_puts(b, ")(");
+                ex(b, n->b);
+                buf_puts(b, "))");
+                return;
+            }
+            if (ty_is_num(vt)) {    /* 标量 → 向量：铺开 */
+                ensure_type(to);
+                Buf sn; buf_init(&sn);
+                tsuffix(&sn, to);
+                buf_printf(b, "zx_splat_%s(", sn.data);
+                ex(b, n->b);
+                buf_putc(b, ')');
+                return;
+            }
+        }
         /* 显式转换在 C 里也要显式：`(f32)(0.1 + 0.2)` 的两个操作数在 C 里
          * 是 double 字面量，省掉这层 cast 就整段按 double 算——`== (f32)0.3`
          * 于是给出 false（运行时是 true）。数值目标一律套一层转换。 */

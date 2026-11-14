@@ -33,6 +33,9 @@ static bool same(const Type *a, const Type *b) {
     case TY_SLICE:
         return a->is_const == b->is_const && same(a->elem, b->elem);
 
+    case TY_VEC:
+        return a->len == b->len && same(a->elem, b->elem);
+
     case TY_OPT:
         return same(a->elem, b->elem);
     case TY_ERR:
@@ -97,6 +100,13 @@ Type *ty_ptr(Type *elem, bool is_const, bool has_len, uint64_t len) {
     t->is_const = is_const;
     t->has_len = has_len;
     t->len = len;
+    return intern(t);
+}
+
+Type *ty_vec(Type *elem, uint64_t n) {
+    Type *t = ty_new(TY_VEC);
+    t->elem = elem;
+    t->len = n;
     return intern(t);
 }
 
@@ -481,6 +491,13 @@ int ty_align(Type *t) {
     case TY_ENUM:  a = ty_align(t->elem ? t->elem : ty_i32()); break;
     case TY_PTR: case TY_FN: a = 8; break;
     case TY_SLICE: a = 8; break;
+    case TY_VEC: {
+        /* 与 clang 的 vector_size 类型一致：对齐 = 大小（4 float = 16B，
+         * 8 float = 32B）。结构体布局两边必须同一个数，否则字段会错位。 */
+        int es = ty_align(t->elem);
+        a = es * (int)t->len;
+        break;
+    }
     case TY_OPT: case TY_ERR: {
         /* 规格 §5：载荷在前、标签在尾。
          * ?T 的标签是 bool（对齐 1），所以 align = align(T)；
@@ -557,6 +574,11 @@ int ty_size(Type *t) {
     case TY_ENUM:  s = t->elem ? ty_size(t->elem) : 4; break;
     case TY_PTR: case TY_FN: s = 8; break;
     case TY_SLICE: s = 16; break;
+    case TY_VEC: {
+        int es = ty_size(t->elem);
+        s = es < 0 ? -1 : es * (int)t->len;
+        break;
+    }
     case TY_TUPLE: {
         int off = 0, maxa = 1;
         for (int i = 0; i < t->nfields; i++) {
@@ -699,6 +721,11 @@ static void ty_print_into(Buf *b, Type *t, int depth) {
         buf_putc(b, '}');
         return;
 
+    case TY_VEC:
+        buf_puts(b, "@Vec(");
+        ty_print_into(b, t->elem, depth + 1);
+        buf_printf(b, ", %llu)", (unsigned long long)t->len);
+        return;
     case TY_OPT: buf_putc(b, '?'); ty_print_into(b, t->elem, depth + 1); return;
     case TY_ERRORSET:
         buf_puts(b, ty_errset_str(t->eset));
@@ -848,6 +875,7 @@ const char *ty_kind_name(TyKind k) {
     case TY_OPT: return "optional";
     case TY_ERR: return "error union";
     case TY_FN: return "function";
+    case TY_VEC: return "vector";
     }
     return "?";
 }

@@ -54,6 +54,7 @@ typedef enum {
     /* 追加在末尾：kind 编号在自举前端（bootstrap/parse.zx 的 NK）里是
      * 同序镜像，插在中间会让所有旧编号漂移。 */
     NK_ERR_SET,         /* error{a, b}：items = NK_PAIR（name 即成员名） */
+    NK_VEC_TYPE,        /* @Vec(T, N)：a = 元素类型，b = 长度（编译期整数） */
 } NodeKind;
 
 struct Node;

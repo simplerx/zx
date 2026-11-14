@@ -1,0 +1,7 @@
+// expect: @Vec length must be 1, 2, 4, 8, 16, 32 or 64
+// 长度必须是 2 的幂：C 的 vector_size 只接受这种，编译器提前说清楚比
+// 让 clang 在 B1001 那一层报 "invalid vector size" 好读得多。
+const main = fn () u8 {
+    var a: @Vec(i32, 3) = (@Vec(i32, 3))1;
+    return 0;
+};

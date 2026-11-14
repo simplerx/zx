@@ -214,6 +214,18 @@ static Node *parse_type_or_const(P *p) {
     return parse_expr(p);
 }
 
+/* @Vec(T, N)（§162）：类型位置与值位置共用一个入口，词法已经吃掉了
+ * `@` 与名字，剩下的是 `( T , N )`。 */
+static Node *parse_vec_type(P *p, int line, int col) {
+    Node *n = node_new(NK_VEC_TYPE, line, col);
+    expect(p, TOK_LPAREN);
+    n->a = parse_type(p);
+    expect(p, TOK_COMMA);
+    n->b = parse_type_or_const(p);
+    expect(p, TOK_RPAREN);
+    return n;
+}
+
 static Node *parse_type_primary(P *p) {
     Token *t = cur(p);
     switch (t->kind) {
@@ -472,6 +484,20 @@ static Node *parse_type_primary(P *p) {
         }
         expect(p, TOK_RBRACE);
         return n;
+    }
+
+    case TOK_AT: {
+        /* @Vec(T, N)：向量类型（§162）。类型位置的 `@` 只认这一个名字——
+         * 其它内建（@type / @memcpy …）是值位置的表达式，写在这里是错。 */
+        int vl = t->line, vc = t->col;
+        advance(p);
+        const char *nm = take_ident(p);
+        if (strcmp(nm, "Vec") != 0) {
+            perr(p, "unknown type builtin @%s -- the only one is @Vec(T, N)", nm);
+            if (g_spec_depth > 0) longjmp(g_spec, 1);
+            return type_ident("<error>", vl, vc);
+        }
+        return parse_vec_type(p, vl, vc);
     }
 
     case TOK_LPAREN: {
@@ -1098,6 +1124,10 @@ static Node *parse_primary(P *p) {
             expect(p, TOK_RPAREN);
             return n;
         }
+
+        /* §162：`@Vec(T, N)` 是类型，值位置也常见（`const V4 = @Vec(f32, 4);`
+         * 这种别名、泛型实参）。类型位置与值位置走同一个构造函数。 */
+        if (n->name && !strcmp(n->name, "Vec")) return parse_vec_type(p, n->line, n->col);
 
         /* 语法只有两种形状：@type 与 @memcpy/@memmove/@memset 先收表达式，
          * 其余收类型——@type 的实参类型与表达式都收（类型在表达式位置也
@@ -1967,6 +1997,7 @@ static const char *nk_name(NodeKind k) {
     case NK_OPT_TYPE: return "opt";
     case NK_ERR_TYPE: return "err";
     case NK_ERR_SET:  return "errset";
+    case NK_VEC_TYPE: return "vec";
     case NK_ROOT: return "root";
     }
     return "?";

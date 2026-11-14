@@ -15,9 +15,9 @@
 /* 编译器版本唯一源：`zxc -v` / `zxc --version` / `--help` 都读这里。
  * （`zxc init` 写进 zx.json 的 0.1.0 是**工程**版本，不是编译器版本。）
  * 发版时同步 `docs/reference.md` 的版本行、`docs/manual.md` 的落款与
- * README 的文档表。1.3.0 = 方法接收者收成两种、@mod / heapSlice、
- * Pool / SyncPool 这一轮能力线之后的发布版。 */
-#define ZXC_VERSION "1.3.0"
+ * README 的文档表。1.4.0 = @shim C 通道（§160）、std.simd 手写 SIMD
+ * （§161）、语言级向量类型 @Vec(T, N)（§162）之后的发布版。 */
+#define ZXC_VERSION "1.4.0"
 
 /* ---------- diagnostics ---------- */
 

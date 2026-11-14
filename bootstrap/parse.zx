@@ -124,6 +124,7 @@ pub const NK = enum {
     t_ident, ptr, sliceT, tupleT, struct_, union_, enum_, opt, err,
     root,
     err_set,          // error{a, b} —— 追加在末尾，老编号不漂移
+    vec,              // @Vec(T, N) —— 同样追加在末尾（§162）
 };
 
 pub const Node = struct {
@@ -204,6 +205,7 @@ const nk_name = fn (k: NK) []const u8 {
         .err: "err";
         .root: "root";
         .err_set: "errset";
+        .vec: "vec";
     };
 };
 
@@ -990,6 +992,27 @@ pub const Parser = struct {
             return n;
         }
 
+        // @Vec(T, N)：向量类型（§162）。类型位置的 `@` 只认这一个名字。
+        if (t.kind == lex.Kind.at) {
+            _ = self.advance();
+            let nm = try self.take_ident();
+            if (!std.str.eq(nm, "Vec")) {
+                self.msgb.clear();
+                self.pushs("unknown type builtin @");
+                self.pushs(nm);
+                self.pushs(" -- the only one is @Vec(T, N)");
+                self.record("E0201", self.dup_msg());
+                return (error)Fail.f;
+            }
+            try self.expect(lex.Kind.lparen);
+            let n = self.new_at(NK.vec, t);
+            n.a = try self.parse_type();
+            try self.expect(lex.Kind.comma);
+            n.b = try self.parse_type_or_const();
+            try self.expect(lex.Kind.rparen);
+            return n;
+        }
+
         if (t.kind == lex.Kind.lparen) {
             _ = self.advance();
             let n = try self.parse_type();
@@ -1619,6 +1642,17 @@ pub const Parser = struct {
                 } else {
                     return (error)Fail.f;
                 }
+                try self.expect(lex.Kind.rparen);
+                return n;
+            }
+            // §162：@Vec(T, N) 是类型，值位置也常见（`const V4 = @Vec(f32, 4);`
+            // 这种别名、泛型实参）。类型位置与值位置同一套解析。
+            if (std.str.eq(nm, "Vec")) {
+                n.kind = NK.vec;
+                try self.expect(lex.Kind.lparen);
+                n.a = try self.parse_type();
+                try self.expect(lex.Kind.comma);
+                n.b = try self.parse_type_or_const();
                 try self.expect(lex.Kind.rparen);
                 return n;
             }

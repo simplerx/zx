@@ -1549,6 +1549,25 @@ static Type *resolve_type(Node *n) {
             return BAD(n, "'%s' is not a type", n->name);
     }
 
+    case NK_VEC_TYPE: {
+        /* @Vec(T, N)（§162）：T 是数值元素类型，N 是 1/2/4/8/16/32/64。
+         * 长度必须是 2 的幂——后端的 C 用的是 vector_size，它也只接受这种。 */
+        int vl = n->line, vc = n->col;
+        Type *elem = resolve_type(n->a);
+        if (elem->kind != TY_INVALID && !ty_is_num(elem))
+            return BAD(n->a, "@Vec element type must be numeric, got `%s`", ty_str(elem));
+        IntV v = ev_int(n->b);
+        if (!v.ok || v.neg)
+            return BAD(n->b, "@Vec length must be a non-negative compile-time integer");
+        if (v.v == 0 || v.v > 64 || (v.v & (v.v - 1)) != 0) {
+            diag_code_at("E0305", vl, vc,
+                         "@Vec length must be 1, 2, 4, 8, 16, 32 or 64 (got %llu)",
+                         (unsigned long long)v.v);
+            return ty_invalid();
+        }
+        return ty_vec(elem, v.v);
+    }
+
     case NK_PTR_TYPE: {
         Type *elem = resolve_type(n->a);
         bool has_len = n->b != NULL;
@@ -2921,6 +2940,28 @@ static Type *check_binary(Node *n, Type *expect) {
     Type *a = check_expr(n->a, (op == TOK_ANDAND || op == TOK_OROR) ? NULL : expect);
     Type *b = check_expr(n->b, expect);
 
+    /* 向量（§162）：两边必须**同一个**向量类型，没有隐式 splat——
+     * 想把标量铺开就用 `(@Vec(T, N))x`。`/` 只对浮点向量开：C 的
+     * vector_size 类型没有整数除法，硬放行会在 B1001 那一层才炸。 */
+    if ((a && a->kind == TY_VEC) || (b && b->kind == TY_VEC)) {
+        if (!ty_eq(a, b))
+            return BAD(n, "vector arithmetic needs the same vector type on both sides, "
+                          "found `%s` and `%s` -- write `(@Vec(T, N))x` to broadcast a scalar",
+                       ty_str(a), ty_str(b));
+        switch (op) {
+        case TOK_PLUS: case TOK_MINUS: case TOK_STAR:
+            return type_of(n, a);
+        case TOK_SLASH:
+            if (!ty_is_float(a->elem))
+                return BAD(n, "`/` is not defined on integer vectors (C vector types "
+                              "have no integer division); convert the lanes to f32 first");
+            return type_of(n, a);
+        default:
+            return BAD(n, "this operator is not defined on vectors (only `+ - *` "
+                          "and `/` for float lanes)");
+        }
+    }
+
     switch (op) {
     case TOK_ANDAND: case TOK_OROR:
         if (!ty_eq(a, ty_bool()) || !ty_eq(b, ty_bool()))
@@ -3105,6 +3146,7 @@ static Type *check_unary(Node *n, Type *expect) {
         t = check_expr(n->a, expect);
     switch (n->op) {
     case TOK_MINUS: case TOK_PLUS:
+        if (t && t->kind == TY_VEC) return type_of(n, t);   /* 逐分量取负 */
         if (!numeric_like(t)) return BAD(n, "unary `-` needs a number, found `%s`", ty_str(t));
         /* 负字面量不能落到无符号类型上（M19）：u8 = -1 是截断不是 -1 */
         if (n->op == TOK_MINUS && t && t->kind == TY_INT && !t->is_signed) {
@@ -3144,6 +3186,13 @@ static bool castable(Type *from, Type *to) {
     if (to->kind == TY_OPT && can_coerce(from, to->elem)) return true;
     if (to->kind == TY_ERR && (from->kind == TY_ERROR || can_coerce(from, to->elem))) return true;
     if (to->kind == TY_SLICE && from->kind == TY_SLICE) return true;
+    /* 向量之间只允许同大小的重解释（i32x4 ↔ f32x4）：按位搬，不转换。 */
+    if (from->kind == TY_VEC && to->kind == TY_VEC &&
+        ty_size(from) == ty_size(to) && ty_size(from) > 0)
+        return true;
+    /* 标量 → 向量：把标量铺满所有分量（splat）。C 的 vector_size 类型
+     * 不接受 scalar cast，后端把它发成 zx_splat_<后缀>(x)。 */
+    if (to->kind == TY_VEC && ty_is_num(from)) return true;
     return false;
 }
 
@@ -3452,12 +3501,23 @@ static Type *check_field(Node *n) {
         if (bt->kind == TY_SLICE) return type_of(n, ty_usize());
         if (bt->kind == TY_TUPLE) return type_of(n, ty_comptime_int());
         if (bt->kind == TY_PTR && bt->has_len) return type_of(n, ty_usize());
+        if (bt->kind == TY_VEC) return type_of(n, ty_usize());
         /* 其余情况：结构体自己也可以有叫 len 的字段，落到普通字段查找 */
         if (bt->kind == TY_PTR && !ty_field(bt->elem, n->name))
             return BAD(n, "`%s` has no count; use *[N]T or []T", ty_str(bt));
     }
 
     switch (bt->kind) {
+    case TY_VEC: {
+        /* v.0 / v.3：编译期分量下标。运行期下标走 v[i]（check_index）。 */
+        if (!n->name) {
+            if (n->ival >= bt->len)
+                return BAD(n, "index %llu out of range for `%s`",
+                           (unsigned long long)n->ival, ty_str(bt));
+            return type_of(n, bt->elem);
+        }
+        return BAD(n, "`%s` has no member `%s`", ty_str(bt), n->name ? n->name : "?");
+    }
     case TY_PTR: {
         Type *e = bt->elem;
         if (!n->name) {
@@ -3656,6 +3716,18 @@ static Type *check_index(Node *n) {
     }
     if (bt->kind == TY_PTR) return type_of(n, bt->elem);
     if (bt->kind == TY_SLICE) return type_of(n, bt->elem);
+    if (bt->kind == TY_VEC) {
+        /* 向量下标：编译期常量能确定越界就现在报；运行期下标合法
+         * （C 的 vector 类型本来就支持 v[i]）。 */
+        Value *iv = n->b->ct ? n->b->ct : ct_eval_probe(n->b);
+        if (iv && iv->kind == V_INT) {
+            int64_t x = val_i64(iv);
+            if (x < 0 || (uint64_t)x >= bt->len)
+                return BAD(n->b, "index %lld is out of bounds (len %llu)",
+                           (long long)x, (unsigned long long)bt->len);
+        }
+        return type_of(n, bt->elem);
+    }
     if (bt->kind == TY_TUPLE) {
         /* tup[N]：N 必须是编译期值。元组是异构的——第 i 个元素和第 i+1 个
          * 类型不同，运行时索引给不出单一返回类型，所以不做成运行时下标。
@@ -5012,6 +5084,7 @@ static Type *check_expr_raw(Node *n, Type *expect) {
     case NK_ENUM_TYPE:
     case NK_OPT_TYPE:
     case NK_ERR_TYPE:
+    case NK_VEC_TYPE:
     case NK_ERR_SET: {
         Type *t = resolve_type(n);
         n->type_val = t;
@@ -7307,6 +7380,9 @@ static Value *ct_field(Node *n) {
         }
         if (t->kind == TY_TUPLE && is_len)
             return val_int(ty_usize(), (uint64_t)t->nfields, false);
+        /* 向量的分量数是类型的一部分（§162） */
+        if (t->kind == TY_VEC && is_len)
+            return val_int(ty_usize(), t->len, false);
 
         /* 数量在值里：切片 / 字符串 */
         if (!is_len && t->kind != TY_SLICE)

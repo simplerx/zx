@@ -41,6 +41,7 @@ typedef enum {
     TY_ERR,                /* !T  = {payload T @0, tag error @sizeof(T)} */
     TY_ERRORSET,           /* error{a, b}：编译期类型，运行时就是 error(u16) */
     TY_FN,                 /* 8 字节代码指针 */
+    TY_VEC,                /* @Vec(T, N)：N 个 T 的向量值（§162） */
 } TyKind;
 
 /* 聚合体的一个成员：结构体字段、联合体成员、枚举变体都用它。 */
@@ -133,6 +134,7 @@ Type *ty_int(int bits, bool is_signed);
 Type *ty_float(int bits);
 Type *ty_ptr(Type *elem, bool is_const, bool has_len, uint64_t len);
 Type *ty_slice(Type *elem, bool is_const);
+Type *ty_vec(Type *elem, uint64_t n);
 Type *ty_tuple(Type **items, int n);
 Type *ty_opt(Type *elem);
 Type *ty_err(Type *elem);

@@ -56,7 +56,8 @@ static const ErrDoc g_errs[] = {
     { "E0304", "type has no such member, field or variant",
       "check spelling (see the `did you mean` hint); for a private member use E0404 instead" },
     { "E0305", "illegal type shape",
-      "write multi-level pointers in full `* *T`; `?T` cannot nest `?`; `?*T` is the nullable pointer" },
+      "write multi-level pointers in full `* *T`; `?T` cannot nest `?`; `?*T` is "
+      "the nullable pointer; a `@Vec(T, N)` length is 1/2/4/8/16/32/64 only" },
     { "E0306", "operator or operand type mismatch",
       "arithmetic takes numbers only; pointers cannot be added; slice concat needs matching element types" },
     { "E0307", "aggregate literal is malformed",

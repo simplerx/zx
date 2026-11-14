@@ -4606,6 +4606,7 @@ const main = fn () u8 {
     var p6 = std.simd.addF32;
     var p7 = std.simd.;
     var p8 = @sh;
+    var p9 = @Ve;
     return 0;
 };
 """
@@ -4734,6 +4735,16 @@ check("completion.shim.partialAtIsBuiltin",
       and _g160_shim[0].get("kind") == 3
       and "@shim(" in (_g160_shim[0].get("detail") or ""),
       str(_g160_shim)[:260])
+
+# §162：`@Vec(T, N)` 是类型内建，也要进 `@` 补全（写到一半 `@Ve` 同样走
+# 这条路）。类型内建的实参是类型，不在值位置当函数看——kind 仍是 3（内建）。
+_g162_vec = g157_comp("var p9 = @Ve", 5214)
+check("completion.vec.partialAtIsBuiltin",
+      len(_g162_vec) == 1
+      and _g162_vec[0].get("label") == "Vec"
+      and _g162_vec[0].get("kind") == 3
+      and "@Vec(T, N)" in (_g162_vec[0].get("detail") or ""),
+      str(_g162_vec)[:260])
 
 
 

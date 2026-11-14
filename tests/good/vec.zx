@@ -1,0 +1,94 @@
+// vec.zx —— §162 语言级向量类型 @Vec(T, N)。
+// 断言的是**语言面**：类型能出现在成员/参数/返回/字段上、逐分量算术、
+// 编译期与运行期下标、`.len/.size`、同大小重解释、标量铺开（splat）。
+// 用不用 SSE/AVX 由 C 编译器决定——vector_size 类型在 -O0 下也是真向量操作，
+// 语言层不做 SIMD 抽象（那是 std.simd 的活，见 §161）。
+// expect-output
+// splat: first=1.5 last=1.5 len=4 size=16
+// arith: add=3.5 mul=7 sub=5.5 div=2.75
+// neg: 0=-2.75 1=-2.75
+// lanes: 2=9 1=3 minlen=4
+// runtime: 2.75 3 9 2.75
+// bitcast: same=true neg2i=1076887552
+// fn: 12
+// field: pos3=100 pos7=1.25 tag=7 bodysize=64
+// opt: some({2, 2, 2, 2})
+// lanes8: 8 sum=36
+const std = @mod("std");
+
+const V4 = @Vec(f32, 4);
+const V8 = @Vec(f32, 8);
+const I4 = @Vec(i32, 4);
+
+const Body = struct {
+    pos: V8,
+    tag: u8,
+};
+
+const mk = fn (k: f32) V8 {
+    return (V8)k;
+};
+
+const sums = fn (a: V4, b: V4) f32 {
+    let c = a + b;
+    return c.0 + c.1 + c.2 + c.3;
+};
+
+pub const main = fn () u8 {
+    // 标量 → 向量：铺开（C 的 vector_size 类型没有 scalar cast，写着像转换）
+    var a = (V4)1.5;
+    let b = (V4)2.0;
+    std.println("splat: first={} last={} len={} size={}", a.0, a.3, a.len, a.size);
+
+    // 逐分量算术（向量不隐式 splat：两边必须同一个向量类型）
+    let add = a + b;
+    let mul = add * b;
+    let sub = mul - a;
+    let div = sub / b;
+    std.println("arith: add={} mul={} sub={} div={}", add.0, mul.0, sub.0, div.0);
+
+    let neg = -div;
+    std.println("neg: 0={} 1={}", neg.0, neg.1);
+
+    // 编译期分量下标是左值；运行期下标走带界检查的那条路
+    var lanes = div;
+    lanes.2 = 9.0;
+    lanes[1] = 3.0;
+    std.println("lanes: 2={} 1={} minlen={}", lanes.2, lanes[1], lanes.len);
+
+    var acc: f32 = 0.0;
+    var i: usize = 0;
+    while (i < lanes.len) {
+        if (i == 3) { acc = lanes[i]; }
+        i = i + 1;
+    }
+    std.println("runtime: {} {} {} {}", lanes.0, lanes[1], lanes.2, acc);
+
+    // 同大小重解释：位不变，不转换
+    let bits = (I4)lanes;
+    std.println("bitcast: same={} neg2i={}", bits.len == lanes.len, bits.0);
+
+    // 参数 / 返回 / 加法的类型都从上下文推
+    std.println("fn: {}", sums((V4)1.0, (V4)2.0));
+
+    // 32 字节向量当结构体字段：对齐 = 大小（32），所以 Body 是 64 字节
+    let p = mk(1.25);
+    var body = Body{ .pos = p, .tag = 7 };
+    body.pos.3 = 100.0;
+    std.println("field: pos3={} pos7={} tag={} bodysize={}",
+                body.pos.3, body.pos.7, body.tag, @type(Body).size);
+
+    // 可空向量：载荷就是那个向量值
+    let o: ?V4 = (V4)2.0;
+    std.println("opt: {}", o);
+
+    // 8 分量：跑一遍 1..8 求和，顺便验证运行期下标与 .len 一致
+    var w: V8 = (V8)0.0;
+    var k: usize = 0;
+    while (k < w.len) { w[k] = (f32)k + 1.0; k = k + 1; }
+    var s: f32 = 0.0;
+    k = 0;
+    while (k < w.len) { s = s + w[k]; k = k + 1; }
+    std.println("lanes8: {} sum={}", w.len, s);
+    return 0;
+};

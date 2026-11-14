@@ -1,0 +1,8 @@
+// expect: @Vec element type must be numeric
+// 元素只能是数值类型：向量是"逐分量算"的值，聚合元素没有算术可做。
+const P = struct { x: i32 };
+
+const main = fn () u8 {
+    var a: @Vec(P, 4) = (@Vec(P, 4))1;
+    return 0;
+};

@@ -321,11 +321,13 @@ const builtin_docs = [_]BuiltinDoc{
     .{ .name = "shim", .detail = "@shim(\"impl.c\") 把一份 C 源文件编进程序（自包含 TU，路径相对本文件）" },
     .{ .name = "trap", .detail = "@trap() 触发断点/中止" },
     .{ .name = "compileError", .detail = "@compileError(msg) 编译期报错" },
+    .{ .name = "Vec", .detail = "@Vec(T, N) 向量类型：N 个 T 的向量值（N 只能是 1/2/4/8/16/32/64），`(@Vec(T, N))x` 把标量铺满各分量" },
 };
 
 const toplevel_builtins = [_][]const u8{
     "type",   "memcpy",  "memmove", "memset",
     "link",   "shim",   "trap",    "compileError",
+    "Vec",
 };
 
 // ---------------------------------------------------------------- utils

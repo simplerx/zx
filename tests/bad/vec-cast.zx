@@ -1,0 +1,7 @@
+// expect: cannot cast
+// 向量之间只允许**同大小**的重解释（i32x4 ↔ f32x4）：大小不同就是不同布局，
+// 不是"换个角度看同一段位"。
+const main = fn () u8 {
+    var a = (@Vec(f32, 8))(@Vec(f32, 4))1.0;
+    return 0;
+};

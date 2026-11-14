@@ -1,0 +1,8 @@
+// expect: `/` is not defined on integer vectors
+// C 的 vector_size 类型没有整数除法：放行会在生成 C 那一步才炸
+// （B1001 假 bug），所以在类型检查就挡下。
+const main = fn () u8 {
+    var a: @Vec(i32, 4) = (@Vec(i32, 4))8;
+    var b = a / a;
+    return 0;
+};

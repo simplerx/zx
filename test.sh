@@ -1400,6 +1400,44 @@ else
     head -12 "$TPFX.s159c.log"; fail=1
 fi
 
+# §162：语言级向量类型 @Vec(T, N)。语言层只管"这是个 N 分量的值"，
+# 落到 C 的是 clang 的 vector_size 类型——不是用 struct 模拟的（用 struct
+# 模拟在 -O0 下完全不会用向量指令，而且字段布局要自己维护）。
+$ZXC tests/good/vec.zx --emit-c > "$TPFX.s162.c" 2>/dev/null
+if grep -qF 'vector_size(16)' "$TPFX.s162.c" \
+   && grep -qF 'vector_size(32)' "$TPFX.s162.c" \
+   && grep -qF 'zx_splat_vf32_4(' "$TPFX.s162.c"; then
+    printf "  ok   §162 @Vec 落到 C 的 vector_size 类型（含 splat 助手）\n"
+else
+    printf "  FAIL §162 --emit-c 里没有 vector_size 类型\n"
+    head -6 "$TPFX.s162.c"; fail=1
+fi
+
+# 两个前端必须生成同一份东西：向量类型是新加的 NodeKind，自举前端漏了
+# 就会在 --fe=zx 下报"unknown type"，而 --fe=c 一切正常。
+$ZXC tests/good/vec.zx -o "$TPFX.s162zx.exe" > "$TPFX.s162zx.log" 2>&1 || true
+$ZXC tests/good/vec.zx --fe=c -o "$TPFX.s162c.exe" > "$TPFX.s162c.log" 2>&1 || true
+"$TPFX.s162zx.exe" > "$TPFX.s162zx.out" 2>&1 || true
+"$TPFX.s162c.exe"  > "$TPFX.s162c.out"  2>&1 || true
+if cmp -s "$TPFX.s162zx.out" "$TPFX.s162c.out" \
+   && grep -qF 'field: pos3=100 pos7=1.25 tag=7 bodysize=64' "$TPFX.s162zx.out"; then
+    printf "  ok   §162 zx / c 两个前端输出一致（向量字段布局 = 对齐 = 大小）\n"
+else
+    printf "  FAIL §162 两个前端输出不一致\n"
+    diff "$TPFX.s162zx.out" "$TPFX.s162c.out" | head -6
+    head -6 "$TPFX.s162zx.log"; head -6 "$TPFX.s162c.log"; fail=1
+fi
+
+# -O2 会真的生成向量指令；数值必须是同一份（不许因为优化改变结果）
+$ZXC tests/good/vec.zx --release -o "$TPFX.s162rel.exe" > "$TPFX.s162rel.log" 2>&1 || true
+"$TPFX.s162rel.exe" > "$TPFX.s162rel.out" 2>&1 || true
+if cmp -s "$TPFX.s162zx.out" "$TPFX.s162rel.out"; then
+    printf "  ok   §162 dev / release 输出一致\n"
+else
+    printf "  FAIL §162 release 输出不同\n"
+    diff "$TPFX.s162zx.out" "$TPFX.s162rel.out" | head -6; fail=1
+fi
+
 # §161：std.simd 换成手写 SIMD（std/simd_impl.c 经 @shim 挂进来）。三条实现
 # （scalar / sse2 / avx2）必须逐位一致——用 ZX_SIMD_ISA 强制降档跑同一份二进制
 # 来证明，而不是"看起来对"；--emit-c 里要看得见 intrinsic，证明不再是靠 -O2

@@ -6459,3 +6459,112 @@ static 私有助手 + 两处 `@shim` 去重）、`tests/multi/shim/`（**模块*
 **守门**：`test.sh §161` 三条（三路输出逐位一致且含 NaN/-0.0 一段 / `--emit-c`
 里有 `_mm256_add_ps` / `isaName` 如实报告强制档），`tests/good/std-simd.zx` 加
 「特殊值」一段（`nan=true clampHi=true negzero=true neg5=true`）。
+
+---
+
+## §162 语言级向量类型 `@Vec(T, N)`（2026-11-14）
+
+**用户原话**：「新建 向量类型 @//vec/」→ 选定「语言级 `@Vector(T,N)` 内建」→
+「名字是 @ Vec」。落地名 **`@Vec`**。
+
+**是类型内建，不是值内建**。§10 那九个（`@mod @type @shim @memcpy @memmove
+@memset @link @compileError @trap`）都有运行期形态或驱动语义；`@Vec(T, N)` 只在
+类型位置（或当类型值：`const V4 = @Vec(f32, 4);`、`@type(@Vec(f32, 4)).size`）
+出现，没有运行期存在。所以计数不变，也不进 `check_builtin`。
+
+### 类型模型
+
+- `src/ty.h` 加 `TY_VEC`，`ty_vec(elem, n)` intern 构造；`len` 装分量数、
+  `elem` 装元素类型，没有新字段。
+- **对齐 = 大小**（`ty_align` 返回 `ty_align(elem) * len`）。这不是随手定的：
+  clang 的 `vector_size(N*sizeof(T))` 类型的对齐恰好等于它的大小，结构体布局
+  必须两边同一个数，否则字段错位（§159 里 `Vec4f` 的手写包装不用操心这个，
+  因为它就是一个 16 字节结构体）。
+- `ty_size` 返回 `ty_size(elem) * len`，`.size` 直接走这条。
+
+### 长度只能是 2 的幂（1/2/4/8/16/32/64）
+
+C 的 `vector_size` 只接受 2 的幂倍数，非 2 的幂 clang 直接
+`error: invalid vector size`。与其让用户收到 B1001「生成的 C 被拒」，不如在
+类型检查就报 **E0305**（复用「类型形状不合法」，那条码本来就是"这个类型形状
+语言里没有"）。
+
+### 生成 C：直接落 `vector_size`，不用 struct 模拟
+
+```c
+typedef float ZxVec_vf32_4 __attribute__((vector_size(16)));
+static ZxVec_vf32_4 zx_splat_vf32_4(float x) { return (ZxVec_vf32_4){x, x, x, x}; }
+```
+
+- 用 struct 模拟在 `-O0` 下完全不会产生向量指令（编译器看不出那四个 float
+  是一个向量），而语言级向量最直接的价值就是"我写的就是一个向量"。
+- `-O0` 下 `vector_size` 类型也已经是真指令（clang 按 SSE/AVX 拆分，不看
+  优化档）；`-O2` 才进一步排布。用不用 AVX-512 仍由 C 编译器决定——**语言层
+  不做 SIMD 抽象**，那是 `std.simd`（§161）的活。
+- `tsuffix` → `vf32_4`，`tn` → `ZxVec_vf32_4`；`ensure_type` 里连 typedef 一起
+  发 splat 助手（同类型只发一次，走既有的 C 名去重）。
+
+### 铺开（splat）就是转换：`(@Vec(T, N))x`
+
+C 的 `vector_size` 类型**不接受标量 cast**（clang 报 `invalid conversion
+between vector type and scalar type`），所以这条不可能靠"照抄成 C cast"实现。
+但语言面不该为此新增内建：R4 的规则是"转换只有 `(T)v`"，而"把一个标量看成
+N 份"本来就是一个转换。于是 `castable` 放行 `数值 → @Vec`，后端把它发成
+`zx_splat_vf32_4(x)`。助手是函数，实参只求值一次。
+
+同理向量之间：**只允许同大小的重解释**（`i32x4 ↔ f32x4`），不同大小报
+`cannot cast`。C 侧必须写显式 cast（clang 的向量隐式转换不成立）。
+
+### 允许 / 不允许的运算（都是"不想在 B1001 那一层才炸"）
+
+| 运算 | 结论 | 原因 |
+|---|---|---|
+| `+ - *` | 允许 | C 逐分量，语义唯一 |
+| `/`（浮点向量） | 允许 | C 逐分量 |
+| `/`（整数向量） | **报错** | C 的 vector 没有整数除法，放行会在生成 C 时炸 |
+| 一元 `-` | 允许 | 逐分量 |
+| `< <= > >= == !=` | **报错** | C 里得到的是"逐分量掩码向量"，不是 `bool` |
+| 位运算 / 移位 | **报错** | 暂时不需要；要用先加，别半支持 |
+| `&v` | 不特殊处理 | 走普通取地址，得 `*@Vec(...)` |
+
+向量**不做隐式 splat**：`a + 1.0` 报 E0301，提示写 `(@Vec(T, N))x`。猜"加到
+每个分量"看起来贴心，但同一条代码在 `a + b` 里又是逐分量——两种隐藏语义比
+一条错误信息贵得多。
+
+### `{}` 打印按分量展开
+
+`any_desc` 给 `TY_VEC` 造的是 `AK_STRUCT` 描述符：N 个字段、偏移按元素大小手算
+（C 的 `offsetof` 不接受 vector 下标），名字留空（和元组一样按位置打）。
+否则 `{}` 走 `default:` 分支，`kind` 留在 `AK_VOID`，打出来是
+`P{id: 3, v: void}` ——类型过了、值是垃圾，正是最该避免的那类。
+
+### 自举（两个前端必须同步）
+
+- `src/ast.h` 的 `NodeKind` **末尾**追加 `NK_VEC_TYPE`；`src/astload.c` 的 kind
+  上界跟着改（`kind > NK_VEC_TYPE` 就是坏值）。
+- `bootstrap/parse.zx`：`NK` 枚举末尾加 `vec`、`kname` 加 `.vec: "vec"`、类型位置
+  加 `lex.Kind.at` 分支。C 侧 dump 名同样是 `"vec"`，`diff_ast.sh` 才对得上。
+- `@Vec` 在**值位置**的入口两处都要接：表达式 primary 的 `@` 分支里认 `Vec`，
+  否则 `const V4 = @Vec(f32, 4);` 报 E0300「unknown builtin @Vec」（类型位置
+  修好了也没用——别名和泛型实参都写在值位置）。
+
+### 守门
+
+- `tests/good/vec.zx`：成员/参数/返回/结构体字段、逐分量算术、编译期 `v.N`
+  与运行期 `v[i]`、`.len/.size`、同大小重解释、splat、`?@Vec`、8 分量求和、
+  `{}` 打印（`opt: some({2, 2, 2, 2})`）。
+- `tests/bad/vec-{length,elem,mismatch,intdiv,index,cast,op}.zx` 七条诊断。
+- `test.sh §162` 三条：`--emit-c` 里是 `vector_size(16)` / `vector_size(32)` /
+  `zx_splat_vf32_4(`（证明不是 struct 模拟）；`--fe=zx` 与 `--fe=c` 输出逐字一致
+  且含 `field: pos3=100 pos7=1.25 tag=7 bodysize=64`（32 字节向量 + u8 的
+  结构体是 64 字节 = 对齐 32，两边布局必须同一个数）；dev / release 输出一致。
+- `tools/lsptest.py`：`@Ve` 补全要出 `Vec`（kind 3，detail 含 `@Vec(T, N)`）。
+
+### 没做的
+
+- LSP 的**类型推断**层没加 `@Vec`：`inferExprType` 之类仍在文本层，hover /
+  inlay 遇到向量值会退回"未推断"，但不会报假诊断（诊断走 `zxc --check`）。
+  只补了 `@` 补全表（`builtin_docs` / `toplevel_builtins`）。
+- 没有隐式 splat、没有向量比较/位运算/`select`、没有向量字面量
+  （`@Vec(f32,4){1,2,3,4}` 这种语法没加：`(@Vec(f32,4))x` + 逐分量赋值够用，
+  多一种字面量语法就多一处 LSP 与自举要跟）。

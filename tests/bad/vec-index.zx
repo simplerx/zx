@@ -1,0 +1,7 @@
+// expect: index 4 out of range
+// 编译期分量下标越界是笔误（v.4 对 @Vec(f32, 4)），现在报比运行时读垃圾好。
+const main = fn () u8 {
+    var a: @Vec(f32, 4) = (@Vec(f32, 4))1.0;
+    var b = a.4;
+    return 0;
+};

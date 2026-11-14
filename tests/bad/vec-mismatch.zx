@@ -1,0 +1,8 @@
+// expect: vector arithmetic needs the same vector type on both sides
+// 向量不做隐式 splat：一条 `a + 1.0` 到底是想加到每个分量还是只想加第一个，
+// 语言不该替你猜。铺开写成 `(@Vec(f32, 4))1.0`。
+const main = fn () u8 {
+    var a: @Vec(f32, 4) = (@Vec(f32, 4))1.0;
+    var b = a + 1.0;
+    return 0;
+};
