@@ -323,12 +323,15 @@ const builtin_docs = [_]BuiltinDoc{
     .{ .name = "compileError", .detail = "@compileError(msg) 编译期报错" },
     .{ .name = "Vec", .detail = "@Vec(T, N) 向量类型：N 个 T 的向量值（N 只能是 1/2/4/8/16/32/64），`(@Vec(T, N))x` 把标量铺满各分量，`@Vec(T, N){a, b, …}` 是字面量" },
     .{ .name = "select", .detail = "@select(mask, a, b) 按掩码逐分量选（mask 来自向量比较，分量 0 / -1）" },
+    .{ .name = "any", .detail = "@any(mask) 掩码整体判真：至少一个分量为真（参数是整数向量）" },
+    .{ .name = "all", .detail = "@all(mask) 掩码整体判真：每个分量都为真" },
 };
 
 const toplevel_builtins = [_][]const u8{
     "type",   "memcpy",  "memmove", "memset",
     "link",   "shim",    "trap",    "compileError",
     "Vec",    "select",
+    "any",    "all",
 };
 
 // ---------------------------------------------------------------- utils
@@ -4659,6 +4662,9 @@ fn inferExprType(text: []const u8, doc: *const Document, expr: []const u8, depth
         }
         return null;
     }
+    // §164 — @any(mask) / @all(mask) 的结果是 bool：整份掩码判真，不再是向量。
+    if (std.mem.startsWith(u8, e, "@any(") or std.mem.startsWith(u8, e, "@all("))
+        return "bool";
     // §162 — @select(mask, a, b) 的类型就是 a 的类型（sema 要求 a、b 同型）。
     if (std.mem.startsWith(u8, e, "@select(")) {
         var i: usize = 8;

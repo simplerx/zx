@@ -1464,6 +1464,29 @@ else
     grep -n '(ZxVec_vf32_4)' "$TPFX.s162.c" | head -6; fail=1
 fi
 
+# §164：掩码整体判真 @any / @all。它们必须是"整份掩码一次判"的助手，
+# 不是把 N 个分量摊到源码里手写——分量个数是类型的一部分，摊开就只能按
+# 具体类型写死。断言落在 C 上：两个助手都发出来了，而且调用点直接是
+# 函数调用（`zx_any_vi32_4(` 后面接实参）。
+if grep -qF 'static bool zx_any_vi32_4(ZxVec_vi32_4 v) { return (v[0] | v[1]' "$TPFX.s162.c" \
+   && grep -qF 'static bool zx_all_vi32_4(ZxVec_vi32_4 v) { return (v[0] != 0)' "$TPFX.s162.c" \
+   && grep -qF 'zx_any_vi32_4(' "$TPFX.s162.c"; then
+    printf "  ok   §164 @any/@all 落成按类型发的助手（any = 按位或，all = 逐分量非 0）\n"
+else
+    printf "  FAIL §164 @any/@all 的 C 发射不是类型助手\n"
+    grep -n 'zx_any_\|zx_all_' "$TPFX.s162.c" | head -6; fail=1
+fi
+
+# 语义两条边：半真掩码 any=true / all=false，全 0 掩码 any=false，
+# 全 -1 掩码 all=true；并且结果能直接进 if（bool 上下文，不需要转换）。
+if grep -qF 'anyall: any=true all=false none=false full=true' "$TPFX.s162zx.out" \
+   && grep -qF 'anyall: if ok' "$TPFX.s162zx.out"; then
+    printf "  ok   §164 半真 / 全 0 / 全 -1 三种掩码判真正确（可直接进 if）\n"
+else
+    printf "  FAIL §164 掩码判真语义不对\n"
+    grep -n 'anyall' "$TPFX.s162zx.out" | head -4; fail=1
+fi
+
 # §161：std.simd 换成手写 SIMD（std/simd_impl.c 经 @shim 挂进来）。三条实现
 # （scalar / sse2 / avx2）必须逐位一致——用 ZX_SIMD_ISA 强制降档跑同一份二进制
 # 来证明，而不是"看起来对"；--emit-c 里要看得见 intrinsic，证明不再是靠 -O2

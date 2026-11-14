@@ -1183,6 +1183,7 @@ static Node *parse_primary(P *p) {
         bool value_first = n->name &&
             (!strcmp(n->name, "memcpy") || !strcmp(n->name, "memmove") ||
              !strcmp(n->name, "memset") || !strcmp(n->name, "select") ||
+             !strcmp(n->name, "any") || !strcmp(n->name, "all") ||
              !strcmp(n->name, "type"));
         expect(p, TOK_LPAREN);
         if (!at(p, TOK_RPAREN)) {

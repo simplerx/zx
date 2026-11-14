@@ -4736,6 +4736,24 @@ static Type *check_builtin(Node *n, Type *expect) {
         return type_of(n, x);
     }
 
+    if (!strcmp(nm, "any") || !strcmp(nm, "all")) {
+        /* §164：掩码的整体判真。@any(m) = 至少一个分量为真，@all(m) = 每个
+         * 分量都为真。掩码的分量只有 0 与 -1（见 vec_mask_ty），所以"分量
+         * 非 0"就是"这一位是真"。
+         *
+         * 只接整数向量：浮点向量的判真要写明确比较（`v != (V4)0.0`），
+         * 因为 NaN != 0 恒真，让 @any 去猜"这个 NaN 算不算真"没有正确答案。
+         * 也没有给 @Vec 加 any()/all() 方法：@Vec 没有方法表，而且这是
+         * **掩码**的语义，不是任意向量的语义。 */
+        if (n->nitems != 1)
+            return BAD(n, "@%s needs exactly 1 argument: @%s(mask)", nm, nm);
+        Type *m = check_expr(n->items[0], NULL);
+        if (!m || m->kind != TY_VEC || !ty_is_int(m->elem))
+            return BAD(n, "@%s: the argument must be a mask vector (what a vector "
+                          "comparison returns), found `%s`", nm, ty_str(m));
+        return type_of(n, ty_bool());
+    }
+
     if (!strcmp(nm, "link")) {
         /* @link("ws2_32") / @link("./vendor/foo.lib")：把外部库交给链接器。
          * 编译期动作，运行时是 no-op；名字去重后由 build_program 转成

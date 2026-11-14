@@ -4599,6 +4599,8 @@ const main = fn () u8 {
     var va = @Vec(f32, 4){1.0, 2.0, 3.0, 4.0};
     let vc = va < va;
     let vd = @select(vc, va, va);
+    let vany = @any(vd);
+    let vall = @all(vd);
     let n = gen.mem;
     _ = n;
     std.println("{} {}", gen.get(), n);
@@ -4613,6 +4615,8 @@ const main = fn () u8 {
     var p8 = @sh;
     var p9 = @Ve;
     var p10 = @se;
+    var p11 = @an;
+    var p12 = @al;
     var vb = va.;
     return 0;
 };
@@ -4772,6 +4776,24 @@ check("completion.select.partialAtIsBuiltin",
       and _g162_sel[0].get("label") == "select"
       and _g162_sel[0].get("kind") == 3,
       str(_g162_sel)[:240])
+
+# §164 — 掩码判真：
+#   @any/@all 的行内类型是 bool（向量已经收敛成一个值）；
+#   `@an` / `@al` 要出对应的内建。
+check("inlayHint.vec.any", g157_hint("let vany") == ": bool", _g157_detail)
+check("inlayHint.vec.all", g157_hint("let vall") == ": bool", _g157_detail)
+_g164_any = g157_comp("var p11 = @an", 5218)
+check("completion.any.partialAtIsBuiltin",
+      len(_g164_any) == 1
+      and _g164_any[0].get("label") == "any"
+      and _g164_any[0].get("kind") == 3,
+      str(_g164_any)[:240])
+_g164_all = g157_comp("var p12 = @al", 5219)
+check("completion.all.partialAtIsBuiltin",
+      len(_g164_all) == 1
+      and _g164_all[0].get("label") == "all"
+      and _g164_all[0].get("kind") == 3,
+      str(_g164_all)[:240])
 
 
 

@@ -1714,6 +1714,8 @@ pub const Parser = struct {
             // §162：@select(mask, a, b) 三个实参都是表达式（掩码本身就是
             // 一次向量比较的结果），第一个不能按类型读。
             if (std.str.eq(nm, "select")) { value_first = true; }
+            if (std.str.eq(nm, "any")) { value_first = true; }
+            if (std.str.eq(nm, "all")) { value_first = true; }
             try self.expect(lex.Kind.lparen);
             if (!self.at(lex.Kind.rparen)) {
                 var ai: usize = 0;

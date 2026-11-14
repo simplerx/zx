@@ -18,6 +18,8 @@
 // cmp: -1 -1 0 0
 // sel: 1 2 3 4
 // isel: 4 5 3 8 eq3=-1
+// anyall: any=true all=false none=false full=true
+// anyall: if ok
 const std = @mod("std");
 
 const V4 = @Vec(f32, 4);
@@ -114,5 +116,15 @@ pub const main = fn () u8 {
     let ib = I4{4, 2, 3, 8};
     let im = @select(ia >= ib, ia, ib);
     std.println("isel: {} {} {} {} eq3={}", im.0, im.1, im.2, im.3, (ia == ib).2);
+
+    // §164：掩码整体判真。`@any` 是"至少一位真"，`@all` 是"每个分量都真"；
+    // 掩码分量只有 0 与 -1，所以"分量非 0" 就是"这一位是真"。
+    let anyHalf = @any(lt);                       // -1 -1 0 0
+    let allHalf = @all(lt);
+    let anyNone = @any(lv > lv + lv);             // 0 0 0 0
+    let allFull = @all(lv < lv + lv);             // -1 -1 -1 -1
+    std.println("anyall: any={} all={} none={} full={}",
+                anyHalf, allHalf, anyNone, allFull);
+    if (@any(lt) && !@all(lt)) { std.println("anyall: if ok"); }
     return 0;
 };

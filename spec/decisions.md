@@ -6669,4 +6669,79 @@ ZxVec_vf32_4 lo = ((ZxVec_vf32_4)(((ZxVec_vi32_4)(a) & _sel0) | ((ZxVec_vi32_4)(
 - 位运算 / `%` / 移位 / `&&` `||`：没有对应的向量语义，不半支持。
 - 归约内建（`@reduce`）：现在要读分量或自己写循环；`std.simd` 的
   `dotF32` / `sumF32` 走切片，不是向量。
-- 掩码的「整体判真」（`any` / `all`）：同上，先不加。
+- 掩码的「整体判真」（`any` / `all`）：见 §164（已补）。
+
+---
+
+## §164 掩码整体判真 `@any` / `@all`（2026-11-14）
+
+用户原话：「掩码的整体判真（any / all）」——§163 的「仍然没做」清单第一条。
+
+### 语义
+
+- `@any(m)`：至少一个分量为真；`@all(m)`：每个分量都为真。结果 `bool`。
+- 真 = 分量非 0。掩码分量只有 0 与 -1（§163），所以「非 0」精确等于「这一位
+  是真」，掩码与普通整数向量用同一条规则解释，不需要额外的掩码类型。
+
+### 只接整数向量
+
+浮点向量不接：`NaN != 0` 恒真，`@any(v)` / `@all(v)` 在 NaN 分量上给什么答案
+都能找到反例。要判浮点向量就写明确比较（`@any(v != (V4)0.0)`），让作者自己
+面对 NaN。报错文案直接说「must be a mask vector (what a vector comparison
+returns)」。
+
+`@all(true)` 这类标量也不接——标量判真直接写 `x != 0`，不该借道内建，否则
+「`@all` 也能吃 bool」会变成事实上的 API。
+
+### 落地：随类型发的助手，不是内联展开
+
+分量个数在类型里（1..64），内联展开会随 N 变长且没法跨类型复用。所以跟
+`splat` 一样在 `ensure_type` 的 `TY_VEC` 分支里发两个 `static` 助手（同名
+去重由既有的 C 名机制负责）：
+
+```c
+static bool zx_any_vi32_4(ZxVec_vi32_4 v) { return (v[0] | v[1] | v[2] | v[3]) != 0; }
+static bool zx_all_vi32_4(ZxVec_vi32_4 v) { return (v[0] != 0) & (v[1] != 0) & (v[2] != 0) & (v[3] != 0); }
+```
+
+- `any` 用**按位或**：全部分量都是 0 时结果才是 0（`1 | 2 = 3` 非 0，与「存在
+  非 0 分量」一致）。
+- `all` **必须逐分量看**：`1 & 2 == 0`，按位与判不出「都非 0」。对掩码
+  （0 / -1）两者都对，但语义要能覆盖非掩码输入。
+- 只在 `ty_is_int(elem)` 时发：浮点向量的 `|` 在 C 里不成立（实测
+  `invalid operands to binary expression ('float' and 'float')`），第一版
+  无条件发就把 f32x4 的编译弄炸了。
+
+### 为什么不是方法
+
+`@Vec` 没有方法表（不是 struct/容器），而且 `any/all` 是**掩码**的语义，
+不是任意向量的语义。做成内建也符合既有形状：`@select` 同样是「只在向量上
+有意义、语言里没有对应运算符」的那一类。
+
+### 连带改动
+
+- `check_builtin` 加两个分支（值内建 10 → 12）。
+- parse 的 `value_first`（两处：`src/parse.c`、`bootstrap/parse.zx`）——
+  实参是表达式，不能按类型读。
+- `tools/zxls.zig`：`builtin_docs` / `toplevel_builtins` 加两项；
+  `inferExprType` 里 `@any(` / `@all(` → `"bool"`（`bool` 全在 inlay 白名单里）。
+- 文档计数：`docs/reference.md` §10（10 → 12）、`docs/errors.md`（十 → 十二）、
+  reference §4.1 与 manual §3.2 各加一段。
+
+### 守门
+
+- `tests/good/vec.zx`：半真掩码（any=true / all=false）、全 0（any=false）、
+  全 -1（all=true），以及「结果直接进 `if`」（bool 上下文不需要转换）。
+- `tests/bad/vec-any-notmask.zx`（浮点向量）、`vec-any-argc.zx`（两个实参）、
+  `vec-all-scalar.zx`（bool 标量）。
+- `test.sh §164` 两条：生成 C 里两个助手确实是「按位或 / 逐分量非 0」且调用点
+  是 `zx_any_vi32_4(`；输出里三种掩码的判真结果。
+- `tools/lsptest.py`：`inlayHint.vec.{any,all}`（`: bool`）、
+  `completion.{any,all}.partialAtIsBuiltin`。
+
+### 仍然没做
+
+- 归约内建 `@reduce`（求和 / 求积 / min / max 到标量）：目前读分量或走
+  `std.simd` 的切片内核。
+- 位运算 / `%` / 移位 / `&&` `||`：不变，仍不半支持。
+- 掩码取反：`!m` 不成立（`!` 只作用于 `bool`），要写反面的比较。

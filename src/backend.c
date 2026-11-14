@@ -421,6 +421,24 @@ static void ensure_type(Type *t) {
         buf_puts(g_out, "){");
         for (uint64_t k = 0; k < t->len; k++) buf_printf(g_out, "%sx", k ? ", " : "");
         buf_puts(g_out, "}; }\n");
+
+        /* §164：掩码判真的两个助手，和类型一起发（分量个数是类型的一部分，
+         * 内联展开会随 N 变成很长的表达式，函数名却能去重）。
+         * `any` 用按位或：全部分量都是 0 时结果才是 0。
+         * `all` 必须逐分量看——`1 & 2 == 0`，按位与判不出"都非 0"。
+         * 掩码分量只有 0 / -1，两种写法对掩码都精确。
+         * 只给整数向量发：浮点向量的 `|` 不成立，而 sema 也只在整数向量上
+         * 认 @any/@all（浮点判真要写明确比较，NaN 没有正确答案）。 */
+        if (ty_is_int(t->elem)) {
+            buf_printf(g_out, "static bool zx_any_%s(%s v) { return (", sn.data, n.data);
+            for (uint64_t k = 0; k < t->len; k++)
+                buf_printf(g_out, "%sv[%llu]", k ? " | " : "", (unsigned long long)k);
+            buf_puts(g_out, ") != 0; }\n");
+            buf_printf(g_out, "static bool zx_all_%s(%s v) { return ", sn.data, n.data);
+            for (uint64_t k = 0; k < t->len; k++)
+                buf_printf(g_out, "%s(v[%llu] != 0)", k ? " & " : "", (unsigned long long)k);
+            buf_puts(g_out, "; }\n");
+        }
         break;
     }
     case TY_STRUCT: case TY_UNION: {
@@ -1553,6 +1571,17 @@ static void ex_builtin(Buf *b, Node *n) {
         ex(b, n->items[2]);
         buf_printf(b, ") & ~%s)))", tmp);
         buf_free(&xn); buf_free(&vb);
+        return;
+    }
+    if (!strcmp(nm, "any") || !strcmp(nm, "all")) {
+        /* §164：掩码判真走类型助手（ensure_type 随 TY_VEC 一起发过）。
+         * 这里只负责挑名字：分量个数在类型里，表达式没法通用地展开。 */
+        Type *mt = n->items[0]->ty;
+        Buf sn; buf_init(&sn); tsuffix(&sn, mt);
+        buf_printf(b, "zx_%s_%s(", nm, sn.data);
+        ex(b, n->items[0]);
+        buf_puts(b, ")");
+        buf_free(&sn);
         return;
     }
     if (!strcmp(nm, "compileError")) {
