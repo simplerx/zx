@@ -154,7 +154,7 @@ zxc explain E0304        # 单个错误码的含义与修法
 | 文件 | 内容 |
 | --- | --- |
 | `docs/manual.md` | 入门手册：从第一个程序到并发、JSON、内存 |
-| `docs/reference.md` | 速查参考：语法、类型、内建、std 全 API、工具链（版本 1.4.1） |
+| `docs/reference.md` | 速查参考：语法、类型、内建、std 全 API、工具链（版本 1.4.2） |
 | `docs/errors.md` | 错误码逐条解释（同 `zxc explain CODE`） |
 | `spec/zx-spec.md` / `spec/decisions.md` | 语言规格与设计裁定 |
 

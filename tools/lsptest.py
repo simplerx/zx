@@ -4614,6 +4614,10 @@ const main = fn () u8 {
     let vd = std.simd.select(vc, va, va);
     let vany = std.simd.any(vd);
     let vall = std.simd.all(vd);
+    let m167 = std.simd.Mat4.identity();
+    let q167 = std.simd.Quat.identity();
+    _ = m167;
+    _ = q167;
     let n = gen.mem;
     _ = n;
     std.println("{} {}", gen.get(), n);
@@ -4630,6 +4634,10 @@ const main = fn () u8 {
     var p10 = @se;
     var p11 = @an;
     var p12 = @al;
+    var p13 = m167.;
+    var p14 = q167.;
+    var p15 = m167.mul;
+    var p16 = std.simd.Mat4.;
     var vb = va.;
     return 0;
 };
@@ -4747,8 +4755,32 @@ check("completion.simd.dot.zxSignature",
       str(_g165_dot)[:260])
 _g165_members = {i["label"] for i in g157_comp("var p7 = std.simd.", 5210)}
 check("completion.simd.members",
-      {"V4", "M4", "Quat", "dot", "cross", "select", "any", "all"} <= _g165_members,
+      {"V4", "M4", "Quat", "Mat3", "Mat4", "dot", "cross", "select", "any", "all"} <= _g165_members,
       str(sorted(_g165_members))[:240])
+
+# §167：矩阵是 std.simd 里的普通容器。`Type.` 只列关联函数（构造入口），
+# 实例补全才列方法——两套列表不许混。四元数互转的两个入口在实例侧。
+_g167_ctors = {i["label"] for i in g157_comp("var p16 = std.simd.Mat4.", 5223)}
+check("completion.simd.mat4Ctors",
+      {"identity", "zero", "fromCols", "fromRows", "fromScale",
+       "fromTranslation", "fromQuat", "fromAxisAngle",
+       "perspective", "ortho", "lookAt"} <= _g167_ctors,
+      str(sorted(_g167_ctors))[:260])
+_g167_mat4 = {i["label"] for i in g157_comp("var p13 = m167.", 5220)}
+check("completion.simd.mat4Methods",
+      {"mul", "mulVec", "transpose", "determinant", "invert",
+       "toMat3", "toQuat", "eq", "approxEq"} <= _g167_mat4,
+      str(sorted(_g167_mat4))[:260])
+_g167_quat = {i["label"] for i in g157_comp("var p14 = q167.", 5221)}
+check("completion.simd.quatMatrixConversions",
+      {"toMat3", "toMat4", "rotate", "slerp", "mul", "conj"} <= _g167_quat,
+      str(sorted(_g167_quat))[:260])
+_g167_mul = [i for i in g157_comp("var p15 = m167.mul", 5222)
+             if i.get("label") == "mul"]
+check("completion.simd.mat4.mulSignature",
+      len(_g167_mul) == 1
+      and "mul(self: Mat4, o: Mat4) Mat4" in (_g167_mul[0].get("detail") or ""),
+      str(_g167_mul)[:260])
 
 # §160：`@shim` 要出现在 `@` 补全里；写到一半（`@sh`）同样要走这条路。
 # 旧行为：identBefore 不吃 '@'，`@sh` 的前缀是 `sh`，`off-1` 也不是 '@'

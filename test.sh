@@ -1519,6 +1519,24 @@ else
     head -6 "$TPFX.s166parse.log"; fail=1
 fi
 
+# §167：Mat3 / Mat4 与四元数互转。守的是"通用求逆"和 Shoemake 四个分支，
+# 不是只测单位矩阵：gen 是非仿射的一般 4x4、persp 是投影矩阵，两者都能
+# 求逆往返才说明伴随矩阵没有偷偷退化成仿射专用公式；sing 钉住奇异契约
+# （det=0 -> 零矩阵）；q2m / m2q 各四个 true 覆盖 trace>0 与 x/y/z 分支。
+if grep -qF 'mat4 gen: det=15 round=true' "$TPFX.s159.dev" \
+   && grep -qF 'mat4 persp: f=true c22=true c23=true round=true' "$TPFX.s159.dev" \
+   && grep -qF 'mat4 sing: det=0 zero=true' "$TPFX.s159.dev" \
+   && grep -qF 'mat3 tr: 4 6 1 det=1' "$TPFX.s159.dev" \
+   && grep -qF 'mat3 inv: det=24 round=true' "$TPFX.s159.dev" \
+   && grep -qF 'q2m: true true true true' "$TPFX.s159.dev" \
+   && grep -qF 'm2q: true true true true' "$TPFX.s159.dev" \
+   && grep -qF 'mat3<->mat4: true true' "$TPFX.s159.dev"; then
+    printf "  ok   §167 矩阵 / 四元数互转（通用求逆 · 四分支 · 奇异契约）\n"
+else
+    printf "  FAIL §167 矩阵语义回归\n"
+    grep -E '^mat|^q2m|^m2q' "$TPFX.s159.dev" | head -20; fail=1
+fi
+
 # §160：C shim 通道（@shim）。真实构建里 shim 是**独立 TU**（用真实路径编，
 # 报错指回那份 .c 的行号）；--emit-c 要自洽就把它贴在末尾；两处 @shim 指向
 # 同一份 .c 只编一遍。shim 编不过报 B1004（不是"编译器 bug"），缺文件报 E0602。

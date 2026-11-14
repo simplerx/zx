@@ -24,16 +24,44 @@
 // quat conj: true true true
 // quat slerp: true true
 // quat slerp edges: true true
+// mat4 id: 1 2 3 1 det=1
+// mat4 ts: 3 6 9 1 det=8
+// mat4 inv: true true
+// mat4 trp: true
+// mat4 gen: det=15 round=true
+// mat4 sing: det=0 zero=true
+// mat4 persp: f=true c22=true c23=true round=true
+// mat4 ortho: true true
+// mat4 lookAt: true
+// mat3 tr: 4 6 1 det=1
+// mat3 rot: true true
+// mat3 inv: det=24 round=true
+// mat3 sing: zero=true
+// q2m: true true true true
+// m2q: true true true true
+// mat4 quat: true true w=true
+// mat4 2quat: true
+// mat3<->mat4: true true
 const std = @mod("std");
 
 const V4 = @Vec(f32, 4);
 const Quat = std.simd.Quat;
+const Mat3 = std.simd.Mat3;
+const Mat4 = std.simd.Mat4;
 
 // 浮点比较：库函数没有 eps 版本，这里手写一个。
 const near = fn (a: f32, b: f32, eps: f32) bool {
     var d = a - b;
     if (d < 0.0) { d = -d; }
     return d <= eps;
+};
+
+// 旋转效果等价：四元数与矩阵互转会拿到 q 或 -q（同一个旋转），
+// 所以比 rotate / mulVec 的结果，不比四个分量。
+const rotEq = fn (q: Quat, m: Mat3, v: V4) bool {
+    let a = q.rotate(v);
+    let b = m.mulVec(v);
+    return near(a.0, b.0, 1e-5) && near(a.1, b.1, 1e-5) && near(a.2, b.2, 1e-5);
 };
 
 pub const main = fn () u8 {
@@ -119,5 +147,111 @@ pub const main = fn () u8 {
     let e0 = h.slerp(id, 0.0);
     let e1 = h.slerp(id, 1.0);
     std.println("quat slerp edges: {} {}", e0.eq(h), e1.eq(id));
+
+    // ---- 矩阵（§167）----
+    // 列主序：mulVec 是四列的线性组合，mul 是把 o 的每列喂给 self.mulVec。
+    let i4 = Mat4.identity();
+    let mv = V4{1.0, 2.0, 3.0, 1.0};
+    let ir = i4.mulVec(mv);
+    std.println("mat4 id: {} {} {} {} det={}", ir.0, ir.1, ir.2, ir.3, i4.determinant());
+
+    let t4 = Mat4.fromTranslation(V4{1.0, 2.0, 3.0, 0.0});
+    let s4 = Mat4.fromScale(V4{2.0, 2.0, 2.0, 0.0});
+    let ts = t4.mul(s4);
+    let tp = ts.mulVec(mv);
+    std.println("mat4 ts: {} {} {} {} det={}", tp.0, tp.1, tp.2, tp.3, ts.determinant());
+
+    // 求逆：A * A^-1 == I，且 A^-1 把 A·v 还原成 v。
+    let tsi = ts.invert();
+    let tsback = ts.mul(tsi);
+    let restored = tsi.mulVec(tp);
+    std.println("mat4 inv: {} {}", tsback.approxEq(i4, 1e-5),
+                near(restored.0, mv.0, 1e-5) && near(restored.1, mv.1, 1e-5)
+                && near(restored.2, mv.2, 1e-5) && near(restored.3, mv.3, 1e-5));
+
+    // 双重转置回到自身。中间值要绑到 let：Mat4 > 16 字节，方法按
+    // const 指针收接收者，临时值取不到地址。
+    let tp2 = ts.transpose();
+    let tp3 = tp2.transpose();
+    std.println("mat4 trp: {}", tp3.eq(ts));
+
+    // 一般（非对角、非仿射）4x4 也要能求逆：伴随矩阵不是仿射专用公式。
+    let g = Mat4.fromRows(
+        V4{1.0, 2.0, 0.0, 1.0},
+        V4{0.0, 1.0, 3.0, 2.0},
+        V4{2.0, 0.0, 1.0, 0.0},
+        V4{1.0, 1.0, 1.0, 2.0});
+    let gi = g.invert();
+    let gback = g.mul(gi);
+    std.println("mat4 gen: det={} round={}", g.determinant(), gback.approxEq(i4, 1e-4));
+
+    // 奇异矩阵：determinant 为 0，invert 返回零矩阵（不做除零）。
+    let sing = Mat4.fromScale(V4{0.0, 1.0, 1.0, 0.0});
+    let si = sing.invert();
+    std.println("mat4 sing: det={} zero={}", sing.determinant(), si.eq(Mat4.zero()));
+
+    let pr = Mat4.perspective(1.5707963, 1.0, 1.0, 10.0);
+    let pri = pr.invert();
+    let prback = pr.mul(pri);
+    std.println("mat4 persp: f={} c22={} c23={} round={}",
+                near(pr.c0.0, 1.0, 1e-5), near(pr.c2.2, -1.2222222, 1e-5),
+                near(pr.c2.3, -1.0, 1e-5), prback.approxEq(i4, 1e-4));
+
+    let o = Mat4.ortho(-1.0, 1.0, -1.0, 1.0, 1.0, 10.0);
+    std.println("mat4 ortho: {} {}", near(o.c0.0, 1.0, 1e-6),
+                near(o.c1.1, 1.0, 1e-6));
+
+    let la = Mat4.lookAt(V4{0.0, 0.0, 5.0, 0.0}, V4{0.0, 0.0, 0.0, 0.0},
+                         V4{0.0, 1.0, 0.0, 0.0});
+    let lv4 = la.mulVec(V4{0.0, 0.0, 0.0, 1.0});
+    std.println("mat4 lookAt: {}", near(lv4.0, 0.0, 1e-6)
+                && near(lv4.1, 0.0, 1e-6) && near(lv4.2, -5.0, 1e-6));
+
+    // ---- Mat3：2D 齐次 + 3D 线性 ----
+    let i3 = Mat3.identity();
+    let tr2 = Mat3.fromTranslation(V4{3.0, 4.0, 0.0, 0.0});
+    let p2 = tr2.mulVec(V4{1.0, 2.0, 1.0, 0.0});
+    std.println("mat3 tr: {} {} {} det={}", p2.0, p2.1, p2.2, tr2.determinant());
+    let rot2 = Mat3.fromRotation2D(1.5707963);
+    let rv2 = rot2.mulVec(V4{1.0, 0.0, 1.0, 0.0});
+    std.println("mat3 rot: {} {}", near(rv2.0, 0.0, 1e-6), near(rv2.1, 1.0, 1e-6));
+    let m3s = Mat3.fromScale(V4{2.0, 3.0, 4.0, 0.0});
+    let m3i = m3s.invert();
+    let m3back = m3s.mul(m3i);
+    std.println("mat3 inv: det={} round={}", m3s.determinant(), m3back.eq(i3));
+    let m3z = Mat3.fromScale(V4{0.0, 1.0, 1.0, 0.0});
+    let m3zi = m3z.invert();
+    std.println("mat3 sing: zero={}", m3zi.eq(Mat3.zero()));
+
+    // ---- 四元数 ↔ 矩阵：Shoemake 四个分支全覆盖 ----
+    let uz = V4{0.0, 0.0, 1.0, 0.0};
+    let ux = V4{1.0, 0.0, 0.0, 0.0};
+    let uy = V4{0.0, 1.0, 0.0, 0.0};
+    let qh = Quat.fromAxisAngle(uz, 1.5707963);       // trace > 0
+    let qx = Quat.fromAxisAngle(ux, 3.1415926);      // x 分支
+    let qy = Quat.fromAxisAngle(uy, 3.1415926);      // y 分支
+    let qz = Quat.fromAxisAngle(uz, 3.1415926);      // z 分支
+    let probe = V4{1.0, 2.0, 3.0, 0.0};
+    let mh = qh.toMat3();
+    let mx = qx.toMat3();
+    let my = qy.toMat3();
+    let mz = qz.toMat3();
+    std.println("q2m: {} {} {} {}", rotEq(qh, mh, probe), rotEq(qx, mx, probe),
+                rotEq(qy, my, probe), rotEq(qz, mz, probe));
+    let qh2 = mh.toQuat();
+    let x2 = mx.toQuat();
+    let y2 = my.toQuat();
+    let z2 = mz.toQuat();
+    std.println("m2q: {} {} {} {}", rotEq(qh2, mh, probe), rotEq(x2, mx, probe),
+                rotEq(y2, my, probe), rotEq(z2, mz, probe));
+    let h4 = Mat4.fromQuat(qh);
+    let hv = h4.mulVec(V4{1.0, 0.0, 0.0, 1.0});
+    std.println("mat4 quat: {} {} w={}", near(hv.0, 0.0, 1e-6),
+                near(hv.1, 1.0, 1e-6), near(hv.3, 1.0, 1e-6));
+    let qback = h4.toQuat();
+    std.println("mat4 2quat: {}", rotEq(qback, mh, probe));
+    let up4 = mh.toMat4();
+    let dn3 = up4.toMat3();
+    std.println("mat3<->mat4: {} {}", h4.eq(up4), dn3.eq(mh));
     return 0;
 };

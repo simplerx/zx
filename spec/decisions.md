@@ -6949,3 +6949,109 @@ Zed 重启 / LSP 被杀会留下它；Windows 对带 HIDDEN 的现有文件用
   能直接 CreateProcess 就别借 shell 的 `2>`。
 - 补全的**候选名**和编译器的**可解析路径**必须是同一套规则：
   为了"兜底解析"把 std/ 塞进搜索目录，不能顺手拿去当导入建议。
+
+## §167 std.simd 补上 Mat3 / Mat4 与四元数互转（2026-11-14，1.4.2）
+
+**用户原话**：「simd 里再添加矩阵 Mat3, Mat4 以及相关的方法」，紧接着补了一句
+「还有四元素和矩阵的转换方法」（"四元素"即四元数）。合起来是：矩阵与四元数
+的**双向**互转都要有，而且按 §165 的判定，全部写在 `std/simd.zx` 里，
+语言层一个内建都不加。
+
+### 形状：矩阵不引入新类型，就是列主序的 V4 列
+
+`Mat4` 四个字段 `c0..c3: V4`，`Mat3` 三个 `c0..c2: V4`（每列只用前三个
+分量，第 4 个 lane 由构造函数保证为 0）。元素 (行 r, 列 c) 写作 `cN.r`，
+与 GLSL / glm 列主序一致。这样：
+
+- `mulVec(m, v) = c0*v.0 + c1*v.1 + ...`，就是 §162 的 splat 转换 `(V4)v.N`；
+- `mul(a, b)` 把 `b` 的每一列喂给 `a.mulVec`，**不写 16 个点乘**；
+- `transpose` 只是把列重新按行拼一遍。
+
+Zx 没有数组值类型，所以列是具名字段。刻意不提供 `col(i)` 动态下标：越界
+返回什么都是编出来的契约，具名字段更清楚，优化器也看得见每次访问。
+
+`Mat3` 同时承担 3D 线性变换和 2D 齐次变换：3D 旋转写在 `c0..c2` 的前三个
+分量（与 `Quat` / `cross` 同形状）；2D 平移写在 `c2` 前两个分量、`c2.2 = 1`，
+向量传 `(x, y, 1)`。一套类型覆盖 2D 地图 / 动画帧与 3D 变换。
+
+### 求逆：determinant 与 invert 共用同一批余子式
+
+4×4 逆没有用"仿射矩阵快速公式"。私有 `minors(a,b,c,d,s)` 接收划掉第 r 行
+后的四列，返回伴随矩阵的一列（四个 3×3 余子式，符号 `(-1)^(i+r)`）；
+`drop0..drop3` 四个助手按编译期行号划掉一个分量；`det3(a,b,c) =
+dot3(a, cross(b,c))` 复用 §165 已有的叉乘。
+
+- `determinant() = dot(row0, adjCol0(...))`（按第 0 行展开）；
+- `invert() = adjCol0..3 / determinant()`。
+
+两者**严格同源**，浮点上不会出现"det 说可逆、inv 却按另一个 det 算"的
+错位；而且是通用伴随矩阵，投影矩阵也能求逆（守门里 `perspective` 的 round
+trip 就是钉这个）。代价是 16 个 `det3`，求逆不是热路径，可接受。
+
+奇异契约沿用 `normalize` 的风格：`det == 0.0` 返回**零矩阵**，不做除零、
+不返回 `?Self`；要区分不可逆先调 `determinant()`。Mat3 的逆走列叉乘
+（`cross(c1,c2)/det` 等三行再按列拼回），同样在 det=0 时返回零矩阵。
+
+### 四元数互转：两条实现 + 六条薄委托
+
+- 唯一「四元数 → 矩阵」实现：`Mat3.fromQuat(q)`（单位四元数的标准展开）；
+  `Mat4.fromQuat(q)` 委托 `Mat3.fromQuat(q).toMat4()`；`Quat.toMat3/toMat4` 同。
+- 唯一「矩阵 → 四元数」实现：`Mat3.toQuat()`，Shoemake 按迹四分支
+  （trace>0 / m00 / m11 / m22 各最大），四个分支各自提前 return，避开
+  `else if` 链；`Mat4.toQuat()` 委托 `self.toMat3().toQuat()`。
+- 结果可能是 `q` 或 `-q`（同一个旋转），守门用"比较旋转效果"（`q.rotate(v)`
+  与 `m.mulVec(v)`）而不是比四个分量；180° 绕 x / y / z 四元数刚好把
+  Shoemake 的另外三个分支全覆盖。
+
+### 两条实测出来的硬约束（这一层必须绕开）
+
+1. **大聚合不能当跨容器关联函数的普通参数**。`Mat4.fromMat3(m: Mat3)` /
+   `Quat.fromMat3(m: Mat3)` 这种写法，一旦库内部又以 `self`（`*const Mat3`）
+   形态调它，类型检查就把形参钉在 `*const Mat3`，所有传值调用报 E0301。
+   最小复现：同一个 `Mat4.fromMat3 = fn (m: Mat3)`，只在 `Mat4.fromQuat`
+   里传值时编译通过；加一个 `Mat3.toMat4(self) { return Mat4.fromMat3(self); }`
+   后，原来那句立刻变红。**这不是本节该改的编译器 ABI**（§151 的大
+   `Self` 按 `const Self*` 传是既定设计），所以 API 侧统一走 `toXxx(self)`
+   方法链，库里不再有任何以 Mat3 / Mat4 / Quat 为参数的函数（`fromQuat`
+   收的是 16 字节的 Quat，按值）。
+2. **大于 16 字节的容器，方法接收者按 `const Self*` 传，临时值不能调方法**。
+   `Mat4.identity().mul(m)` / `Mat3.fromQuat(q).toMat4()` 报 E0403
+   （`cannot take the address of this receiver; bind it to a let first`）。
+   库内所有委托、文档示例、守门用例都先 `let tmp = ...;` 再调；Quat 正好
+   16 字节按值，不受影响。
+
+这两条都写进了 `docs/reference.md` §14.13，示例逐条编译运行过。
+
+### 守门
+
+- `tests/good/std-simd.zx` 追加 19 行 expect-output：Mat4 单位 / 缩放平移 /
+  求逆往返 / 双重转置 / **一般非仿射 4×4**（det=15）/ 奇异 / perspective /
+  ortho / lookAt；Mat3 2D 平移 / 2D 旋转 / 求逆 / 奇异；四元数互转四分支
+  与 Mat3↔Mat4 升维降维。浮点一律用本地 `near()` 输出 `true`，不钉末位。
+- `test.sh §167`：在 §159 的 dev 输出上断言 `mat4 gen: det=15 round=true`、
+  `mat4 persp ... round=true`、`mat4 sing: det=0 zero=true`、
+  `q2m/m2q` 各四个 true、`mat3<->mat4: true true`。dev / release 逐字一致
+  仍由 §159 的 `cmp` 守。
+- `tools/lsptest.py`：GEN157 fixture 加 Mat4 / Quat 实例；新增
+  `completion.simd.mat4Ctors`（`Type.` 只列关联函数）、
+  `completion.simd.mat4Methods`（实例才列方法，**两套列表不许混**）、
+  `completion.simd.quatMatrixConversions`（`toMat3/toMat4`）、
+  `completion.simd.mat4.mulSignature`（`mul(self: Mat4, o: Mat4) Mat4`）。
+  `completion.simd.members` 补 `Mat3` / `Mat4`。
+- 实测：`ZXC_NO_AST_CACHE=1 zxc std/simd.zx --check` 过；
+  dev / release 输出逐字一致；LSP 冒烟 **454 项全过 / SMOKE ALL PASS**
+  （原 450 + 4 条）；文档示例 `.tmp/docmat.zx` 编译运行输出
+  `3 6 9 1 round=true` / `1 0.99999994` / `5 25 -3` / `0.99999994`。
+
+### 顺带修掉的文档错误
+
+`docs/manual.md` 的旧示例还留着 `std.simd.V4{...}` 这种**带路径的向量
+字面量**（§165 已实测不合法，报 `expected ';', found '{'`）。本轮改成先
+`const V4 = std.simd.V4;` 再 `V4{...}`，并把矩阵示例一起实测。
+
+### 仍然没做
+
+- 矩阵的行 / 列动态下标（见上，刻意的）。
+- SIMD 化的批量矩阵乘（一次算 4 个向量）：游戏里成批变换更常见，但那需要
+  先把 `@Vec` 长度泛型化或写死 4×N 的展开，属于另一条能力线。
+- `Quat.fromMat3(m)` 形式（见硬约束 1），用 `m.toQuat()` 代替。

@@ -1,4 +1,4 @@
-// simd.zx —— `@Vec` 的数学层：向量度量、逐分量工具、掩码选择、四元数。
+// simd.zx —— `@Vec` 的数学层：向量度量、逐分量工具、掩码选择、四元数、矩阵。
 //
 // 语言那边只有**类型** `@Vec(T, N)` 和它的运算符（`+ - *`、浮点 `/`、一元
 // `-`、六个比较）。其余的一切都在这个文件里，写成普通函数，形参就是
@@ -15,7 +15,9 @@
 // 完全展开。少三个内建，就少三处需要跟 N 一起同步的实现。旧拼写报 E0211
 // 并指到这里的同名函数。
 //
-// 形状：4 个分量是这一层唯一的形状。3D 用 (x, y, z, 0)，2D 用 (x, y, 0, 0)。
+// 形状：4 个分量是这一层唯一的形状。3D 用 (x, y, z, 0)，2D 用 (x, y, 0, 0)；
+// 矩阵也是这一种形状堆出来的——列主序的 V4 列（Mat3 三列 / Mat4 四列），
+// 见下面的「矩阵」一节。四元数与矩阵互转也在这一层，不进语言。
 // `@Vec` 的长度只能是 2 的幂，没有 3 分量向量；第 4 个分量留 0 是 SIMD
 // 数学库的通行做法（4 lane 正好一个 SSE 寄存器）。8 分量（AVX）的批量
 // 计算直接用运算符，不需要这一层包装。
@@ -184,6 +186,411 @@ pub const reflect = fn (v: V4, n: V4) V4 {
     return v - n * (V4)(2.0 * dot(v, n));
 };
 
+// ---- 矩阵 ----
+//
+// 形状沿用这一层的约定：**列主序的 V4 列**。Mat4 是 4 列 V4，Mat3 是 3 列
+// V4（只用前三个分量，第 4 个 lane 恒 0）。矩阵元素 (行 r, 列 c) 写作
+// `cN.r`，和 GLSL / glm 的列主序一致。这样 `mulVec(m, v)` 就是四列的线性
+// 组合，`mul(a, b)` 只需把 b 的每一列喂给 `a.mulVec`——不写 16 个点乘，
+// 也没有"矩阵再来一套运算"的平行系统。
+//
+// Mat3 同时是 3D 线性变换和 2D 齐次变换：3D 旋转放在 c0..c2 的前三个
+// 分量里（和 Quat / cross 同一个形状）；2D 平移放在 c2 的前两个分量、
+// c2.2 = 1，传进来的向量是 (x, y, 1)。第 4 个 lane 由构造函数保证为 0。
+//
+// Zx 没有数组值类型，所以列是具名字段，不是 `cols[4]`；不要给矩阵加
+// `col(i)` 之类的动态下标——越界返回什么都是编出来的契约，直接写
+// `.c0 .. .c3` 更清楚，也让优化器看得见每一次访问。
+//
+// 奇异矩阵（determinant() == 0.0）没有逆：`invert()` 返回零矩阵，不做
+// 除零、不返回 `?Self`。要区分"不可逆"就先调 `determinant()`。
+
+// 3x3 行列式（列主序）：a · (b × c)。cross 只算前三个分量，dot3 也只取
+// 前三个，正好是 3x3 的形状。
+const det3 = fn (a: V4, b: V4, c: V4) f32 {
+    return dot3(a, cross(b, c));
+};
+
+// 划掉 V4 的第 r 个分量、剩三个挪到低位。4x4 余子式要按行展开，行号是
+// 编译期位置，所以写成四个明确的助手而不是传 r 进去再分支。
+const drop0 = fn (v: V4) V4 { return V4{ v.1, v.2, v.3, 0.0 }; };
+const drop1 = fn (v: V4) V4 { return V4{ v.0, v.2, v.3, 0.0 }; };
+const drop2 = fn (v: V4) V4 { return V4{ v.0, v.1, v.3, 0.0 }; };
+const drop3 = fn (v: V4) V4 { return xyz(v); };
+
+// 伴随矩阵的一列：a/b/c/d 是划掉第 r 行后的四列，s = (-1)^r。
+// 第 i 个分量就是 (-1)^(i+r) × det(划掉第 r 行、第 i 列的 3x3)。
+// determinant() 与 invert() 共用这一套余子式，两者的浮点结果严格同源。
+const minors = fn (a: V4, b: V4, c: V4, d: V4, s: f32) V4 {
+    return V4{
+        s * det3(b, c, d),
+        (-s) * det3(a, c, d),
+        s * det3(a, b, d),
+        (-s) * det3(a, b, c),
+    };
+};
+
+const adjCol0 = fn (c0: V4, c1: V4, c2: V4, c3: V4) V4 {
+    return minors(drop0(c0), drop0(c1), drop0(c2), drop0(c3), 1.0);
+};
+const adjCol1 = fn (c0: V4, c1: V4, c2: V4, c3: V4) V4 {
+    return minors(drop1(c0), drop1(c1), drop1(c2), drop1(c3), -1.0);
+};
+const adjCol2 = fn (c0: V4, c1: V4, c2: V4, c3: V4) V4 {
+    return minors(drop2(c0), drop2(c1), drop2(c2), drop2(c3), 1.0);
+};
+const adjCol3 = fn (c0: V4, c1: V4, c2: V4, c3: V4) V4 {
+    return minors(drop3(c0), drop3(c1), drop3(c2), drop3(c3), -1.0);
+};
+
+// ---- Mat3：3x3（3D 线性 / 2D 齐次）----
+
+pub const Mat3 = struct {
+    pub c0: V4,
+    pub c1: V4,
+    pub c2: V4,
+
+    pub const identity = fn () Self {
+        return Self{
+            .c0 = V4{1.0, 0.0, 0.0, 0.0},
+            .c1 = V4{0.0, 1.0, 0.0, 0.0},
+            .c2 = V4{0.0, 0.0, 1.0, 0.0},
+        };
+    };
+
+    pub const zero = fn () Self {
+        let z = (V4)0.0;
+        return Self{ .c0 = z, .c1 = z, .c2 = z };
+    };
+
+    // 构造会清掉第 4 个 lane：矩阵的第 4 分量不属于这一层的数据。
+    pub const fromCols = fn (c0: V4, c1: V4, c2: V4) Self {
+        return Self{ .c0 = xyz(c0), .c1 = xyz(c1), .c2 = xyz(c2) };
+    };
+
+    // 按行写矩阵更符合纸面习惯：行 r 的第 c 个分量就是结果 c_c.r。
+    pub const fromRows = fn (r0: V4, r1: V4, r2: V4) Self {
+        return Self{
+            .c0 = V4{ r0.0, r1.0, r2.0, 0.0 },
+            .c1 = V4{ r0.1, r1.1, r2.1, 0.0 },
+            .c2 = V4{ r0.2, r1.2, r2.2, 0.0 },
+        };
+    };
+
+    pub const fromScale = fn (v: V4) Self {
+        return Self{
+            .c0 = V4{ v.0, 0.0, 0.0, 0.0 },
+            .c1 = V4{ 0.0, v.1, 0.0, 0.0 },
+            .c2 = V4{ 0.0, 0.0, v.2, 0.0 },
+        };
+    };
+
+    // 2D 平移（齐次）：向量传 (x, y, 1)，结果的第三个分量仍是 1。
+    pub const fromTranslation = fn (v: V4) Self {
+        return Self{
+            .c0 = V4{1.0, 0.0, 0.0, 0.0},
+            .c1 = V4{0.0, 1.0, 0.0, 0.0},
+            .c2 = V4{ v.0, v.1, 1.0, 0.0 },
+        };
+    };
+
+    // 2D 旋转（绕原点，逆时针）：第三行保持齐次单位。
+    pub const fromRotation2D = fn (rad: f32) Self {
+        let c = cosf(rad);
+        let s = sinf(rad);
+        return Self{
+            .c0 = V4{ c, s, 0.0, 0.0 },
+            .c1 = V4{ -s, c, 0.0, 0.0 },
+            .c2 = V4{ 0.0, 0.0, 1.0, 0.0 },
+        };
+    };
+
+    // 3D 旋转：唯一的四元数 → 矩阵实现在这里，Mat4 / Quat 的转换都委托过来。
+    // 输入应是单位四元数（与 Quat.rotate 的约定一致）；非单位会带进缩放。
+    pub const fromQuat = fn (q: Quat) Self {
+        let v = q.v;
+        let x = v.0;
+        let y = v.1;
+        let z = v.2;
+        let w = v.3;
+        return Self{
+            .c0 = V4{ 1.0 - 2.0 * (y * y + z * z),
+                      2.0 * (x * y + z * w),
+                      2.0 * (x * z - y * w), 0.0 },
+            .c1 = V4{ 2.0 * (x * y - z * w),
+                      1.0 - 2.0 * (x * x + z * z),
+                      2.0 * (y * z + x * w), 0.0 },
+            .c2 = V4{ 2.0 * (x * z + y * w),
+                      2.0 * (y * z - x * w),
+                      1.0 - 2.0 * (x * x + y * y), 0.0 },
+        };
+    };
+
+    pub const fromAxisAngle = fn (axis: V4, rad: f32) Self {
+        return Self.fromQuat(Quat.fromAxisAngle(axis, rad));
+    };
+
+    // 3x3 升成 4x4：第 3 行补零、第 3 列补 (0,0,0,1)。
+    pub const toMat4 = fn (self: Self) Mat4 {
+        return Mat4.fromCols(xyz(self.c0), xyz(self.c1), xyz(self.c2),
+                            V4{0.0, 0.0, 0.0, 1.0});
+    };
+
+    // 矩阵 → 四元数（Shoemake 按迹分支）：先取四个"对角优势量"里最大的
+    // 一个开方，避免接近 0 时除出噪声。输入必须是**纯旋转矩阵**（正交、
+    // det=1）；带缩放 / 错切 / 投影的矩阵没有对应的四元数。
+    // 结果可能是 q 或 -q（同一个旋转），比较时要么比旋转效果，要么看
+    // |dot(q1,q2)| ≈ 1。
+    pub const toQuat = fn (self: Self) Quat {
+        let m00 = self.c0.0; let m01 = self.c1.0; let m02 = self.c2.0;
+        let m10 = self.c0.1; let m11 = self.c1.1; let m12 = self.c2.1;
+        let m20 = self.c0.2; let m21 = self.c1.2; let m22 = self.c2.2;
+        let tr = m00 + m11 + m22;
+        if (tr > 0.0) {
+            let s = sqrtf(tr + 1.0) * 2.0;
+            return Quat{ .v = V4{ (m21 - m12) / s, (m02 - m20) / s,
+                                  (m10 - m01) / s, s * 0.25 } };
+        }
+        if (m00 > m11 && m00 > m22) {
+            let s = sqrtf(1.0 + m00 - m11 - m22) * 2.0;
+            return Quat{ .v = V4{ s * 0.25, (m01 + m10) / s,
+                                  (m02 + m20) / s, (m21 - m12) / s } };
+        }
+        if (m11 > m22) {
+            let s = sqrtf(1.0 + m11 - m00 - m22) * 2.0;
+            return Quat{ .v = V4{ (m01 + m10) / s, s * 0.25,
+                                  (m12 + m21) / s, (m02 - m20) / s } };
+        }
+        let s = sqrtf(1.0 + m22 - m00 - m11) * 2.0;
+        return Quat{ .v = V4{ (m02 + m20) / s, (m12 + m21) / s,
+                              s * 0.25, (m10 - m01) / s } };
+    };
+
+    // 矩阵 × 向量：三列按 v 的分量线性组合；第 4 个 lane 清 0。
+    pub const mulVec = fn (self: Self, v: V4) V4 {
+        return xyz(self.c0 * (V4)v.0 + self.c1 * (V4)v.1 + self.c2 * (V4)v.2);
+    };
+
+    // 矩阵 × 矩阵：结果的第 j 列就是 self 乘上 o 的第 j 列。
+    pub const mul = fn (self: Self, o: Self) Self {
+        return Self{
+            .c0 = self.mulVec(o.c0),
+            .c1 = self.mulVec(o.c1),
+            .c2 = self.mulVec(o.c2),
+        };
+    };
+
+    pub const transpose = fn (self: Self) Self {
+        return Self{
+            .c0 = V4{ self.c0.0, self.c1.0, self.c2.0, 0.0 },
+            .c1 = V4{ self.c0.1, self.c1.1, self.c2.1, 0.0 },
+            .c2 = V4{ self.c0.2, self.c1.2, self.c2.2, 0.0 },
+        };
+    };
+
+    pub const determinant = fn (self: Self) f32 {
+        return det3(self.c0, self.c1, self.c2);
+    };
+
+    // 伴随 / det 的 3x3 写法：三个列叉乘就是余子式的三行，再按列拼回去。
+    // 奇异时返回零矩阵（见本节开头的契约）。
+    pub const invert = fn (self: Self) Self {
+        let d = self.determinant();
+        if (d == 0.0) { return Self.zero(); }
+        let s = 1.0 / d;
+        let r0 = cross(self.c1, self.c2);
+        let r1 = cross(self.c2, self.c0);
+        let r2 = cross(self.c0, self.c1);
+        return Self{
+            .c0 = V4{ r0.0 * s, r1.0 * s, r2.0 * s, 0.0 },
+            .c1 = V4{ r0.1 * s, r1.1 * s, r2.1 * s, 0.0 },
+            .c2 = V4{ r0.2 * s, r1.2 * s, r2.2 * s, 0.0 },
+        };
+    };
+
+    pub const eq = fn (self: Self, o: Self) bool {
+        return all(self.c0 == o.c0) && all(self.c1 == o.c1)
+            && all(self.c2 == o.c2);
+    };
+
+    pub const approxEq = fn (self: Self, o: Self, eps: f32) bool {
+        let e = (V4)eps;
+        return all(abs(self.c0 - o.c0) < e) && all(abs(self.c1 - o.c1) < e)
+            && all(abs(self.c2 - o.c2) < e);
+    };
+};
+
+// ---- Mat4：4x4（3D 仿射 / 投影）----
+
+pub const Mat4 = struct {
+    pub c0: V4,
+    pub c1: V4,
+    pub c2: V4,
+    pub c3: V4,
+
+    pub const identity = fn () Self {
+        return Self{
+            .c0 = V4{1.0, 0.0, 0.0, 0.0},
+            .c1 = V4{0.0, 1.0, 0.0, 0.0},
+            .c2 = V4{0.0, 0.0, 1.0, 0.0},
+            .c3 = V4{0.0, 0.0, 0.0, 1.0},
+        };
+    };
+
+    pub const zero = fn () Self {
+        let z = (V4)0.0;
+        return Self{ .c0 = z, .c1 = z, .c2 = z, .c3 = z };
+    };
+
+    pub const fromCols = fn (c0: V4, c1: V4, c2: V4, c3: V4) Self {
+        return Self{ .c0 = c0, .c1 = c1, .c2 = c2, .c3 = c3 };
+    };
+
+    pub const fromRows = fn (r0: V4, r1: V4, r2: V4, r3: V4) Self {
+        return Self{
+            .c0 = V4{ r0.0, r1.0, r2.0, r3.0 },
+            .c1 = V4{ r0.1, r1.1, r2.1, r3.1 },
+            .c2 = V4{ r0.2, r1.2, r2.2, r3.2 },
+            .c3 = V4{ r0.3, r1.3, r2.3, r3.3 },
+        };
+    };
+
+    // 四元数 → 4x4：唯一的 四元数→矩阵 实现在 Mat3.fromQuat，这里只是把
+    // 结果升成 4x4。中间值必须绑到 let——Mat3 大于 16 字节，它的方法按
+    // const 指针收接收者，临时值取不到地址（E0403）。
+    pub const fromQuat = fn (q: Quat) Self {
+        let m = Mat3.fromQuat(q);
+        return m.toMat4();
+    };
+
+    pub const fromAxisAngle = fn (axis: V4, rad: f32) Self {
+        return Self.fromQuat(Quat.fromAxisAngle(axis, rad));
+    };
+
+    pub const fromScale = fn (v: V4) Self {
+        return Self{
+            .c0 = V4{ v.0, 0.0, 0.0, 0.0 },
+            .c1 = V4{ 0.0, v.1, 0.0, 0.0 },
+            .c2 = V4{ 0.0, 0.0, v.2, 0.0 },
+            .c3 = V4{ 0.0, 0.0, 0.0, 1.0 },
+        };
+    };
+
+    pub const fromTranslation = fn (v: V4) Self {
+        let i = Self.identity();
+        return Self{
+            .c0 = i.c0, .c1 = i.c1, .c2 = i.c2,
+            .c3 = V4{ v.0, v.1, v.2, 1.0 },
+        };
+    };
+
+    // 透视投影（右手系，看向 -z，深度映射到 [-1,1]）。f 用
+    // cos(fovy/2)/sin(fovy/2) 算，省一个 tanf 符号。
+    pub const perspective = fn (fovy: f32, aspect: f32, zn: f32, zf: f32) Self {
+        let f = cosf(fovy * 0.5) / sinf(fovy * 0.5);
+        let nf = 1.0 / (zn - zf);
+        return Self{
+            .c0 = V4{ f / aspect, 0.0, 0.0, 0.0 },
+            .c1 = V4{ 0.0, f, 0.0, 0.0 },
+            .c2 = V4{ 0.0, 0.0, (zf + zn) * nf, -1.0 },
+            .c3 = V4{ 0.0, 0.0, 2.0 * zf * zn * nf, 0.0 },
+        };
+    };
+
+    // 正交投影：l/r/b/t 是近平面边界，zn/zf 是近远裁剪面。
+    pub const ortho = fn (l: f32, r: f32, b: f32, t: f32,
+                          zn: f32, zf: f32) Self {
+        return Self{
+            .c0 = V4{ 2.0 / (r - l), 0.0, 0.0, 0.0 },
+            .c1 = V4{ 0.0, 2.0 / (t - b), 0.0, 0.0 },
+            .c2 = V4{ 0.0, 0.0, -2.0 / (zf - zn), 0.0 },
+            .c3 = V4{ -(r + l) / (r - l), -(t + b) / (t - b),
+                      -(zf + zn) / (zf - zn), 1.0 },
+        };
+    };
+
+    // 视图矩阵：eye 看向 center，up 给上方向。eye / center 的 w 应为 0；
+    // eye == center 或 up 与视线平行时 normalize 会得到零向量（与
+    // normalize 的零向量契约一致），结果矩阵退化，调用方自己保证。
+    pub const lookAt = fn (eye: V4, center: V4, up: V4) Self {
+        let z = normalize(eye - center);
+        let x = normalize(cross(up, z));
+        let y = cross(z, x);
+        return Self{
+            .c0 = V4{ x.0, y.0, z.0, 0.0 },
+            .c1 = V4{ x.1, y.1, z.1, 0.0 },
+            .c2 = V4{ x.2, y.2, z.2, 0.0 },
+            .c3 = V4{ -(dot3(x, eye)), -(dot3(y, eye)),
+                      -(dot3(z, eye)), 1.0 },
+        };
+    };
+
+    // 取左上 3x3（划掉第 3 行与第 3 列）。
+    pub const toMat3 = fn (self: Self) Mat3 {
+        return Mat3.fromCols(xyz(self.c0), xyz(self.c1), xyz(self.c2));
+    };
+
+    pub const toQuat = fn (self: Self) Quat {
+        let m = self.toMat3();
+        return m.toQuat();
+    };
+
+    pub const mulVec = fn (self: Self, v: V4) V4 {
+        return self.c0 * (V4)v.0 + self.c1 * (V4)v.1
+             + self.c2 * (V4)v.2 + self.c3 * (V4)v.3;
+    };
+
+    pub const mul = fn (self: Self, o: Self) Self {
+        return Self{
+            .c0 = self.mulVec(o.c0),
+            .c1 = self.mulVec(o.c1),
+            .c2 = self.mulVec(o.c2),
+            .c3 = self.mulVec(o.c3),
+        };
+    };
+
+    pub const transpose = fn (self: Self) Self {
+        return Self{
+            .c0 = V4{ self.c0.0, self.c1.0, self.c2.0, self.c3.0 },
+            .c1 = V4{ self.c0.1, self.c1.1, self.c2.1, self.c3.1 },
+            .c2 = V4{ self.c0.2, self.c1.2, self.c2.2, self.c3.2 },
+            .c3 = V4{ self.c0.3, self.c1.3, self.c2.3, self.c3.3 },
+        };
+    };
+
+    // 按第 0 行展开：adjCol0 就是这一行的四个代数余子式。
+    pub const determinant = fn (self: Self) f32 {
+        let row0 = V4{ self.c0.0, self.c1.0, self.c2.0, self.c3.0 };
+        return dot(row0, adjCol0(self.c0, self.c1, self.c2, self.c3));
+    };
+
+    // 通用 4x4 求逆：伴随矩阵 / det。四个 adjCol 各算 4 个 3x3 余子式，
+    // 与 determinant() 共用同一批 det3，所以 det 与 inv 严格自洽。
+    // 奇异时返回零矩阵（见本节开头的契约）。
+    pub const invert = fn (self: Self) Self {
+        let d = self.determinant();
+        if (d == 0.0) { return Self.zero(); }
+        let s = 1.0 / d;
+        return Self{
+            .c0 = adjCol0(self.c0, self.c1, self.c2, self.c3) * (V4)s,
+            .c1 = adjCol1(self.c0, self.c1, self.c2, self.c3) * (V4)s,
+            .c2 = adjCol2(self.c0, self.c1, self.c2, self.c3) * (V4)s,
+            .c3 = adjCol3(self.c0, self.c1, self.c2, self.c3) * (V4)s,
+        };
+    };
+
+    pub const eq = fn (self: Self, o: Self) bool {
+        return all(self.c0 == o.c0) && all(self.c1 == o.c1)
+            && all(self.c2 == o.c2) && all(self.c3 == o.c3);
+    };
+
+    pub const approxEq = fn (self: Self, o: Self, eps: f32) bool {
+        let e = (V4)eps;
+        return all(abs(self.c0 - o.c0) < e) && all(abs(self.c1 - o.c1) < e)
+            && all(abs(self.c2 - o.c2) < e) && all(abs(self.c3 - o.c3) < e);
+    };
+};
+
 // ---- 四元数 ----
 //
 // 存成 `@Vec(f32, 4)` 的 (x, y, z, w)：w 是实部，xyz 是虚部。这样拷贝、
@@ -273,5 +680,22 @@ pub const Quat = struct {
     pub const approxEq = fn (self: Self, o: Self, eps: f32) bool {
         let d = abs(self.v - o.v);
         return all(d < (V4)eps);
+    };
+
+    // ---- 矩阵互转（§167）----
+    //
+    // 双向都收在这一层：矩阵 → 四元数的实现是 Mat3.toQuat（Shoemake），
+    // 四元数 → 矩阵的实现是 Mat3.fromQuat。这里只做一行委托，Mat4 再
+    // 由 Mat3 升维。不提供 `Quat.fromMat3(m)` 这种把 >16 字节聚合当普通
+    // 参数收的关联函数：Zx 的大 `Self` 按 `const Self*` 传，同一函数被
+    // 值形态和 self 形态混着调会让类型检查钉在指针上（E0301）。统一走
+    // `m.toQuat()` / `q.toMat4()`，一种形态，一条实现。
+    pub const toMat3 = fn (self: Self) Mat3 {
+        return Mat3.fromQuat(self);
+    };
+
+    pub const toMat4 = fn (self: Self) Mat4 {
+        let m = self.toMat3();
+        return m.toMat4();
     };
 };

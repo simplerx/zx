@@ -1,6 +1,6 @@
 # Zx 语言查阅文档（Reference）
 
-> 版本 1.4.1 · 一份文档看完全部定义和用法。
+> 版本 1.4.2 · 一份文档看完全部定义和用法。
 > 语言细则与设计理由在 `spec/zx-spec.md`；错误码逐条解释在 `docs/errors.md`；
 > 本文是**查阅用**的完整速查：语法、类型、内建、模块、std 全 API、工具链。
 
@@ -176,7 +176,8 @@ std.println("{} {} {}", m.0, d.len, d.size);  // -1 4 16
 ```
 
 语言层**只有 `@Vec` 这个类型内建**，外加作用于它的运算符。按掩码挑值、把掩码
-归约成 `bool`、点乘叉乘、四元数——这些全是 `std.simd` 里的普通函数（§14.13）。
+归约成 `bool`、点乘叉乘、四元数、列主序矩阵——这些全是 `std.simd` 里的
+普通函数（§14.13）。
 
 - **字面量**：`@Vec(T, N){a, b, c, d}`，写在别名上就是 `V4{a, b, c, d}`。
   分量个数必须正好是 `N`（少写报 E0306），每个分量按元素类型各自转换一次。
@@ -198,7 +199,8 @@ std.println("{} {} {}", m.0, d.len, d.size);  // -1 4 16
   32 对齐，所以放进结构体时前后的偏移和 C 侧算出来的一样。
 - **语言层不做 SIMD 抽象**：向量落到 C 的 `vector_size` 类型上，用不用 SSE/AVX
   由 C 编译器决定（`-O0` 下向量操作也已经是真指令）。向量数学（点乘、叉乘、
-  四元数）在 `std.simd`（§14.13），那层是纯 Zx，没有额外内建、没有手写内核。
+  四元数）与 `Mat3` / `Mat4` 矩阵都在 `std.simd`（§14.13），那层是纯 Zx，
+  没有额外内建、没有手写内核。
 - `@Vec` 是**类型内建**，不占 §10 那九个值内建的位置：它只能写在类型位置，
   或者当类型值用（`const V4 = @Vec(f32, 4);`、`@type(@Vec(f32, 4)).size`）。
 
@@ -943,6 +945,67 @@ let q = std.simd.Quat.fromAxisAngle(z, (f32)(std.math.pi * 0.5));
 let r = q.rotate(V4{1.0, 0.0, 0.0, 0.0});                     // ≈ (0, 1, 0, 0)
 std.println("{}", std.simd.cross(V4{1.0, 0.0, 0.0, 0.0},
                                 V4{0.0, 1.0, 0.0, 0.0}).2);   // 1（x×y=z）
+```
+
+**矩阵（`std.simd.Mat3` / `std.simd.Mat4`）** 是这一层的最后一块，仍然是同一条
+规则的延续：矩阵不是新类型系统，就是**列主序的 V4 列**。Mat4 有 `c0..c3`
+四个字段，Mat3 有 `c0..c2` 三个（每列只用前三个分量，第 4 个 lane 恒 0）。
+元素 (行 r, 列 c) 写作 `cN.r`，与 GLSL / glm 的列主序一致。这样
+`mulVec(m, v)` 只是三 / 四列的线性组合，`mul(a, b)` 就是把 `b` 的每一列喂给
+`a.mulVec`——没有 16 个点乘，也没有第二套运算。
+
+Mat3 同时管 **3D 线性变换**和 **2D 齐次变换**：3D 旋转写在 `c0..c2` 的前三个
+分量；2D 平移写在 `c2` 的前两个分量、`c2.2 = 1`，传进来的向量是 `(x, y, 1)`。
+
+| 类别 | Mat3 | Mat4 |
+|---|---|---|
+| 构造 | `identity / zero / fromCols / fromRows / fromScale / fromTranslation / fromRotation2D / fromAxisAngle / fromQuat` | 同名去掉 `fromRotation2D` |
+| 运算 | `mul / mulVec / transpose / determinant / invert / eq / approxEq` | 同左 |
+| 互转 | `toMat4` / `toQuat` | `toMat3` / `toQuat` |
+| 投影 / 视图 | — | `perspective(fovy, aspect, zn, zf)` / `ortho(l, r, b, t, zn, zf)` / `lookAt(eye, center, up)` |
+
+四元数 ↔ 矩阵也只走方法：`Quat.toMat3()` / `toMat4()` 与 `Mat3.toQuat()` /
+`Mat4.toQuat()`。`Mat3.fromQuat(q)` 是唯一的「四元数 → 矩阵」实现，
+`Mat4.fromQuat(q)` 只是把结果升成 4×4；`Mat3.toQuat()` 是唯一的反向实现
+（Shoemake 按迹四分支）。**不提供 `Quat.fromMat3(m)` 这种把大聚合当普通参数
+收的关联函数**：§151 的大 `Self` 按 `const Self*` 传，同一函数被值形态和
+self 形态混着调会让类型检查钉在指针上（E0301）。统一走 `toXxx()` 一种形态。
+
+契约：
+
+- `determinant()` 与 `invert()` **共用同一批 3×3 余子式**，两者严格自洽；
+  `invert()` 是通用伴随矩阵（不是仿射专用公式），投影矩阵也能求逆。
+- `determinant() == 0.0` 时 `invert()` 返回**零矩阵**：不做除零、不返回
+  `?Self`。要区分"不可逆"先调 `determinant()`。
+- `toQuat()` 要求**纯旋转矩阵**（正交、det=1）；带缩放 / 错切 / 投影的矩阵
+  没有对应的四元数。结果可能是 `q` 或 `-q`，两者是同一个旋转。
+- `fromQuat(q)` 要求单位四元数（与 `Quat.rotate` 一致），非单位会带进缩放；
+  `lookAt` 要求 `eye != center` 且 `up` 不与视线平行。
+- **Mat3 / Mat4 大于 16 字节，方法按 `const Self*` 收接收者**（§151），所以
+  临时值不能直接调方法：`Mat4.identity().mul(m)` 报 E0403，先 `let t = ...;`
+  再 `t.mul(m)`。库内部所有委托都遵守这一点。
+- 输出仍是纯 Zx：没有 `@shim`、没有 intrinsic，语言层一个内建都没加。
+
+```zx
+const std = @mod("std");
+const V4 = std.simd.V4;
+const Mat4 = std.simd.Mat4;
+
+let t = Mat4.fromTranslation(V4{1.0, 2.0, 3.0, 0.0});
+let s = Mat4.fromScale(V4{2.0, 2.0, 2.0, 0.0});
+let m = t.mul(s);                                    // 先缩放再平移
+let p = m.mulVec(V4{1.0, 2.0, 3.0, 1.0});           // (3, 6, 9, 1)
+let inv = m.invert();
+let back = m.mul(inv);                               // 中间值要绑到 let
+std.println("{} {} {} {} round={}", p.0, p.1, p.2, p.3,
+            back.approxEq(Mat4.identity(), 0.00001));   // 3 6 9 1 round=true
+
+let z = V4{0.0, 0.0, 1.0, 0.0};
+let q = std.simd.Quat.fromAxisAngle(z, 1.5707963);
+let rm = q.toMat4();
+let r = rm.mulVec(V4{1.0, 0.0, 0.0, 1.0});           // ≈ (0, 1, 0, 1)
+let q2 = rm.toQuat();                                 // q 或 -q，同一个旋转
+std.println("{} {}", r.1, q2.rotate(V4{1.0, 0.0, 0.0, 0.0}).1);  // ≈1 ≈1
 ```
 
 ---

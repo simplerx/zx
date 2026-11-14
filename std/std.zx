@@ -58,9 +58,10 @@ pub const math = @mod("math.zx");
 pub const net = @mod("net.zx");
 
 // 向量数学（simd.zx）。语言只给 `@Vec(T, N)` 类型与它的运算符，其余都在
-// 这里：`std.simd.dot(a, b)` / `length` / `normalize` / `cross` / `select`
-// / `any` / `all`，以及四元数 `std.simd.Quat`。全是普通函数，没有额外的
-// 向量内建；4 分量是这一层的形状（3D 用 xyz + w=0）。
+// 这里：度量 / 逐分量 / 掩码 `select` `any` `all`、`cross` / `reflect`、
+// 四元数 `Quat`、列主序矩阵 `Mat3` / `Mat4`（含四元数互转、投影与视图）。
+// 全是普通函数，没有额外的向量内建；4 分量是这一层的形状（3D 用 xyz +
+// w=0），矩阵就是三 / 四列这样的向量。
 pub const simd = @mod("simd.zx");
 
 // 可增长数组。`T` 是元素类型；容量不够时按倍数向分配器要内存、搬过去、释放旧的。

@@ -415,15 +415,30 @@ if (t.spawn(job, 21)) h {
 // 数学：浮点函数 extern 到 C 运行时的 libm，整数工具是纯 Zx 代码
 std.println("{} {}", std.math.sqrt(16.0), std.math.gcd(12, 18));   // 4 6
 
-// 向量数学：形参就是 @Vec 本身，没有门面类型。V4 = std.simd.V4（= @Vec(f32, 4)）
-// 注意别名要先 const 绑一下：`std.simd.V4{…}` 这种带路径的字面量不合法。
+// 向量数学：形参就是 @Vec 本身，没有门面类型。别名要先 const 绑一下：
+// `std.simd.V4{...}` 这种带路径的字面量不合法。
 const V4 = std.simd.V4;
+const Mat4 = std.simd.Mat4;
 var va = V4{ 0.0, 3.0, 4.0, 0.0 };
-var vb = std.simd.V4{ 1.0, 0.0, 0.0, 0.0 };
+var vb = V4{ 1.0, 0.0, 0.0, 0.0 };
 std.println("{} {} {}", std.simd.length(va), std.simd.dot(va, va),
             std.simd.cross(va, vb).2);                    // 5 25 -3
-let qz = std.simd.Quat.fromAxisAngle(std.simd.V4{0.0, 0.0, 1.0, 0.0}, 1.5707964);
+let qz = std.simd.Quat.fromAxisAngle(V4{0.0, 0.0, 1.0, 0.0}, 1.5707964);
 std.println("{}", qz.rotate(vb).1);                       // ≈1（x 转 90° 成 y）
+
+// 矩阵：列主序的 V4 列。t.mul(s) 表示先缩放再平移；大于 16 字节的容器
+// 按 const 指针收 self，所以中间值要绑到 let 再调方法。
+let t = Mat4.fromTranslation(V4{1.0, 2.0, 3.0, 0.0});
+let s = Mat4.fromScale(V4{2.0, 2.0, 2.0, 0.0});
+let m = t.mul(s);
+let p = m.mulVec(V4{1.0, 2.0, 3.0, 1.0});
+let inv = m.invert();
+let back = m.mul(inv);
+std.println("{} {} {} {} round={}", p.0, p.1, p.2, p.3,
+            back.approxEq(Mat4.identity(), 0.00001));   // 3 6 9 1 round=true
+let rm = qz.toMat4();
+let qback = rm.toQuat();                                 // q 或 -q，同一个旋转
+std.println("{}", qback.rotate(vb).1);                   // ≈1
 
 // 网络：同步 IPv4 TCP/UDP（Windows Winsock2），init/deinit 包住
 if (!std.net.init()) { return 1; }
@@ -494,5 +509,5 @@ zxc init myproj            # 生成工程骨架
 
 ---
 
-*本文按 Zx 1.4.1 实现逐片段实测写成；语言演进以编译器行为为准，
+*本文按 Zx 1.4.2 实现逐片段实测写成；语言演进以编译器行为为准，
 API 细节以 `std/` 源码与 `docs/reference.md` 为准。*
