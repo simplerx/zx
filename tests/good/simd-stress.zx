@@ -4,10 +4,11 @@
 // 下会不会崩 / 会不会漂"。样本由 LCG 生成，种子写死，所以每次运行的输入
 // 完全一样，期望输出可以进 expect-output。
 //
-// 判定阈值按 f32 定：一般矩阵求逆往返 1e-3（随机样本里尾部条件数可达
-// 1e3，最大实测误差 3.3e-4），投影 / lookAt 这类元素跨度大的矩阵放宽到
-// 5e-3；四元数与矩阵互转比**旋转效果**（q 和 -q 是同一个旋转，不能比
-// 分量），阈值 1e-4。
+// 求逆用**后向误差**判定：||m*inv - I|| / (||m|| * ||inv||) <= 1e-5。
+// 它与矩阵尺度和条件数无关；绝对误差在 20 万样本的尾部必然出现超阈值的
+// 样本（f32 的正常现象），当判据会随样本量抖动。
+// 四元数与矩阵互转比**旋转效果**（q 和 -q 是同一个旋转，不能比分量），
+// 单位向量上的绝对误差阈值 1e-4。
 // expect-output
 // stress mat4 inv: n=20000 bad=0
 // stress mat3 inv: n=20000 bad=0
@@ -82,6 +83,58 @@ const mat3Err = fn (a: Mat3, b: Mat3) f32 {
     return m;
 };
 
+// 元素最大绝对值：后向误差的归一化分母。
+const colMaxAbs = fn (v: V4) f32 {
+    var m: f32 = 0.0;
+    var i: usize = 0;
+    while (i < 4) {
+        var d = v[i];
+        if (d < 0.0) { d = -d; }
+        if (d > m) { m = d; }
+        i = i + 1;
+    }
+    return m;
+};
+
+const mat4MaxAbs = fn (m: Mat4) f32 {
+    var r = colMaxAbs(m.c0);
+    let a1 = colMaxAbs(m.c1);
+    let a2 = colMaxAbs(m.c2);
+    let a3 = colMaxAbs(m.c3);
+    if (a1 > r) { r = a1; }
+    if (a2 > r) { r = a2; }
+    if (a3 > r) { r = a3; }
+    return r;
+};
+
+const mat3MaxAbs = fn (m: Mat3) f32 {
+    var r = colMaxAbs(m.c0);
+    let a1 = colMaxAbs(m.c1);
+    let a2 = colMaxAbs(m.c2);
+    if (a1 > r) { r = a1; }
+    if (a2 > r) { r = a2; }
+    return r;
+};
+
+// 求逆的**后向误差**：||m*inv - I|| / (||m|| * ||inv||)。
+// 它与矩阵尺度无关，是数值线性代数的标准判据；绝对误差会随条件数放大，
+// 20 万样本的尾部必然出现"看起来超阈值"的样本，那不是实现缺陷。
+const backErr4 = fn (m: Mat4, inv: Mat4) f32 {
+    let r = m.mul(inv);
+    let num = mat4Err(r, Mat4.identity());
+    let den = mat4MaxAbs(m) * mat4MaxAbs(inv);
+    if (den == 0.0) { return num; }
+    return num / den;
+};
+
+const backErr3 = fn (m: Mat3, inv: Mat3) f32 {
+    let r = m.mul(inv);
+    let num = mat3Err(r, Mat3.identity());
+    let den = mat3MaxAbs(m) * mat3MaxAbs(inv);
+    if (den == 0.0) { return num; }
+    return num / den;
+};
+
 // 单位四元数：随机轴（加偏置保证非零）+ 随机角，覆盖 tr>0 与三个对角分支。
 const randQuat = fn (rng: *Rng) Quat {
     let axis = std.simd.normalize(V4{
@@ -126,17 +179,14 @@ const probeRot = fn (q1: Quat, q2: Quat) f32 {
 
 pub const main = fn () u8 {
     var rng = Rng{ .s = 20261114 };
-    let I4 = Mat4.identity();
-    let I3 = Mat3.identity();
 
-    // ---- 4x4 随机求逆：m * m^-1 ≈ I ----
+    // ---- 4x4 随机求逆：后向误差 ||m*inv - I|| / (||m||*||inv||) ----
     var bad4: u32 = 0;
     var n: usize = 0;
     while (n < 20000) {
         let m = randMat4(&rng);
         let inv = m.invert();
-        let r = m.mul(inv);
-        if (mat4Err(r, I4) > 1e-3) { bad4 = bad4 + 1; }
+        if (backErr4(m, inv) > 1e-5) { bad4 = bad4 + 1; }
         n = n + 1;
     }
     std.println("stress mat4 inv: n={} bad={}", n, bad4);
@@ -146,8 +196,8 @@ pub const main = fn () u8 {
     n = 0;
     while (n < 20000) {
         let m = randMat3(&rng);
-        let r = m.mul(m.invert());
-        if (mat3Err(r, I3) > 1e-4) { bad3 = bad3 + 1; }
+        let inv = m.invert();
+        if (backErr3(m, inv) > 1e-5) { bad3 = bad3 + 1; }
         n = n + 1;
     }
     std.println("stress mat3 inv: n={} bad={}", n, bad3);
@@ -197,8 +247,8 @@ pub const main = fn () u8 {
         let zn = rng.range(0.01, 1.0);
         let zf = rng.range(10.0, 5000.0);
         let p = Mat4.perspective(fovy, aspect, zn, zf);
-        let r = p.mul(p.invert());
-        if (mat4Err(r, I4) > 5e-3) { badp = badp + 1; }
+        let inv = p.invert();
+        if (backErr4(p, inv) > 1e-5) { badp = badp + 1; }
         n = n + 1;
     }
     std.println("stress persp: n={} bad={}", n, badp);
@@ -209,8 +259,8 @@ pub const main = fn () u8 {
     while (n < 5000) {
         let eye = V4{ rng.sym(5.0), rng.range(0.5, 8.0), rng.sym(5.0), 1.0 };
         let m = Mat4.lookAt(eye, V4{0.0, 0.0, 0.0, 1.0}, V4{0.0, 1.0, 0.0, 0.0});
-        let r = m.mul(m.invert());
-        if (mat4Err(r, I4) > 5e-3) { badl = badl + 1; }
+        let inv = m.invert();
+        if (backErr4(m, inv) > 1e-5) { badl = badl + 1; }
         n = n + 1;
     }
     std.println("stress lookAt: n={} bad={}", n, badl);

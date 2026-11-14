@@ -57,6 +57,7 @@ pub const main = fn () !i32 {
 ```sh
 sh build.sh     # → bin/zxc.exe（编译器）· bin/zxfe.exe（自举前端）· bin/zxls.exe（语言服务器）
 sh test.sh      # 全量回归：语法 / 语义 / 反例 / 运行 / 多文件 / 增量 / CLI / LSP
+sh tools/stress.sh  # 暴力压测：回归 3 轮 / fuzz / LSP 滥用 / 60 万数值样本 / 并发编译
 ```
 
 工具链是项目内自带的 zig（`.toolchain/zig.exe`，不进版本库，约 360 MB）。
