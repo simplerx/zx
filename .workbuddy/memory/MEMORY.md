@@ -6,6 +6,7 @@
 - 能力线用 **git commit + 守门用例** 保存；实现被删会连挂，**不许删用例来变绿**。定位历史：`git log --oneline --grep=关键词`。
 - 改动完成即提交推送；精确指定路径，不捎带并行任务的工作区改动。每轮只测本轮结果，全部做完再统一全量。用户偏好实际运行验证交付。Git Bash 多行提交用 `printf '%s\n' … | git commit -F -`。
 - 控制台输出（进度/诊断/help/usage/explain）**只用 ASCII**；中文只进注释与写进文件的模板。GBK 控制台会把 `—`/`…` 渲成乱码。
+- **压测入口 `sh tools/stress.sh`**（regress [plain|nocache|checked] / fuzz N / lsp / numeric / concurrent，§169）。concurrent 阶段必须导出 `ZIG_LOCAL_CACHE_DIR`/`ZIG_GLOBAL_CACHE_DIR` 到仓库内——默认全局缓存下 16 并发会有一个进程卡死在 `compiling N units...`（4min+），仓库内共享缓存 10s 全过。simd 求逆判据用**后向误差** `‖m·inv−I‖/(‖m‖·‖inv‖) ≤ 1e-5`，绝对误差会随样本量在条件数尾部抖动。
 - **行尾**：`src/{main,parse,sema}.c`、`src/{astload.c,ty.c,ty.h}`、`tools/{zxls.zig,lsptest.py}`、`std/std.zx` 是 **CRLF**；`src/ast.h`、`spec/decisions.md` 是**混合**（同一文件两种都有）；`src/backend.c`、`src/errors.c`、`bootstrap/`、`docs/`、`test.sh`、`build.sh`、memory 是 **LF**。Python 一律 bytes 读写，改完 `git diff --numstat` 确认没炸整文件（炸了就按 HEAD 每条行尾回填）。
 - `// expect-output` 两种写法 runner 都认；runner **合并 stdout/stderr** 比对，期望里含相对路径+行号 → 编译必须传相对路径。bad 用例用 `// expect: <诊断子串>`。`tests/good|bad/*.zx` 自动发现，新增文件不用改 test.sh（但特性级断言要单写一节）。
 - 改 `tools/zxls.zig` 后必须确认 `bin/zxls.exe` 真被替换（Zed 锁 exe 会让 build skip：`mv bin/zxls.exe bin/zxls-bak.exe`，再 `./.toolchain/zig.exe build-exe tools/zxls.zig -O ReleaseFast -femit-bin=bin/zxls.exe`），用户要重启 Zed。验证：`ZXLS_BIN=bin/zxls.exe python tools/lsptest.py`；编译器改动 `sh build.sh` 再 `sh test.sh`（当前基线 passed 429 / failed 0 + LSP 冒烟 454 项全过 / SMOKE ALL PASS；§166 已根治旧的 diagnostics.* 假崩溃）。
