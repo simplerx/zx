@@ -1,0 +1,252 @@
+// simd-stress.zx —— std.simd 数值压测：随机样本上的往返一致性。
+//
+// 与 std-simd.zx 的分工：那边钉具体数值和契约边界，这边只压"大量随机输入
+// 下会不会崩 / 会不会漂"。样本由 LCG 生成，种子写死，所以每次运行的输入
+// 完全一样，期望输出可以进 expect-output。
+//
+// 判定阈值按 f32 定：一般矩阵求逆往返 1e-3（随机样本里尾部条件数可达
+// 1e3，最大实测误差 3.3e-4），投影 / lookAt 这类元素跨度大的矩阵放宽到
+// 5e-3；四元数与矩阵互转比**旋转效果**（q 和 -q 是同一个旋转，不能比
+// 分量），阈值 1e-4。
+// expect-output
+// stress mat4 inv: n=20000 bad=0
+// stress mat3 inv: n=20000 bad=0
+// stress quat m3: n=20000 bad=0
+// stress quat m4: n=20000 bad=0
+// stress mat3<->mat4: n=20000 bad=0
+// stress persp: n=5000 bad=0
+// stress lookAt: n=5000 bad=0
+// stress singular: det=0 zero=true
+// stress pinned: x=true y=true z=true
+// stress eps0: eq=true ne=false
+const std = @mod("std");
+
+const V4 = @Vec(f32, 4);
+const Quat = std.simd.Quat;
+const Mat3 = std.simd.Mat3;
+const Mat4 = std.simd.Mat4;
+
+const PI: f32 = 3.14159265358979;
+
+// 确定性 LCG：状态保持 32 位，乘法在 u64 里做，不碰整数溢出。
+const Rng = struct {
+    s: u64,
+
+    pub const next = fn (self: *Self) f32 {
+        self.s = (self.s * 1664525 + 1013904223) % 4294967296;
+        let u = (u32)(self.s >> 8);          // 24 位尾数
+        return (f32)u * (1.0 / 16777216.0);
+    };
+
+    // [lo, hi)
+    pub const range = fn (self: *Self, lo: f32, hi: f32) f32 {
+        return lo + (hi - lo) * self.next();
+    };
+
+    // [-k, k)
+    pub const sym = fn (self: *Self, k: f32) f32 {
+        return self.range(-k, k);
+    };
+};
+
+// 两列逐分量最大绝对差。
+const colErr = fn (a: V4, b: V4) f32 {
+    var m: f32 = 0.0;
+    var i: usize = 0;
+    while (i < 4) {
+        var d = a[i] - b[i];
+        if (d < 0.0) { d = -d; }
+        if (d > m) { m = d; }
+        i = i + 1;
+    }
+    return m;
+};
+
+const mat4Err = fn (a: Mat4, b: Mat4) f32 {
+    var m = colErr(a.c0, b.c0);
+    let e1 = colErr(a.c1, b.c1);
+    let e2 = colErr(a.c2, b.c2);
+    let e3 = colErr(a.c3, b.c3);
+    if (e1 > m) { m = e1; }
+    if (e2 > m) { m = e2; }
+    if (e3 > m) { m = e3; }
+    return m;
+};
+
+const mat3Err = fn (a: Mat3, b: Mat3) f32 {
+    var m = colErr(a.c0, b.c0);
+    let e1 = colErr(a.c1, b.c1);
+    let e2 = colErr(a.c2, b.c2);
+    if (e1 > m) { m = e1; }
+    if (e2 > m) { m = e2; }
+    return m;
+};
+
+// 单位四元数：随机轴（加偏置保证非零）+ 随机角，覆盖 tr>0 与三个对角分支。
+const randQuat = fn (rng: *Rng) Quat {
+    let axis = std.simd.normalize(V4{
+        rng.sym(1.0) + 0.013,
+        rng.sym(1.0) + 0.027,
+        rng.sym(1.0) + 0.041,
+        0.0,
+    });
+    return Quat.fromAxisAngle(axis, rng.range(-PI, PI));
+};
+
+// 随机 4x4：分量落在 [-1,1)，对角加 2 保证对角线优势、det 远离 0。
+const randMat4 = fn (rng: *Rng) Mat4 {
+    return Mat4.fromCols(
+        V4{ rng.sym(1.0) + 2.0, rng.sym(1.0), rng.sym(1.0), rng.sym(1.0) },
+        V4{ rng.sym(1.0), rng.sym(1.0) + 2.0, rng.sym(1.0), rng.sym(1.0) },
+        V4{ rng.sym(1.0), rng.sym(1.0), rng.sym(1.0) + 2.0, rng.sym(1.0) },
+        V4{ rng.sym(1.0), rng.sym(1.0), rng.sym(1.0), rng.sym(1.0) + 2.0 },
+    );
+};
+
+const randMat3 = fn (rng: *Rng) Mat3 {
+    return Mat3.fromCols(
+        V4{ rng.sym(1.0) + 2.0, rng.sym(1.0), rng.sym(1.0), 0.0 },
+        V4{ rng.sym(1.0), rng.sym(1.0) + 2.0, rng.sym(1.0), 0.0 },
+        V4{ rng.sym(1.0), rng.sym(1.0), rng.sym(1.0) + 2.0, 0.0 },
+    );
+};
+
+// 三个探针向量：轴对齐，覆盖旋转矩阵的每一列。
+const probeRot = fn (q1: Quat, q2: Quat) f32 {
+    let px = V4{1.0, 0.0, 0.0, 0.0};
+    let py = V4{0.0, 1.0, 0.0, 0.0};
+    let pz = V4{0.0, 0.0, 1.0, 0.0};
+    var m = colErr(q1.rotate(px), q2.rotate(px));
+    let ey = colErr(q1.rotate(py), q2.rotate(py));
+    let ez = colErr(q1.rotate(pz), q2.rotate(pz));
+    if (ey > m) { m = ey; }
+    if (ez > m) { m = ez; }
+    return m;
+};
+
+pub const main = fn () u8 {
+    var rng = Rng{ .s = 20261114 };
+    let I4 = Mat4.identity();
+    let I3 = Mat3.identity();
+
+    // ---- 4x4 随机求逆：m * m^-1 ≈ I ----
+    var bad4: u32 = 0;
+    var n: usize = 0;
+    while (n < 20000) {
+        let m = randMat4(&rng);
+        let inv = m.invert();
+        let r = m.mul(inv);
+        if (mat4Err(r, I4) > 1e-3) { bad4 = bad4 + 1; }
+        n = n + 1;
+    }
+    std.println("stress mat4 inv: n={} bad={}", n, bad4);
+
+    // ---- 3x3 随机求逆 ----
+    var bad3: u32 = 0;
+    n = 0;
+    while (n < 20000) {
+        let m = randMat3(&rng);
+        let r = m.mul(m.invert());
+        if (mat3Err(r, I3) > 1e-4) { bad3 = bad3 + 1; }
+        n = n + 1;
+    }
+    std.println("stress mat3 inv: n={} bad={}", n, bad3);
+
+    // ---- 四元数 → Mat3 → 四元数：比旋转效果 ----
+    var badq3: u32 = 0;
+    n = 0;
+    while (n < 20000) {
+        let q = randQuat(&rng);
+        let m = q.toMat3();
+        let q2 = m.toQuat();
+        if (probeRot(q, q2) > 1e-4) { badq3 = badq3 + 1; }
+        n = n + 1;
+    }
+    std.println("stress quat m3: n={} bad={}", n, badq3);
+
+    // ---- 四元数 → Mat4 → 四元数 ----
+    var badq4: u32 = 0;
+    n = 0;
+    while (n < 20000) {
+        let q = randQuat(&rng);
+        let m = q.toMat4();
+        let q2 = m.toQuat();
+        if (probeRot(q, q2) > 1e-4) { badq4 = badq4 + 1; }
+        n = n + 1;
+    }
+    std.println("stress quat m4: n={} bad={}", n, badq4);
+
+    // ---- Mat3 ↔ Mat4 往返 ----
+    var bad34: u32 = 0;
+    n = 0;
+    while (n < 20000) {
+        let m3 = randMat3(&rng);
+        let up = m3.toMat4();
+        let down = up.toMat3();
+        if (mat3Err(down, m3) > 1e-4) { bad34 = bad34 + 1; }
+        n = n + 1;
+    }
+    std.println("stress mat3<->mat4: n={} bad={}", n, bad34);
+
+    // ---- 随机透视矩阵求逆 ----
+    var badp: u32 = 0;
+    n = 0;
+    while (n < 5000) {
+        let fovy = rng.range(0.2, 2.8);
+        let aspect = rng.range(0.4, 4.0);
+        let zn = rng.range(0.01, 1.0);
+        let zf = rng.range(10.0, 5000.0);
+        let p = Mat4.perspective(fovy, aspect, zn, zf);
+        let r = p.mul(p.invert());
+        if (mat4Err(r, I4) > 5e-3) { badp = badp + 1; }
+        n = n + 1;
+    }
+    std.println("stress persp: n={} bad={}", n, badp);
+
+    // ---- 随机 lookAt 求逆（eye 的 y 分量为正，与 up 不平行）----
+    var badl: u32 = 0;
+    n = 0;
+    while (n < 5000) {
+        let eye = V4{ rng.sym(5.0), rng.range(0.5, 8.0), rng.sym(5.0), 1.0 };
+        let m = Mat4.lookAt(eye, V4{0.0, 0.0, 0.0, 1.0}, V4{0.0, 1.0, 0.0, 0.0});
+        let r = m.mul(m.invert());
+        if (mat4Err(r, I4) > 5e-3) { badl = badl + 1; }
+        n = n + 1;
+    }
+    std.println("stress lookAt: n={} bad={}", n, badl);
+
+    // ---- 奇异矩阵：一行全零，det 在浮点下也精确为 0 ----
+    // 注意不能用"近似线性相关"的行（如 2 倍行）：det 会算成 1e-16 级非零，
+    // 契约只保证 det == 0.0 时返回零矩阵，近似奇异由调用方先查 determinant。
+    let sng = Mat4.fromRows(
+        V4{1.0, 2.0, 3.0, 4.0},
+        V4{0.0, 0.0, 0.0, 0.0},
+        V4{1.0, 1.0, 1.0, 1.0},
+        V4{2.0, 3.0, 4.0, 5.0},
+    );
+    let szi = sng.invert();
+    let sZero = szi.eq(Mat4.zero());
+    std.println("stress singular: det={} zero={}", sng.determinant(), sZero);
+
+    // ---- 绕 x / y / z 的 180°：Shoemake 另外三个对角分支 ----
+    let qx = Quat.fromAxisAngle(V4{1.0, 0.0, 0.0, 0.0}, PI);
+    let qy = Quat.fromAxisAngle(V4{0.0, 1.0, 0.0, 0.0}, PI);
+    let qz = Quat.fromAxisAngle(V4{0.0, 0.0, 1.0, 0.0}, PI);
+    let mx = qx.toMat3();
+    let my = qy.toMat3();
+    let mz = qz.toMat3();
+    let bx = probeRot(qx, mx.toQuat()) <= 1e-4;
+    let by = probeRot(qy, my.toQuat()) <= 1e-4;
+    let bz = probeRot(qz, mz.toQuat()) <= 1e-4;
+    std.println("stress pinned: x={} y={} z={}", bx, by, bz);
+
+    // ---- eps == 0 退化为精确相等（approxEq 内部用 <=，不是 <）----
+    let ida = Mat4.identity();
+    let idb = Mat4.identity();
+    let tr1 = Mat4.fromTranslation(V4{1.0, 0.0, 0.0, 0.0});
+    let epsEq = ida.approxEq(idb, 0.0);
+    let epsNe = ida.approxEq(tr1, 0.0);
+    std.println("stress eps0: eq={} ne={}", epsEq, epsNe);
+
+    return 0;
+};

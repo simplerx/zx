@@ -7055,3 +7055,45 @@ trip 就是钉这个）。代价是 16 个 `det3`，求逆不是热路径，可�
 - SIMD 化的批量矩阵乘（一次算 4 个向量）：游戏里成批变换更常见，但那需要
   先把 `@Vec` 长度泛型化或写死 4×N 的展开，属于另一条能力线。
 - `Quat.fromMat3(m)` 形式（见硬约束 1），用 `m.toQuat()` 代替。
+
+## §168 std.simd 压测验收：eps=0 的 approxEq 修正（2026-11-14）
+
+用户要求「压测，达标后 push」。压测分数值（入库守门）与性能（临时基准）两块。
+
+### 数值压测：`tests/good/simd-stress.zx`
+
+- 确定性 LCG（种子 20261114；32 位状态放在 u64 里乘，不碰整数溢出），
+  样本量：4×4 求逆 20000、3×3 求逆 20000、四元数→Mat3→四元数 20000、
+  四元数→Mat4→四元数 20000、Mat3↔Mat4 20000、perspective 5000、lookAt 5000。
+- 阈值：一般矩阵 1e-3，投影 / lookAt 5e-3，旋转效果 1e-4。随机 4×4
+  （对角 +2）实测最大往返误差 3.3e-4，对应尾部样本条件数 ~1e3，是 f32
+  的正常量级，不是实现缺陷；不放宽到能吞掉量级错误的值。
+- 覆盖：随机轴 + 随机角覆盖 Shoemake 四个分支，另用绕 x / y / z 的 180°
+  钉死另外三个对角分支；奇异矩阵用**一行全零**使 det 在浮点下精确为 0。
+- 「近似线性相关」（如两行成 2 倍）的矩阵 det 会算成 1e-16 级非零，
+  `invert()` 不承诺零矩阵——契约只认 det == 0.0，这一点在用例注释里写明。
+- dev / release 输出逐字一致；用例由 `tests/good/*.zx` 自动发现，不改 test.sh。
+
+### 压出来的一处 API 不自洽（已修）
+
+`approxEq(o, eps)` 原实现用 `abs(a-b) < eps`：`eps == 0` 时**恒假**，连完全
+相等的两个矩阵都判不等。这不合理（"误差不超过 0" 应当就是精确相等），
+而且三处实现（Quat / Mat3 / Mat4）各抄了一遍。
+
+- 新增模块级 `near4(a, b, eps)`，改用 `<=`；三处 `approxEq` 收敛到它。
+- 新语义：`eps >= 0`；`eps == 0` 退化为精确相等（NaN 仍为 false）。
+- 守门：`tests/good/simd-stress.zx` 的 `stress eps0: eq=true ne=false`；
+  `docs/reference.md` 矩阵契约节补一条。
+
+### 性能基准（release，临时脚本不入库）
+
+| 操作 | ns/op |
+|---|---|
+| `Mat4.mulVec` | < 1 |
+| `Mat4.mul` | 3 |
+| `Mat4.invert` | 25 |
+| `Quat → Mat3 → Quat` | 21 |
+| `Mat3.invert` | 10 |
+
+1M mulVec / 1M mul / 200k invert / 200k q2m2q / 200k inv3 合计 < 100 ms。
+不需要 intrinsic：`@Vec` 落到 clang `vector_size`，-O2 自动展开。

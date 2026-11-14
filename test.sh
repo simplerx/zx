@@ -1403,6 +1403,22 @@ else
     head -12 "$TPFX.s159c.log"; fail=1
 fi
 
+# §168：std.simd 数值压测。dev 档已由 tests/good/*.zx 自动发现比对过
+# expect-output；这里只额外钉 release 档——优化不能改变浮点语义，随机样本
+# 也不许出现任何一个 bad。`stress eps0` 守 approxEq 的 eps=0 退化语义。
+$ZXC tests/good/simd-stress.zx --release -o "$TPFX.s168r.exe" > "$TPFX.s168r.log" 2>&1 || true
+"$TPFX.s168r.exe" > "$TPFX.s168.run" 2>&1 || true
+if grep -qF 'stress mat4 inv: n=20000 bad=0' "$TPFX.s168.run" \
+   && grep -qF 'stress quat m3: n=20000 bad=0' "$TPFX.s168.run" \
+   && grep -qF 'stress persp: n=5000 bad=0' "$TPFX.s168.run" \
+   && grep -qF 'stress eps0: eq=true ne=false' "$TPFX.s168.run" \
+   && ! grep -q 'bad=[1-9]' "$TPFX.s168.run"; then
+    printf "  ok   §168 std.simd 压测 release 档全样本通过\n"
+else
+    printf "  FAIL §168 std.simd 压测 release 档有失败样本\n"
+    head -12 "$TPFX.s168.run"; head -6 "$TPFX.s168r.log"; fail=1
+fi
+
 # §162：语言级向量类型 @Vec(T, N)。语言层只管"这是个 N 分量的值"，
 # 落到 C 的是 clang 的 vector_size 类型——不是用 struct 模拟的（用 struct
 # 模拟在 -O0 下完全不会用向量指令，而且字段布局要自己维护）。

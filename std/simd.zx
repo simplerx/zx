@@ -91,6 +91,13 @@ pub const all = fn (m: M4) bool {
     return true;
 };
 
+// 逐分量近似相等：eps 是"允许的最大绝对差"，必须 >= 0。用 `<=` 而不是
+// `<`：eps == 0 时退化为精确相等（NaN 仍然为 false），符合"误差不超过 0"
+// 的直觉；用 `<` 的话连完全相等的两个向量都会被判否。
+const near4 = fn (a: V4, b: V4, eps: f32) bool {
+    return all(abs(a - b) <= (V4)eps);
+};
+
 // ---- 度量 ----
 
 // 点乘。一次向量乘 + 三个标量加：加法顺序固定为 ((0+1)+(2+3))，
@@ -413,10 +420,10 @@ pub const Mat3 = struct {
             && all(self.c2 == o.c2);
     };
 
+    // eps 是逐分量最大绝对差；eps == 0 时等价于 eq（见模块级 near4）。
     pub const approxEq = fn (self: Self, o: Self, eps: f32) bool {
-        let e = (V4)eps;
-        return all(abs(self.c0 - o.c0) < e) && all(abs(self.c1 - o.c1) < e)
-            && all(abs(self.c2 - o.c2) < e);
+        return near4(self.c0, o.c0, eps) && near4(self.c1, o.c1, eps)
+            && near4(self.c2, o.c2, eps);
     };
 };
 
@@ -585,9 +592,8 @@ pub const Mat4 = struct {
     };
 
     pub const approxEq = fn (self: Self, o: Self, eps: f32) bool {
-        let e = (V4)eps;
-        return all(abs(self.c0 - o.c0) < e) && all(abs(self.c1 - o.c1) < e)
-            && all(abs(self.c2 - o.c2) < e) && all(abs(self.c3 - o.c3) < e);
+        return near4(self.c0, o.c0, eps) && near4(self.c1, o.c1, eps)
+            && near4(self.c2, o.c2, eps) && near4(self.c3, o.c3, eps);
     };
 };
 
@@ -676,10 +682,9 @@ pub const Quat = struct {
         return all(self.v == o.v);
     };
 
-    // 规范化之后的近似相等：eps 逐分量比较（不取最大误差，省一趟归约）。
+    // 逐分量近似相等：eps 是最大绝对差，eps == 0 时等价于 eq（见 near4）。
     pub const approxEq = fn (self: Self, o: Self, eps: f32) bool {
-        let d = abs(self.v - o.v);
-        return all(d < (V4)eps);
+        return near4(self.v, o.v, eps);
     };
 
     // ---- 矩阵互转（§167）----
