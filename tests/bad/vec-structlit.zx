@@ -1,0 +1,9 @@
+// expect: struct literal needs named fields
+// `P{1, 2}` 是向量字面量的写法，结构体必须写字段名。parse 为了让
+// `V4{…}`（向量别名）能写，把位置列表收了下来，就在这里说清楚。
+const P = struct { a: i32, b: i32 };
+
+const main = fn () u8 {
+    let p = P{1, 2};
+    return 0;
+};

@@ -1,8 +1,9 @@
 // expect: this operator is not defined on vectors
-// C 里 `v4 < v4` 得到的是"逐分量掩码向量"而不是 bool，放进来会静默变成
-// 一个没人想得到的类型；比较请逐分量写。
+// 允许的是 `+ - *`、浮点向量的 `/`，以及六个比较（结果是一份掩码）。
+// `%` / 位运算 / 移位都没有对应的向量语义，不半支持：要用先加，
+// 半支持的运算比没有更难查。
 const main = fn () u8 {
     var a: @Vec(f32, 4) = (@Vec(f32, 4))1.0;
-    var b = a < a;
+    var b = a % a;
     return 0;
 };

@@ -837,6 +837,29 @@ static Node *parse_postfix(P *p, Node *base) {
                 base = n;
                 continue;
             }
+            /* §162：向量字面量写在别名上（`const V4 = @Vec(f32, 4); V4{1, 2}`）。
+             * 位置列表在结构体字面量里没有意义（那边一定是 `.name =`），所以
+             * `{` 后面不是字段名就是向量字面量：按"把 N 个值当成一个向量"的
+             * 转换收下，个数与元素类型由 sema 核对。写错结构体的人也会在那里
+             * 收到"要写 .field = value"的提示。只认裸别名——`v.V4{…}` 留着
+             * 走原来的报错，不值当为它放宽点路径。 */
+            if (base->kind == NK_IDENT && base->name) {
+                Token *lb = advance(p);
+                Node *tup = node_new(NK_TUPLE, lb->line, lb->col);
+                for (;;) {
+                    push(tup, parse_expr(p));
+                    if (!accept(p, TOK_COMMA)) break;
+                    if (at(p, TOK_RBRACE)) break;    /* 尾逗号 */
+                }
+                expect(p, TOK_RBRACE);
+                Node *tv = node_new(NK_TYPE_IDENT, base->line, base->col);
+                tv->name = base->name;
+                Node *cv = node_new(NK_CAST, lb->line, lb->col);
+                cv->a = tv;
+                cv->b = tup;
+                base = cv;
+                continue;
+            }
         }
         break;
     }
@@ -1127,7 +1150,28 @@ static Node *parse_primary(P *p) {
 
         /* §162：`@Vec(T, N)` 是类型，值位置也常见（`const V4 = @Vec(f32, 4);`
          * 这种别名、泛型实参）。类型位置与值位置走同一个构造函数。 */
-        if (n->name && !strcmp(n->name, "Vec")) return parse_vec_type(p, n->line, n->col);
+        if (n->name && !strcmp(n->name, "Vec")) {
+            Node *vt = parse_vec_type(p, n->line, n->col);
+            /* §162：`@Vec(f32, 4){1, 2, 3, 4}` 是向量字面量。脱糖成
+             * "把这 N 个值看成一个向量"的转换（cast 一个元组）。
+             * 单独加一个 NK 种类就要自举 + dump 复名儿三处跟着改，
+             * 而它的语义本来就是"逐分量定型"。 */
+            if (!at(p, TOK_LBRACE)) return vt;
+            Token *lb = advance(p);
+            Node *tup = node_new(NK_TUPLE, lb->line, lb->col);
+            if (!at(p, TOK_RBRACE)) {
+                for (;;) {
+                    push(tup, parse_expr(p));
+                    if (!accept(p, TOK_COMMA)) break;
+                    if (at(p, TOK_RBRACE)) break;   /* 尾逗号 */
+                }
+            }
+            expect(p, TOK_RBRACE);
+            Node *c = node_new(NK_CAST, lb->line, lb->col);
+            c->a = vt;
+            c->b = tup;
+            return c;
+        }
 
         /* 语法只有两种形状：@type 与 @memcpy/@memmove/@memset 先收表达式，
          * 其余收类型——@type 的实参类型与表达式都收（类型在表达式位置也
@@ -1138,7 +1182,8 @@ static Node *parse_primary(P *p) {
          *   1.2.2 反射全收敛到 @type。） */
         bool value_first = n->name &&
             (!strcmp(n->name, "memcpy") || !strcmp(n->name, "memmove") ||
-             !strcmp(n->name, "memset") || !strcmp(n->name, "type"));
+             !strcmp(n->name, "memset") || !strcmp(n->name, "select") ||
+             !strcmp(n->name, "type"));
         expect(p, TOK_LPAREN);
         if (!at(p, TOK_RPAREN)) {
             int ai = 0;

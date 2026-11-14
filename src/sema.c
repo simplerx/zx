@@ -2929,6 +2929,15 @@ static void cmp_help(Type *t) {
     }
 }
 
+/* §162：比较结果的类型——同 lane 数的**有符号整数**向量，每个分量 0 或 -1。
+ * 宽度跟操作数走：f32x4 → i32x4，u8x16 → i8x16。clang 对 `a < b` 就是这么
+ * 定义的，比较指令落到的也正是掩码寄存器。 */
+static Type *vec_mask_ty(Type *v) {
+    int bits = (int)(ty_size(v->elem) * 8);
+    if (bits <= 0) bits = 8;
+    return ty_vec(ty_int(bits, true), v->len);
+}
+
 static Type *check_binary(Node *n, Type *expect) {
     TokKind op = (TokKind)n->op;
 
@@ -2951,14 +2960,22 @@ static Type *check_binary(Node *n, Type *expect) {
         switch (op) {
         case TOK_PLUS: case TOK_MINUS: case TOK_STAR:
             return type_of(n, a);
+        /* §162：比较得到**掩码向量**——每个分量 0 或 -1（全 1 位）。
+         * C 的 `a < b` 本来就是这个形状（同 lane 数的有符号整数向量），
+         * 也正是 SSE/AVX 掩码寄存器的形状。不展平成 bool 向量：C 没有
+         * `_Bool` 向量（clang 报 invalid vector element type），而且还要
+         * 多一趟压缩。掩码给 @select 用，也能直接当整数向量读分量。 */
+        case TOK_EQ: case TOK_NE: case TOK_LT: case TOK_LE:
+        case TOK_GT: case TOK_GE:
+            return type_of(n, vec_mask_ty(a));
         case TOK_SLASH:
             if (!ty_is_float(a->elem))
                 return BAD(n, "`/` is not defined on integer vectors (C vector types "
                               "have no integer division); convert the lanes to f32 first");
             return type_of(n, a);
         default:
-            return BAD(n, "this operator is not defined on vectors (only `+ - *` "
-                          "and `/` for float lanes)");
+            return BAD(n, "this operator is not defined on vectors (`+ - *`, "
+                          "`/` on float lanes, and the six comparisons)");
         }
     }
 
@@ -3264,6 +3281,25 @@ static Type *check_cast(Node *n) {
             n->b->ct = NULL;
         from = to;
     }
+    /* §162：向量字面量。parse 把 `@Vec(f32, 4){a, b, c, d}` 脱糖成
+     * "把一个元组当值转换成向量"，定型就是这里。个数必须正好是 N，
+     * 每个分量再按元素类型各自转换一次。 */
+    if (to->kind == TY_VEC && from->kind == TY_TUPLE) {
+        if ((uint64_t)from->nfields != to->len)
+            return BAD(n, "vector literal needs %llu values, found %d",
+                       (unsigned long long)to->len, from->nfields);
+        for (int i = 0; i < from->nfields; i++) {
+            Type *ft = from->fields[i].ty;
+            if (!castable(ft, to->elem))
+                return BAD(n, "vector literal value %d is `%s`, which cannot be cast to `%s`",
+                           i + 1, ty_str(ft), ty_str(to->elem));
+        }
+        return type_of(n, to);
+    }
+    /* 位置列表写在结构体名后面（`P{1, 2}`）：parse 按向量字面量收下了
+     * （见 parse_primary 的 `{` 分支），这里说清楚结构体要写字段名。 */
+    if (from->kind == TY_TUPLE && (to->kind == TY_STRUCT || to->kind == TY_UNION))
+        return BAD(n, "struct literal needs named fields: `%s`{ .a = 1, .b = 2 }", ty_str(to));
     if (!castable(from, to))
         return BAD(n, "cannot cast `%s` to `%s`", ty_str(from), ty_str(to));
     return type_of(n, to);
@@ -4671,6 +4707,34 @@ static Type *check_builtin(Node *n, Type *expect) {
     }
 
     if (!strcmp(nm, "trap")) return type_of(n, ty_noreturn());
+
+    if (!strcmp(nm, "select")) {
+        /* §162：@select(mask, a, b) —— 逐分量按掩码选，**按位**选而不是按值
+         * 判断：mask 的分量是真/假不影响，只有全 1 位（-1）和 0 两种合法
+         * 输入，正好是向量比较给出的东西。所以 NaN 分量也照搬位模式，
+         * 不会被 "a 是不是非零" 这种判断弄坏。
+         *
+         * 为什么必须是内建：语言里没有三元运算符（`if (c) {x} else {y}` 的
+         * 块臂不给值），C 的 `mask ? a : b` 又是扩展写法。一个三参原语
+         * 比给语言加一个只在向量上有意义的运算符便宜。 */
+        if (n->nitems != 3)
+            return BAD(n, "@select needs 3 arguments: @select(mask, a, b)");
+        Type *m = check_expr(n->items[0], NULL);
+        Type *x = check_expr(n->items[1], NULL);
+        Type *y = check_expr(n->items[2], NULL);
+        if (!m || m->kind != TY_VEC || !ty_is_int(m->elem))
+            return BAD(n, "@select: the first argument must be a mask vector "
+                          "(what a vector comparison returns), found `%s`", ty_str(m));
+        if (!x || x->kind != TY_VEC)
+            return BAD(n, "@select: the second argument must be a vector, found `%s`", ty_str(x));
+        if (!ty_eq(x, y))
+            return BAD(n, "@select: both value arguments must have the same type, "
+                          "found `%s` and `%s`", ty_str(x), ty_str(y));
+        if (m->len != x->len)
+            return BAD(n, "@select: the mask has %llu lanes but the values have %llu",
+                       (unsigned long long)m->len, (unsigned long long)x->len);
+        return type_of(n, x);
+    }
 
     if (!strcmp(nm, "link")) {
         /* @link("ws2_32") / @link("./vendor/foo.lib")：把外部库交给链接器。

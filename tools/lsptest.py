@@ -4594,6 +4594,11 @@ const Gen157 = fn (T: type, n: T) type {
 
 const main = fn () u8 {
     var gen = Gen157(i32, 10){ .mem = 10 };
+    // §162：向量的行内类型：字面量 / 比较掩码 / @select。
+    // 必须放在下面 `var p1 = gen.;` 之前：行内提示遍历到第一个语法错就停。
+    var va = @Vec(f32, 4){1.0, 2.0, 3.0, 4.0};
+    let vc = va < va;
+    let vd = @select(vc, va, va);
     let n = gen.mem;
     _ = n;
     std.println("{} {}", gen.get(), n);
@@ -4607,6 +4612,8 @@ const main = fn () u8 {
     var p7 = std.simd.;
     var p8 = @sh;
     var p9 = @Ve;
+    var p10 = @se;
+    var vb = va.;
     return 0;
 };
 """
@@ -4745,6 +4752,26 @@ check("completion.vec.partialAtIsBuiltin",
       and _g162_vec[0].get("kind") == 3
       and "@Vec(T, N)" in (_g162_vec[0].get("detail") or ""),
       str(_g162_vec)[:260])
+
+# §162 — 向量的行内类型与成员表。三件事各自守住一段推断：
+#   字面量 `@Vec(f32, 4){…}`、比较结果（掩码，lane 宽度跟操作数走）、
+#   `@select` 返回值的类型。`va.` 的成员在源文件里没有声明文本，全靠
+#   类型串 `@Vec(f32, 4)` 现算（`.len/.size` + 分量 `.0`..`.3`）。
+check("inlayHint.vec.literal", g157_hint("var va") == ": @Vec(f32, 4)", _g157_detail)
+check("inlayHint.vec.cmpMask", g157_hint("let vc") == ": @Vec(i32, 4)", _g157_detail)
+check("inlayHint.vec.select", g157_hint("let vd") == ": @Vec(f32, 4)", _g157_detail)
+_g162_members = {i["label"] for i in g157_comp("var vb = va.", 5216)}
+check("completion.vec.members",
+      {"len", "size", "0", "1", "2", "3"} <= _g162_members and "4" not in _g162_members,
+      str(sorted(_g162_members))[:240])
+
+# §162 — `@select` 也是内建，`@se` 要出它（掩码选择没有别的写法）。
+_g162_sel = g157_comp("var p10 = @se", 5217)
+check("completion.select.partialAtIsBuiltin",
+      len(_g162_sel) == 1
+      and _g162_sel[0].get("label") == "select"
+      and _g162_sel[0].get("kind") == 3,
+      str(_g162_sel)[:240])
 
 
 

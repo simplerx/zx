@@ -14,6 +14,10 @@
 // field: pos3=100 pos7=1.25 tag=7 bodysize=64
 // opt: some({2, 2, 2, 2})
 // lanes8: 8 sum=36
+// lit: 1 2 3 4
+// cmp: -1 -1 0 0
+// sel: 1 2 3 4
+// isel: 4 5 3 8 eq3=-1
 const std = @mod("std");
 
 const V4 = @Vec(f32, 4);
@@ -90,5 +94,25 @@ pub const main = fn () u8 {
     k = 0;
     while (k < w.len) { s = s + w[k]; k = k + 1; }
     std.println("lanes8: {} sum={}", w.len, s);
+
+    // 字面量：两种写法等价（`@Vec(T, N){…}` 与别名 `V4{…}`）。
+    var lv = V4{1.0, 2.0, 3.0, 4.0};
+    let rv = @Vec(f32, 4){4.0, 3.0, 2.0, 1.0};
+    std.println("lit: {} {} {} {}", lv.0, lv.1, lv.2, lv.3);
+
+    // 比较得到掩码向量：分量 0 或 -1，lane 宽度跟操作数走（f32x4 → i32x4）
+    let lt = lv < rv;
+    std.println("cmp: {} {} {} {}", lt.0, lt.1, lt.2, lt.3);
+
+    // @select 按掩码逐分量选（按位选，不看值）：两个方向就是 min / max
+    let lo = @select(lt, lv, rv);
+    let hi = @select(lt, rv, lv);
+    std.println("sel: {} {} {} {}", lo.0, lo.1, hi.2, hi.3);
+
+    // 整数向量也一样：>= 的掩码配上 select 就是逐分量 max
+    let ia = I4{1, 5, 3, 7};
+    let ib = I4{4, 2, 3, 8};
+    let im = @select(ia >= ib, ia, ib);
+    std.println("isel: {} {} {} {} eq3={}", im.0, im.1, im.2, im.3, (ia == ib).2);
     return 0;
 };

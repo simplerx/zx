@@ -1531,6 +1531,30 @@ static void ex_builtin(Buf *b, Node *n) {
         buf_free(&d); buf_free(&s); buf_free(&c);
         return;
     }
+    if (!strcmp(nm, "select")) {
+        /* §162：@select(mask, a, b) —— 逐分量按位选。
+         * 掩码分量只有 0 和 -1（全 1 位），所以 `(a & m) | (b & ~m)` 就是
+         * 完整语义：不看值、不碰 NaN、也不需要三元运算符（clang 不支持
+         * 向量条件 `m ? a : b`）。掩码先落临时量，实参只求值一次。 */
+        Type *mt = n->items[0]->ty;
+        Type *vt = n->ty;
+        Buf mb; buf_init(&mb);
+        ex(&mb, n->items[0]);
+        static int sn;
+        char tmp[64];
+        snprintf(tmp, sizeof tmp, "_sel%d", sn++);
+        line("%s %s = %s;", cty(mt), tmp, mb.data);
+        buf_free(&mb);
+        Buf xn; buf_init(&xn); ctype(&xn, mt);
+        Buf vb; buf_init(&vb); ctype(&vb, vt);
+        buf_printf(b, "((%s)(((%s)(", vb.data, xn.data);
+        ex(b, n->items[1]);
+        buf_printf(b, ") & %s) | ((%s)(", tmp, xn.data);
+        ex(b, n->items[2]);
+        buf_printf(b, ") & ~%s)))", tmp);
+        buf_free(&xn); buf_free(&vb);
+        return;
+    }
     if (!strcmp(nm, "compileError")) {
         buf_puts(b, "abort()");
         return;
@@ -5626,6 +5650,21 @@ static void ex(Buf *b, Node *n) {
     case NK_BIN: {
         const char *op = cop(n->op);
         if (!op) { ex(b, n->a); return; }
+        /* §162：向量比较。C 里 `a < b` 本来就给出逐分量的有符号整数向量
+         * （0 / -1），但目标类型是 sema 算出来的掩码类型，写显式 cast 比
+         * 让 C 的隐式转换去猜清楚。算术（+ - * /）不需要这层，直接逐分量。 */
+        if (n->ty && n->ty->kind == TY_VEC &&
+            (n->op == TOK_EQ || n->op == TOK_NE || n->op == TOK_LT ||
+             n->op == TOK_LE || n->op == TOK_GT || n->op == TOK_GE)) {
+            buf_puts(b, "((");
+            ctype(b, n->ty);
+            buf_puts(b, ")(");
+            ex(b, n->a);
+            buf_printf(b, " %s ", op);
+            ex(b, n->b);
+            buf_puts(b, "))");
+            return;
+        }
         /* 指针算术。C 里 `*[N]T` 是 `T(*)[N]`，直接 `+1` 会跳 N 个元素，
          * 所以先转成元素的 C 指针再加减——语义是"n 个元素"。 */
         if (n->ty && n->ty->kind == TY_PTR) {
@@ -5690,6 +5729,25 @@ static void ex(Buf *b, Node *n) {
                 buf_puts(b, ")(");
                 ex(b, n->b);
                 buf_puts(b, "))");
+                return;
+            }
+            if (vt->kind == TY_TUPLE) {
+                /* §162：向量字面量 `@Vec(f32, 4){a, b, c, d}`（parse 脱糖
+                 * 成"转换一个元组"）。落成复合字面量，每个分量显式写到元素
+                 * 类型——`{1, 2, 3, 4}` 里的 1 是 comptime_int，不写这层
+                 * 转换 C 会按 double 往上提。 */
+                buf_puts(b, "((");
+                ctype(b, to);
+                buf_puts(b, "){");
+                for (int i = 0; i < vt->nfields; i++) {
+                    if (i) buf_puts(b, ", ");
+                    buf_puts(b, "(");
+                    ctype(b, to->elem);
+                    buf_puts(b, ")(");
+                    ex(b, n->b->items[i]);
+                    buf_putc(b, ')');
+                }
+                buf_puts(b, "})");
                 return;
             }
             if (ty_is_num(vt)) {    /* 标量 → 向量：铺开 */

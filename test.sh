@@ -1438,6 +1438,32 @@ else
     diff "$TPFX.s162zx.out" "$TPFX.s162rel.out" | head -6; fail=1
 fi
 
+# §162 续：字面量 / 比较 / @select 三条都必须是"真的落到 C 的向量操作"，
+# 而不是被包成逐分量循环或整数运算：
+#   字面量 → 复合字面量 `(ZxVec_vf32_4){…}`（不是 4 次下标赋值）
+#   比较   → 一次向量比较后再 cast 成掩码类型（C 里本来就是 0 / -1）
+#   select → 掩码位运算 `& _selN | … & ~_selN`（没有三元、不重复求值掩码）
+if grep -qF '(ZxVec_vf32_4){(float)(1.0)' "$TPFX.s162.c" \
+   && grep -qF 'ZxVec_vi32_4 lt_' "$TPFX.s162.c" \
+   && grep -qF ') & _sel' "$TPFX.s162.c" \
+   && grep -qF '& ~_sel' "$TPFX.s162.c"; then
+    printf "  ok   §162 字面量 = 复合字面量、比较 = 掩码 cast、select = 掩码位运算\n"
+else
+    printf "  FAIL §162 字面量/比较/select 的 C 发射不是向量操作\n"
+    grep -n 'ZxVec_' "$TPFX.s162.c" | head -8; fail=1
+fi
+
+# 别名写法必须和直接写法等价：`V4{1, 2, 3, 4}` 与 `@Vec(f32, 4){…}` 都在
+# good/vec.zx 里，上面那份输出同时覆盖两种；这里只钉住 C 侧真的都是
+# 复合字面量（如果别名退化成结构体赋值，上面的 grep 就只剩一条）。
+# 计数下限 3 = splat 助手 1 条 + 两个字面量（别名 / 直接写法各一）。
+if [ "$(grep -cF '(ZxVec_vf32_4){' "$TPFX.s162.c")" -ge 3 ]; then
+    printf "  ok   §162 别名字面量 V4{…} 与 @Vec(f32, 4){…} 都是复合字面量\n"
+else
+    printf "  FAIL §162 别名字面量没有落成复合字面量\n"
+    grep -n '(ZxVec_vf32_4)' "$TPFX.s162.c" | head -6; fail=1
+fi
+
 # §161：std.simd 换成手写 SIMD（std/simd_impl.c 经 @shim 挂进来）。三条实现
 # （scalar / sse2 / avx2）必须逐位一致——用 ZX_SIMD_ISA 强制降档跑同一份二进制
 # 来证明，而不是"看起来对"；--emit-c 里要看得见 intrinsic，证明不再是靠 -O2

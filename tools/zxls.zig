@@ -321,13 +321,14 @@ const builtin_docs = [_]BuiltinDoc{
     .{ .name = "shim", .detail = "@shim(\"impl.c\") 把一份 C 源文件编进程序（自包含 TU，路径相对本文件）" },
     .{ .name = "trap", .detail = "@trap() 触发断点/中止" },
     .{ .name = "compileError", .detail = "@compileError(msg) 编译期报错" },
-    .{ .name = "Vec", .detail = "@Vec(T, N) 向量类型：N 个 T 的向量值（N 只能是 1/2/4/8/16/32/64），`(@Vec(T, N))x` 把标量铺满各分量" },
+    .{ .name = "Vec", .detail = "@Vec(T, N) 向量类型：N 个 T 的向量值（N 只能是 1/2/4/8/16/32/64），`(@Vec(T, N))x` 把标量铺满各分量，`@Vec(T, N){a, b, …}` 是字面量" },
+    .{ .name = "select", .detail = "@select(mask, a, b) 按掩码逐分量选（mask 来自向量比较，分量 0 / -1）" },
 };
 
 const toplevel_builtins = [_][]const u8{
     "type",   "memcpy",  "memmove", "memset",
-    "link",   "shim",   "trap",    "compileError",
-    "Vec",
+    "link",   "shim",    "trap",    "compileError",
+    "Vec",    "select",
 };
 
 // ---------------------------------------------------------------- utils
@@ -4638,6 +4639,57 @@ fn inferExprType(text: []const u8, doc: *const Document, expr: []const u8, depth
     const e = trimSl(expr);
     if (e.len == 0) return null;
     if (std.mem.startsWith(u8, e, "@mod(")) return null;
+    // §162 — @Vec 的三种形态都收敛成类型串 `@Vec(T, N)`：
+    //   @Vec(f32, 4)        类型值 → "type"
+    //   @Vec(f32, 4){…}     向量字面量
+    //   (@Vec(f32, 4))x     铺开（cast）
+    // 成员补全、`.N` 分量、`.len` 都认这个串。
+    if (std.mem.startsWith(u8, e, "(@Vec(")) {
+        if (vecHead(e, 1)) |h| {
+            const rest = trimSl(e[h.close + 1 ..]);
+            if (rest.len > 1 and rest[0] == ')') return h.ty;
+        }
+        return null;
+    }
+    if (std.mem.startsWith(u8, e, "@Vec(")) {
+        if (vecHead(e, 0)) |h| {
+            const rest = trimSl(e[h.close + 1 ..]);
+            if (rest.len == 0) return "type";
+            if (rest[0] == '{') return h.ty;
+        }
+        return null;
+    }
+    // §162 — @select(mask, a, b) 的类型就是 a 的类型（sema 要求 a、b 同型）。
+    if (std.mem.startsWith(u8, e, "@select(")) {
+        var i: usize = 8;
+        var d: usize = 1;
+        var seg: usize = 8;
+        var args = [_][]const u8{ "", "", "" };
+        var ai: usize = 0;
+        while (i < e.len) : (i += 1) {
+            const ch = e[i];
+            if (ch == '(' or ch == '[' or ch == '{') {
+                d += 1;
+                continue;
+            }
+            if (ch == ')' or ch == ']' or ch == '}') {
+                d -= 1;
+                if (d == 0) break;
+                continue;
+            }
+            if (ch == ',' and d == 1 and ai < 2) {
+                args[ai] = trimSl(e[seg..i]);
+                ai += 1;
+                seg = i + 1;
+            }
+        }
+        if (ai != 2 or i >= e.len) return null;
+        args[2] = trimSl(e[seg..i]);
+        const rest = trimSl(e[i + 1 ..]);
+        if (rest.len != 0) return null;
+        if (depth >= 4) return null;
+        return inferExprType(text, doc, args[1], depth + 1);
+    }
     // §157 — 泛型构造式实例的字段 / 方法：`var gen = Gen(i32,10){…};`
     // 之后 `gen.mem` 要出 `: i32`、`gen.get()` 要出方法返回类型。
     // 放在最前面：下面的「类型值接收者」链会把初值里的 `Gen(...)` 当成
@@ -4766,6 +4818,20 @@ fn inferExprType(text: []const u8, doc: *const Document, expr: []const u8, depth
             }
         }
         return null;
+    }
+    // §162 — 向量二元运算：`a + b` / `a < b`。左操作数推出来是向量就够
+    //（sema 已保证两边同型）。比较给掩码（同 lane 数的有符号整数向量），
+    // 算术给原类型。放在下面各分支之前，否则 `a < b` 会被当纯路径失败掉。
+    if (depth < 4) {
+        if (vecBinOp(e)) |vb| {
+            if (inferExprType(text, doc, vb.lhs, depth + 1)) |lt0| {
+                if (vecTyParse(trimSl(lt0))) |vt| {
+                    if (!vb.cmp) return trimSl(lt0);
+                    const bits = vecLaneBits(vt.elem) orelse return null;
+                    return std.fmt.allocPrint(gpa, "@Vec(i{d}, {d})", .{ bits, vt.n }) catch null;
+                }
+            }
+        }
     }
     // 取地址的数组字面量：`&.{ "a", "b" }` → `*[N]T`（元素类型按第一项推）。
     // 用户 2026-11-09 第 16 条：`const s = strs.0` 推不出类型。
@@ -5331,6 +5397,130 @@ fn allDigits(t: []const u8) bool {
 
 /// 拆一层容器拿元素类型：`[]T` → T、`*[N]T` / `[N]T` → T、`str` → u8。
 /// 用户 2026-11-09 第 16 条：`args[0][0]`、`strs.0` 的下标/位置访问要能一路拆到底。
+/// §162 — 从 e[at..] 是 `@Vec(` 时解析出规范化后的类型串 `@Vec(T, N)`
+/// 与那个右括号的下标。源码里 `,` 后可能没空格，统一重排。
+fn vecHead(e: []const u8, at: usize) ?struct { close: usize, ty: []const u8 } {
+    const s = "@Vec(";
+    if (e.len < at + s.len) return null;
+    if (!std.mem.eql(u8, e[at .. at + s.len], s)) return null;
+    var i = at + s.len;
+    var d: usize = 1;
+    while (i < e.len) : (i += 1) {
+        const ch = e[i];
+        if (ch == '(' or ch == '[' or ch == '{') d += 1;
+        if (ch == ')' or ch == ']' or ch == '}') {
+            d -= 1;
+            if (d == 0) break;
+        }
+    }
+    if (i >= e.len) return null;
+    const inner = trimSl(e[at + s.len .. i]);
+    var k: usize = 0;
+    var dd: usize = 0;
+    var cut: ?usize = null;
+    while (k < inner.len) : (k += 1) {
+        const ch = inner[k];
+        if (ch == '(' or ch == '[' or ch == '{') dd += 1;
+        if (ch == ')' or ch == ']' or ch == '}') dd -= 1;
+        if (ch == ',' and dd == 0) {
+            cut = k;
+            break;
+        }
+    }
+    const c = cut orelse return null;
+    const et = trimSl(inner[0..c]);
+    const nn = trimSl(inner[c + 1 ..]);
+    if (et.len == 0 or nn.len == 0) return null;
+    const ty = std.fmt.allocPrint(gpa, "@Vec({s}, {s})", .{ et, nn }) catch return null;
+    return .{ .close = i, .ty = ty };
+}
+
+const VecTy = struct { elem: []const u8, n: usize };
+
+/// 类型串是 `@Vec(T, N)` 时拆成元素类型与分量数。
+fn vecTyParse(ty0: []const u8) ?VecTy {
+    const t = trimSl(ty0);
+    if (!std.mem.startsWith(u8, t, "@Vec(")) return null;
+    const h = vecHead(t, 0) orelse return null;
+    const inner = trimSl(t[5..h.close]);
+    var dd: usize = 0;
+    for (inner, 0..) |ch, k| {
+        if (ch == '(' or ch == '[' or ch == '{') dd += 1;
+        if (ch == ')' or ch == ']' or ch == '}') dd -= 1;
+        if (ch == ',' and dd == 0) {
+            const et = trimSl(inner[0..k]);
+            const ns = trimSl(inner[k + 1 ..]);
+            const n = std.fmt.parseInt(usize, ns, 10) catch return null;
+            if (et.len == 0 or n == 0 or n > 64) return null;
+            return .{ .elem = et, .n = n };
+        }
+    }
+    return null;
+}
+
+/// `@Vec(f32, 4)` 的元素类型；不是向量返回 null。
+fn vecElemOf(ty0: []const u8) ?[]const u8 {
+    if (vecTyParse(ty0)) |v| return v.elem;
+    return null;
+}
+
+/// §162 — 向量二元运算的左操作数与"是不是比较"。按**两侧带空格**的
+/// 运算符扫（Zx 的书写惯例），取最靠右的那个：`a + b * c` 取 `*`，
+/// 左操作数仍是向量，够判断类型了。
+fn vecBinOp(e: []const u8) ?struct { lhs: []const u8, cmp: bool } {
+    var best: ?usize = null;
+    var bestcmp = false;
+    var d: usize = 0;
+    var i: usize = 0;
+    while (i < e.len) : (i += 1) {
+        const ch = e[i];
+        if (ch == '(' or ch == '[' or ch == '{') {
+            d += 1;
+            continue;
+        }
+        if (ch == ')' or ch == ']' or ch == '}') {
+            if (d > 0) d -= 1;
+            continue;
+        }
+        if (d != 0) continue;
+        if (i == 0 or e[i - 1] != ' ') continue;
+        var oplen: usize = 0;
+        var cmp = false;
+        switch (ch) {
+            '+', '-', '*', '/' => oplen = 1,
+            '<', '>' => {
+                cmp = true;
+                if (i + 2 < e.len and e[i + 1] == '=' and e[i + 2] == ' ') oplen = 2 else oplen = 1;
+            },
+            '=', '!' => {
+                if (i + 2 < e.len and e[i + 1] == '=' and e[i + 2] == ' ') {
+                    oplen = 2;
+                    cmp = true;
+                }
+            },
+            else => {},
+        }
+        if (oplen == 0) continue;
+        if (i + oplen >= e.len or e[i + oplen] != ' ') continue;
+        best = i;
+        bestcmp = cmp;
+    }
+    const p0 = best orelse return null;
+    const lhs = trimSl(e[0..p0]);
+    if (lhs.len == 0) return null;
+    return .{ .lhs = lhs, .cmp = bestcmp };
+}
+
+/// 元素类型 → 掩码向量的元素位宽（比较结果的 lane 宽度跟操作数一致）。
+fn vecLaneBits(elem: []const u8) ?usize {
+    const t = trimSl(elem);
+    if (std.mem.eql(u8, t, "bool")) return 8;
+    if (t.len < 2) return null;
+    const n = std.fmt.parseInt(usize, t[1..], 10) catch return null;
+    if (n != 8 and n != 16 and n != 32 and n != 64) return null;
+    return n;
+}
+
 fn elemTyOf(ty0: []const u8) ?[]const u8 {
     var t = trimSl(ty0);
     var g: usize = 0;
@@ -5338,6 +5528,7 @@ fn elemTyOf(ty0: []const u8) ?[]const u8 {
         t = trimSl(t[1..]);
     while (t.len > 0 and t[t.len - 1] == '?') t = trimSl(t[0 .. t.len - 1]);
     if (t.len == 0) return null;
+    if (vecTyParse(t)) |v| return v.elem;    // §162：v.N / v[i] 的元素
     if (std.mem.eql(u8, t, "str")) return "u8";
     if (std.mem.startsWith(u8, t, "[]")) return trimSl(t[2..]);
     if (t[0] == '*') {
@@ -5485,6 +5676,10 @@ fn isBuiltinTy(ty0: []const u8) bool {
 /// 内建类型的字段类型：`Type` + `fields` → "[]Field"。推断
 /// `const n = info.fieldCount` / `info.fields[0].offset` 用它。
 fn builtinFieldTy(ty0: []const u8, member: []const u8) ?[]const u8 {
+    // §162：向量的 .len / .size 都写在类型里，是 usize 常量。
+    if (vecElemOf(ty0) != null and
+        (std.mem.eql(u8, member, "len") or std.mem.eql(u8, member, "size")))
+        return "usize";
     const b = builtinTyDefOf(ty0) orelse return null;
     // KEEP — §118：f.ptr 的具体类型 *(f.ty) 只有编译器知道（逐字段不同），
     // 推断返回 null（不出 inlay/hover 类型）；表里的文案只给补全 detail。
@@ -5536,6 +5731,30 @@ fn addTupleMembers(list: *Json, seen: *std.StringHashMapUnmanaged(void),
         if (prefix.len > 0 and !std.mem.startsWith(u8, lab, prefix)) continue;
         addItem(list, seen, lab, 6, et, 0);
     }
+}
+
+/// §162 — 向量接收者的成员：`.len` / `.size` 与编译期分量 `.0`..`.N-1`。
+fn addVecMembers(list: *Json, seen: *std.StringHashMapUnmanaged(void),
+                 prefix: []const u8, vt: VecTy) void {
+    if (prefix.len == 0 or std.mem.startsWith(u8, "len", prefix))
+        addItem(list, seen, "len", 6, "usize", 0);
+    if (prefix.len == 0 or std.mem.startsWith(u8, "size", prefix))
+        addItem(list, seen, "size", 6, "usize", 0);
+    var i: usize = 0;
+    while (i < vt.n) : (i += 1) {
+        var nb: [8]u8 = undefined;
+        const lab = std.fmt.bufPrint(&nb, "{d}", .{i}) catch break;
+        if (prefix.len > 0 and !std.mem.startsWith(u8, lab, prefix)) continue;
+        addItem(list, seen, lab, 6, vt.elem, 0);
+    }
+}
+
+/// 接收者表达式 → 向量类型（元素 + 分量数）。不是向量返回 null。
+fn vecRecvTy(text: []const u8, doc: *const Document, expr0: []const u8) ?VecTy {
+    const expr = trimSl(expr0);
+    if (expr.len == 0) return null;
+    const t = inferExprType(text, doc, expr, 0) orelse return null;
+    return vecTyParse(trimSl(t));
 }
 
 /// 接收者表达式 → 元组类型串 `{A,B,…}`。先看初值/绑定推断，再看显式类型
@@ -6992,11 +7211,14 @@ fn inlayHintsAt(doc: *const Document, start_line: u32, end_line: u32) []const u8
         // struct{pos:struct{x:i32,y:i32},tag:str} 有 39+ 字符，用户要求
         // 嵌套匿名类型也要有行内提示；再长就放弃，防止提示糊屏）。
         if (ty.len == 0 or ty.len > 120) continue;
+        // §162：`@` 也要放行——向量类型写成 `@Vec(f32, 4)`，
+        // 不放行的话行内提示会被这里的白名单挡掉。
         var valid = true;
         for (ty) |ch| {
             if (!(isIdentChar(ch) or ch == '.' or ch == '*' or ch == '[' or
                 ch == ']' or ch == '?' or ch == '!' or ch == '{' or ch == '}' or
-                ch == ',' or ch == ' ' or ch == ':' or ch == '(' or ch == ')')) {
+                ch == ',' or ch == ' ' or ch == ':' or ch == '(' or ch == ')' or
+                ch == '@')) {
                 valid = false;
                 break;
             }
@@ -8562,6 +8784,13 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                 if (tupleRecvTy(text, doc, path, off)) |tt| {
                     handled = true;
                     addTupleMembers(&list, &seen, prefix, tt);
+                }
+            }
+            // §162 — 向量接收者：`.len` / `.size` / `.0`..`.N-1`。
+            if (!handled) {
+                if (vecRecvTy(text, doc, path)) |vt| {
+                    handled = true;
+                    addVecMembers(&list, &seen, prefix, vt);
                 }
             }
 

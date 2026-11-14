@@ -1349,6 +1349,35 @@ pub const Parser = struct {
                                 }
                                 try self.expect(lex.Kind.rbrace);
                                 base = n;
+                            } else if (base.kind == NK.id) {
+                                // §162：向量字面量写在别名上
+                                // （`const V4 = @Vec(f32, 4); V4{1, 2}`）。`{` 后面不是
+                                // `.name =` 就是位置列表，按"把 N 个值当成一个向量"的
+                                // 转换收下。只认裸别名，与 C 前端同步。
+                                var bn: []const u8 = base.name orelse "";
+                                if (bn.len > 0) {
+                                    handled = true;
+                                    let lb = self.advance();
+                                    let tup = self.new_at(NK.tuple, lb);
+                                    var go2 = true;
+                                    while (go2) {
+                                        let el = try self.parse_expr();
+                                        self.push_item(tup, el);
+                                        if (!self.accept(lex.Kind.comma)) {
+                                            go2 = false;
+                                        }
+                                        if (self.at(lex.Kind.rbrace)) { go2 = false; }  // 尾逗号
+                                    }
+                                    try self.expect(lex.Kind.rbrace);
+                                    let tv = self.new(NK.t_ident);
+                                    tv.line = base.line;
+                                    tv.col = base.col;
+                                    tv.name = bn;
+                                    let cv = self.new_at(NK.cast, lb);
+                                    cv.a = tv;
+                                    cv.b = tup;
+                                    base = cv;
+                                }
                             }
                         }
                         if (!handled) {
@@ -1654,6 +1683,27 @@ pub const Parser = struct {
                 try self.expect(lex.Kind.comma);
                 n.b = try self.parse_type_or_const();
                 try self.expect(lex.Kind.rparen);
+                // §162：`@Vec(f32, 4){1, 2, 3, 4}` 是向量字面量，脱糖成
+                // "把 N 个值当成一个向量"的转换。C 前端同样这一步，两边的
+                // dump 才对得上。
+                if (self.at(lex.Kind.lbrace)) {
+                    let lb = self.advance();
+                    let tup = self.new_at(NK.tuple, lb);
+                    if (!self.at(lex.Kind.rbrace)) {
+                        var go = true;
+                        while (go) {
+                            let e = try self.parse_expr();
+                            self.push_item(tup, e);
+                            if (!self.accept(lex.Kind.comma)) { go = false; }
+                            if (self.at(lex.Kind.rbrace)) { go = false; }  // 尾逗号
+                        }
+                    }
+                    try self.expect(lex.Kind.rbrace);
+                    let c = self.new_at(NK.cast, lb);
+                    c.a = n;
+                    c.b = tup;
+                    return c;
+                }
                 return n;
             }
             var value_first = false;
@@ -1661,6 +1711,9 @@ pub const Parser = struct {
             if (std.str.eq(nm, "memcpy")) { value_first = true; }
             if (std.str.eq(nm, "memmove")) { value_first = true; }
             if (std.str.eq(nm, "memset")) { value_first = true; }
+            // §162：@select(mask, a, b) 三个实参都是表达式（掩码本身就是
+            // 一次向量比较的结果），第一个不能按类型读。
+            if (std.str.eq(nm, "select")) { value_first = true; }
             try self.expect(lex.Kind.lparen);
             if (!self.at(lex.Kind.rparen)) {
                 var ai: usize = 0;

@@ -1,0 +1,7 @@
+// expect: vector literal needs 4 values, found 3
+// 分量个数就是类型的一部分：`@Vec(f32, 4)` 只有 4 个分量，少写一个是笔误，
+// 别指望编译器补 0（那会让"忘了写"和"故意写 0"看起来一样）。
+const main = fn () u8 {
+    let a = @Vec(f32, 4){1.0, 2.0, 3.0};
+    return 0;
+};

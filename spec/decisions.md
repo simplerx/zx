@@ -6560,11 +6560,113 @@ N 份"本来就是一个转换。于是 `castable` 放行 `数值 → @Vec`，�
   结构体是 64 字节 = 对齐 32，两边布局必须同一个数）；dev / release 输出一致。
 - `tools/lsptest.py`：`@Ve` 补全要出 `Vec`（kind 3，detail 含 `@Vec(T, N)`）。
 
-### 没做的
+### 没做的（§163 已补上前三条）
 
-- LSP 的**类型推断**层没加 `@Vec`：`inferExprType` 之类仍在文本层，hover /
-  inlay 遇到向量值会退回"未推断"，但不会报假诊断（诊断走 `zxc --check`）。
-  只补了 `@` 补全表（`builtin_docs` / `toplevel_builtins`）。
-- 没有隐式 splat、没有向量比较/位运算/`select`、没有向量字面量
-  （`@Vec(f32,4){1,2,3,4}` 这种语法没加：`(@Vec(f32,4))x` + 逐分量赋值够用，
-  多一种字面量语法就多一处 LSP 与自举要跟）。
+- ~~LSP 的类型推断层~~、~~向量字面量~~、~~向量比较 / `select`~~：见 §163。
+- 没有隐式 splat。
+- 位运算 / `%` / 移位 / `&&` `||` 仍不支持（掩码不是 bool）。
+
+---
+
+## §163 `@Vec` 续：字面量 / 比较 / `@select` / LSP（2026-11-14）
+
+用户：「一起做」——把 §162 收尾时列的三个「没做的」一次补齐。
+
+### 字面量：语法糖，不新增 NodeKind
+
+`@Vec(f32, 4){1, 2, 3, 4}` 在 parse 时就脱糖成 **cast 一个元组**
+（`NK_CAST{ a = NK_VEC_TYPE, b = NK_TUPLE }`），sema 的 `check_cast` 里多一条
+「元组 → 向量」的分量核对（个数 + 逐分量可转换）。
+
+为什么不加 `NK_VEC_LIT`：那要动 `NodeKind`（末尾追加）、`astload.c` 的上界、
+`bootstrap/parse.zx` 的 `NK` 枚举与 `kname`（自举对拍要求 dump 名一致）——
+四处同步，只为表达「逐分量定型」这一件事，而它本来就是一个转换。
+`(@Vec(f32, 4)){…}` 因此也免费可用。
+
+**别名写法也支持**：`const V4 = @Vec(f32, 4); V4{1, 2, 3, 4}`。parse 的
+「类型化字面量」分支（`Type{ … }`，原本只认 `.name =` 形态）里补一条：`{` 后面
+不是字段名、`base` 又是裸 `NK_IDENT` 时，按位置列表收下并包成 cast
+（`a` 换成 `NK_TYPE_IDENT`——`resolve_type` 只认那个）。写错结构体的人
+（`P{1, 2}`）会在 sema 收到专门提示 `struct literal needs named fields`，
+不是一句含糊的 `cannot cast`。
+
+### 比较给**掩码**，不给 bool 向量
+
+六个比较（`== != < <= > >=`）两边是同一个向量类型时，结果是**同 lane 数的有符号
+整数向量**，每个分量 0 或 -1。
+
+- 这不是图省事：它就是 C 里 `a < b` 的定义，也是 SSE/AVX 掩码寄存器的形状，
+  一条比较指令直接用。
+- **不能做成 bool 向量**：clang 拒绝 `_Bool` 的 `vector_size` 类型
+  （`error: invalid vector element type 'bool'`，实测过）；就算能，也得先拿
+  整数掩码再压一遍（每分量一次 `!= 0`）。
+- 掩码宽度 = 操作数宽度：`@Vec(f32, 4) < …` → `@Vec(i32, 4)`，`@Vec(u8, 16)` →
+  `@Vec(i8, 16)`。sema 里就一条 `vec_mask_ty()`（`ty_size(elem) * 8`）。
+- 掩码可以 `.N` / `[i]` 读，也可以当整数向量传出去——不需要额外的「掩码类型」。
+
+### `@select` 是第 10 个值内建
+
+`@select(mask, a, b)`：逐分量按掩码选。必须是内建，因为语言里**没有三元运算符**
+（`if (c) {x} else {y}` 的块臂不给值），而 clang **不支持向量条件**
+（`m ? a : b` 报 `used type 'vi4' where arithmetic or pointer type is required`，
+也实测过）。
+
+于是落到位运算：`(a & m) | (b & ~m)`。掩码只有 0 和 -1 两种分量，所以这等价于
+逐分量选择，而且**按位选**——不看值、不碰 NaN（`@select(x == x, x, y)` 对 NaN
+分量取 y，不会因为「NaN 非零」走错分支）。
+
+生成的 C 里掩码先落临时量（`_selN`），实参只求值一次；直接内联会让 `m`
+出现两次。形态：
+
+```c
+ZxVec_vi32_4 _sel0 = (a < b);
+ZxVec_vf32_4 lo = ((ZxVec_vf32_4)(((ZxVec_vi32_4)(a) & _sel0) | ((ZxVec_vi32_4)(b) & ~_sel0)));
+```
+
+`@select` 进 `check_builtin`（第 10 个），连带改：`docs/errors.md` 的计数、
+`docs/reference.md` §10 表、`tools/zxls.zig` 的 `builtin_docs` /
+`toplevel_builtins`、parse 的 `value_first`（三个实参都是表达式，第一个不能
+按类型读——`@select(m, …)` 里的 `m` 后面跟 `,`，会被 `parse_type_or_const`
+当成类型）。
+
+### LSP 类型推断（§162 留的口子）
+
+四个助手 + 三处接线：
+
+- `vecHead(e, at)`：解析 `@Vec(…)`，返回规范化后的类型串与 `)` 位置。
+- `vecTyParse` / `vecElemOf`：类型串 → `{elem, n}`，供 `elemTyOf`（`.N` / `[i]`
+  的元素）、`builtinFieldTy`（`.len` / `.size` → `usize`）复用。
+- `vecBinOp(e)`：扫**两侧带空格**的运算符（Zx 书写惯例），取最靠右的一个，
+  用来推 `a + b`（原类型）与 `a < b`（掩码类型）。
+- `inferExprType` 开头三个分支：`@Vec(…)`（类型值 → `type`、后跟 `{` →
+  向量类型）、`(@Vec(…))x` → 向量类型、`@select(m, a, b)` → 取第二个实参的类型。
+- 补全：`addVecMembers`（`.len` / `.size` / `.0`..`.N-1`），接在
+  `addTupleMembers` 之后。
+
+**踩到的坑**：inlay hint 对推断出的类型串有一层白名单字符检查
+（`isIdentChar` 与 `. * [ ] ? ! { } , 空格 : ( )`），`@Vec(f32, 4)` 里的 `@`
+不在表里 → 三条 inlay 断言全挂，而补全和 hover 都正常。把 `@` 加进白名单。
+
+另一个坑：`GEN157` 里第一条语法错误（`var p1 = gen.;`）之后不再产生任何
+行内提示——**inlay 遍历到第一个解析失败就停**。向量那几行必须排在它前面。
+
+### 守门
+
+- `tests/good/vec.zx` 追加：别名/直接两种字面量、`a < b` 的掩码值、
+  `@select` 求 min/max、整数向量的 `>=` + select。
+- `tests/bad/` 新增五条：`vec-lit-count`（个数不对）、`vec-lit-elem`（分量转
+  不过去）、`vec-select-mask`（首参不是掩码）、`vec-select-lanes`（lane 数不
+  一致）、`vec-structlit`（结构体写成位置列表）。
+- `tests/bad/vec-op.zx` 改成 `%`（原来测的是 `a < a`，比较已经支持了）。
+- `test.sh §162` 追加两条：生成 C 里字面量是复合字面量、比较是掩码 cast、
+  select 是 `& _selN` / `& ~_selN` 的位运算；别名与直接写法都落成复合字面量
+  （`grep -c` 下限 3 = splat 助手 + 两个字面量）。
+- `tools/lsptest.py`：`inlayHint.vec.{literal,cmpMask,select}`、
+  `completion.vec.members`、`completion.select.partialAtIsBuiltin`。
+
+### 仍然没做
+
+- 位运算 / `%` / 移位 / `&&` `||`：没有对应的向量语义，不半支持。
+- 归约内建（`@reduce`）：现在要读分量或自己写循环；`std.simd` 的
+  `dotF32` / `sumF32` 走切片，不是向量。
+- 掩码的「整体判真」（`any` / `all`）：同上，先不加。

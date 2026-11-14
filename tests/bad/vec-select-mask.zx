@@ -1,0 +1,8 @@
+// expect: the first argument must be a mask vector
+// @select 的掩码只能是向量比较的产物（分量 0 / -1）。bool 或裸整数都不行：
+// "按值判断真假"和"按位选"在这里是两件事，混着来会让 NaN 分量行为不定。
+const main = fn () u8 {
+    let a = @Vec(f32, 4){1.0, 2.0, 3.0, 4.0};
+    let b = @select(true, a, a);
+    return 0;
+};

@@ -1,0 +1,7 @@
+// expect: vector literal value 2 is
+// 每个分量按元素类型各自转换一次；转不过去的（这里是字符串 → f32）
+// 在写错的那一项上报，不等到生成 C。
+const main = fn () u8 {
+    let a = @Vec(f32, 4){1.0, "x", 3.0, 4.0};
+    return 0;
+};

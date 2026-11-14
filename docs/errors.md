@@ -106,9 +106,12 @@ const r = blk: {
 1.2.0 把内建砍到九个；1.2.1 反射收敛成一个 `@type(x)`（x 可以是类型
 也可以是表达式），1.2.2 把 `@sizeOf` / `@alignOf` / `@typeName` 也并了进去——
 描述符 `Type{.name, .size, .align, .ty, .fieldCount,
-.fields[i]{.name, .ty, .offset}}` 全是编译期值。现在共九个：
+.fields[i]{.name, .ty, .offset}}` 全是编译期值。现在共十个：
 
-`@mod` / `@type` / `@shim` / `@memcpy` / `@memmove` / `@memset` / `@link` / `@compileError` / `@trap`（共九个）。
+`@mod` / `@type` / `@shim` / `@memcpy` / `@memmove` / `@memset` / `@link` / `@compileError` / `@trap` / `@select`（共十个）。
+
+另有**类型内建** `@Vec(T, N)`：只写在类型位置（或当类型值），没有运行期存在，
+不占上面这十个的位置。
 
 | 老写法 | 换成 |
 | --- | --- |
