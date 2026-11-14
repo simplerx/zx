@@ -19,7 +19,7 @@ void zx_add_link_lib(const char *name) {
     g_link_libs[g_nlink_libs++] = strdup(name);
 }
 
-/* ---------- C shim（@cShim） ----------
+/* ---------- C shim（@shim） ----------
  * 与 @link 同一套路：语义阶段填表，driver 消费。去重按完整路径——
  * std/simd.zx 与用户自己的模块各登记一次同一份 .c 只编一遍。 */
 static const char *g_c_shims[ZXC_MAX_C_SHIMS];
@@ -58,7 +58,7 @@ static const DiagRule g_rules[] = {
     { "was removed:",                     "E0211" },
 
     /* C shim 打不开（编译不过另走 B1004）：和"模块解析失败"是同类，
-     * 但 help 完全不同——一个是 @mod 路径，一个是 @cShim 路径。 */
+     * 但 help 完全不同——一个是 @mod 路径，一个是 @shim 路径。 */
     { "C shim",                           "E0602" },
 
     /* 模块 */

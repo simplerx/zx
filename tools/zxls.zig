@@ -5,7 +5,7 @@
 //     解析 stderr 的 `path:line:col: error[CODE]: msg` 行 → publishDiagnostics。
 //     直接复用自举前端（zxfe），诊断与编译器 100% 同源。
 //   - 补全：
-//       `@` 前缀      → 顶层内建（@type/@memcpy/@cShim/@trap/… 共九个）
+//       `@` 前缀      → 顶层内建（@type/@memcpy/@shim/@trap/… 共九个）
 //       `X.`          → std 内建命名空间 / module 绑定的顶层 pub 声明 /
 //                       容器（struct/union/enum）的成员与方法（含实例推断：
 //                       `let v = Obj.init(...)` 后 `v.` 出 Obj 的成员）
@@ -169,7 +169,7 @@ const snippets = [_]Snip{
     .{ .label = "let", .body = "let ${1:name} = $0;", .detail = "代码片段 let" },
     .{ .label = "var", .body = "var ${1:name} = $0;", .detail = "代码片段 var" },
     .{ .label = "mod", .body = "@mod(\"${1:std}\")", .detail = "代码片段 @mod" },
-    .{ .label = "cshim", .body = "@cShim(\"${1:impl.c}\");", .detail = "代码片段 @cShim" },
+    .{ .label = "shim", .body = "@shim(\"${1:impl.c}\");", .detail = "代码片段 @shim" },
     .{ .label = "defer", .body = "defer $0;", .detail = "代码片段 defer" },
     .{ .label = "errdefer", .body = "errdefer $0;", .detail = "代码片段 errdefer" },
     .{ .label = "try", .body = "try $0", .detail = "代码片段 try" },
@@ -318,14 +318,14 @@ const builtin_docs = [_]BuiltinDoc{
     .{ .name = "memmove", .detail = "@memmove(dest, src, count) 内存移动" },
     .{ .name = "memset", .detail = "@memset(dest, fill, count) 内存填充" },
     .{ .name = "link", .detail = "@link(\"lib\") 链接外部库" },
-    .{ .name = "cShim", .detail = "@cShim(\"impl.c\") 把一份 C 源文件编进程序（自包含 TU，路径相对本文件）" },
+    .{ .name = "shim", .detail = "@shim(\"impl.c\") 把一份 C 源文件编进程序（自包含 TU，路径相对本文件）" },
     .{ .name = "trap", .detail = "@trap() 触发断点/中止" },
     .{ .name = "compileError", .detail = "@compileError(msg) 编译期报错" },
 };
 
 const toplevel_builtins = [_][]const u8{
     "type",   "memcpy",  "memmove", "memset",
-    "link",   "cShim",   "trap",    "compileError",
+    "link",   "shim",   "trap",    "compileError",
 };
 
 // ---------------------------------------------------------------- utils
@@ -7949,7 +7949,7 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
     } else if (ps > 0 and text[ps - 1] == '@') {
         // `@cSh`：内建名输到一半。identBefore 不吃 '@'，前缀里自然没有它，
         // 上面两条都不命中——旧行为是掉进全局标识符分支，用户看到一条同名
-        // 变量而不是内建列表（§160 打 @cShim 时必现）。判法与下面 dotted
+        // 变量而不是内建列表（§160 打 @shim 时必现）。判法与下面 dotted
         // 同口径：看前缀起点前面那个字符。
         is_at_ctx = true;
     }

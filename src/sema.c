@@ -4612,8 +4612,8 @@ static Type *check_builtin(Node *n, Type *expect) {
         return type_of(n, ty_void());
     }
 
-    if (!strcmp(nm, "cShim")) {
-        /* @cShim("impl.c")：把一份 C 源文件编进程序。
+    if (!strcmp(nm, "shim")) {
+        /* @shim("impl.c")：把一份 C 源文件编进程序。
          * 它既不是 include 也不是新类型——就是一份**自包含的 C 翻译单元**，
          * 用与 zx 相同的 cc/flags 编成 .o 后一起链接（见 build_program）。
          * 路径相对**声明它的那份 .zx** 解析，库才能把自己的 shim 放在同目录
@@ -4624,17 +4624,17 @@ static Type *check_builtin(Node *n, Type *expect) {
          * TU 只依赖它自己 include 的 C 头，边界干净，报错也直接指到那份
          * .c 的真实行号（B1004），不需要行列映射。 */
         if (n->nitems < 1)
-            return BAD(n, "@cShim needs a file name: @cShim(\"impl.c\")");
+            return BAD(n, "@shim needs a file name: @shim(\"impl.c\")");
         Value *sv = arg_ct(n->items[0], NULL);
         if (!sv || sv->kind != V_STR)
-            return BAD(n, "@cShim: the file name must be a string literal");
+            return BAD(n, "@shim: the file name must be a string literal");
         char *dir  = path_dup_dir(g_srcpath);
         char *full = path_join(dir, sv->sval);
         free(dir);
         FILE *probe = fopen(full, "rb");
         if (!probe) {
             err_at(n->line, n->col,
-                   "@cShim: cannot open C shim \"%s\" (resolved to %s)",
+                   "@shim: cannot open C shim \"%s\" (resolved to %s)",
                    sv->sval, full);
             free(full);
             return ty_invalid();
@@ -4643,7 +4643,7 @@ static Type *check_builtin(Node *n, Type *expect) {
         int added = zx_add_c_shim(full);
         free(full);
         if (!added)
-            return BAD(n, "@cShim: too many C shims (limit %d)", ZXC_MAX_C_SHIMS);
+            return BAD(n, "@shim: too many C shims (limit %d)", ZXC_MAX_C_SHIMS);
         return type_of(n, ty_void());
     }
 
@@ -4698,6 +4698,8 @@ static Type *check_builtin(Node *n, Type *expect) {
             { "line",     "source-location builtins are gone" },
             { "col",      "source-location builtins are gone" },
             { "fnName",   "source-location builtins are gone" },
+            /* §160 落地当天就改名：@cShim 太长，通道本身没有变化。 */
+            { "cShim",    "renamed to @shim -- same channel, shorter name" },
         };
         for (size_t i = 0; i < sizeof gone / sizeof gone[0]; i++)
             if (!strcmp(nm, gone[i].name))

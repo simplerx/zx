@@ -71,9 +71,9 @@ extern char *g_link_libs[ZXC_MAX_LINK_LIBS];
 extern int   g_nlink_libs;
 void zx_add_link_lib(const char *name);
 
-/* ---------- C shim（@cShim） ----------
+/* ---------- C shim（@shim） ----------
  *
- * `@cShim("impl.c")` 把一份 C 源文件编进程序：语义阶段登记路径（按解析后
+ * `@shim("impl.c")` 把一份 C 源文件编进程序：语义阶段登记路径（按解析后
  * 的完整路径去重），build_program 用同一套 cc/flags 把它编成 .o 一起链接。
  * 记的是**用户那份文件的路径**——不复制、不改名、不生成包装文件，C 编译器
  * 报错时给的行号就是真实行号，不需要任何映射表。 */

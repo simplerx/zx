@@ -1400,28 +1400,28 @@ else
     head -12 "$TPFX.s159c.log"; fail=1
 fi
 
-# §160：C shim 通道（@cShim）。真实构建里 shim 是**独立 TU**（用真实路径编，
-# 报错指回那份 .c 的行号）；--emit-c 要自洽就把它贴在末尾；两处 @cShim 指向
+# §160：C shim 通道（@shim）。真实构建里 shim 是**独立 TU**（用真实路径编，
+# 报错指回那份 .c 的行号）；--emit-c 要自洽就把它贴在末尾；两处 @shim 指向
 # 同一份 .c 只编一遍。shim 编不过报 B1004（不是"编译器 bug"），缺文件报 E0602。
-$ZXC tests/good/cshim.zx --emit-c > "$TPFX.s160.c" 2>/dev/null
-n160=$(grep -cF 'C shim: tests/good/cshim_impl.c' "$TPFX.s160.c")
+$ZXC tests/good/shim.zx --emit-c > "$TPFX.s160.c" 2>/dev/null
+n160=$(grep -cF 'C shim: tests/good/shim_impl.c' "$TPFX.s160.c")
 if [ "$n160" = "1" ] && grep -qF 'zx_shim_vec_ok(void)' "$TPFX.s160.c"; then
-    printf "  ok   §160 @cShim 按路径去重并贴在 --emit-c 末尾\n"
+    printf "  ok   §160 @shim 按路径去重并贴在 --emit-c 末尾\n"
 else
     printf "  FAIL §160 --emit-c 里 shim 出现 %s 次\n" "$n160"; fail=1
 fi
 
-if $ZXC tests/good/cshim.zx --check --fe=c > "$TPFX.s160c.log" 2>&1; then
-    printf "  ok   §160 cshim 在 C 前端通过\n"
+if $ZXC tests/good/shim.zx --check --fe=c > "$TPFX.s160c.log" 2>&1; then
+    printf "  ok   §160 shim 在 C 前端通过\n"
 else
-    printf "  FAIL §160 cshim 在 C 前端失败\n"
+    printf "  FAIL §160 shim 在 C 前端失败\n"
     head -12 "$TPFX.s160c.log"; fail=1
 fi
 
 # 坏 shim：报 B1004，行列来自那份 .c（第 2 行），并且不把责任推给编译器
 mkdir -p "$TPFX.shim" 2>/dev/null || true
 cat > "$TPFX.shim/bad.zx" <<'ZXEOF'
-@cShim("bad.c");
+@shim("bad.c");
 
 pub const main = fn () u8 { return 0; };
 ZXEOF
@@ -1442,7 +1442,7 @@ fi
 
 # 缺文件：E0602（自己一个码，不复用 @mod 的 E0601，help 不是同一件事）
 cat > "$TPFX.shim/miss.zx" <<'ZXEOF'
-@cShim("nope.c");
+@shim("nope.c");
 
 pub const main = fn () u8 { return 0; };
 ZXEOF

@@ -12,7 +12,7 @@
 
 ## 语言事实（写文档/示例前必看）
 - **无 trait / interface / 重载 / 子类型**；函数指针可作 struct 字段，调用点全靠 `(T)bits` 强转。
-- 内建八个：`@mod @type @memcpy @memmove @memset @link @compileError @trap`（§144 起 `module` 收成 `@mod`）。`@type(x)` 是唯一反射；旧拼写报 **E0211**。
+- 内建九个：`@mod @type @shim @memcpy @memmove @memset @link @compileError @trap`（§144 起 `module` 收成 `@mod`）。`@type(x)` 是唯一反射；旧拼写报 **E0211**。
 - **转换只有 `(T)val`**；无 GC/析构/RAII/生命周期/异常（只有 `!T`）/协程/宏/运算符重载/`private`/默认参数/变参。
 - 函数定义只有 `const F = fn(…) ret {…};` —— **没有 `pub fn`**，pub 是前缀修饰符。
 - **容器方法不能泛型（E0701）**；容器字段/方法/静态成员默认私有，`pub` 才对外，跨文件访问私有报 **E0404**；enum / union(enum) 变体恒公开。锚点 `sema.c member_hidden/deny_member/stamp_mod`；自举要先重建 zxfe。
@@ -71,10 +71,10 @@
 - 语义契约：按 `min(各 len)` 处理并**返回个数**；逐元素内核允许 `dst` 与输入同块（原地安全）；归约用 4 条累加链（不改浮点顺序、不需 fast-math）；`normalize` 零向量原样返回；`length` 走私有 `extern sqrtf(f32) f32`（`sqrtf` 不在 libc_declared，生成 C 有 `extern float sqrtf(float x);`）。
 - 守门 `tests/good/std-simd.zx`（尾块/别名/不等长/两类型）、`test.sh §159`（release 输出与 dev 一致 + sqrtf 原型 + 单文件检查 + C 前端）、`lsptest` 两条补全断言。实测 4M f32 add×20：dev 118ms/8.4GB/s，release 31ms/约31GB/s。
 
-## §160 C shim 通道 @cShim（2026-11-13）
-- **内建 9 个**：`@mod @type @cShim @memcpy @memmove @memset @link @compileError @trap`。加内建要动：`src/sema.c check_builtin` + 可能新错误码三张表（`zxc.c g_rules` / `errors.c` / `docs/errors.md` 含锚点 + reference §15 计数）+ `tools/zxls.zig` 的 `builtin_docs` / `toplevel_builtins` / snippets + 文档四处名单（reference §10、manual §8、errors.md E0211 段、spec/zx-spec.md）。**词法/语法不用改**：`@name(...)` 是通用的，`bootstrap/` 也不用动。
-- `@cShim("impl.c")`：那份 `.c` 是**自包含 C TU**，zxc 用同一套 cc/flags 编成独立 `.o` 一起链接，**直接编真实路径**（不复制不改名）⇒ C 报错行号即真实行号，报 **B1004**；文件打不开报 **E0602**。路径相对 `g_srcpath` 目录（库可自带实现）；按完整路径去重；`--emit-c` 把 shim 文本贴末尾（自洽单 TU）。shim 看不见 zx 生成的任何东西（只 include 自己的 C 头）。
-- `shim 编不过`时构建总结走「N error(s) in the C shim(s)」，**不许**说 "compiler bug"。
-- **`run_cc_jobs()` 串行分支必须写回 `jobs[i].rc`**：诊断翻译 `report_cc_log` 只认 rc，漏写时 njobs==1 的失败只剩一句 "build failed in the C backend"（§160 第一轮就是这么被吞的）。
-- zxls `@` 补全：`identBefore` 不吃 `'@'`，所以 `@cSh` 这种半截内建名要靠 `ps-1 == '@'` 判（与 dotted 同口径），否则掉进全局标识符分支、只弹一条同名变量。改 `tools/zxls.zig` 后必须先 `mv bin/zxls.exe …` 绕 Zed 锁再重建，用户重启 Zed 生效。
-- 守门：`tests/good/cshim.zx` + `tests/good/cshim_impl.c`、`test.sh §160` 四条、`lsptest` 的 `completion.cShim.partialAtIsBuiltin`。
+## §160 C shim 通道 `@shim`（2026-11-13 落地，11-14 改名）
+- **内建 9 个**：`@mod @type @shim @memcpy @memmove @memset @link @compileError @trap`。加内建要动：`src/sema.c check_builtin` + 可能新错误码三张表（`zxc.c g_rules` / `errors.c` / `docs/errors.md` 含锚点 + reference §15 计数）+ `tools/zxls.zig` 的 `builtin_docs` / `toplevel_builtins` / snippets + 四处名单（reference §10、manual §8、errors.md E0211 段、spec/zx-spec.md）。**词法/语法/`bootstrap/` 都不用动**：`@name(...)` 是通用的。
+- `@shim("impl.c")`：那份 `.c` 是**自包含 C TU**，同一套 cc/flags 编成独立 `.o` 一起链接，**直接编真实路径**（不复制不改名）⇒ 报错行号即真实行号（**B1004**）；打不开报 **E0602**。路径相对 `g_srcpath`（库可自带实现）；按完整路径去重；`--emit-c` 贴末尾。shim 看不见 zx 的任何东西。
+- **旧名 `@cShim` 报 E0211** 并提示 `renamed to @shim`（在 `check_builtin` 的 `gone[]` 表里）——改名不静默失效。
+- 构建总结：shim 编不过是「N error(s) in the C shim(s)」，**不许**说 "compiler bug"；**`run_cc_jobs()` 串行分支必须写回 `jobs[i].rc`**（`report_cc_log` 只认 rc，njobs==1 时会吞掉具体错误）。
+- zxls `@` 补全：`identBefore` 不吃 `'@'`，半截内建名（`@sh`）要靠 `ps-1 == '@'` 判，否则掉进全局标识符分支。
+- 守门：`tests/good/shim.zx` + `shim_impl.c`、`tests/multi/shim/`、`test.sh §160` 四条、`lsptest` 的 `completion.shim.partialAtIsBuiltin`。

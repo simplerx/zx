@@ -116,8 +116,8 @@ static const ErrDoc g_errs[] = {
     { "E0601", "module resolution failed",
       "check the path/spelling of `@mod(\"name\")`; break circular deps; `std` must resolve next to the compiler" },
 
-    { "E0602", "a @cShim C file cannot be opened",
-      "the path is resolved relative to the .zx that writes @cShim(...); keep the .c next to that file" },
+    { "E0602", "a @shim C file cannot be opened",
+      "the path is resolved relative to the .zx that writes @shim(...); keep the .c next to that file" },
 
     /* ---- 泛型 ---- */
     { "E0701", "generic instantiation failed",

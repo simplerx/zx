@@ -1,6 +1,6 @@
-// cshim.zx —— @cShim：把一份自己的 C 源文件编进程序（§160）。
+// shim.zx —— @shim：把一份自己的 C 源文件编进程序（§160）。
 //
-// @cShim("impl.c") 不是 include、也不是新类型：那份 .c 是一份自包含的 C
+// @shim("impl.c") 不是 include、也不是新类型：那份 .c 是一份自包含的 C
 // 翻译单元，用与 zx 相同的 cc/flags 编成独立 .o 后一起链接。路径相对
 // **声明它的这份 .zx** 解析，所以库可以把自己的 shim 放在同目录发布。
 //
@@ -16,7 +16,7 @@
 // vec=ok
 // twice=ok
 
-@cShim("cshim_impl.c");
+@shim("shim_impl.c");
 
 extern "C" {
     fn zx_shim_sum_f32(a: *f32, n: usize) f32;
@@ -62,9 +62,9 @@ pub const main = fn () u8 {
         println("vec=bad");
     }
 
-    // 第二处 @cShim 指向同一份 .c：按完整路径去重，只会编一遍。
+    // 第二处 @shim 指向同一份 .c：按完整路径去重，只会编一遍。
     println("twice=ok");
     return 0;
 };
 
-@cShim("cshim_impl.c");
+@shim("shim_impl.c");

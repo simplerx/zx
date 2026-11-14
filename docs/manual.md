@@ -254,8 +254,8 @@ const main = fn () !u8 {
   编译期除零/越界/null 解包直接报错（E0505/E0506）。
 - 转换只有一种写法 `(T)v`，覆盖窄化/扩宽、整数↔浮点、指针互转、指针↔整数。
   没有隐式数值转换（字面量除外，会向期望类型定型并检查拟合）。
-- **内建只有 9 个**：`@mod @type @cShim @memcpy @memmove @memset @link @compileError @trap`。
-  `@cShim("impl.c")` 把一份自己的 C 源文件编进程序（手写 intrinsic 只能这么写，见 `docs/reference.md` §10.2）。
+- **内建只有 9 个**：`@mod @type @shim @memcpy @memmove @memset @link @compileError @trap`。
+  `@shim("impl.c")` 把一份自己的 C 源文件编进程序（手写 intrinsic 只能这么写，见 `docs/reference.md` §10.2）。
 
 `@type(x)` 是唯一反射，x 可以是类型或表达式：
 

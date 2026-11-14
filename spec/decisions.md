@@ -6363,7 +6363,7 @@ zmm；普通循环得到的指令一样，代码却短一半。结论：展开�
 实测 4M 个 f32 的 `addF32` ×20 轮：dev 118 ms（8.4 GB/s）、release 31 ms
 （约 31 GB/s，三流内存带宽饱和，约 3.8×）。
 
-## §160 C shim 通道：`@cShim`（2026-11-13 23:5x）
+## §160 C shim 通道：`@shim`（2026-11-13 落地，2026-11-14 改名）
 
 用户点名要「C shim 通道」——§159 的 SIMD 只靠下游 C 编译器向量化，真正要写
 `_mm256_add_ps` 这类 intrinsic 时，语言里没有入口。三条候选：
@@ -6374,19 +6374,19 @@ zmm；普通循环得到的指令一样，代码却短一半。结论：展开�
 2. **给语言加向量类型 + intrinsic 内建（`@Vector` / `@splat` …）**：等于新增
    一套类型与 ABI，sema / 后端 / LSP / 自举前端四处同步，换来的只是"标准库
    不用写 shim"。（否，用户要的是通道，不是语言扩展）
-3. **`@cShim("impl.c")` = 一份独立的 C 翻译单元**（选它）：zxc 用与 zx 相同的
+3. **`@shim("impl.c")` = 一份独立的 C 翻译单元**（选它）：zxc 用与 zx 相同的
    cc/flags 把它编成 `.o` 一起链接。（选它）
 
 **契约**（写进 reference §10.2）：
 
 - shim **自包含**：不 include zx 生成的任何东西，只依赖自己 include 的 C 头。
   边界干净 ⇒ 库换内部实现不牵动 shim，shim 换实现不牵动 zx。
-- 路径相对**写 `@cShim(...)` 的那份 `.zx`** 解析（`g_srcpath` 的目录），所以
+- 路径相对**写 `@shim(...)` 的那份 `.zx`** 解析（`g_srcpath` 的目录），所以
   `std/simd.zx` 能把实现放在 `std/` 里一起发布——这是 §157 之后"库自带资源"
   的第一例（`@mod` 早就按同一规则解析）。
 - 符号声明仍走 `extern "C"`：shim 给实现，zx 侧给原型。没有第二套绑定语法。
 - **直接编用户那份文件**：不复制、不改名、不生成包装 TU ⇒ C 编译器的行号就是
-  真实行号，不需要列映射表。去重按完整路径，两份 `@cShim` 指向同一份只编一遍。
+  真实行号，不需要列映射表。去重按完整路径，两份 `@shim` 指向同一份只编一遍。
 - `--emit-c` 是"整份程序摊成一个 C"的检查路径，所以把 shim 按登记顺序贴末尾
   （原型都在前面的共享头里，顺序无关）；真实构建永远是独立 `.o`。
 
@@ -6394,7 +6394,7 @@ zmm；普通循环得到的指令一样，代码却短一半。结论：展开�
 not compile: …`，并且构建总结换一句「N error(s) in the C shim(s)」，不再说
 "compiler bug"（那是我们自己的代码生成问题，shim 是用户自己的 C）。文件打不开
 报 **E0602**，没有复用 `@mod` 的 E0601：两者的 help 是两件事（一个查 `@mod`
-路径，一个查 `@cShim` 路径）。
+路径，一个查 `@shim` 路径）。
 
 **顺手修掉的既有缺口**：`run_cc_jobs()` 的串行分支（`nproc <= 1 || njobs == 1`）
 以前只 `if (system(...) != 0) return 1`，**没把 rc 写回 job**。诊断翻译
@@ -6407,8 +6407,17 @@ not compile: …`，并且构建总结换一句「N error(s) in the C shim(s)」
 再手写 AVX2 + 运行期 cpuid 分派只会多一条要人维护的 C 路径；能力该在语言里
 （通道），不该在标准库里堆第二套实现。这条写进了 reference §10.2。
 
-**守门**：`tests/good/cshim.zx` + `tests/good/cshim_impl.c`（SSE2 intrinsic +
-static 私有助手 + 两处 `@cShim` 去重）、`tests/multi/cshim/`（**模块**里的
-`@cShim` 按模块目录解析、符号能被入口链接到）、`test.sh §160` 四条（`--emit-c` 里 shim
+**守门**：`tests/good/shim.zx` + `tests/good/shim_impl.c`（SSE2 intrinsic +
+static 私有助手 + 两处 `@shim` 去重）、`tests/multi/shim/`（**模块**里的
+`@shim` 按模块目录解析、符号能被入口链接到）、`test.sh §160` 四条（`--emit-c` 里 shim
 只出现一次且贴在末尾 / C 前端通过 / 坏 shim 报 B1004 且行号来自 `.c` 且不说
-"compiler bug" / 缺文件报 E0602）、`tools/lsptest.py` 的 `@cShim` 补全断言。
+"compiler bug" / 缺文件报 E0602）、`tools/lsptest.py` 的 `@shim` 补全断言。
+
+**2026-11-14 改名**：用户要「简约一点」，`@cShim` → `@shim`。**只改名字**，
+通道语义、去重、路径解析、诊断码一字未动。旧拼写没有静默失效：它在
+`sema.c check_builtin` 的 `gone[]` 表里，报 **E0211** 并给出 `renamed to @shim`。
+守门同步改名：`tests/good/shim.zx` + `shim_impl.c`、`tests/multi/shim/`、
+`test.sh §160`、`lsptest` 的 `completion.shim.partialAtIsBuiltin`（半截名样本
+从 `@cSh` 换成 `@sh`）。**教训**：内建名要让用户一眼读完，`@cShim` 的 `c`
+既不是 C 语言的必需信息（上下文已经说是 C 文件），又让补全排到 `@type`
+后面去——名字也是 API。

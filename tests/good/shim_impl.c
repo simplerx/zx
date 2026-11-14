@@ -1,4 +1,4 @@
-/* cshim_impl.c —— @cShim 的守门样本（§160）。
+/* shim_impl.c —— @shim 的守门样本（§160）。
  *
  * 它是一份**自包含的 C 翻译单元**：只 include 自己需要的 C 头，不引用 zx
  * 生成的任何类型或函数。zxc 用与 zx 代码相同的 cc / flags 编译它，产出

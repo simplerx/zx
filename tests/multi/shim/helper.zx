@@ -1,0 +1,12 @@
+// helper.zx —— 模块自带的 C shim。路径 "helper_impl.c" 相对本文件解析，
+// 不是相对工作目录：库带着自己的 C 实现走，使用方一句话都不用配。
+
+@shim("helper_impl.c");
+
+extern "C" {
+    fn zx_shim_mod_val() i32;
+    fn zx_shim_mod_twice(v: i32) i32;
+}
+
+pub const val = fn () i32 { return zx_shim_mod_val(); };
+pub const twice = fn (v: i32) i32 { return zx_shim_mod_twice(v); };

@@ -282,7 +282,7 @@ static int report_cc_log(CCJob *j, int mode) {
                  * 它），所以原样带路径打出来，编辑器和终端都能直接点开。 */
                 fprintf(stderr, "%s:%d:%d: error[B1004]: the C shim does not compile: %s\n",
                         path, ln, col > 0 ? col : 1, msg);
-                fprintf(stderr, "  help: this file came from @cShim(...); zxc compiles it with the same\n"
+                fprintf(stderr, "  help: this file came from @shim(...); zxc compiles it with the same\n"
                                 "        cc and flags as zx code, so the fix belongs in that .c\n");
             } else if (j->unit < 0) {
                 fprintf(stderr, "error[B1003]: the bundled C runtime (zxrt) does not compile: %s\n", msg);
@@ -721,7 +721,7 @@ static int build_program(Node *root, const char *out, const char *cachedir, OutK
         buf_printf(&objs, "\"%s\"", opath);
     }
 
-    /* C shim（@cShim）：每份独立编成一个 .o。
+    /* C shim（@shim）：每份独立编成一个 .o。
      *
      * 直接编**用户那份文件**（不复制、不改名、不生成包装 TU）：
      *   ① C 编译器的报错行号就是真实行号，不需要行列映射；
@@ -741,8 +741,8 @@ static int build_program(Node *root, const char *out, const char *cachedir, OutK
             if (!ok) *q = '_';
         }
         char opath[2048], lpath[2048];
-        snprintf(opath, sizeof opath, "%s_cshim%d_%s.o", stem, si, sbase);
-        snprintf(lpath, sizeof lpath, "%s_cshim%d_%s.log", stem, si, sbase);
+        snprintf(opath, sizeof opath, "%s_shim%d_%s.o", stem, si, sbase);
+        snprintf(lpath, sizeof lpath, "%s_shim%d_%s.log", stem, si, sbase);
         {
             long long om = fmtime(opath);
             if (om > maxobj) maxobj = om;
@@ -790,7 +790,7 @@ static int build_program(Node *root, const char *out, const char *cachedir, OutK
         else if (nshim)
             /* shim 是用户自己的 C：说成"编译器 bug"会把人指错方向。 */
             fprintf(stderr, "zxc: build failed: %d error(s) in the C shim(s) "
-                            "registered with @cShim(...)\n", nerr);
+                            "registered with @shim(...)\n", nerr);
         else
             fprintf(stderr, "zxc: build failed: %d code-generation error(s) "
                             "(compiler bug, not a problem in your zx source)\n", nerr);
@@ -3698,7 +3698,7 @@ int main(int argc, char **argv) {
                 buf_init(&csrc);
                 backend_emit(root, &csrc);
                 /* --emit-c 是一条"把整份程序摊成单个 C 文件"的检查路径，
-                 * 而 @cShim 在真实构建里是独立 TU。这里把它按登记顺序贴在
+                 * 而 @shim 在真实构建里是独立 TU。这里把它按登记顺序贴在
                  * 末尾：原型都在前面的共享头里，顺序无关紧要，但整份 C
                  * 仍然自成一体（可以直接丢给 cc 编）。 */
                 for (int si = 0; si < zx_c_shim_count(); si++) {
