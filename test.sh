@@ -1400,6 +1400,56 @@ else
     head -12 "$TPFX.s159c.log"; fail=1
 fi
 
+# §161：std.simd 换成手写 SIMD（std/simd_impl.c 经 @shim 挂进来）。三条实现
+# （scalar / sse2 / avx2）必须逐位一致——用 ZX_SIMD_ISA 强制降档跑同一份二进制
+# 来证明，而不是"看起来对"；--emit-c 里要看得见 intrinsic，证明不再是靠 -O2
+# 自动向量化的普通循环。
+$ZXC tests/good/std-simd.zx -o "$TPFX.s161.exe" > "$TPFX.s161.log" 2>&1 || true
+ZX_SIMD_ISA=scalar "$TPFX.s161.exe" > "$TPFX.s161.scalar" 2>&1 || true
+ZX_SIMD_ISA=sse2   "$TPFX.s161.exe" > "$TPFX.s161.sse2"   2>&1 || true
+ZX_SIMD_ISA=avx2   "$TPFX.s161.exe" > "$TPFX.s161.avx2"   2>&1 || true
+if cmp -s "$TPFX.s161.scalar" "$TPFX.s161.sse2" \
+   && cmp -s "$TPFX.s161.scalar" "$TPFX.s161.avx2" \
+   && grep -qF 'kernel special: nan=true clampHi=true negzero=true neg5=true' "$TPFX.s161.scalar"; then
+    printf "  ok   §161 scalar/sse2/avx2 三路逐位一致（含 NaN 与 -0.0）\n"
+else
+    printf "  FAIL §161 三路输出不一致\n"
+    diff "$TPFX.s161.scalar" "$TPFX.s161.sse2" | head -6
+    diff "$TPFX.s161.scalar" "$TPFX.s161.avx2" | head -6
+    head -6 "$TPFX.s161.log"; fail=1
+fi
+
+$ZXC tests/good/std-simd.zx --emit-c > "$TPFX.s161.c" 2>/dev/null
+if grep -qF '_mm256_add_ps' "$TPFX.s161.c" && grep -qF '_mm_add_ps' "$TPFX.s161.c"; then
+    printf "  ok   §161 --emit-c 里是 intrinsic，不是普通循环\n"
+else
+    printf "  FAIL §161 shim 没进 --emit-c\n"; fail=1
+fi
+
+# isaName()：强制降档要如实报告；默认档必须是三档之一（x86 上不该是 scalar）
+cat > "$TPFX.s161isa.zx" <<'ZXEOF'
+const std = @mod("std");
+
+pub const main = fn () u8 {
+    println("isa={}", std.simd.isaName());
+    return 0;
+};
+ZXEOF
+$ZXC "$TPFX.s161isa.zx" -o "$TPFX.s161isa.exe" > "$TPFX.s161isa.log" 2>&1 || true
+isa_forced=$(ZX_SIMD_ISA=scalar "$TPFX.s161isa.exe" 2>/dev/null)
+isa_auto=$(ZX_SIMD_ISA= "$TPFX.s161isa.exe" 2>/dev/null)
+case "$isa_forced" in
+    isa=scalar)
+        case "$isa_auto" in
+            isa=sse2|isa=avx2)
+                printf "  ok   §161 isaName 如实报告（强制 scalar / 默认 %s）\n" "${isa_auto#isa=}" ;;
+            *)
+                printf "  FAIL §161 默认档是 %s，x86 上不该是 scalar\n" "$isa_auto"; fail=1 ;;
+        esac ;;
+    *)
+        printf "  FAIL §161 强制 scalar 却报 %s\n" "$isa_forced"; head -6 "$TPFX.s161isa.log"; fail=1 ;;
+esac
+
 # §160：C shim 通道（@shim）。真实构建里 shim 是**独立 TU**（用真实路径编，
 # 报错指回那份 .c 的行号）；--emit-c 要自洽就把它贴在末尾；两处 @shim 指向
 # 同一份 .c 只编一遍。shim 编不过报 B1004（不是"编译器 bug"），缺文件报 E0602。

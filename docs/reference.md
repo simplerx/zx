@@ -454,9 +454,9 @@ pub const main = fn () u8 {
 };
 ```
 
-标准库目前一份 shim 都没有：`std.simd` 的向量化交给下游 C 编译器（§14.13）。
-**能用 `extern "C"` 直接调现成符号的，就别写 shim**——多一层要人维护的 C 是
-负债，不是能力。
+标准库目前只有一份 shim：`std/simd_impl.c`（§14.13 的向量内核，要手写
+intrinsic 才拿得到 -O0 下的真指令）。**能用 `extern "C"` 直接调现成符号的，
+就别写 shim**——多一层要人维护的 C 是负债，不是能力。
 
 ---
 
@@ -853,10 +853,12 @@ Zx 没有向量类型（没有 `@Vector` 那类内建），`std.simd` 分两层�
 - **切片内核**：`addF32 / subF32 / mulF32 / scaleF32 / saxpyF32 / lerpF32 /
   clampF32 / absF32 / fillF32 / dotF32 / sumF32`，整数侧 `addI32 / subI32 / fillI32`。
   处理 `min(各输入长度)` 个元素并返回实际个数；`dst` 允许与输入是同一块内存。
-  内核体就是普通逐元素循环，**`--release`（-O2）下由 C 编译器自动向量化**
-  （实测 zig cc 发 `vaddps %zmm`，一轮 16 个 float，尾块由标量循环收掉）；
-  dev 档是 `-O0`，不向量化。归约用 4 条独立累加链，不改变浮点加法顺序，
-  不需要 `-ffast-math`。
+  实现在 `std/simd_impl.c`——一份经 `@shim` 挂进来的独立 C TU，**手写 SSE2 /
+  AVX2 intrinsic**，运行期按 CPU 选，非 x86 走标量：AVX2 一轮 8 个 float，
+  SSE2 一轮 4 个，所以 dev（`-O0`）也是真向量指令，不再依赖 `-O2` 的自动向量化。
+  三条实现**逐位一致**（逐元素天然一致；归约固定 8 条累加链、不用 FMA；
+  clamp / abs 保住 NaN 与 -0.0）。`std.simd.isaName()` 报当前走哪条；
+  `ZX_SIMD_ISA=scalar|sse2|avx2` 可强制降档（调试或做对照实验）。
 
 ```zx
 var a: *[4]f32 = std.stackAlloc(f32, 4);

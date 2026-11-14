@@ -6421,3 +6421,41 @@ static 私有助手 + 两处 `@shim` 去重）、`tests/multi/shim/`（**模块*
 从 `@cSh` 换成 `@sh`）。**教训**：内建名要让用户一眼读完，`@cShim` 的 `c`
 既不是 C 语言的必需信息（上下文已经说是 C 文件），又让补全排到 `@type`
 后面去——名字也是 API。
+
+## §161 std.simd 换成手写 SIMD（2026-11-14）
+
+用户：「可以实现真正的simd 吗？可以的话替换掉 std.simd 里的假 simd」。§159 的
+内核是普通循环，靠 `--release`（-O2）自动向量化——dev（-O0）一条向量指令都
+没有。选：把 14 个内核移进 `std/simd_impl.c`，用 §160 的 `@shim` 挂进构建，
+手写 intrinsic；三条实现（avx2 / sse2 / scalar）运行期选，`ZX_SIMD_ISA`
+可以强制降档。
+
+**为什么先走 shim 而不是先加语言级向量类型**：`@Vec` 要动 sema / 后端 / LSP /
+自举四端（§162 才做）；先让通道把真指令拿到手，两件事互不阻塞。
+
+**数值契约：三条实现逐位一致**（守门直接 diff 三条路径的输出）：
+- 归约从 4 链改成 8 链：AVX2 正好一个 8 lane 寄存器、SSE2 两个 4 lane、标量
+  八个变量，**分组相同所以加法结合顺序相同**；尾块一律并进第 0 条链。
+- 不用 FMA。SSE2 没有，AVX2 一旦融合，同一份输入在两种 CPU 上就不同。
+- clamp / abs 用有序比较 + 选择：`min/max` 遇 NaN 会返回第二操作数，清符号位
+  会把 `-0.0` 变成 `+0.0`，都和 Zx 里那段标量代码不一样。
+- 逐元素内核允许 `dst` 与输入同一块内存 ⇒ C 侧**一律不加 `restrict`**。
+
+**不用 `__builtin_cpu_supports`**：它要链 `__cpu_model`（libgcc / compiler-rt
+的 cpuinfo 目标文件），zxc 只链 CRT 时报 `B2001: undefined symbol __cpu_model`。
+改成 `cpuid.h` + `xgetbv` 自己判（OSXSAVE → AVX → XCR0 的 XMM/YMM 位 → AVX2）。
+
+**实测**（4M f32，add × 20 轮；dot × 20 轮）：
+
+| 档 | 路径 | add | dot |
+|---|---|---|---|
+| dev (-O0) | scalar | 97 ms / 10.4 GB/s | 125 ms |
+| dev (-O0) | avx2 | 49 ms / 20.5 GB/s | 55 ms |
+| release (-O2) | 三条都一样 | 31 ms / 32.4 GB/s | 10 ms |
+
+结论：**收益全在 dev**（约 2×）；release 下自动向量化本来就已经压到内存带宽，
+手写只是把"依赖优化器"换成"确定"。
+
+**守门**：`test.sh §161` 三条（三路输出逐位一致且含 NaN/-0.0 一段 / `--emit-c`
+里有 `_mm256_add_ps` / `isaName` 如实报告强制档），`tests/good/std-simd.zx` 加
+「特殊值」一段（`nan=true clampHi=true negzero=true neg5=true`）。

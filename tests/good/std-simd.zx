@@ -11,6 +11,7 @@
 // kernel fillabs: 3 3
 // kernel inplace: 2.5 11.5
 // kernel minlen: n=4 last=7.5
+// kernel special: nan=true clampHi=true negzero=true neg5=true
 // kernel i32: add=3 sub=-1 fill=-9
 // vec4f: add=(5,6,2,2) len=5 lenSq=25 norm=(0.6,0.8) dot=14 sum=7
 // vec4f: clamp=(2.5,1) lerp=3 abs=4 min=(0,0,0,0) max=(3,4,2,2) approx=true eq=false
@@ -53,6 +54,22 @@ pub const main = fn () u8 {
     // 不等长：按最短的长度处理，返回 4。
     let short = std.simd.addF32(d[0..4], a[0..10], b[0..10]);
     std.println("kernel minlen: n={} last={}", short, (d + 3).0);
+
+    // 特殊值：NaN 与 -0.0。三条实现（scalar / sse2 / avx2）必须给出同样的答案，
+    // C 侧用有序比较 + 选择就是为了这个（min/max 遇 NaN 会返回第二操作数，
+    // 清符号位会把 -0.0 变成 +0.0）。
+    var zero: f32 = 0.0;
+    var nan = zero / zero;
+    var sp: *[4]f32 = std.stackAlloc(f32, 4);
+    sp.0 = nan;
+    sp.1 = -0.0;
+    sp.2 = 5.0;
+    sp.3 = -5.0;
+    var cp: *[4]f32 = std.stackAlloc(f32, 4);
+    _ = std.simd.clampF32(cp[0..4], sp[0..4], 1.0, 3.0);
+    _ = std.simd.absF32(sp[0..4], sp[0..4]);
+    std.println("kernel special: nan={} clampHi={} negzero={} neg5={}",
+                cp.0 != cp.0, cp.2 == 3.0, (1.0 / sp.1) < 0.0, sp.3 == 5.0);
 
     // 整数内核。
     var x: *[8]i32 = std.stackAlloc(i32, 8);

@@ -1,36 +1,65 @@
-// simd.zx —— 向量值类型与批量浮点内核。
+// simd.zx —— 向量值类型与批量内核（真 SIMD，§161）。
 //
-// Zx 没有向量类型（`@Vector` 那一类内建不存在），所以这里分两层，各管各的：
+// 两层，各管各的：
 //
 //   Vec4f / Vec4i   4 分量值类型：几何、颜色、整数向量。16 字节，按值传，
-//                   单条向量的运算是 4 条标量指令——SIMD 的收益来自"跨
-//                   元素"，不来自"一个向量的 4 个分量"，见下一层。
+//                   单条向量的运算是 4 条标量指令——SIMD 的收益来自"跨元素"，
+//                   不来自"一个向量的 4 个分量"。这一层刻意保持纯 Zx：它是
+//                   值语义的门面，换实现不会更快，只会更难调试。
+//
 //   切片内核        addF32 / mulF32 / saxpy / dotF32 …：逐元素处理 []f32。
-//                   每个内核就是一个普通循环，不做手工展开：下游 C 编译器
-//                   在 --release（-O2）下会把它向量化到 SSE/AVX（实测 zig cc
-//                   发 vaddps %zmm，一轮 16 个 float，尾部由标量循环收掉）。
-//                   dev 档是 -O0，不向量化——迭代速度优先，这不是库能决定的。
+//                   实现在 simd_impl.c（@shim 挂进来的独立 C TU），手写
+//                   SSE2 / AVX2 intrinsic，运行期按 CPU 选，非 x86 走标量。
+//                   所以 **dev（-O0）也是真向量指令**，不再依赖 -O2 的自动
+//                   向量化；AVX2 一轮 8 个 float，SSE2 一轮 4 个。
 //
-// 归约（dotF32 / sumF32）用 4 条独立累加链：浮点加法顺序不变，所以不需要
-// -ffast-math，也不指望编译器把归约改写成向量指令；拿到的是 4 路 ILP 与
-// FMA（编译器能证明不改变语义时才发）。要更快的归约只能改算法（分块 +
-// 多累加器 + 最后合并），那是调用方的选择，不是语言该悄悄做的事。
+// **数值契约：三条实现逐位一致。**
 //
-// 别名：逐元素内核允许 dst 与 a / b 是同一块内存（原地更新安全）——每个
-// 下标只读写自己那一格。归约只读。
+//   - 逐元素内核：每个下标只读写自己那一格，与标量实现逐位相同。
+//   - 归约（dotF32 / sumF32）：固定 8 条累加链，按
+//     ((t0+t1)+(t2+t3)) + ((t4+t5)+(t6+t7)) 合并，尾块并进第 0 条链。
+//     AVX2 一个 8 lane 寄存器、SSE2 两个 4 lane、标量八个变量，分组相同 =>
+//     加法结合顺序相同。**不用 FMA**（SSE2 没有；一融合两种 CPU 的结果就分叉）。
+//     这比 §159 的 4 链并行度更高，末位可能与旧版不同——4 链是实现细节，
+//     不是对外承诺。
+//   - clamp / abs：NaN 与 -0.0 保持原样（C 侧用有序比较 + 选择，不用
+//     min/max，也不清符号位）。
+//
+// 别名：逐元素内核允许 dst 与 a / b 是同一块内存（原地更新安全）。归约只读。
 //
 // 长度：所有内核处理 min(各输入长度)，返回实际处理的元素个数。不 trap、
 // 不补零：调用方拿返回值就能知道尾部有没有漏。
+//
+// 想看跑的是哪条路径：std.simd.isaName()；调试或做对照实验可用环境变量
+// ZX_SIMD_ISA=scalar|sse2|avx2 强制降档（没有对应指令集时按实际能力回退）。
 
-// ---- 私有小工具 ----
+@shim("simd_impl.c");
 
-// f32 的平方根直接用 libm 的 sqrtf：和 math.zx 的 sqrt(f64) 是两个符号，
-// 这里不做 f32→f64→f32 的往返（向量长度在热路径上）。符号私有，
-// 不往 std.simd 的公开面加东西。
 extern "C" {
+    fn zx_simd_add_f32(dst: *f32, a: *const f32, b: *const f32, n: usize) void;
+    fn zx_simd_sub_f32(dst: *f32, a: *const f32, b: *const f32, n: usize) void;
+    fn zx_simd_mul_f32(dst: *f32, a: *const f32, b: *const f32, n: usize) void;
+    fn zx_simd_scale_f32(dst: *f32, a: *const f32, s: f32, n: usize) void;
+    fn zx_simd_saxpy_f32(dst: *f32, a: *const f32, b: *const f32, s: f32, n: usize) void;
+    fn zx_simd_lerp_f32(dst: *f32, a: *const f32, b: *const f32, t: f32, n: usize) void;
+    fn zx_simd_clamp_f32(dst: *f32, a: *const f32, lo: f32, hi: f32, n: usize) void;
+    fn zx_simd_abs_f32(dst: *f32, a: *const f32, n: usize) void;
+    fn zx_simd_fill_f32(dst: *f32, v: f32, n: usize) void;
+    fn zx_simd_add_i32(dst: *i32, a: *const i32, b: *const i32, n: usize) void;
+    fn zx_simd_sub_i32(dst: *i32, a: *const i32, b: *const i32, n: usize) void;
+    fn zx_simd_fill_i32(dst: *i32, v: i32, n: usize) void;
+    fn zx_simd_dot_f32(a: *const f32, b: *const f32, n: usize) f32;
+    fn zx_simd_sum_f32(a: *const f32, n: usize) f32;
+    fn zx_simd_isa_level() i32;
+
+    // f32 的平方根直接用 libm 的 sqrtf：和 math.zx 的 sqrt(f64) 是两个符号，
+    // 这里不做 f32->f64->f32 的往返（向量长度在热路径上）。
     fn sqrtf(x: f32) f32;
 }
 
+// ---- 私有小工具 ----
+
+// 长度取 min：几处长度可能不同，只处理够得着的那一段。
 const min2 = fn (a: usize, b: usize) usize {
     if (a < b) { return a; }
     return b;
@@ -40,6 +69,8 @@ const min3 = fn (a: usize, b: usize, c: usize) usize {
     return min2(min2(a, b), c);
 };
 
+// Vec4f.clamp 用（切片版的 clamp 在 C 里，NaN 语义与这里一致）：
+// 两个比较对 NaN 都是 false，原样留下。
 const clampOne = fn (v: f32, lo: f32, hi: f32) f32 {
     var r = v;
     if (r < lo) { r = lo; }
@@ -210,151 +241,90 @@ pub const Vec4i = struct {
 };
 
 // ---- 批量内核：f32 ----
+//
+// 每个内核只做三件事：算 n（min 各输入长度）、调 C 实现、返回 n。长度语义
+// 留在 Zx 这一侧——C 那边只认 (ptr, ptr, n)，两处各算一遍 min 迟早会漂。
+
+// 当前实际使用的指令集路径："avx2" / "sse2" / "scalar"。
+pub const isaName = fn () []const u8 {
+    let k = zx_simd_isa_level();
+    if (k >= 3) { return "avx2"; }
+    if (k == 2) { return "sse2"; }
+    return "scalar";
+};
 
 // dst = a + b
 pub const addF32 = fn (dst: []f32, a: []const f32, b: []const f32) usize {
     let n = min3(dst.len, a.len, b.len);
-    var i: usize = 0;
-    while (i < n) {
-        (dst.ptr + i).0 = (a.ptr + i).0 + (b.ptr + i).0;
-        i = i + 1;
-    }
+    zx_simd_add_f32(dst.ptr, a.ptr, b.ptr, n);
     return n;
 };
 
 // dst = a - b
 pub const subF32 = fn (dst: []f32, a: []const f32, b: []const f32) usize {
     let n = min3(dst.len, a.len, b.len);
-    var i: usize = 0;
-    while (i < n) {
-        (dst.ptr + i).0 = (a.ptr + i).0 - (b.ptr + i).0;
-        i = i + 1;
-    }
+    zx_simd_sub_f32(dst.ptr, a.ptr, b.ptr, n);
     return n;
 };
 
 // dst = a * b
 pub const mulF32 = fn (dst: []f32, a: []const f32, b: []const f32) usize {
     let n = min3(dst.len, a.len, b.len);
-    var i: usize = 0;
-    while (i < n) {
-        (dst.ptr + i).0 = (a.ptr + i).0 * (b.ptr + i).0;
-        i = i + 1;
-    }
+    zx_simd_mul_f32(dst.ptr, a.ptr, b.ptr, n);
     return n;
 };
 
 // dst = a * s
 pub const scaleF32 = fn (dst: []f32, a: []const f32, s: f32) usize {
     let n = min2(dst.len, a.len);
-    var i: usize = 0;
-    while (i < n) {
-        (dst.ptr + i).0 = (a.ptr + i).0 * s;
-        i = i + 1;
-    }
+    zx_simd_scale_f32(dst.ptr, a.ptr, s, n);
     return n;
 };
 
 // dst = a + b * s（BLAS 的 saxpy：y = y + alpha * x 的通用形式）
 pub const saxpyF32 = fn (dst: []f32, a: []const f32, b: []const f32, s: f32) usize {
     let n = min3(dst.len, a.len, b.len);
-    var i: usize = 0;
-    while (i < n) {
-        (dst.ptr + i).0 = (a.ptr + i).0 + (b.ptr + i).0 * s;
-        i = i + 1;
-    }
+    zx_simd_saxpy_f32(dst.ptr, a.ptr, b.ptr, s, n);
     return n;
 };
 
 // dst = a + (b - a) * t
 pub const lerpF32 = fn (dst: []f32, a: []const f32, b: []const f32, t: f32) usize {
     let n = min3(dst.len, a.len, b.len);
-    var i: usize = 0;
-    while (i < n) {
-        let av = (a.ptr + i).0;
-        (dst.ptr + i).0 = av + ((b.ptr + i).0 - av) * t;
-        i = i + 1;
-    }
+    zx_simd_lerp_f32(dst.ptr, a.ptr, b.ptr, t, n);
     return n;
 };
 
-// dst = clamp(a, lo, hi)
+// dst = clamp(a, lo, hi)；NaN 原样留下
 pub const clampF32 = fn (dst: []f32, a: []const f32, lo: f32, hi: f32) usize {
     let n = min2(dst.len, a.len);
-    var i: usize = 0;
-    while (i < n) {
-        (dst.ptr + i).0 = clampOne((a.ptr + i).0, lo, hi);
-        i = i + 1;
-    }
+    zx_simd_clamp_f32(dst.ptr, a.ptr, lo, hi, n);
     return n;
 };
 
 // dst = |a|
 pub const absF32 = fn (dst: []f32, a: []const f32) usize {
     let n = min2(dst.len, a.len);
-    var i: usize = 0;
-    while (i < n) {
-        var v = (a.ptr + i).0;
-        if (v < 0.0) { v = -v; }
-        (dst.ptr + i).0 = v;
-        i = i + 1;
-    }
+    zx_simd_abs_f32(dst.ptr, a.ptr, n);
     return n;
 };
 
 // dst[i] = v
 pub const fillF32 = fn (dst: []f32, v: f32) usize {
     let n = dst.len;
-    var i: usize = 0;
-    while (i < n) {
-        (dst.ptr + i).0 = v;
-        i = i + 1;
-    }
+    zx_simd_fill_f32(dst.ptr, v, n);
     return n;
 };
 
-// 点积：4 条独立累加链（见文件头）。空切片返回 0。
+// 点积：8 条累加链（见文件头），空切片返回 0。
 pub const dotF32 = fn (a: []const f32, b: []const f32) f32 {
     let n = min2(a.len, b.len);
-    var s0: f32 = 0.0;
-    var s1: f32 = 0.0;
-    var s2: f32 = 0.0;
-    var s3: f32 = 0.0;
-    var i: usize = 0;
-    while (i + 4 <= n) {
-        s0 = s0 + (a.ptr + i).0 * (b.ptr + i).0;
-        s1 = s1 + (a.ptr + i + 1).0 * (b.ptr + i + 1).0;
-        s2 = s2 + (a.ptr + i + 2).0 * (b.ptr + i + 2).0;
-        s3 = s3 + (a.ptr + i + 3).0 * (b.ptr + i + 3).0;
-        i = i + 4;
-    }
-    while (i < n) {
-        s0 = s0 + (a.ptr + i).0 * (b.ptr + i).0;
-        i = i + 1;
-    }
-    return (s0 + s1) + (s2 + s3);
+    return zx_simd_dot_f32(a.ptr, b.ptr, n);
 };
 
-// 求和：同 dot 的 4 链累加，空切片返回 0。
+// 求和：同 dot 的 8 链累加，空切片返回 0。
 pub const sumF32 = fn (a: []const f32) f32 {
-    let n = a.len;
-    var s0: f32 = 0.0;
-    var s1: f32 = 0.0;
-    var s2: f32 = 0.0;
-    var s3: f32 = 0.0;
-    var i: usize = 0;
-    while (i + 4 <= n) {
-        s0 = s0 + (a.ptr + i).0;
-        s1 = s1 + (a.ptr + i + 1).0;
-        s2 = s2 + (a.ptr + i + 2).0;
-        s3 = s3 + (a.ptr + i + 3).0;
-        i = i + 4;
-    }
-    while (i < n) {
-        s0 = s0 + (a.ptr + i).0;
-        i = i + 1;
-    }
-    return (s0 + s1) + (s2 + s3);
+    return zx_simd_sum_f32(a.ptr, a.len);
 };
 
 // ---- 批量内核：i32 ----
@@ -362,32 +332,20 @@ pub const sumF32 = fn (a: []const f32) f32 {
 // dst = a + b（回绕语义与 i32 的 + 一致，不检查溢出）
 pub const addI32 = fn (dst: []i32, a: []const i32, b: []const i32) usize {
     let n = min3(dst.len, a.len, b.len);
-    var i: usize = 0;
-    while (i < n) {
-        (dst.ptr + i).0 = (a.ptr + i).0 + (b.ptr + i).0;
-        i = i + 1;
-    }
+    zx_simd_add_i32(dst.ptr, a.ptr, b.ptr, n);
     return n;
 };
 
 // dst = a - b
 pub const subI32 = fn (dst: []i32, a: []const i32, b: []const i32) usize {
     let n = min3(dst.len, a.len, b.len);
-    var i: usize = 0;
-    while (i < n) {
-        (dst.ptr + i).0 = (a.ptr + i).0 - (b.ptr + i).0;
-        i = i + 1;
-    }
+    zx_simd_sub_i32(dst.ptr, a.ptr, b.ptr, n);
     return n;
 };
 
 // dst[i] = v
 pub const fillI32 = fn (dst: []i32, v: i32) usize {
     let n = dst.len;
-    var i: usize = 0;
-    while (i < n) {
-        (dst.ptr + i).0 = v;
-        i = i + 1;
-    }
+    zx_simd_fill_i32(dst.ptr, v, n);
     return n;
 };
