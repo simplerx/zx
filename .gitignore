@@ -33,3 +33,6 @@ err_probe.zx
 # Python 工具脚本缓存
 __pycache__/
 *.pyc
+
+# 本地 AI 工作区记忆（不入库）
+.workbuddy/

@@ -1,6 +1,6 @@
 import json, os, queue, shutil, subprocess, threading, time
 
-ROOT = r"E:\workbuddy\zx"
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BIN = os.path.join(ROOT, ".tmp", "zxlsnew", "zxls.exe")
 DIR = os.path.join(ROOT, ".tmp", "slprobe")
 SRC = os.path.join(DIR, "src")

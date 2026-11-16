@@ -1,6 +1,6 @@
 // extern var（M24）：外部 C 全局变量。只声明、不定义存储；名字原样进 C。
 // 编译/链接级验证：这些声明没被引用，不会产生 undefined symbol；
-// 引用级验证见 .workbuddy 备忘（手写 .o + @link("xxx.o") 的混合编程模式）。
+// 引用级验证见 demo/ffi（手写 .o + @link("xxx.o") 的混合编程模式）。
 extern var g_counter: i32;
 extern var g_table: *const u8;
 extern var g_callback: fn (i32) i32;

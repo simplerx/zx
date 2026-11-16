@@ -4307,7 +4307,7 @@ errors.md 37 码、增量编译、CLI 冒烟全过）。`bin/zxls.exe` 已替换
 `bin/zxls-f-1112.exe`），用 Zed 实际二进制直连探针复验 S1–S12 全通。
 **Zed 需重启重新协商 capabilities** 才能看到行内提示与补全。
 改动文件：`tools/zxls.zig`、`tools/lsptest.py`（均 CRLF）、
-`spec/decisions.md`、`.workbuddy/memory/2026-11-12.md`。未 git commit。
+`spec/decisions.md`。未 git commit.
 
 
 ## §125 Task 是接口，不是关联函数集合（2026-11-12 用户纠偏）

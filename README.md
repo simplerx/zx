@@ -1,18 +1,23 @@
 # Zx
 
-一门简约的系统级语言。
+A minimal systems programming language.
 
-- **一个值一个类型**：`?T` 和 `!T` 是普通值类型，`try` / 捕获 / `orelse` / `switch`
-  四条出口，逃不掉也不用猜。
-- **一个并发抽象**：`std.task.Task` 实例。线程、协程、任务池、select 与默认通道
-  都挂在实例上，不用挑模型；`std.io` 保持纯同步，要并发就显式 `task + io`。
-- **一个内存模型**：手动管理，标准库给 arena 和 pool；没有隐式分配。
-- **直出 C**：后端把 Zx 生成 C，再交给项目内自带的 zig `cc`。生成物可读，
-  也可以 `--emit-c` 拿出来看——性能问题不在黑盒里。
+- **One value, one type**: `?T` and `!T` are ordinary value types, with exactly
+  four ways out — `try`, catch, `orelse`, and `switch`. No guessing, no hidden paths.
+- **One concurrency abstraction**: the `std.task.Task` instance. Threads,
+  coroutines, task pools, select, and default channels all hang off the instance;
+  `std.io` stays purely synchronous — for concurrency you compose `task + io`
+  explicitly.
+- **One memory model**: manual management. The standard library provides an
+  arena and a pool; there are no implicit allocations.
+- **C all the way down**: the backend compiles Zx to C, then hands it to the
+  bundled zig `cc`. The generated code is readable, and `--emit-c` prints it —
+  performance problems never hide inside a black box.
 
-自举：前端（词法/语法）和整个标准库都是 Zx 自己写的，编译器主程序是 C。
+Self-hosted: the frontend (lexer/parser) and the entire standard library are
+written in Zx itself; the compiler driver is C.
 
-## 语言速览
+## Language in one glance
 
 ```zx
 const std = @mod("std");
@@ -38,7 +43,7 @@ pub const main = fn () !i32 {
     var p = Point{ .x = 3.0, .y = 4.0 };
     std.println("{}", p.len2());          // 25
 
-    if (parse("12")) pt {                 // 捕获：成功拿值，失败拿错误码
+    if (parse("12")) pt {                 // catch: value on success, error code on failure
         std.println("x={}", pt.x);
     } else e {
         std.println("err {}", std.debug.errName(e));
@@ -47,117 +52,127 @@ pub const main = fn () !i32 {
 };
 ```
 
-要点：变量只有 `let`（不可变）和 `var`（可变）；函数是值，写成
-`const name = fn (args) ret { ... };`；`!T` 表示「要么是 `T`，要么是一个错误」；
-`Self` 指当前结构体；没有 `break`，提前退出用带标签的表达式
-`const v = done: while (...) { ... done: 42; };`。
+Key points: variables are either `let` (immutable) or `var` (mutable); functions
+are values, written as `const name = fn (args) ret { ... };`; `!T` means
+"either a `T` or an error"; `Self` refers to the enclosing struct; there is no
+`break` — early exit uses labeled expressions:
+`const v = done: while (...) { ... done: 42; };`.
 
-## 构建与测试
+## Build and test
 
 ```sh
-sh build.sh     # → bin/zxc.exe（编译器）· bin/zxfe.exe（自举前端）· bin/zxls.exe（语言服务器）
-sh test.sh      # 全量回归：语法 / 语义 / 反例 / 运行 / 多文件 / 增量 / CLI / LSP
-sh tools/stress.sh  # 暴力压测：回归 3 轮 / fuzz / LSP 滥用 / 60 万数值样本 / 并发编译
+sh build.sh     # -> bin/zxc.exe (compiler), bin/zxfe.exe (bootstrapped frontend), bin/zxls.exe (language server)
+sh test.sh      # full regression: syntax / semantics / negative cases / runtime / multi-file / incremental / CLI / LSP
+sh tools/stress.sh  # stress suite: 3 regression rounds / fuzz / LSP abuse / 600k numeric samples / concurrent builds
 ```
 
-工具链是项目内自带的 zig（`.toolchain/zig.exe`，不进版本库，约 360 MB）。
-缺它时把 zig 0.17.0 解到 `.toolchain/zig.exe`，或者 `ZIG=zig sh build.sh` 用系统 zig。
-Windows 是主平台（FFI 演示、语言服务器都按它写），其余平台尚未验证。
+The toolchain ships inside the repo (`.toolchain/zig.exe`, not tracked, ~360 MB).
+If it is missing, unpack zig 0.17.0 to `.toolchain/zig.exe`, or run
+`ZIG=zig sh build.sh` to use a system zig. Windows is the primary platform
+(the FFI demos and the language server are written against it); other
+platforms are unverified.
 
-跑一下带自检的示例：
+A demo with built-in self-checks:
 
 ```sh
 bin/zxc.exe demo/snake.zx -o snake.exe
-./snake.exe          # 控制台贪吃蛇：WASD/方向键，P 暂停，R 重开，Q 退出
-./snake.exe --sim    # 无人值守：机器人自跑 300 局，校验每一步的不变式
+./snake.exe          # console snake: WASD/arrows, P pause, R restart, Q quit
+./snake.exe --sim    # unattended: a bot plays 300 games, verifying invariants at every step
 ```
 
-## 命令
+## Commands
 
-单文件：
+Single file:
 
 ```sh
-zxc file.zx              # 静态检查（默认）
-zxc file.zx -o prog      # 生成可执行文件
-zxc file.zx --emit-c     # 只打印生成的 C
-zxc file.zx --ast        # 打印语法树
-zxc file.zx --tokens     # 打印词法单元
-zxc file.zx --release    # -O2（默认 dev 是 -O0）
+zxc file.zx              # static check (default)
+zxc file.zx -o prog      # produce an executable
+zxc file.zx --emit-c     # print the generated C only
+zxc file.zx --ast        # print the syntax tree
+zxc file.zx --tokens     # print tokens
+zxc file.zx --release    # -O2 (dev default is -O0)
 ```
 
-工程（读当前目录的 `zx.json`）：
+Projects (reads `zx.json` in the current directory):
 
 ```sh
-zxc init [name]          # 建工程：src/ + vendor/ + zx.json
-zxc run                  # 构建后直接跑
-zxc build                # 产物进 out/，中间文件进 .zxc-cache/
-zxc test [filter]        # 跑 src/test/ 下的用例（零参 pub 函数）
-zxc check                # 整个工程静态检查
-zxc fmt [--check]        # 格式化
+zxc init [name]          # scaffold: src/ + vendor/ + zx.json
+zxc run                  # build and run
+zxc build                # artifacts go to out/, intermediates to .zxc-cache/
+zxc test [filter]        # run cases in src/test/ (zero-arg pub functions)
+zxc check                # static-check the whole project
+zxc fmt [--check]        # format
 ```
 
-接 C 库：
+Binding C libraries:
 
 ```sh
-zxc include ../raylib    # 目录 → vendor/<名>.zx 绑定 + vendor/<名>.clib 清单
-zxc include foo.h        # 单个头文件
-zxc add https://.../xx.h  or xx.git  or lib  # 从网上拉, 存入vendor，SHA-256 / commit 写进 zx.lock
-zxc fetch                # 换机器时按锁复现 vendor/
+zxc include ../raylib    # directory -> vendor/<name>.zx bindings + vendor/<name>.clib manifest
+zxc include foo.h        # a single header
+zxc add https://.../xx.h  or xx.git  or lib  # fetch from the network into vendor/, SHA-256 / commit recorded in zx.lock
+zxc fetch                # reproduce vendor/ from the lock file on a new machine
 ```
 
-`vendor/` 是模块搜索根：`const r = @mod("raylib");` 之后补全、跳转、行内类型
-提示照常生效，生成的绑定是普通 Zx 源码，可以直接改。
+`vendor/` is a module search root: after `const r = @mod("raylib");`, completion,
+go-to-definition, and inlay type hints all work as usual. The generated bindings
+are ordinary Zx source files you can edit freely.
 
-## 性能
+## Performance
 
-同 `zig cc -O2`、同基线的对照（`sh bench/run.sh`，每项 7 次取中位数）：
+Compared against `zig cc -O2` on the same baselines (`sh bench/run.sh`,
+median of 7 runs):
 
-| 负载 | Zx | 手写 C |
+| Workload | Zx | Hand-written C |
 | --- | --- | --- |
 | fib(34) | 14.4 ms | 14.1 ms |
 | mandel | 130.9 ms | 132.0 ms |
-| 矩阵乘 | 92.1 ms | 93.6 ms |
-| 字符串扫描 | 2.6 ms | 2.0 ms |
+| matrix multiply | 92.1 ms | 93.6 ms |
+| string scan | 2.6 ms | 2.0 ms |
 
-**运行时已经和手写 C 打平**：生成的是普通 C，没有运行时解释、没有隐式装箱、
-没有 GC 停顿。容器（`ArrayList` / `HashMap`）用 `@memcpy`/`@memmove`/`@memset`
-走批量路径，扩容时哈希随键缓存，实测比朴素实现快约 23%。
+**Runtime performance is on par with hand-written C**: what gets generated is
+plain C — no runtime interpretation, no implicit boxing, no GC pauses.
+Containers (`ArrayList` / `HashMap`) use `@memcpy`/`@memmove`/`@memset` bulk
+paths and cache the hash with its key on growth; measured ~23% faster than a
+naive implementation.
 
-编译侧同样是线性的：小文件 0.1 s 级，多文件工程按模块出 `.o` 增量重编；
-语言服务器给 16000 行文件算 48000 条行内类型提示只要 0.09 s。
+The compile side is linear too: small files build in ~0.1 s, multi-file
+projects rebuild incrementally per-module `.o`; the language server computes
+48,000 inlay type hints for a 16,000-line file in 0.09 s.
 
-## 目录
+## Layout
 
-| 路径 | 内容 |
+| Path | Contents |
 | --- | --- |
-| `src/` | 编译器 C 实现：词法 / 语法 / 语义 / C 发射 / 诊断 |
-| `bootstrap/` | 自举前端（Zx 写），编成 `bin/zxfe.exe`，默认走它 |
-| `std/` | 标准库：`str` `map` `fs` `json` `time` `arena` `pool` `task` |
-| `tests/` | `good/` 正例、`bad/` 反例（带期望错误码）、`multi/` 多文件 |
-| `demo/` | `snake.zx` 控制台游戏；`ffi/` Win32 + OpenGL 绑定示例 |
-| `bench/` | 与手写 C 对照的基准与基线 |
-| `spec/` | `zx-spec.md` 规格、`zx.ebnf` 文法、`decisions.md` 设计裁定 |
-| `editor/` | Zed 扩展与语言服务器源码 `tools/zxls.zig` |
+| `src/` | the compiler in C: lexer / parser / semantic analysis / C emission / diagnostics |
+| `bootstrap/` | bootstrapped frontend (written in Zx), built as `bin/zxfe.exe`, used by default |
+| `std/` | standard library: `str` `map` `fs` `json` `time` `arena` `pool` `task` |
+| `tests/` | `good/` positive cases, `bad/` negative cases (with expected error codes), `multi/` multi-file |
+| `demo/` | `snake.zx` console game; `ffi/` Win32 + OpenGL binding demos |
+| `bench/` | benchmarks against hand-written C, plus baselines |
+| `spec/` | `zx-spec.md` the spec, `zx.ebnf` the grammar, `decisions.md` design decisions |
+| `editor/` | Zed extension and the language server source `tools/zxls.zig` |
 
-## 错误码
+## Error codes
 
 ```sh
-zxc errors               # 所有错误码，按类别
-zxc explain E0304        # 单个错误码的含义与修法
+zxc errors               # all error codes, grouped by category
+zxc explain E0304        # meaning and fixes for one code
 ```
 
-错误码文案就在 `src/errors.c` 里，`zxc errors` / `zxc explain` 直接念它，
-不用翻文件；完整参考在 `docs/errors.md`（诊断里的 `details:` 链接、编辑器里
-点诊断上的码都跳到那里）。
+The error text lives in `src/errors.c`; `zxc errors` / `zxc explain` read it
+directly, so there is nothing to look up by hand. The full reference is in
+`docs/errors.md` (the `details:` links in diagnostics and clicking a code in
+the editor both jump there).
 
-## 文档
+## Docs
 
-| 文件 | 内容 |
+| File | Contents |
 | --- | --- |
-| `docs/manual.md` | 入门手册：从第一个程序到并发、JSON、内存 |
-| `docs/reference.md` | 速查参考：语法、类型、内建、std 全 API、工具链（版本 1.4.2） |
-| `docs/errors.md` | 错误码逐条解释（同 `zxc explain CODE`） |
-| `spec/zx-spec.md` / `spec/decisions.md` | 语言规格与设计裁定 |
+| `docs/manual.md` | getting started: first program through concurrency, JSON, and memory |
+| `docs/reference.md` | quick reference: syntax, types, builtins, the full std API, tooling (version 1.4.2) |
+| `docs/errors.md` | every error code explained (same as `zxc explain CODE`) |
+| `spec/zx-spec.md` / `spec/decisions.md` | the language spec and design decisions |
 
-标准库仍在演进：`std/` 的源码顺序与注释、编辑器补全（签名 + 成员）永远是
-最新的一手资料；离线文档站暂不提供。
+The standard library is still evolving: the source order and comments in `std/`,
+and editor completion (signatures + members), are always the most up-to-date
+reference; there is no separate documentation site for now.
