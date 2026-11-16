@@ -111,6 +111,7 @@ static const DiagRule g_rules[] = {
     { "cannot yield a tagged pointer",    "E0516" },
     { "must be tagged",                   "E0517" },
     { "already owns an allocation",       "E0518" },
+    { "manual tag declaration is gone",   "E0519" },
 
     /* 控制流位置：continue/return/defer 放错地方，标签找不到 */
     { "does not take an `else` branch",   "E0405" },

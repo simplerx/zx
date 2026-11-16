@@ -357,7 +357,7 @@ Type *ty_agg(TyKind kind, Node *decl, const char *name) {
 /* ---------- singletons ---------- */
 
 static Type *mk_single(TyKind k) {
-    static Type *cache[TY_FN + 1];
+    static Type *cache[TY_TAG + 1];
     if (!cache[k]) cache[k] = intern(ty_new(k));
     return cache[k];
 }
@@ -367,6 +367,7 @@ Type *ty_void(void)          { return mk_single(TY_VOID); }
 Type *ty_bool(void)          { return mk_single(TY_BOOL); }
 Type *ty_error(void)         { return mk_single(TY_ERROR); }
 Type *ty_type(void)          { return mk_single(TY_TYPE); }
+Type *ty_tag(void)           { return mk_single(TY_TAG); }
 Type *ty_noreturn(void)      { return mk_single(TY_NORETURN); }
 Type *ty_comptime_int(void)  { return mk_single(TY_COMPTIME_INT); }
 Type *ty_comptime_float(void){ return mk_single(TY_COMPTIME_FLOAT); }
@@ -482,7 +483,7 @@ int ty_align(Type *t) {
     int a = 1;
     switch (t->kind) {
     case TY_INVALID: case TY_VOID: case TY_NORETURN: case TY_TYPE:
-    case TY_ERRORSET:
+    case TY_ERRORSET: case TY_TAG:
     case TY_COMPTIME_INT: case TY_COMPTIME_FLOAT: case TY_NULL: case TY_UNDEF:
         a = 1; break;
     case TY_BOOL:  a = 1; break;
@@ -562,7 +563,7 @@ int ty_size(Type *t) {
     int s = 0;
     switch (t->kind) {
     case TY_INVALID: case TY_VOID: case TY_NORETURN: case TY_TYPE:
-    case TY_ERRORSET:                  /* 编译期类型：没有运行时大小 */
+    case TY_ERRORSET: case TY_TAG:                  /* 编译期类型：没有运行时大小 */
         s = 0; break;
     case TY_COMPTIME_INT: case TY_COMPTIME_FLOAT:
         s = -1; break;                 /* 还没有运行时宽度 */
@@ -669,6 +670,7 @@ static void ty_print_into(Buf *b, Type *t, int depth) {
     case TY_BOOL:      buf_puts(b, "bool"); return;
     case TY_ERROR:     buf_puts(b, "error"); return;
     case TY_TYPE:      buf_puts(b, "type"); return;
+    case TY_TAG:       buf_puts(b, "tag"); return;
     case TY_COMPTIME_INT:   buf_puts(b, "comptime_int"); return;
     case TY_COMPTIME_FLOAT: buf_puts(b, "comptime_float"); return;
     case TY_NULL:  buf_puts(b, "null"); return;
@@ -876,6 +878,7 @@ const char *ty_kind_name(TyKind k) {
     case TY_ERR: return "error union";
     case TY_FN: return "function";
     case TY_VEC: return "vector";
+    case TY_TAG: return "tag";
     }
     return "?";
 }

@@ -1,6 +1,5 @@
 // tag-loop.zx —— §170 循环配平：alloc + free 在同一迭代内闭合
 const std = @mod("std");
-tag.buf;
 const main = fn () u8 {
     var total: u64 = 0;
     for (0..3) i {

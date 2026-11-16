@@ -617,8 +617,9 @@ module.exports = grammar({
         seq("try", field("operand", $._expression), field("binding", $.identifier), field("body", $.block)),
       ),
 
-    // §170 贴标：`tag.name;` / `tag.name.static;` / `tag.name : expr`
+    // §170/§172 贴标：`tag.name`（引用） / `tag.name : expr`（贴标）
     // 上下文关键字：只有 `tag` + `.` + 名字才是标签，其他位置的 tag 仍按标识符
+    //（§172：没有声明语句，也没有 .static；标签首次引用自动建槽）
     tag_application: ($) =>
       prec.right(
         PREC.CALL + 1,
@@ -626,12 +627,9 @@ module.exports = grammar({
           "tag",
           ".",
           field("name", $.identifier),
-          optional(alias($._tag_static, $.tag_static)),
           optional(seq(":", field("value", $._expression))),
         ),
       ),
-
-    _tag_static: ($) => seq(".", "static"),
 
     return_statement: ($) =>
       seq("return", optional(field("value", $._expression)), ";"),

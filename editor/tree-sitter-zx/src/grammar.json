@@ -3929,23 +3929,6 @@
             "type": "CHOICE",
             "members": [
               {
-                "type": "ALIAS",
-                "content": {
-                  "type": "SYMBOL",
-                  "name": "_tag_static"
-                },
-                "named": true,
-                "value": "tag_static"
-              },
-              {
-                "type": "BLANK"
-              }
-            ]
-          },
-          {
-            "type": "CHOICE",
-            "members": [
-              {
                 "type": "SEQ",
                 "members": [
                   {
@@ -3969,19 +3952,6 @@
           }
         ]
       }
-    },
-    "_tag_static": {
-      "type": "SEQ",
-      "members": [
-        {
-          "type": "STRING",
-          "value": "."
-        },
-        {
-          "type": "STRING",
-          "value": "static"
-        }
-      ]
     },
     "return_statement": {
       "type": "SEQ",

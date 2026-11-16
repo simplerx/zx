@@ -2,7 +2,6 @@
 // expect-code: E0514
 // §170：贴标载体不跨函数边界——传参即断链。
 const std = @mod("std");
-tag.buf;
 const take = fn (_p: *i32) void {
     _ = _p;
 };

@@ -118,7 +118,7 @@ static const ErrDoc g_errs[] = {
     { "E0512", "use after free of a tagged pointer",
       "the tag's state machine knows the allocation was released; re-binding (`tag.x : p`) a freed pointer is also use after free" },
     { "E0513", "a tagged allocation was never freed",
-      "alloc and free must come in pairs; declare the tag `tag.x.static;` if it is meant to outlive the program" },
+      "alloc and free must come in pairs; free the tagged pointer before the program ends -- there are no exemptions" },
     { "E0514", "tagged pointer provenance lost",
       "tagged pointers cannot cross function boundaries, be cast to non-pointers, or stay behind control flow; a branch that frees must return null as its value" },
     { "E0515", "tag state is undetermined -- defend first",
@@ -129,6 +129,8 @@ static const ErrDoc g_errs[] = {
       "every heap allocation must be tagged: `let p = tag.x : std.heapAlloc(...)`; write `tag.close;` in this file to opt out" },
     { "E0518", "tag already owns an allocation",
       "a tag is a single-instance label: free the current allocation or use a second tag" },
+    { "E0519", "manual tag declaration removed -- tags self-declare on first use",
+      "a tag slot is created automatically the first time you reference it (`tag.x : expr` or `const h = tag.x;`); there is no declaration statement any more -- remove the line" },
 
     /* ---- 模块 ---- */
     { "E0601", "module resolution failed",

@@ -1,0 +1,19 @@
+// tag-auto.zx —— §172：标签自动建槽（引用即声明），手动 `tag.buf;` 已丢弃
+// 覆盖：贴标点自动建槽、裸引用一等值 const 绑定、别名回退指向同一槽。
+const std = @mod("std");
+
+const main = fn () u8 {
+    var p = tag.buf : std.heapAlloc(std.heap.page, i32, 4);
+    p[0] = 7;
+    var first = p[0];
+    const h = tag.buf;                   // 一等 tag 值（模仿 error.foo）
+    std.heap.page.free(std.heap.page.ctx, (*u8)p, 16);
+    var q = tag.h : std.heapAlloc(std.heap.page, i32, 4);  // 别名回退 → buf 的槽
+    q[0] = first + 2;
+    std.println("v={d}", q[0]);
+    std.heap.page.free(std.heap.page.ctx, (*u8)q, 16);
+    return 0;
+};
+
+// expect-output
+// v=9

@@ -2,7 +2,6 @@
 // tag 是编译期唯一标签；贴标指针进状态机，alloc/free 成对，解引用点查状态。
 const std = @mod("std");
 
-tag.buf;
 
 const main = fn () u8 {
     var p = tag.buf : std.heapAlloc(std.heap.page, i32, 4);

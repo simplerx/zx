@@ -3,7 +3,6 @@
 // §170：分支内 free 必须传 null 作为臂值。free 后传出非空载体，根因在
 // 臂出口报 E0514；合并出的载体状态失效，下游使用再报一条 E0512。
 const std = @mod("std");
-tag.buf;
 var drop: bool = false;
 
 const main = fn () u8 {

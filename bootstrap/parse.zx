@@ -1515,7 +1515,7 @@ pub const Parser = struct {
         if (t.kind == lex.Kind.ident && std.str.eq(self.tok_text(t), "tag") &&
             self.peek_tok(1).kind == lex.Kind.dot &&
             self.peek_tok(2).kind == lex.Kind.ident) {
-            // tag.name / tag.name.static / tag.name : expr（§170）
+            // tag.name / tag.name : expr（§170；§172 无声明语句无 .static）
             // 上下文关键字：只有「裸 tag + . + 名字」形态按标签语法收
             _ = self.advance();
             try self.expect(lex.Kind.dot);
@@ -1526,15 +1526,6 @@ pub const Parser = struct {
                 n.name = self.tok_text(nm);
             } else {
                 self.record("E0201", "expected a tag name after 'tag.'");
-            }
-            if (self.at(lex.Kind.dot) && self.peek_tok(1).kind == lex.Kind.ident) {
-                let st = self.peek_tok(1);
-                let txt = self.tok_text(st);
-                if (std.str.eq(txt, "static")) {
-                    _ = self.advance();
-                    _ = self.advance();
-                    n.flag = true;
-                }
             }
             if (self.at(lex.Kind.colon)) {
                 _ = self.advance();

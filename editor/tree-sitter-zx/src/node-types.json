@@ -7177,22 +7177,7 @@
           }
         ]
       }
-    },
-    "children": {
-      "multiple": false,
-      "required": false,
-      "types": [
-        {
-          "type": "tag_static",
-          "named": true
-        }
-      ]
     }
-  },
-  {
-    "type": "tag_static",
-    "named": true,
-    "fields": {}
   },
   {
     "type": "try_capture_expression",
@@ -9301,10 +9286,6 @@
   },
   {
     "type": "return",
-    "named": false
-  },
-  {
-    "type": "static",
     "named": false
   },
   {

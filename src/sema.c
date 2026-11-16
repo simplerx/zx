@@ -545,6 +545,7 @@ static Type *base_type(const char *n) {
     if (!strcmp(n, "bool"))      return ty_bool();
     if (!strcmp(n, "type"))      return ty_type();
     if (!strcmp(n, "error"))     return ty_error();
+    if (!strcmp(n, "tag"))       return ty_tag();     /* §172：tag 是内建类型 */
     if (!strcmp(n, "noreturn"))  return ty_noreturn();
     if (!strcmp(n, "usize"))     return ty_usize();
     if (!strcmp(n, "isize"))     return ty_isize();
@@ -686,6 +687,7 @@ static Type *sema_type_type(void) {
 bool sema_ty_ct_only(Type *t) {
     if (!t) return false;
     if (t == sema_type_type() || t == sema_type_field_type()) return true;
+    if (t->kind == TY_TAG) return true;          /* §172：标签句柄只活在编译期 */
     if (t->kind == TY_SLICE || t->kind == TY_PTR || t->kind == TY_OPT)
         return sema_ty_ct_only(t->elem);
     return false;
@@ -2758,7 +2760,6 @@ static void region_handle_call(Node *n) {
 typedef struct {
     const char *name;      /* 编译期唯一名（程序级，跨文件不可重名） */
     int         line, col;
-    bool        is_static; /* 静态生命周期：豁免泄漏检查 */
     int         state;     /* TST_*：分配事实 */
     int         region;    /* 当前关联的 region token（0 = 无） */
     int         free_line, free_col;
@@ -2794,16 +2795,11 @@ static void tag_of_expr(Node *e, int *id, int *state) {
     if (e->kind == NK_YIELD) { tag_of_expr(e->a, id, state); return; }
 }
 
-/* 定义 / 查重。同位置重复检查（泛型/折值重扫）幂等返回。 */
-static TagSlot *tag_decl(const char *name, bool is_static, Node *n) {
+/* 定义 / 查重。§172：tag 名字是全局唯一键（模仿 error 名字分配码）：
+ * 首次引用（tag.buf）即自动建槽，没有声明语句，同名幂等不报重复。 */
+static TagSlot *tag_decl(const char *name, Node *n) {
     TagSlot *ex = tag_by_name(name);
-    if (ex) {
-        if (ex->line == n->line && ex->col == n->col && ex->is_static == is_static)
-            return ex;
-        err_at(n->line, n->col, "duplicate tag '%s' (first declared at line %d)",
-               name, ex->line);
-        return ex;
-    }
+    if (ex) return ex;
     if (g_ntslots == g_ctslots) {
         int nc = g_ctslots ? g_ctslots * 2 : 16;
         TagSlot *p = realloc(g_tslots, (size_t)nc * sizeof(TagSlot));
@@ -2814,8 +2810,21 @@ static TagSlot *tag_decl(const char *name, bool is_static, Node *n) {
     memset(t, 0, sizeof *t);
     t->name = name;
     t->line = n->line; t->col = n->col;
-    t->is_static = is_static;
     return t;
+}
+
+/* §172：按名字解析 tag 槽 —— 先查槽位表（已建槽），再查同名 const 别名
+ * （const b2 = tag.buf; 之后 `tag.b2` 也指到 buf 的槽，避免按名误建新标签），
+ * 都没有就自动建槽（引用即声明）。 */
+static TagSlot *tag_resolve(Node *n) {
+    TagSlot *t = tag_by_name(n->name);
+    if (!t) {
+        Symbol *s = lookup(n->name);
+        if (s) s->used = true;              /* 别名引用算使用 */
+        if (s && s->tag_id) t = tag_slot(s->tag_id);
+    }
+    if (t) return t;
+    return tag_decl(n->name, n);
 }
 
 /* 解引用点检查：base 带贴标载体时按状态拦（use-after-free / 未防守）。 */
@@ -2935,10 +2944,9 @@ static void tag_alloc_register(Node *call, Module *mod) {
  * 返回载体状态（TC_*）；报错时置 *bad。 */
 static int tag_check_apply(Node *n, bool *bad) {
     *bad = false;
-    TagSlot *t = tag_by_name(n->name);
+    /* §172：引用即声明（自动建槽），没有任何豁免 */
+    TagSlot *t = tag_resolve(n);
     if (!t) {
-        diag_code_at("E0401", n->line, n->col,
-            "unknown tag '%s' -- declare it first: `tag %s;`", n->name, n->name);
         *bad = true;
         return TC_NONE;
     }
@@ -2997,10 +3005,16 @@ typedef struct {
 
 /* 臂检查后对账：对比快照，臂内释放的 tag 必须以 null 收尾，臂内分配的
  * tag 必须由臂值传出。返回该臂的出口载体（无传出 → tag=0）。 */
-static ArmExit tag_arm_reconcile(Node *armval, const int *snap, int n0) {
+static ArmExit tag_arm_reconcile(Node *armval, const int *snap, int n0, int ntotal) {
     ArmExit e = { 0, TC_NONE, armval };
-    for (int i = 0; i < n0 && i < g_ntslots; i++) {
-        if (g_tslots[i].state == snap[i]) continue;
+    for (int i = 0; i < g_ntslots; i++) {
+        /* §172：快照之后新建的槽（自动建槽可能发生在臂内）按 idle 进入；
+         * 超出快照数组容量的老槽维持旧行为（跳过） */
+        int before;
+        if (i < n0) before = snap[i];
+        else if (i < ntotal) continue;
+        else before = 0;
+        if (g_tslots[i].state == before) continue;
         TagSlot *t = &g_tslots[i];
         if (t->state == TST_FREED && snap[i] == TST_LIVE) {
             /* 臂内释放：必须传出 null 载体（"在壁内释放，就返回空指针"） */
@@ -3074,12 +3088,14 @@ static void tag_join_arms(Node *n, ArmExit a, ArmExit b) {
 #define TAG_SNAP_MAX 128
 typedef struct {
     int      n;
+    int      total;    /* §172：快照时的槽位总数（含超出数组容量的） */
     int      state[TAG_SNAP_MAX];
     Symbol  *carrier[TAG_SNAP_MAX];   /* 载体符号与其 tag_state 一起回滚 */
     int      cstate[TAG_SNAP_MAX];
 } TagSnap;
 
 static void tag_snap(TagSnap *s) {
+    s->total = g_ntslots;
     s->n = g_ntslots < TAG_SNAP_MAX ? g_ntslots : TAG_SNAP_MAX;
     for (int i = 0; i < s->n; i++) {
         s->state[i] = g_tslots[i].state;
@@ -3088,12 +3104,19 @@ static void tag_snap(TagSnap *s) {
     }
 }
 
-/* 恢复快照：另一臂 / 下一轮迭代从同一进入状态开始检查 */
+/* 恢复快照：另一臂 / 下一轮迭代从同一进入状态开始检查。
+ * §172：快照之后**新建**的槽位退回 idle——臂内分配的事实已经由对账收进
+ * 载体链（与预声明时代槽位以 idle 进入分支的语义一致）；槽位本身保留，
+ * 保证 tag_id 索引稳定。 */
 static void tag_restore(const TagSnap *s) {
     for (int i = 0; i < s->n && i < g_ntslots; i++) {
         g_tslots[i].state = s->state[i];
         g_tslots[i].carrier = s->carrier[i];
         if (g_tslots[i].carrier) g_tslots[i].carrier->tag_state = s->cstate[i];
+    }
+    for (int i = s->total; i < g_ntslots; i++) {
+        g_tslots[i].state = 0;
+        g_tslots[i].carrier = NULL;
     }
 }
 
@@ -3105,8 +3128,13 @@ static void tag_restore(const TagSnap *s) {
  * 出口 LIVE 而进入是 idle = 分配没闭合（第二轮就是重复分配）；出口 FREED
  * 而进入是 LIVE = 轮内释放了循环外的分配。都是 E0516。 */
 static void tag_loop_balance(Node *body, const TagSnap *snap) {
-    for (int i = 0; i < snap->n && i < g_ntslots; i++) {
-        int before = snap->state[i], after = g_tslots[i].state;
+    for (int i = 0; i < g_ntslots; i++) {
+        /* §172：快照之后新建的槽按 idle 进入；超容量老槽跳过 */
+        int before, after;
+        if (i < snap->n) before = snap->state[i];
+        else if (i < snap->total) continue;
+        else before = 0;
+        after = g_tslots[i].state;
         if (before == after) continue;
         bool ok = (before == TST_LIVE && after == TST_LIVE) ||
                   (before != TST_LIVE && after == TST_FREED);
@@ -3152,12 +3180,12 @@ static bool tag_module_exempt(Module *m) {
 static void tag_ledger_final(const char *entry_path) {
     for (int i = 0; i < g_ntslots; i++) {
         TagSlot *t = &g_tslots[i];
-        if (t->state != TST_LIVE || t->is_static) continue;
+        if (t->state != TST_LIVE) continue;
         diag_code_at("E0513", t->line, t->col,
             "tag '%s' is still LIVE at the end of the program (allocated at "
-            "line %d) -- alloc and free must come in pairs; declare it "
-            "`tag %s.static;` if it is meant to outlive the program",
-            t->name, t->line, t->name);
+            "line %d) -- alloc and free must come in pairs; free it before "
+            "the program ends",
+            t->name, t->line);
     }
     for (int i = 0; i < g_ntag_allocs; i++) {
         Node *c = g_tag_allocs[i].node;
@@ -3924,6 +3952,14 @@ static Type *check_field(Node *n) {
     /* 类型值上的成员：Color.red / Counter.n / ShapeTag.circle */
     if (bt && bt->kind == TY_TYPE) {
         Type *tv = base->type_val ? base->type_val : ty_invalid();
+        /* §172：tag.buf —— 标签句柄字面量（模仿 error.foo）。引用即声明：
+         * 名字来自成员名，绑到 const 时符号名只是别名。节点带 tag_id 供
+         * 贴标与状态机使用；类型是编译期-only，后端不发射。 */
+        if (tv->kind == TY_TAG && n->name) {
+            TagSlot *ts = tag_decl(n->name, n);
+            n->tag_id = ts ? (int)(ts - g_tslots) + 1 : 0;
+            return type_of(n, ty_tag());
+        }
         /* error.open：错误码字面量。类型是 error（运行时就是一个 u16），
          * 值在编译期折成常量，集合信息（单元素）留在节点上供 try/return 检查。 */
         if (tv->kind == TY_ERROR && n->name) {
@@ -4938,7 +4974,7 @@ static Type *check_call(Node *n, Type *expect) {
             }
             Type *elem = resolve_type(n->items[base]);
             if (!elem || elem->kind == TY_INVALID || elem->kind == TY_TYPE ||
-                elem->kind == TY_VOID)
+                elem->kind == TY_VOID || elem->kind == TY_TAG)
                 return BAD(n, "std.%s cannot allocate `%s`", m->name,
                            elem ? ty_str(elem) : "?");
             check_expr(n->items[base + 1], ty_usize());
@@ -5604,7 +5640,7 @@ static Type *check_expr_raw(Node *n, Type *expect) {
             }
             bt = check_block(n->b);
             if (n->b->kind == NK_BLOCK) {
-                exErr = tag_arm_reconcile(n->b->d, snapT.state, snapT.n);
+                exErr = tag_arm_reconcile(n->b->d, snapT.state, snapT.n, snapT.total);
             } else {
                 exErr = (ArmExit){ 0, TC_NONE, NULL };
             }
@@ -5651,12 +5687,12 @@ static Type *check_expr_raw(Node *n, Type *expect) {
             return BAD(n, "`tag.close;` is a file-scope statement, not an expression");
         }
         if (!n->b) {
-            TagSlot *t = tag_by_name(n->name);
-            if (!t)
-                return BAD(n, "unknown tag '%s' -- declare it first: `tag %s;`",
-                           n->name, n->name);
-            return BAD(n, "tag '%s' is a compile-time label with no runtime "
-                          "value -- bind it: `tag.%s : expr`", n->name, n->name);
+            /* §172：裸引用 tag.buf —— 一等 tag 值（模仿 error.foo）：
+             * 引用即自动建槽，类型是编译期-only 的 tag；没有运行期值，
+             * 只能 const 绑定（const buf = tag.buf;）或去贴标点用。 */
+            TagSlot *ts = tag_resolve(n);
+            n->tag_id = ts ? (int)(ts - g_tslots) + 1 : 0;
+            return type_of(n, ty_tag());
         }
         Type *vt = check_expr(n->b, expect);
         bool bad = false;
@@ -6266,7 +6302,8 @@ static void ensure_raw(Symbol *s) {
 
     /* R1：凡 const，编译器必须能在编译期算出值 */
     if (s->kind == SK_CONST && d->b && !s->ct && !s->type_val &&
-        s->ty && s->ty->kind != TY_INVALID && d->b->kind != NK_MODULE &&
+        s->ty && s->ty->kind != TY_INVALID && s->ty->kind != TY_TAG &&
+        d->b->kind != NK_MODULE &&
         (!init || init->kind != TY_INVALID))   /* 初始化器本身报过错就别再叠一条 */
         err_at(d->line, d->col,
                "const '%s' must be computable at compile time (R1); "
@@ -6766,7 +6803,8 @@ static void check_stmt(Node *n) {
             if (tid) {
                 n->sym->tag_id = tid; n->sym->tag_state = tst;
                 TagSlot *ts = tag_slot(tid);
-                if (ts) ts->carrier = n->sym;
+                /* const 别名只是句柄不是指针载体，不进账本（§172） */
+                if (ts && n->sym->kind != SK_CONST) ts->carrier = n->sym;
             }
         }
         return;
@@ -6781,7 +6819,12 @@ static void check_stmt(Node *n) {
             return;
         }
         if (!n->b) {
-            tag_decl(n->name, n->flag, n);   /* flag = .static */
+            /* §172：声明语句已整个丢弃 —— 标签首次引用自动建槽，没有豁免：
+             * 释放是 alloc/free 的职责，程序结束仍 LIVE 报 E0513。 */
+            diag_code_at("E0519", n->line, n->col,
+                "manual tag declaration is gone -- '%s' self-declares on "
+                "first use (`tag.%s : expr`); remove this line",
+                n->name, n->name);
             return;
         }
         err_at(n->line, n->col,
@@ -7078,7 +7121,7 @@ static Type *check_if(Node *n, Type *expect) {
             /* 臂值：带标签 if 的收割挂在外层 Label（lb->val）；无标签块的
              * 收割才落在块节点上 */
             Node *tval = lb ? lb->val : ((n->b && n->b->kind == NK_BLOCK) ? n->b->d : n->b);
-            exT = tag_arm_reconcile(tval, snapT.state, snapT.n);
+            exT = tag_arm_reconcile(tval, snapT.state, snapT.n, snapT.total);
         }
         tag_restore(&snapT);          /* 臂 2 从同一进入状态开始 */
         scope_pop(&sc);
@@ -7113,7 +7156,7 @@ static Type *check_if(Node *n, Type *expect) {
         }
         et = check_arm(n->c, expect);
         Node *eval = lb ? lb->val : ((n->c && n->c->kind == NK_BLOCK) ? n->c->d : n->c);
-        exE = tag_arm_reconcile(eval, snapT.state, snapT.n);
+        exE = tag_arm_reconcile(eval, snapT.state, snapT.n, snapT.total);
         tag_restore(&snapT);
         scope_pop(&sc);
     }

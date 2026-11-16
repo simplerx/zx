@@ -178,7 +178,6 @@ def send(msg):
     data = json.dumps(msg).encode()
     proc.stdin.write(f"Content-Length: {len(data)}\r\n\r\n".encode() + data)
     proc.stdin.flush()
-
 def recv_id(tag, want_id, timeout=30):
     """按 id 取应答；通知（无 id）跳过但保留诊断内容供检查。"""
     notifs = []
@@ -5210,6 +5209,68 @@ def inlay_perf():
         except Exception:
             pass
 
+
+# ---------------------------------------------------------------------------
+# §172 tag 补全：`tag.` → close + 本文件出现过的 tag 名（不再是 0/len/size）。
+# 用独立服务器：主服务器在上面已经 shutdown/exit 退出了。
+def tag_completion_probe():
+    tdir = os.path.join(TESTDIR, "tagdoc%d.zx" % 0)
+    turi = "file:///" + tdir.replace("\\", "/")
+    tagp = subprocess.Popen([ZXLS_BIN], stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    def tes(msg):
+        tdata = json.dumps(msg).encode()
+        tagp.stdin.write(b"Content-Length: %d\r\n\r\n" % len(tdata) + tdata)
+        tagp.stdin.flush()
+    def ter(timeout=30):
+        import time as _t9
+        end = _t9.time() + timeout
+        tbuf = b""
+        while _t9.time() < end:
+            c = tagp.stdout.read(1)
+            if not c:
+                return None
+            tbuf += c
+            if tbuf.endswith(b"\r\n\r\n"):
+                thdr = dict(l.split(b": ", 1) for l in tbuf.split(b"\r\n") if b": " in l)
+                return json.loads(tagp.stdout.read(int(thdr[b"Content-Length"])))
+        return None
+    labels = set()
+    try:
+        TAGDOC = chr(10).join([
+            'const std = @mod("std");',
+            '',
+            'const main = fn () u8 {',
+            '    var p = tag.buf : std.heapAlloc(std.heap.page, i32, 4);',
+            '    return 0;',
+            '};',
+        ]) + chr(10)
+        tes({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "rootUri": "file:///" + TESTDIR.replace("\\", "/")}})
+        ter()
+        tes({"jsonrpc": "2.0", "method": "initialized", "params": {}})
+        tes({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": {"uri": turi, "languageId": "zx", "version": 1, "text": TAGDOC}}})
+        ter()                                  # 吃掉诊断通知
+        _toff = TAGDOC.index("tag.buf") + 4    # 光标贴在 '.' 之后
+        _tline = TAGDOC.count(chr(10), 0, _toff)
+        _tls = TAGDOC.rfind(chr(10), 0, _toff) + 1
+        tes({"jsonrpc": "2.0", "id": 2, "method": "textDocument/completion", "params": {
+            "textDocument": {"uri": turi},
+            "position": {"line": _tline, "character": _toff - _tls}}})
+        _m = ter()
+        if _m and _m.get("result"):
+            labels = {it["label"] for it in _m["result"]["items"]}
+    finally:
+        try:
+            tagp.kill()
+        except Exception:
+            pass
+    return labels
+
+_tag_labels = tag_completion_probe()
+check("completion.tag.members", {"close", "buf"} <= _tag_labels
+      and not ({"len", "size", "0"} & _tag_labels), str(sorted(_tag_labels)))
 
 perf = inlay_perf()
 if perf is None:

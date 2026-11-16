@@ -199,6 +199,7 @@ static void tsuffix(Buf *b, Type *t) {
     case TY_BOOL:     buf_puts(b, "bool"); break;
     case TY_ERROR:    buf_puts(b, "err");  break;
     case TY_TYPE:     buf_puts(b, "type"); break;
+    case TY_TAG:      buf_puts(b, "tag"); break;
     case TY_INT:
         if (t->bits == 64 && !t->is_signed) buf_puts(b, "usize");
         else if (t->bits == 64)             buf_puts(b, "isize");
@@ -476,7 +477,7 @@ static void ensure_type(Type *t) {
                  * ctype 把类型发成 void、初值是 struct 类型字面量节点，
                  * 后端直接撞 E0300 + B1003（用户 2026-11-10 报的 B1001
                  * 同一条线上的坑）。 */
-                if (f->ty && f->ty->kind == TY_TYPE) continue;
+                if (f->ty && (f->ty->kind == TY_TYPE || f->ty->kind == TY_TAG)) continue;
                 Buf s; buf_init(&s);
                 buf_puts(&s, "static ");
                 ctype(&s, f->ty);
@@ -570,7 +571,7 @@ static void ensure_type(Type *t) {
         for (int k = 0; k < t->nstatics; k++) {
             Field *f = &t->statics[k];
             /* 类型成员没有 C 表示（同 struct 静态成员） */
-            if (f->ty && f->ty->kind == TY_TYPE) continue;
+            if (f->ty && (f->ty->kind == TY_TYPE || f->ty->kind == TY_TAG)) continue;
             ensure_type(f->ty);
             Buf s; buf_init(&s);
             buf_puts(&s, "static ");
@@ -601,6 +602,7 @@ static void ctype(Buf *b, Type *t) {
     case TY_BOOL:     buf_puts(b, "bool"); break;
     case TY_ERROR:    buf_puts(b, "uint16_t"); break;
     case TY_TYPE:     buf_puts(b, "void"); break;
+    case TY_TAG:      buf_puts(b, "void"); break;
     case TY_INT:
         if (t->bits == 8)  buf_puts(b, t->is_signed ? "int8_t"  : "uint8_t");
         else if (t->bits == 16) buf_puts(b, t->is_signed ? "int16_t" : "uint16_t");

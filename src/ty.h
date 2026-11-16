@@ -42,6 +42,7 @@ typedef enum {
     TY_ERRORSET,           /* error{a, b}：编译期类型，运行时就是 error(u16) */
     TY_FN,                 /* 8 字节代码指针 */
     TY_VEC,                /* @Vec(T, N)：N 个 T 的向量值（§162） */
+    TY_TAG,                /* tag.buf：编译期标签句柄（§172），只活在编译期 */
 } TyKind;
 
 /* 聚合体的一个成员：结构体字段、联合体成员、枚举变体都用它。 */
@@ -117,6 +118,7 @@ Type *ty_void(void);
 Type *ty_bool(void);
 Type *ty_error(void);
 Type *ty_type(void);
+Type *ty_tag(void);
 Type *ty_noreturn(void);
 Type *ty_usize(void);
 Type *ty_isize(void);

@@ -936,9 +936,8 @@ static Node *parse_dot_brace(P *p, bool array_lit) {
 
 /* tag 指针生命周期标签（上下文关键字：`tag` 平时是普通标识符，只有
  * 「裸 tag + . + 名字」形态才按标签语法收，v.tag / 局部变量 tag 不受影响）：
- *   tag.name;            定义（编译期唯一名）
- *   tag.name.static;     定义：静态生命周期，豁免泄漏检查
- *   tag.close;           关闭本文件的强制贴标（库/旧代码逃生口）
+ *   tag.close;           关闭本模块的强制贴标（库/旧代码逃生口）
+ *   （§172：tag.name 首次引用自动建槽，没有声明语句，也没有 .static）
  *   tag.name : expr      贴标：把 expr（heapAlloc 分配或已贴标载体）
  *                        绑到该标签上
  * 调用点已保证 cur 是裸 ident "tag" 且 peek(1) 是 '.'、peek(2) 是 ident。 */
@@ -947,11 +946,6 @@ static Node *parse_tag(P *p) {
     expect(p, TOK_DOT);
     Node *n = node_new(NK_TAG_APPLY, t->line, t->col);
     n->name = take_ident(p);
-    if (at(p, TOK_DOT) && peek(p, 1)->kind == TOK_IDENT &&
-        peek(p, 1)->len == 6 && !memcmp(peek(p, 1)->start, "static", 6)) {
-        advance(p);                              /* .static */
-        n->flag = true;
-    }
     if (at(p, TOK_COLON)) {
         advance(p);
         n->b = parse_expr(p);                    /* 贴标 */
