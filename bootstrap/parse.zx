@@ -125,6 +125,7 @@ pub const NK = enum {
     root,
     err_set,          // error{a, b} —— 追加在末尾，老编号不漂移
     vec,              // @Vec(T, N) —— 同样追加在末尾（§162）
+    tag_apply,        // tag.name / tag.name : expr —— 追加在末尾（§170）
 };
 
 pub const Node = struct {
@@ -206,6 +207,7 @@ const nk_name = fn (k: NK) []const u8 {
         .root: "root";
         .err_set: "errset";
         .vec: "vec";
+        .tag_apply: "tag";
     };
 };
 
@@ -1493,6 +1495,36 @@ pub const Parser = struct {
             _ = self.advance();
             let n = self.new_at(NK.try_, t);
             n.a = try self.parse_unary();
+            return n;
+        }
+        if (t.kind == lex.Kind.ident && std.str.eq(self.tok_text(t), "tag") &&
+            self.peek_tok(1).kind == lex.Kind.dot &&
+            self.peek_tok(2).kind == lex.Kind.ident) {
+            // tag.name / tag.name.static / tag.name : expr（§170）
+            // 上下文关键字：只有「裸 tag + . + 名字」形态按标签语法收
+            _ = self.advance();
+            try self.expect(lex.Kind.dot);
+            let n = self.new_at(NK.tag_apply, t);
+            let nm = self.cur();
+            if (nm.kind == lex.Kind.ident) {
+                _ = self.advance();
+                n.name = self.tok_text(nm);
+            } else {
+                self.record("E0201", "expected a tag name after 'tag.'");
+            }
+            if (self.at(lex.Kind.dot) && self.peek_tok(1).kind == lex.Kind.ident) {
+                let st = self.peek_tok(1);
+                let txt = self.tok_text(st);
+                if (std.str.eq(txt, "static")) {
+                    _ = self.advance();
+                    _ = self.advance();
+                    n.flag = true;
+                }
+            }
+            if (self.at(lex.Kind.colon)) {
+                _ = self.advance();
+                n.b = try self.parse_expr();
+            }
             return n;
         }
         let prim = try self.parse_primary();

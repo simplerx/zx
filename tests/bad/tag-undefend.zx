@@ -1,0 +1,20 @@
+// expect: was freed inside this branch
+// expect-code: E0514 E0512
+// §170：分支内 free 必须传 null 作为臂值。free 后传出非空载体，根因在
+// 臂出口报 E0514；合并出的载体状态失效，下游使用再报一条 E0512。
+const std = @mod("std");
+tag.buf;
+var drop: bool = false;
+
+const main = fn () u8 {
+    var p = tag.buf : std.heapAlloc(std.heap.page, i32, 4);
+    p[0] = 9;
+    let r = ok: if (drop) {
+        std.heap.page.free(std.heap.page.ctx, (*u8)p, 16);
+        ok: p;              // free 后传出非空载体：违反"free 臂传 null"约定
+    } else {
+        ok: p;
+    };
+    std.println("v={d}", r[0]);   // 链式诊断：E0512
+    return 0;
+};

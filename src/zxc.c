@@ -96,6 +96,22 @@ static const DiagRule g_rules[] = {
     { "cannot prove this handle is alive", "E0511" },
     { "cannot prove which handle this is", "E0511" },
 
+    /* §170 tag 指针生命周期账本：这些子串要放在下面的笼统规则之前，
+     * 否则会先命中 "found `" / "cannot" 之类，给出完全不对路的码。 */
+    { "use after free",                   "E0512" },
+    { "re-binding a freed tagged pointer", "E0512" },
+    { "still LIVE at the end",            "E0513" },
+    { "provenance lost",                  "E0514" },
+    { "cannot cross the function boundary", "E0514" },
+    { "cannot stay behind control flow",  "E0514" },
+    { "return null as its value",         "E0514" },
+    { "tagged allocation must be bound",  "E0514" },
+    { "state is undetermined",            "E0515" },
+    { "not balanced",                     "E0516" },
+    { "cannot yield a tagged pointer",    "E0516" },
+    { "must be tagged",                   "E0517" },
+    { "already owns an allocation",       "E0518" },
+
     /* 控制流位置：continue/return/defer 放错地方，标签找不到 */
     { "does not take an `else` branch",   "E0405" },
     { "outside a loop",                   "E0405" },

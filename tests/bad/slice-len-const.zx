@@ -1,5 +1,6 @@
 // expect: must be computable at compile time
 // expect-code: E0501
+tag.close;
 const std = @mod("std");
 
 const main = fn () u8 {

@@ -1,0 +1,26 @@
+// tag-branch.zx —— §170 分支传出：臂内分配必须由臂值传出，臂内 free 必须传 null
+// then 臂分配并传出 LIVE 载体，else 臂传 null → 合并成 COND（判空后可用）。
+const std = @mod("std");
+tag.buf;
+var need: bool = true;
+
+const main = fn () u8 {
+    let p = ok: if (need) {
+        var b = tag.buf : std.heapAlloc(std.heap.page, i32, 4);
+        b[0] = 5;
+        ok: b;
+    } else {
+        ok: null;
+    };
+    if (p == (null)) {
+        std.println("empty");
+    } else {
+        let q = p.?;
+        std.println("v={d}", q[0]);
+        std.heap.page.free(std.heap.page.ctx, (*u8)q, 16);
+    }
+    return 0;
+};
+
+// expect-output
+// v=5

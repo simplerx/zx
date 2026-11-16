@@ -55,6 +55,9 @@ typedef enum {
      * 同序镜像，插在中间会让所有旧编号漂移。 */
     NK_ERR_SET,         /* error{a, b}：items = NK_PAIR（name 即成员名） */
     NK_VEC_TYPE,        /* @Vec(T, N)：a = 元素类型，b = 长度（编译期整数） */
+    NK_TAG_APPLY,       /* tag.name / tag.name.static / tag.name : expr
+                         * name = 标签名，b = 被贴标表达式（NULL = 定义/引用），
+                         * flag = static（声明处），ival = tag 账本 id（sema 填） */
 } NodeKind;
 
 struct Node;
@@ -109,6 +112,13 @@ struct Node {
     uint64_t      reg_off;
     uint64_t      reg_total;
     Node         *reg_alloc;
+
+    /* tag 指针生命周期账本：贴标载体在节点上携带 (tag id, 载体状态)。
+     * tag_state: 0 = 无 / 1 = LIVE / 2 = FREED / 3 = COND（分支合并出
+     * 「可能是 null」）/ 4 = UNKNOWN（分支间状态不一致，未防守）。
+     * 全是编译期信息，编译完擦除。 */
+    int           tag_id;
+    int           tag_state;
 };
 
 Node *node_new(NodeKind k, int line, int col);

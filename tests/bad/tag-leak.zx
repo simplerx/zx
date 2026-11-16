@@ -1,0 +1,10 @@
+// expect: is still LIVE at the end
+// expect-code: E0513
+// §170：alloc 与 free 必须成对，作用域结束仍 LIVE 报泄漏。
+const std = @mod("std");
+tag.buf;
+const main = fn () u8 {
+    var p = tag.buf : std.heapAlloc(std.heap.page, i32, 4);
+    p[0] = 1;
+    return 0;
+};

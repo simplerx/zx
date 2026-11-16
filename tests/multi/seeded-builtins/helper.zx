@@ -2,6 +2,7 @@
 // §157 守门：以前只有 `std.xxx` 的 NK_FIELD 分支认这些调用，裸名会被 sema
 // 判成 TY_INVALID 静默放过，后端再吐出未声明的 C 标识符（B1001「编译器
 // bug」）。现在限定名与裸名共用一条分派；输出必须和等价的 std. 前缀写法一致。
+tag.close;
 pub const probe = fn () void {
     print("print-ok ");
     println("println-ok {}", 7);

@@ -1,0 +1,24 @@
+// tag-defend.zx —— §170 防守：COND 载体（分支合并出"可能为 null"）由
+// 使用者重申状态——解包担保非空 + `tag.x : p.?` 重申 LIVE，之后一切按规则走。
+const std = @mod("std");
+tag.buf;
+var drop: bool = true;
+
+const main = fn () u8 {
+    var p = ok: if (drop) {
+        var b = tag.buf : std.heapAlloc(std.heap.page, i32, 4);
+        b[0] = 5;
+        ok: b;
+    } else {
+        ok: null;
+    };
+    // 防守：解包担保非空（drop=true 时担保成立）+ 重申 LIVE
+    var q = tag.buf : p.?;
+    q[0] = q[0] + 1;
+    std.println("v={d}", q[0]);
+    std.heap.page.free(std.heap.page.ctx, (*u8)q, 16);
+    return 0;
+};
+
+// expect-output
+// v=6

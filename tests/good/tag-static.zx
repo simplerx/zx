@@ -1,0 +1,13 @@
+// tag-static.zx —— §170 `.static` 长命标签：豁免泄漏检查（全局缓存场景）
+const std = @mod("std");
+tag.cache.static;
+
+const main = fn () u8 {
+    var p = tag.cache : std.heapAlloc(std.heap.page, i32, 4);
+    p[0] = 1;
+    std.println("ok={d}", p[0]);
+    return 0;
+};
+
+// expect-output
+// ok=1

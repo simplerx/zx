@@ -136,6 +136,9 @@ struct Symbol {
     struct Symbol *locals_next;  /* 本函数体的局部登记链（见 local_track） */
     bool        stack_val; /* 它的值指向当前栈帧（逃逸检查用，见 addr_frame） */
     int         reg_slot;  /* §130 发行版本 id：0 = 无 / opaque（见 region_ledger） */
+    int         tag_id;    /* §170 tag 账本 id（TagSlot 下标+1，0 = 无） */
+    int         tag_state; /* §170 载体状态 TC_*（0 NONE / 1 LIVE / 2 FREED /
+                            * 3 COND / 4 UNKNOWN） */
     const char *cname;     /* 后端用的 C 名字（模块内名字带前缀） */
     int         decl_line; /* 声明位置（D2 note 用；0 = 没记） */
     int         decl_col;
@@ -206,6 +209,7 @@ typedef struct Module {
     Scope       scope;     /* 文件级作用域 */
     Symbol     *ns;        /* 对外的命名空间符号 */
     bool        loading;   /* 正在加载：用来发现循环导入 */
+    bool        tags_closed; /* §170：本模块写了 `tag.close;`，堆分配不强制贴标 */
 } Module;
 
 static Module **g_mods;
@@ -402,6 +406,7 @@ typedef struct {
     bool        has;      /* 已经有过收割 */
     bool        is_loop;
     bool        is_fn;
+    Node       *val;      /* 最后一次收割的值表达式（§170 臂出口 tag 检查用） */
 } Label;
 
 #define MAX_LABEL 256
@@ -412,6 +417,7 @@ static Label *label_push(const char *name, bool is_loop) {
     if (g_nlabels >= MAX_LABEL) return NULL;
     Label *l = &g_labels[g_nlabels++];
     l->name = name; l->ty = NULL; l->has = false; l->is_loop = is_loop; l->is_fn = false;
+    l->val = NULL;
     return l;
 }
 static void label_pop(void) { if (g_nlabels) g_nlabels--; }
@@ -2233,6 +2239,10 @@ static Type *unify(Node *at, Type *a, Type *b) {
 
     if (a->kind == TY_NULL && b->kind == TY_OPT) return b;
     if (b->kind == TY_NULL && a->kind == TY_OPT) return a;
+    /* 指针臂与 null 臂统一成可选指针（§170 分支传出："释放后返回空指针"
+     * 就落在这里——`ok: b;` 与 `ok: null;` 的公共类型是 `?*[N]T`） */
+    if (a->kind == TY_NULL && b->kind == TY_PTR) return ty_opt(b);
+    if (b->kind == TY_NULL && a->kind == TY_PTR) return ty_opt(a);
     if (a->kind == TY_NULL && b->kind == TY_BOOL) return a;
     if (b->kind == TY_NULL && a->kind == TY_BOOL) return b;
 
@@ -2382,6 +2392,8 @@ typedef struct {
     uint64_t off, total;      /* §132 账本：组内静态偏移 / 组总字节 */
     Node    *site;
     Symbol  *sym;             /* 绑定的局部变量（若有） */
+    int      tag;             /* §170：关联的 TagSlot 下标（0 = 无），tag.x : heapAlloc */
+    bool     no_merge;        /* heapSlice 的槽：运行期长度，不进预分配合并 */
     bool     is_handle;       /* §133：Handle 发行版本，不是堆字节分配 */
     bool     tainted;         /* 发行/作废点在控制流里，静态身份不可证明 */
     Symbol  *owner_sym;       /* 表实例（接收者符号），deinit 按它整批作废 */
@@ -2455,6 +2467,7 @@ static void region_note_free(Node *call) {
     int id = region_of_expr(ptr);
     if (!id || id > g_nrslots) return;
     RegionSlot *r = &g_rslots[id - 1];
+    if (r->tag) return;    /* §170：贴标分配走 tag 账本，region 不重复记账 */
     if (r->state == RS_FREED) {
         /* 同一个释放点被重复检查（泛型 / 折值会重扫同一棵树）不算第二次 */
         if (r->free_line == call->line && r->free_col == call->col) return;
@@ -2529,6 +2542,7 @@ static void region_plan_block(Node *blk) {
     for (int k = 0; k < n; k++) {
         int id = sites[k]->reg_slot;
         if (id <= 0 || id > g_nrslots || g_rslots[id - 1].state != RS_LIVE) return;
+        if (g_rslots[id - 1].no_merge) return;   /* heapSlice：运行期长度 */
     }
     if (!region_uses_ok(blk, NULL, syms, n)) return;
     uint64_t off = 0, maxal = 1;
@@ -2716,6 +2730,457 @@ static void region_handle_call(Node *n) {
  * 「确定失效」也知道「证明不了」），再在 unwrap 处报一遍会变成一条语句
  * 两个错，反而盖住真正的修法。 */
 
+/* ---------------- §170 tag 指针生命周期账本 ----------------
+ *
+ * tag 是用户显式命名的编译期唯一标签：`tag.name;` 声明，`tag.name : expr`
+ * 把一个堆分配或同标签载体绑到它上面。状态机五格（载体侧）：
+ *   NONE / LIVE / FREED / COND（分支合并出「可能是 null」）/
+ *   UNKNOWN（分支间状态不一致，未防守）。
+ * tag 侧（TagSlot）只记分配事实：UNBOUND / LIVE / FREED。
+ *
+ * 硬边界（写进 decisions §170）：
+ *   - tag 载体不跨函数边界（传参/返回报 E0514）——工厂函数返回堆指针
+ *     请在调用点直调分配；free 封装走「释放器」识别（体里直接调
+ *     Allocator.free 的函数，调用点视作一次释放事件）。
+ *   - 循环体内分配/释放必须配平（进出同状态），循环不传出贴标载体。
+ *   - 分支内释放必须传出 null（载体）；分支内分配必须传出载体。
+ *   - tag.close 关闭本模块的强制贴标（库/旧代码逃生口），std 天然豁免。
+ */
+
+#define TST_UNBOUND 0
+#define TST_LIVE    1
+#define TST_FREED   2
+
+/* 载体状态（Node.tag_state / Symbol.tag_state） */
+#define TC_NONE     0
+#define TC_LIVE     1
+#define TC_FREED    2
+#define TC_COND     3
+#define TC_UNKNOWN  4
+
+typedef struct {
+    const char *name;      /* 编译期唯一名（程序级，跨文件不可重名） */
+    int         line, col;
+    bool        is_static; /* 静态生命周期：豁免泄漏检查 */
+    int         state;     /* TST_*：分配事实 */
+    int         region;    /* 当前关联的 region token（0 = 无） */
+    int         free_line, free_col;
+    Symbol     *carrier;   /* 当前载体符号（free 事件写它的 tag_state；
+                            * 臂快照要连同它一起回滚，否则 then 臂的
+                            * 释放事实会污染 else 臂的检查） */
+} TagSlot;
+static TagSlot *g_tslots;
+static int      g_ntslots, g_ctslots;
+static bool     g_tags_closed;  /* §170：全局开关——任一文件写 tag.close;
+                                 * 整个程序都不再强制贴标 */
+
+static Module *g_std_mod;       /* 5931 附近定义：std 模块（豁免判定用） */
+
+static TagSlot *tag_slot(int id) {       /* id = TagSlot 下标 + 1 */
+    return (id > 0 && id <= g_ntslots) ? &g_tslots[id - 1] : NULL;
+}
+
+static TagSlot *tag_by_name(const char *name) {
+    for (int i = 0; i < g_ntslots; i++)
+        if (!strcmp(g_tslots[i].name, name)) return &g_tslots[i];
+    return NULL;
+}
+
+/* 表达式携带的 tag 载体：(id = TagSlot 下标+1, 载体状态)。id=0 = 不带 tag。
+ * 顺序：节点自带的标记（贴标/合并/传播时填好）优先，ident 查符号，
+ * 收割冒泡到值。 */
+static void tag_of_expr(Node *e, int *id, int *state) {
+    *id = 0; *state = TC_NONE;
+    if (!e) return;
+    if (e->tag_id) { *id = e->tag_id; *state = e->tag_state; return; }
+    if (e->kind == NK_IDENT && e->sym && e->sym->tag_id) {
+        *id = e->sym->tag_id; *state = e->sym->tag_state; return;
+    }
+    if (e->kind == NK_YIELD) { tag_of_expr(e->a, id, state); return; }
+}
+
+/* 定义 / 查重。同位置重复检查（泛型/折值重扫）幂等返回。 */
+static TagSlot *tag_decl(const char *name, bool is_static, Node *n) {
+    TagSlot *ex = tag_by_name(name);
+    if (ex) {
+        if (ex->line == n->line && ex->col == n->col && ex->is_static == is_static)
+            return ex;
+        err_at(n->line, n->col, "duplicate tag '%s' (first declared at line %d)",
+               name, ex->line);
+        return ex;
+    }
+    if (g_ntslots == g_ctslots) {
+        int nc = g_ctslots ? g_ctslots * 2 : 16;
+        TagSlot *p = realloc(g_tslots, (size_t)nc * sizeof(TagSlot));
+        if (!p) { err_at(n->line, n->col, "out of memory"); return NULL; }
+        g_tslots = p; g_ctslots = nc;
+    }
+    TagSlot *t = &g_tslots[g_ntslots++];
+    memset(t, 0, sizeof *t);
+    t->name = name;
+    t->line = n->line; t->col = n->col;
+    t->is_static = is_static;
+    return t;
+}
+
+/* 解引用点检查：base 带贴标载体时按状态拦（use-after-free / 未防守）。 */
+static void tag_check_deref(Node *base) {
+    int id, st;
+    tag_of_expr(base, &id, &st);
+    if (!id) return;
+    TagSlot *t = tag_slot(id);
+    if (!t) return;
+    if (st == TC_FREED) {
+        diag_code_at("E0512", base->line, base->col,
+            "use after free: tag '%s' was released at line %d -- a tagged "
+            "pointer must not be dereferenced after `free`", t->name, t->free_line);
+        return;
+    }
+    if (st == TC_UNKNOWN) {
+        diag_code_at("E0515", base->line, base->col,
+            "tag '%s' has an undetermined state here (branches disagree on "
+            "whether it was freed) -- defend first: re-bind it "
+            "(`p = %s : p.?;` asserts it is live) or `free` it", t->name, t->name);
+        return;
+    }
+    /* COND：解引用必须先判空（`.?`），这是类型系统的事，类型层拦。 */
+}
+
+/* 沿载体传播链（cast / unwrap / 收割）找到底层标识符符号：
+ * free 的状态要写回真正的载体变量，后续解引用才查得到。 */
+static Symbol *tag_carrier_sym(Node *e) {
+    while (e) {
+        if (e->kind == NK_IDENT) return e->sym;
+        if (e->kind == NK_CAST || e->kind == NK_UNWRAP || e->kind == NK_YIELD)
+            e = e->b ? e->b : e->a;
+        else return NULL;
+    }
+    return NULL;
+}
+
+/* 一次释放事件（Allocator.free 直调 / 释放器调用 / 臂内 free）。
+ * 返回 true = 这次 free 被记录为该 tag 的释放。 */
+static bool tag_free_event(Node *site, Node *ptr) {
+    int id, st;
+    tag_of_expr(ptr, &id, &st);
+    if (!id) return false;
+    if (ptr->kind == NK_NULL) return false;   /* free(null)：no-op */
+    TagSlot *t = tag_slot(id);
+    if (!t) return false;
+    if (t->state == TST_FREED) {
+        if (t->free_line == site->line && t->free_col == site->col) return true;
+        diag_code_at("E0509", site->line, site->col,
+            "tag '%s' was already freed (allocated at line %d, first freed "
+            "at line %d)", t->name, t->line, t->free_line);
+        return true;
+    }
+    /* UNKNOWN / COND：防守二（使用者宣告终结）与 null 合并载体的放行。
+     * 悬垂风险由「free 后必须传 null」的分支约定承担。 */
+    t->state = TST_FREED;
+    t->free_line = site->line; t->free_col = site->col;
+    ptr->tag_id = id; ptr->tag_state = TC_FREED;
+    Symbol *cs = tag_carrier_sym(ptr);
+    if (cs) { cs->tag_state = TC_FREED; t->carrier = cs; }
+    return true;
+}
+
+/* Allocator.free(ctx, ptr, size) 形状的释放事件（贴标指针走 tag 账本，
+ * 不进 region 账本——同一份事实记两遍会双报 E0509）。 */
+static void tag_note_free(Node *call) {
+    Node *a = call->a;
+    if (!a || a->kind != NK_FIELD || !a->name || strcmp(a->name, "free") ||
+        !a->a || !is_allocator_ty(a->a->ty) || call->nitems != 3) return;
+    tag_free_event(call, call->items[1]);
+}
+
+/* 释放器识别：fn 体里直接调用过 Allocator.free（不含嵌套 fn 体）。
+ * 结果缓存在 fn 节点上（tag_id: 0=未扫 1=是 2=不是）——调用点把带 tag
+ * 的实参视作一次释放事件，用户的 free 封装不需要任何额外语法。 */
+static bool tag_block_has_free(Node *n) {
+    if (!n) return false;
+    if (n->kind == NK_FN) return false;               /* 嵌套函数体不算 */
+    if (n->kind == NK_CALL && n->a && n->a->kind == NK_FIELD &&
+        n->a->name && !strcmp(n->a->name, "free") && n->a->a &&
+        is_allocator_ty(n->a->a->ty)) return true;
+    if (tag_block_has_free(n->a) || tag_block_has_free(n->b) ||
+        tag_block_has_free(n->c) || tag_block_has_free(n->d)) return true;
+    for (int i = 0; i < n->nitems; i++)
+        if (tag_block_has_free(n->items[i])) return true;
+    return false;
+}
+
+static bool fn_is_releaser(Node *fn) {
+    if (!fn || fn->kind != NK_FN) return false;
+    if (fn->tag_id == 1) return true;
+    if (fn->tag_id == 2) return false;
+    bool r = tag_block_has_free(fn->b);
+    fn->tag_id = r ? 1 : 2;
+    return r;
+}
+
+/* 强制贴标的堆分配登记（check_builtin 的分配 API 成功路径调用）。
+ * sema 结束时统一扫：所在模块没写 tag.close 且分配没被贴标 → E0517。 */
+typedef struct { Node *node; Module *mod; } TagAllocSite;
+static TagAllocSite *g_tag_allocs;
+static int            g_ntag_allocs, g_ctag_allocs;
+
+static void tag_alloc_register(Node *call, Module *mod) {
+    if (g_ntag_allocs == g_ctag_allocs) {
+        int nc = g_ctag_allocs ? g_ctag_allocs * 2 : 32;
+        TagAllocSite *p = realloc(g_tag_allocs, (size_t)nc * sizeof(TagAllocSite));
+        if (!p) return;
+        g_tag_allocs = p; g_ctag_allocs = nc;
+    }
+    g_tag_allocs[g_ntag_allocs].node = call;
+    g_tag_allocs[g_ntag_allocs].mod = mod;
+    g_ntag_allocs++;
+}
+
+/* 贴标（NK_TAG_APPLY 带 b）：把分配 / 同标签载体绑到 tag 上。
+ * 返回载体状态（TC_*）；报错时置 *bad。 */
+static int tag_check_apply(Node *n, bool *bad) {
+    *bad = false;
+    TagSlot *t = tag_by_name(n->name);
+    if (!t) {
+        diag_code_at("E0401", n->line, n->col,
+            "unknown tag '%s' -- declare it first: `tag %s;`", n->name, n->name);
+        *bad = true;
+        return TC_NONE;
+    }
+    int tid = (int)(t - g_tslots) + 1;
+    n->ival = (uint64_t)tid;
+
+    int id, st;
+    tag_of_expr(n->b, &id, &st);
+    int rid = (n->b && n->b->kind == NK_CALL) ? n->b->reg_slot : 0;
+
+    if (rid > 0) {
+        /* 分配贴标：tag 必须空闲。tag 是单例标签，一次 LIVE。 */
+        if (t->state == TST_LIVE) {
+            diag_code_at("E0518", n->line, n->col,
+                "tag '%s' already owns an allocation (bound at line %d) -- "
+                "free it first, or use a second tag", t->name, t->line);
+            *bad = true;
+            return TC_NONE;
+        }
+        t->state = TST_LIVE;
+        t->region = rid;
+        if (rid <= g_nrslots) g_rslots[rid - 1].tag = tid;
+        n->tag_id = tid;
+        n->tag_state = TC_LIVE;
+        return TC_LIVE;
+    }
+    if (id == tid) {
+        /* 同标签载体：重申（UNKNOWN/COND → 使用者担保 LIVE）或别名传递。 */
+        if (st == TC_FREED) {
+            diag_code_at("E0512", n->line, n->col,
+                "tag '%s' was freed at line %d -- re-binding a freed tagged "
+                "pointer is use after free", t->name, t->free_line);
+            *bad = true;
+            return TC_NONE;
+        }
+        if (st == TC_LIVE) t->state = TST_LIVE;   /* 防守重申：重新拥有 */
+        n->tag_id = tid;
+        n->tag_state = TC_LIVE;
+        return TC_LIVE;
+    }
+    diag_code_at("E0514", n->line, n->col,
+        "tag '%s' can only bind a std.heapAlloc/std.heapSlice allocation or "
+        "a pointer that already carries this tag -- tagged pointers do not "
+        "cross function boundaries", t->name);
+    *bad = true;
+    return TC_NONE;
+}
+
+/* ---------------- §170 臂出口与分支合并 ---------------- */
+
+typedef struct {
+    int   tag;      /* TagSlot 下标 + 1（0 = 该臂没碰/没传出） */
+    int   state;    /* 臂出口载体状态 */
+    Node *val;      /* 臂值表达式（null 载体判定用） */
+} ArmExit;
+
+/* 臂检查后对账：对比快照，臂内释放的 tag 必须以 null 收尾，臂内分配的
+ * tag 必须由臂值传出。返回该臂的出口载体（无传出 → tag=0）。 */
+static ArmExit tag_arm_reconcile(Node *armval, const int *snap, int n0) {
+    ArmExit e = { 0, TC_NONE, armval };
+    for (int i = 0; i < n0 && i < g_ntslots; i++) {
+        if (g_tslots[i].state == snap[i]) continue;
+        TagSlot *t = &g_tslots[i];
+        if (t->state == TST_FREED && snap[i] == TST_LIVE) {
+            /* 臂内释放：必须传出 null 载体（"在壁内释放，就返回空指针"） */
+            if (armval && armval->kind == NK_NULL) {
+                armval->tag_id = i + 1;
+                armval->tag_state = TC_FREED;
+                e.tag = i + 1; e.state = TC_FREED; e.val = armval;
+            } else {
+                diag_code_at("E0514", t->free_line, t->free_col,
+                    "tag '%s' was freed inside this branch -- the branch must "
+                    "return null as its value so the freed state travels with "
+                    "the carrier", t->name);
+                e.tag = i + 1; e.state = TC_FREED; e.val = NULL;
+            }
+        } else if (t->state == TST_LIVE && snap[i] != TST_LIVE) {
+            /* 臂内分配：必须由臂值传出（指针不能留在控制流里） */
+            int id, st;
+            tag_of_expr(armval, &id, &st);
+            if (id == i + 1 && st == TC_LIVE) {
+                e.tag = i + 1; e.state = TC_LIVE; e.val = armval;
+            } else {
+                diag_code_at("E0514", t->line, t->col,
+                    "tag '%s' was allocated inside this branch but the branch "
+                    "does not return it -- a tagged pointer cannot stay behind "
+                    "control flow", t->name);
+                e.tag = i + 1; e.state = TC_LIVE; e.val = NULL;
+            }
+        }
+    }
+    return e;
+}
+
+/* 两臂出口合并（decisions §170 的 join 表）。结果挂到 if 节点。 */
+static void tag_join_arms(Node *n, ArmExit a, ArmExit b) {
+    if (!a.tag && !b.tag) return;
+    /* 一臂没碰 tag（出口 NONE, tag=0）：按同 tag 合并——join 表里
+     * LIVE⊔NONE=COND / FREED⊔NONE=FREED 才能生效。否则 else 传 null
+     * 的合并会被误当成单臂出口，COND 判空防守整条断掉。 */
+    if (a.tag != b.tag) {
+        if (a.tag && !b.tag) { b.tag = a.tag; b.state = TC_NONE; b.val = NULL; }
+        else if (b.tag && !a.tag) { a.tag = b.tag; a.state = TC_NONE; a.val = NULL; }
+        else {                        /* 两臂动了不同的 tag：各自记账即可 */
+            n->tag_id = a.tag ? a.tag : b.tag;
+            n->tag_state = a.tag ? a.state : b.state;
+            return;
+        }
+    }
+    int id = a.tag;
+    int s;
+    if (a.state == b.state)          s = a.state;
+    else if ((a.state == TC_LIVE  && b.state == TC_FREED) ||
+             (a.state == TC_FREED && b.state == TC_LIVE)) {
+        /* FREED 臂的值是 null 载体 → COND（可能是 null，判空后用）；
+         * 否则（free 后传了非空载体）→ UNKNOWN，下游必须防守。 */
+        Node *freed = (a.state == TC_FREED) ? a.val : b.val;
+        s = (freed && freed->kind == NK_NULL) ? TC_COND : TC_UNKNOWN;
+    }
+    else if ((a.state == TC_LIVE  && b.state == TC_NONE) ||
+             (a.state == TC_NONE  && b.state == TC_LIVE))  s = TC_COND;
+    else if ((a.state == TC_FREED && b.state == TC_NONE) ||
+             (a.state == TC_NONE  && b.state == TC_FREED)) s = TC_FREED;
+    else                             s = TC_UNKNOWN;
+    n->tag_id = id;
+    n->tag_state = s;
+    /* COND/UNKNOWN 不改写 tag 侧事实（free 事件已即时记账）；LIVE/FREED
+     * 一致时事实已由事件本身确定。 */
+}
+
+/* ---------------- §170 循环配平 ---------------- */
+
+#define TAG_SNAP_MAX 128
+typedef struct {
+    int      n;
+    int      state[TAG_SNAP_MAX];
+    Symbol  *carrier[TAG_SNAP_MAX];   /* 载体符号与其 tag_state 一起回滚 */
+    int      cstate[TAG_SNAP_MAX];
+} TagSnap;
+
+static void tag_snap(TagSnap *s) {
+    s->n = g_ntslots < TAG_SNAP_MAX ? g_ntslots : TAG_SNAP_MAX;
+    for (int i = 0; i < s->n; i++) {
+        s->state[i] = g_tslots[i].state;
+        s->carrier[i] = g_tslots[i].carrier;
+        s->cstate[i] = g_tslots[i].carrier ? g_tslots[i].carrier->tag_state : 0;
+    }
+}
+
+/* 恢复快照：另一臂 / 下一轮迭代从同一进入状态开始检查 */
+static void tag_restore(const TagSnap *s) {
+    for (int i = 0; i < s->n && i < g_ntslots; i++) {
+        g_tslots[i].state = s->state[i];
+        g_tslots[i].carrier = s->carrier[i];
+        if (g_tslots[i].carrier) g_tslots[i].carrier->tag_state = s->cstate[i];
+    }
+}
+
+/* 循环体检查后对账。合法形态只有两种：
+ *   - 循环外分配（进入 LIVE）：轮内只用不释放，出口仍是 LIVE——
+ *     轮内释放会让后续轮拿到悬垂载体；
+ *   - 轮内自闭合（进入 idle）：alloc + free 在同一迭代里成对，出口 FREED，
+ *     下一轮从空闲状态重新分配。
+ * 出口 LIVE 而进入是 idle = 分配没闭合（第二轮就是重复分配）；出口 FREED
+ * 而进入是 LIVE = 轮内释放了循环外的分配。都是 E0516。 */
+static void tag_loop_balance(Node *body, const TagSnap *snap) {
+    for (int i = 0; i < snap->n && i < g_ntslots; i++) {
+        int before = snap->state[i], after = g_tslots[i].state;
+        if (before == after) continue;
+        bool ok = (before == TST_LIVE && after == TST_LIVE) ||
+                  (before != TST_LIVE && after == TST_FREED);
+        if (ok) continue;
+        TagSlot *t = &g_tslots[i];
+        diag_code_at("E0516", t->line, t->col,
+            "tag '%s' is not balanced across the loop body (entered %s, left "
+            "%s) -- allocate and free it within the same iteration, or keep "
+            "the loop-external allocation alive until after the loop", t->name,
+            before == TST_LIVE ? "LIVE" : "idle",
+            after == TST_LIVE ? "LIVE" : "freed");
+    }
+    int id, st;
+    tag_of_expr(body->kind == NK_BLOCK ? body->d : body, &id, &st);
+    if (id) {
+        TagSlot *t = tag_slot(id);
+        if (t) diag_code_at("E0516", t->line, t->col,
+            "a loop cannot yield a tagged pointer -- the carrier's identity "
+            "differs per iteration; free inside the loop or allocate outside");
+    }
+}
+
+/* ---------------- §170 收尾：泄漏 + 强制贴标 ----------------
+ * sema 全部结束后调用一次。 */
+
+static bool tag_module_exempt(Module *m) {
+    if (!m || !m->path) return true;               /* 无模块上下文：不强制 */
+    if (m == g_std_mod) return true;               /* 标准库天然豁免 */
+    if (g_std_mod && g_std_mod->path) {            /* std 目录下的内部文件 */
+        const char *a = strrchr(g_std_mod->path, '/');
+        const char *b = strrchr(m->path, '/');
+        const char *la = strrchr(g_std_mod->path, '\\');
+        const char *lb = strrchr(m->path, '\\');
+        if (la && (!a || la > a)) a = la;
+        if (lb && (!b || lb > b)) b = lb;
+        if (a && b && (a - g_std_mod->path) == (b - m->path) &&
+            !memcmp(g_std_mod->path, m->path, (size_t)(a - g_std_mod->path)))
+            return true;
+    }
+    return false;
+}
+
+static void tag_ledger_final(const char *entry_path) {
+    for (int i = 0; i < g_ntslots; i++) {
+        TagSlot *t = &g_tslots[i];
+        if (t->state != TST_LIVE || t->is_static) continue;
+        diag_code_at("E0513", t->line, t->col,
+            "tag '%s' is still LIVE at the end of the program (allocated at "
+            "line %d) -- alloc and free must come in pairs; declare it "
+            "`tag %s.static;` if it is meant to outlive the program",
+            t->name, t->line, t->name);
+    }
+    for (int i = 0; i < g_ntag_allocs; i++) {
+        Node *c = g_tag_allocs[i].node;
+        Module *m = g_tag_allocs[i].mod;
+        if (c->reg_slot > 0 && c->reg_slot <= g_nrslots &&
+            g_rslots[c->reg_slot - 1].tag) continue;   /* 已贴标 */
+        if (c->tag_id) continue;                       /* heapSlice 已贴标 */
+        if (!m || m->tags_closed) continue;
+        if (g_tags_closed) continue;                   /* 全局开关：任一文件声明即全关 */
+        if (tag_module_exempt(m)) continue;
+        (void)entry_path;
+        diag_code_at("E0517", c->line, c->col,
+            "every heap allocation must be tagged -- write "
+            "`let p = tag.myTag : std.heapAlloc(...);` (or declare "
+            "`tag.close;` in any file of the program to opt out globally)");
+    }
+}
+
 /* §132：编译期分配账本的只读视图。`zxc explain region <file.zx>` 与
  * `ZX_REGION=1` 共用这份输出；unit 记的是分配点所在模块，不是入口文件，
  * 这样多模块工程里行号才对得上。这是观测，不改任何语义。 */
@@ -2844,6 +3309,24 @@ static Type *check_assign(Node *n) {
             int rs = n->b ? n->b->reg_slot : 0;
             n->a->sym->reg_slot = rs;
             if (rs) region_bind(rs, n->a->sym);
+        }
+        /* §170：赋值重新绑定贴标载体。防守写法 `p = tag.x : p;`（重申
+         * LIVE）与普通赋值都走这里；赋成别的值则旧载体身份作废——
+         * 与 region 的 opaque 口径一致，悬垂只能来自分支未传 null。 */
+        if (n->a->kind == NK_IDENT && n->a->sym) {
+            int tid, tst;
+            tag_of_expr(n->b, &tid, &tst);
+            if (tid) {
+                n->a->sym->tag_id = tid;
+                n->a->sym->tag_state = tst;
+                TagSlot *ts = tag_slot(tid);
+                if (ts) ts->carrier = n->a->sym;
+            } else if (n->a->sym->tag_id) {
+                TagSlot *ts = tag_slot(n->a->sym->tag_id);
+                if (ts && ts->carrier == n->a->sym) ts->carrier = NULL;
+                n->a->sym->tag_id = 0;
+                n->a->sym->tag_state = TC_NONE;
+            }
         }
     } else if (lt && lt->kind == TY_PTR) {
         if (n->op != TOK_PLUSEQ && n->op != TOK_MINUSEQ)
@@ -3238,6 +3721,25 @@ static Type *check_cast(Node *n) {
      * 一旦把 u8 传给二元表达式，`1` 会变成 u8，加法就成了 u64 + u8。 */
     Type *from = check_expr(n->b, NULL);
 
+    /* §170：贴标载体过 cast —— 指针到指针身份没变，照常携带；
+     * 其余方向抹源，证明不了就是错（§135 口径）。 */
+    {
+        int tid, tst;
+        tag_of_expr(n->b, &tid, &tst);
+        if (tid) {
+            if (to->kind == TY_PTR && from->kind == TY_PTR) {
+                n->tag_id = tid;
+                n->tag_state = tst;
+            } else {
+                TagSlot *t = tag_slot(tid);
+                diag_code_at("E0514", n->line, n->col,
+                    "tag '%s' provenance lost: a tagged pointer cannot be cast "
+                    "to `%s` -- keep it in a variable of the same pointer type",
+                    t ? t->name : "?", ty_str(to));
+            }
+        }
+    }
+
     /* 错误码 0 就是"没有错误"。`(error)X` 里 X 在编译期能算出 0 的，
      * 等于把"出错了"写成"成功了"——而 `!T` 的成功分支还会去读一段
      * 未初始化的 payload。这类错编译过、跑起来答案错，必须在编译期拦下。
@@ -3389,6 +3891,9 @@ static Type *check_field(Node *n) {
         }
     }
     Type *bt = check_expr(base, NULL);
+    /* §170：`.0` 与经指针的字段访问都是使用点，查贴标状态。
+     * 命名空间 / 类型值 / 聚合 base 不带 tag，查了也是 no-op。 */
+    tag_check_deref(base);
 
     /* §118 字段值指针：f.ptr —— 描述符 Field 的 ptr 槽。类型是 *(f.ty)，
      * 基址/偏移挂在节点上（b / ival），后端发 ((fldty *)((char *)&base + off))。
@@ -3736,6 +4241,7 @@ static Type *check_field(Node *n) {
 
 static Type *check_index(Node *n) {
     Type *bt = check_expr(n->a, NULL);
+    tag_check_deref(n->a);               /* §170：use-after-free / 未防守 */
     Type *it = check_expr(n->b, ty_usize());
     if (!ty_is_int(it)) return BAD(n->b, "index must be an integer, found `%s`", ty_str(it));
     if (bt->kind == TY_PTR && bt->has_len) {
@@ -4442,18 +4948,29 @@ static Type *check_call(Node *n, Type *expect) {
                 return BAD(n, "std.%s cannot allocate `%s`", m->name,
                            elem ? ty_str(elem) : "?");
             check_expr(n->items[base + 1], ty_usize());
-            if (slice)
+            if (slice) {
+                /* heapSlice：运行期长度，建 no_merge 槽只为贴标/释放追踪 */
+                if (!n->reg_slot) {
+                    n->reg_slot = region_new(n, 1, 1);
+                    if (n->reg_slot <= g_nrslots)
+                        g_rslots[n->reg_slot - 1].no_merge = true;
+                }
+                tag_alloc_register(n, g_mod);   /* §170 强制贴标扫描 */
                 return type_of(n, ty_slice(elem, false));
+            }
             IntV c = ev_int(n->items[base + 1]);
             if (!c.ok)
                 return BAD(n->items[base + 1],
                            "std.%s count must be known at compile time", m->name);
             n->esc = stack;          /* 栈那份指向当前帧：逃逸检查盯它 */
-            if (!stack && !n->reg_slot) {
-                int sz = ty_size(elem), al = ty_align(elem);
-                n->reg_slot = region_new(n,
-                    (uint64_t)(sz > 0 ? sz : 1) * c.v,
-                    (uint64_t)(al > 0 ? al : 1));
+            if (!stack) {
+                if (!n->reg_slot) {
+                    int sz = ty_size(elem), al = ty_align(elem);
+                    n->reg_slot = region_new(n,
+                        (uint64_t)(sz > 0 ? sz : 1) * c.v,
+                        (uint64_t)(al > 0 ? al : 1));
+                }
+                tag_alloc_register(n, g_mod);   /* §170 强制贴标扫描 */
             }
             return type_of(n, ty_ptr(elem, false, true, c.v));
         }
@@ -4560,6 +5077,39 @@ static Type *check_call(Node *n, Type *expect) {
         Type *want = ct->params[i];
         Type *got = check_expr(n->items[i], want);
         coerce_node(n->items[i], got, want, "argument");
+    }
+    /* §170：贴标载体过调用点。释放器（体里直接调 Allocator.free 的函数，
+     * 免语法封装 free）的调用视作一次释放事件；其余函数收不下贴标
+     * 载体——证明不了就是错（§135 口径）。 */
+    {
+        Node *fn = NULL;
+        if (n->a->sym && n->a->sym->decl) {
+            Node *d = n->a->sym->decl;
+            /* `const name = fn (…) {...};` 的符号挂在 DECL 上，fn 节点是它的初值 */
+            if (d->kind == NK_FN) fn = d;
+            else if (d->kind == NK_DECL && d->b && d->b->kind == NK_FN) fn = d->b;
+        }
+        else if (n->a->inst && n->a->inst->kind == NK_FN)
+            fn = n->a->inst;
+        bool releaser = fn_is_releaser(fn);
+        /* Allocator.free(ctx, ptr, bytes) 自身就是释放通路：实参放行，
+         * 释放事件由 tag_note_free 在 NK_CALL 出口统一记账。 */
+        bool free_call = n->a->kind == NK_FIELD && n->a->name &&
+                         !strcmp(n->a->name, "free") && n->a->a &&
+                         is_allocator_ty(n->a->a->ty);
+        for (int i = 0; i < n->nitems; i++) {
+            int tid, tst;
+            tag_of_expr(n->items[i], &tid, &tst);
+            if (!tid) continue;
+            if (releaser || free_call) tag_free_event(n, n->items[i]);
+            else {
+                TagSlot *t = tag_slot(tid);
+                diag_code_at("E0514", n->items[i]->line, n->items[i]->col,
+                    "tag '%s' cannot cross the function boundary -- tagged "
+                    "pointers stay in the function that allocated them (free "
+                    "them there, or inline the wrapper)", t ? t->name : "?");
+            }
+        }
     }
     /* 函数指针字段的分发：能证明目标就改成直调（§138） */
     devirt_allocator_call(n);
@@ -4965,6 +5515,15 @@ static Type *check_expr_raw(Node *n, Type *expect) {
         if (cv && (cv->kind == V_NULL || cv->kind == V_UNDEF))
             return BAD_CODE("E0506", n, "`.?` on a value that is `null` at compile time -- "
                                         "it would abort every time");
+        /* §170：COND 载体判空后按 LIVE 使用（判空担保非空、非空即已分配） */
+        {
+            int tid, tst;
+            tag_of_expr(n->a, &tid, &tst);
+            if (tid && tst == TC_COND) {
+                n->tag_id = tid;
+                n->tag_state = TC_LIVE;
+            }
+        }
         return type_of(n, t->elem);
     }
 
@@ -5041,10 +5600,34 @@ static Type *check_expr_raw(Node *n, Type *expect) {
     case NK_FIELD:    return check_field(n);
     case NK_INDEX:    return check_index(n);
     case NK_SLICE:    return check_slice_expr(n);
+
+    case NK_TAG_APPLY: {
+        /* 表达式位置：贴标（tag.x : expr）或裸引用。定义/tag.close 是
+         * 语句位置的事（check_stmt）。 */
+        if (!strcmp(n->name, "close")) {
+            return BAD(n, "`tag.close;` is a file-scope statement, not an expression");
+        }
+        if (!n->b) {
+            TagSlot *t = tag_by_name(n->name);
+            if (!t)
+                return BAD(n, "unknown tag '%s' -- declare it first: `tag %s;`",
+                           n->name, n->name);
+            return BAD(n, "tag '%s' is a compile-time label with no runtime "
+                          "value -- bind it: `tag.%s : expr`", n->name, n->name);
+        }
+        Type *vt = check_expr(n->b, expect);
+        bool bad = false;
+        tag_check_apply(n, &bad);
+        if (bad) return type_of(n, vt ? vt : ty_invalid());
+        n->ty = vt;
+        return vt;
+    }
+
     case NK_CALL: {
         Type *r = check_call(n, expect);
         /* 实参检查完才能追 provenance：Allocator.free 是一次 release 事件 */
         region_note_free(n);
+        tag_note_free(n);           /* §170：贴标指针走 tag 账本 */
         region_handle_call(n);
         return r;
     }
@@ -6106,7 +6689,11 @@ static Type *check_block(Node *n) {
     region_plan_block(n);
 
     Type *t = ty_void();
-    if (lb) t = lb->has ? lb->ty : ty_void();
+    if (lb) {
+        t = lb->has ? lb->ty : ty_void();
+        /* §170：把收割的值节点留给臂出口检查（贴标载体的传出通道） */
+        if (lb->val) n->d = lb->val;
+    }
     if (lb) label_pop();
     scope_pop(&sc);
     if (getenv("ZX_TIMING2")) dbg_depth--;
@@ -6130,7 +6717,38 @@ static void check_stmt(Node *n) {
         if (n->sym && n->b) {
             int rs = region_of_expr(n->b);
             if (rs) { n->sym->reg_slot = rs; region_bind(rs, n->sym); }
+            /* §170：贴标载体的 tag 状态跟着绑到符号上 */
+            int tid, tst;
+            tag_of_expr(n->b, &tid, &tst);
+            if (tid) {
+                n->sym->tag_id = tid; n->sym->tag_state = tst;
+                TagSlot *ts = tag_slot(tid);
+                if (ts) ts->carrier = n->sym;
+            }
         }
+        return;
+
+    case NK_TAG_APPLY:
+        /* 语句位置：tag 定义 / tag.close / 独立贴标 */
+        if (!strcmp(n->name, "close")) {
+            if (n->b)
+                err_at(n->line, n->col, "`tag.close` takes no value");
+            else {
+                /* §170：全局开关。任何一个文件声明一次，整个程序
+                 * （所有模块）都不再强制贴标——库作者关一次即可。 */
+                g_tags_closed = true;
+                if (g_mod) g_mod->tags_closed = true;
+            }
+            return;
+        }
+        if (!n->b) {
+            tag_decl(n->name, n->flag, n);   /* flag = .static */
+            return;
+        }
+        err_at(n->line, n->col,
+               "a tagged allocation must be bound to a `let` -- write "
+               "`let p = tag.%s : expr;`", n->name);
+        check_expr(n->b, NULL);
         return;
 
     case NK_FN:
@@ -6178,6 +6796,19 @@ static void check_stmt(Node *n) {
             err_at(n->a->line, n->a->col,
                    "cannot return a pointer into the current function's stack frame "
                    "(use std.heapAlloc for outliving storage)");
+        /* §170：贴标载体不跨函数边界（tag 是单例标签，调用点的状态机
+         * 接不住多次调用的发行）。工厂返回堆指针请在调用点直调分配。 */
+        {
+            int tid, tst;
+            tag_of_expr(n->a, &tid, &tst);
+            if (tid) {
+                TagSlot *t = tag_slot(tid);
+                diag_code_at("E0514", n->a->line, n->a->col,
+                    "tag '%s' cannot cross the function boundary -- tagged "
+                    "pointers stay in the function that allocated them",
+                    t ? t->name : "?");
+            }
+        }
         n->ty = want;
         return;
     }
@@ -6205,9 +6836,15 @@ static void check_stmt(Node *n) {
             n->ty = ty_void();
             return;
         }
+        /* §170：null 臂进来时公共类型升级成可选指针——"分支内释放返回
+         * 空指针"的载体需要 `?T`，解引用前判空（`p.?`）。 */
+        if (l->has && l->ty && l->ty->kind == TY_PTR &&
+            n->a->kind == NK_NULL && l->ty != ty_invalid())
+            l->ty = ty_opt(l->ty);
         Type *t = check_expr(n->a, l->has ? l->ty : NULL);
         if (!l->has) { l->ty = t; l->has = true; }
         else l->ty = unify(n, l->ty, t);
+        l->val = n->a;
         n->ty = l->ty;
         return;
     }
@@ -6385,6 +7022,9 @@ static Type *check_if(Node *n, Type *expect) {
     if (known && cv->bval && n->c) mark_uses(n->c);
 
     Type *tt;
+    ArmExit exT = { 0, TC_NONE, NULL };
+    TagSnap snapT;
+    tag_snap(&snapT);                 /* §170：臂出口对账的基准 */
     {
         Scope sc;
         scope_push(&sc);
@@ -6395,10 +7035,18 @@ static Type *check_if(Node *n, Type *expect) {
                      s->cap_src = n->a; }
         }
         tt = (known && !cv->bval) ? ty_void() : check_arm(n->b, expect);
+        if (!(known && !cv->bval)) {
+            /* 臂值：带标签 if 的收割挂在外层 Label（lb->val）；无标签块的
+             * 收割才落在块节点上 */
+            Node *tval = lb ? lb->val : ((n->b && n->b->kind == NK_BLOCK) ? n->b->d : n->b);
+            exT = tag_arm_reconcile(tval, snapT.state, snapT.n);
+        }
+        tag_restore(&snapT);          /* 臂 2 从同一进入状态开始 */
         scope_pop(&sc);
     }
 
     Type *et = NULL;
+    ArmExit exE = { 0, TC_NONE, NULL };
     if (n->c && !(known && cv->bval)) {
         Scope sc;
         scope_push(&sc);
@@ -6425,7 +7073,22 @@ static Type *check_if(Node *n, Type *expect) {
             }
         }
         et = check_arm(n->c, expect);
+        Node *eval = lb ? lb->val : ((n->c && n->c->kind == NK_BLOCK) ? n->c->d : n->c);
+        exE = tag_arm_reconcile(eval, snapT.state, snapT.n);
+        tag_restore(&snapT);
         scope_pop(&sc);
+    }
+
+    /* §170：两臂出口合并；单臂（剪枝 / 无 else）直接沿用那支的出口 */
+    if (known) {
+        ArmExit one = cv->bval ? exT : exE;
+        if (one.tag) { n->tag_id = one.tag; n->tag_state = one.state; }
+    } else if (!n->c) {
+        /* 无 else：隐含一支"返回零值（null）"，与 then 出口合并 */
+        ArmExit none = { 0, TC_NONE, NULL };
+        tag_join_arms(n, exT, none);
+    } else {
+        tag_join_arms(n, exT, exE);
     }
 
     Type *r;
@@ -6468,7 +7131,11 @@ static Type *check_while(Node *n, Type *expect) {
             Symbol *s = scope_add(&sc, n->name, SK_CAPTURE);
             if (s) { s->ty = cap_ty; s->state = 2; }
         }
+        TagSnap snapW;                     /* §170：循环配平 */
+        tag_snap(&snapW);
         check_block(n->b);
+        tag_loop_balance(n->b, &snapW);
+        tag_restore(&snapW);
         scope_pop(&sc);
     }
 
@@ -6687,7 +7354,11 @@ static Type *check_for(Node *n, Type *expect) {
             b->sym = s;
             b->ty = s->ty;
         }
+        TagSnap snapF;                     /* §170：循环配平 */
+        tag_snap(&snapF);
         check_block(n->b);
+        tag_loop_balance(n->b, &snapF);
+        tag_restore(&snapF);
         scope_pop(&sc);
     }
 
@@ -7232,6 +7903,9 @@ void sema_check(Node *root) {
     g_nmods = 0;
     g_npending = 0;
     g_std_mod = NULL;
+    g_ntslots = 0;              /* §170：tag 账本同样按轮清零 */
+    g_ntag_allocs = 0;
+    g_tags_closed = false;
     stamp_mod(root, g_srcpath);
     g_cmods = 8;
     g_mods = calloc((size_t)g_cmods, sizeof(Module *));
@@ -7273,6 +7947,10 @@ void sema_check(Node *root) {
 
     /* 函数体全部查完：把第一次因工厂体未检查而没证明出来的调用点重试。 */
     devirt_retry_all();
+
+    /* §170 收尾：泄漏 + 强制贴标。只在有诊断余量时扫，别把
+     * 前面已经炸出来的错盖掉。 */
+    if (!g_error_count) tag_ledger_final(g_srcpath);
 
     m0->loading = false;
     g_scope = NULL;

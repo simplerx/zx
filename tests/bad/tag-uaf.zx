@@ -1,0 +1,12 @@
+// expect: use after free
+// expect-code: E0512
+// §170：free 之后解引用，状态机在编译期就知道载体已失效。
+const std = @mod("std");
+tag.buf;
+const main = fn () u8 {
+    var p = tag.buf : std.heapAlloc(std.heap.page, i32, 4);
+    std.heap.page.free(std.heap.page.ctx, (*u8)p, 16);
+    let v = p[0];
+    std.println("{d}", v);
+    return 0;
+};

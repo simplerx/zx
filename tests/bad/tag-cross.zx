@@ -1,0 +1,14 @@
+// expect: cannot cross the function boundary
+// expect-code: E0514
+// §170：贴标载体不跨函数边界——传参即断链。
+const std = @mod("std");
+tag.buf;
+const take = fn (_p: *i32) void {
+    _ = _p;
+};
+const main = fn () u8 {
+    var p = tag.buf : std.heapAlloc(std.heap.page, i32, 4);
+    take(p);
+    std.heap.page.free(std.heap.page.ctx, (*u8)p, 16);
+    return 0;
+};

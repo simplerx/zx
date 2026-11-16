@@ -934,6 +934,31 @@ static Node *parse_dot_brace(P *p, bool array_lit) {
     return n;
 }
 
+/* tag 指针生命周期标签（上下文关键字：`tag` 平时是普通标识符，只有
+ * 「裸 tag + . + 名字」形态才按标签语法收，v.tag / 局部变量 tag 不受影响）：
+ *   tag.name;            定义（编译期唯一名）
+ *   tag.name.static;     定义：静态生命周期，豁免泄漏检查
+ *   tag.close;           关闭本文件的强制贴标（库/旧代码逃生口）
+ *   tag.name : expr      贴标：把 expr（heapAlloc 分配或已贴标载体）
+ *                        绑到该标签上
+ * 调用点已保证 cur 是裸 ident "tag" 且 peek(1) 是 '.'、peek(2) 是 ident。 */
+static Node *parse_tag(P *p) {
+    Token *t = advance(p);                       /* tag（裸 ident） */
+    expect(p, TOK_DOT);
+    Node *n = node_new(NK_TAG_APPLY, t->line, t->col);
+    n->name = take_ident(p);
+    if (at(p, TOK_DOT) && peek(p, 1)->kind == TOK_IDENT &&
+        peek(p, 1)->len == 6 && !memcmp(peek(p, 1)->start, "static", 6)) {
+        advance(p);                              /* .static */
+        n->flag = true;
+    }
+    if (at(p, TOK_COLON)) {
+        advance(p);
+        n->b = parse_expr(p);                    /* 贴标 */
+    }
+    return n;
+}
+
 static Node *parse_unary(P *p) {
     Token *t = cur(p);
     switch (t->kind) {
@@ -1013,6 +1038,13 @@ static Node *parse_primary(P *p) {
     case TOK_KW_UNDEF: advance(p); return node_new(NK_UNDEF, t->line, t->col);
 
     case TOK_IDENT: {
+        /* tag.name / tag.name : expr —— 上下文关键字：只有「裸 tag + .
+         * + 名字」这个形态按标签语法收；`v.tag`（有 base）与名为 tag
+         * 的局部变量完全不受影响。 */
+        if (t->len == 3 && !memcmp(t->start, "tag", 3) &&
+            peek(p, 1)->kind == TOK_DOT && peek(p, 2)->kind == TOK_IDENT) {
+            return parse_tag(p);
+        }
         /* label on a block/construct in expression position:  body: { … }
          * `true` / `false` 除外——它们是 bool 字面量，不是标签。 */
         if (peek(p, 1)->kind == TOK_COLON && !is_bool_word(t)) {
@@ -2042,6 +2074,7 @@ static const char *nk_name(NodeKind k) {
     case NK_ERR_TYPE: return "err";
     case NK_ERR_SET:  return "errset";
     case NK_VEC_TYPE: return "vec";
+    case NK_TAG_APPLY: return "tag";
     case NK_ROOT: return "root";
     }
     return "?";

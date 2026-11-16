@@ -1,0 +1,13 @@
+// expect: is not balanced across the loop body
+// expect-code: E0516
+// §170：循环每轮必须从同一状态开始、在同一状态结束；轮内只分配不释放不配平。
+const std = @mod("std");
+tag.buf;
+const main = fn () u8 {
+    for (0..3) i {
+        var p = tag.buf : std.heapAlloc(std.heap.page, i32, 4);
+        p[0] = (i32)(i) + 1;
+        _ = p;
+    }
+    return 0;
+};

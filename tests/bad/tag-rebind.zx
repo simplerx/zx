@@ -1,0 +1,13 @@
+// expect: already owns an allocation
+// expect-code: E0518
+// §170：tag 是单实例标签——上一次分配还 LIVE 不能再贴到同一个 tag。
+const std = @mod("std");
+tag.buf;
+const main = fn () u8 {
+    var p = tag.buf : std.heapAlloc(std.heap.page, i32, 4);
+    var q = tag.buf : std.heapAlloc(std.heap.page, i32, 4);
+    q[0] = 1;
+    std.heap.page.free(std.heap.page.ctx, (*u8)p, 16);
+    std.heap.page.free(std.heap.page.ctx, (*u8)q, 16);
+    return 0;
+};

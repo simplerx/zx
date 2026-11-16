@@ -2,6 +2,7 @@
 // std.stackAlloc(T, N) 栈帧存储，N 编译期已知；
 // std.heapAlloc(alloc, T, N) 走分配器，OOM 直接 abort；
 // `var x: *[N]T = undefined` 不再分配存储，只是指针槽不初始化。
+tag.close;
 const std = @mod("std");
 
 const total = fn (p: *[4]u64) u64 {

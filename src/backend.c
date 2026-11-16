@@ -5987,6 +5987,11 @@ static void ex(Buf *b, Node *n) {
         ex(b, n->a);
         return;
 
+    /* §170 tag 贴标：运行期就是被贴的表达式本身，账本信息编译完擦除 */
+    case NK_TAG_APPLY:
+        ex(b, n->b);
+        return;
+
     /* 有值的控制流当普通表达式用（`std.println("{}", if (c) 1 else 0)`、
      * `f(s: blk)`、switch 表达式……）：开一个临时量，用 gen_value 把值写
      * 进去，表达式本身引用临时量。line() 在这里落盘的语句会打印在"包着

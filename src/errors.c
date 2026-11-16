@@ -114,6 +114,22 @@ static const ErrDoc g_errs[] = {
     { "E0511", "cannot prove that a handle is alive",
       "handle checks are compile-time only (no runtime side table): keep `create`/`get`/`free` in straight-line code, bind the handle to a local, and do not store it in a struct, pass it through a cast, or issue it inside control flow" },
 
+    /* ---- tag 指针生命周期账本（§170） ---- */
+    { "E0512", "use after free of a tagged pointer",
+      "the tag's state machine knows the allocation was released; re-binding (`tag.x : p`) a freed pointer is also use after free" },
+    { "E0513", "a tagged allocation was never freed",
+      "alloc and free must come in pairs; declare the tag `tag.x.static;` if it is meant to outlive the program" },
+    { "E0514", "tagged pointer provenance lost",
+      "tagged pointers cannot cross function boundaries, be cast to non-pointers, or stay behind control flow; a branch that frees must return null as its value" },
+    { "E0515", "tag state is undetermined -- defend first",
+      "branches disagree on whether the tag was freed; re-bind it (`p = tag.x : p;`) to assert it is live, or `free` it to end it, before any other use" },
+    { "E0516", "tagged allocation inside a loop is not balanced",
+      "allocate and free within the same iteration, or move the allocation outside the loop; a loop cannot yield a tagged pointer" },
+    { "E0517", "heap allocation without a tag (mandatory tagging)",
+      "every heap allocation must be tagged: `let p = tag.x : std.heapAlloc(...)`; declare `tag.close;` in any file to opt out globally" },
+    { "E0518", "tag already owns an allocation",
+      "a tag is a single-instance label: free the current allocation or use a second tag" },
+
     /* ---- 模块 ---- */
     { "E0601", "module resolution failed",
       "check the path/spelling of `@mod(\"name\")`; break circular deps; `std` must resolve next to the compiler" },
