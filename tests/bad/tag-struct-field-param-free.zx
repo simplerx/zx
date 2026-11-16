@@ -1,0 +1,30 @@
+// expect: already freed
+// expect-code: E0509
+// expect-count: 1
+// §173：结构体实参的字段所有权移交 —— 被调方体内 free 过 p.name
+// （pff 事实账，devirt 改写 .free 之前记录），调用点把字段槽标 FREED：
+// 之后再释放报 E0509、解引用报 E0512、不释放不假报 E0513。
+// 声明序（init 在 main 前）与调用依赖序都要成立。
+const std = @mod("std");
+
+const init = fn (p: Person) void {
+    std.heap.page.free(std.heap.page.ctx, p.name, 10);
+};
+
+const release = fn (p: *u8) void {
+    std.heap.page.free(std.heap.page.ctx, p, 10);
+};
+
+const main = fn () void {
+    let s = make();
+    init(s);
+    release(s.name);
+};
+
+const make = fn () Person {
+    return .{.name = (*u8)std.heapAlloc(std.heap.page, u8, 10)};
+};
+
+const Person = struct {
+    name: *u8,
+};

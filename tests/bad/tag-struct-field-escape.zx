@@ -1,0 +1,27 @@
+// expect: already died with its scope
+// expect-code: E0509
+// expect-count: 1
+// §173：stackAlloc 指针存进结构体字段随结构体返回 —— 字段账本
+// （FieldTag：字段名 -> 槽）让 `s.name` 的释放/解引用继续记账，
+// tag 身份不再被结构体字面量/返回抹掉（2026-11-17 用户实测：
+// release(p.name) 零诊断，运行即崩）。
+const std = @mod("std");
+
+const main = fn () !i32 {
+    let p = alloc();
+    release(p.name);
+    return 0;
+};
+
+const alloc = fn () Person {
+    let p = std.stackAlloc(i32, 10);
+    return .{.name = (*u8)p};
+};
+
+const release = fn (p: *u8) void {
+    std.heap.page.free(std.heap.page.ctx, p, 10);
+};
+
+const Person = struct {
+    name: *u8,
+};

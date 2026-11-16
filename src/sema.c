@@ -114,6 +114,7 @@ static const char *suggest_std_member(const char *ns, const char *bad) {
 enum { SK_CONST, SK_LET, SK_VAR, SK_PARAM, SK_CAPTURE, SK_FN, SK_NS };
 
 typedef struct Symbol Symbol;
+typedef struct FieldTag FieldTag;   /* §173 字段账本，定义在 tag 一节 */
 struct Symbol {
     const char *name;
     int         kind;
@@ -139,6 +140,7 @@ struct Symbol {
     int         tag_id;    /* §170 tag 账本 id（TagSlot 下标+1，0 = 无） */
     int         tag_state; /* §170 载体状态 TC_*（0 NONE / 1 LIVE / 2 FREED /
                             * 3 COND / 4 UNKNOWN） */
+    FieldTag   *ftags;     /* §173：结构体值载体携带的字段账本（FieldTag 链） */
     const char *cname;     /* 后端用的 C 名字（模块内名字带前缀） */
     int         decl_line; /* 声明位置（D2 note 用；0 = 没记） */
     int         decl_col;
@@ -2791,6 +2793,148 @@ static TagSlot *tag_by_name(const char *name) {
     return NULL;
 }
 
+/* ---------------- §173 字段账本 ----------------
+ * 结构体值携带的 tag 标记（字段名 -> 槽 id）。挂两处：节点（字面量
+ * 烙印 / 调用点继承）与符号（let/var 载体）。状态不存副本——一律从
+ * 槽现推，free 事件 / 作用域退出改槽，所有字段载体自动同步
+ * （泄漏终扫是槽级的，也自动覆盖）。已知限制：嵌套字段（s.inner.name）、
+ * 元组/结构体数组的字段、方法接收者、臂内整结构体赋值的快照回滚，
+ * 都暂不追。 */
+
+struct FieldTag {
+    const char *name;          /* 字段名（AST 内部串，稳定） */
+    int         slot;          /* TagSlot 下标 + 1；0 = 该字段不携带 */
+    FieldTag   *next;
+};
+
+static FieldTag *ft_find(FieldTag *list, const char *name) {
+    for (; list; list = list->next)
+        if (list->name && name && !strcmp(list->name, name)) return list;
+    return NULL;
+}
+
+static void ft_set(FieldTag **plist, const char *name, int slot) {
+    FieldTag *f = ft_find(*plist, name);
+    if (f) { f->slot = slot; return; }
+    f = malloc(sizeof *f);
+    if (!f) return;
+    f->name = name; f->slot = slot; f->next = *plist;
+    *plist = f;
+}
+
+static FieldTag *ft_clone(FieldTag *src) {
+    FieldTag *out = NULL, **tail = &out;
+    for (; src; src = src->next) {
+        FieldTag *f = malloc(sizeof *f);
+        if (!f) break;
+        f->name = src->name; f->slot = src->slot; f->next = NULL;
+        *tail = f; tail = &f->next;
+    }
+    return out;
+}
+
+/* 合并两条 return 路径的字段表；同名字段槽不一致 = 状态不一致，丢弃。 */
+static FieldTag *ft_merge(FieldTag *a, FieldTag *b) {
+    FieldTag *out = NULL;
+    for (FieldTag *f = a; f; f = f->next) {
+        FieldTag *g = ft_find(b, f->name);
+        if (g && g->slot != f->slot) continue;
+        ft_set(&out, f->name, f->slot);
+    }
+    for (FieldTag *f = b; f; f = f->next)
+        if (!ft_find(a, f->name)) ft_set(&out, f->name, f->slot);
+    return out;
+}
+
+/* 字段槽当前载体状态：从槽现推。 */
+static int ft_state_of(int slot) {
+    TagSlot *t = tag_slot(slot);
+    if (!t || t->state == TST_UNBOUND) return TC_NONE;
+    return t->state == TST_FREED ? TC_FREED : TC_LIVE;
+}
+
+static bool ft_member_of(FieldTag *list, const char *name, int *id, int *state) {
+    FieldTag *f = ft_find(list, name);
+    if (!f || f->slot <= 0) return false;
+    int st = ft_state_of(f->slot);
+    if (st == TC_NONE) return false;
+    *id = f->slot; *state = st;
+    return true;
+}
+
+/* 表达式的字段账本：节点自带优先，ident 查符号。 */
+static FieldTag *ftags_of_expr(Node *e) {
+    if (!e) return NULL;
+    if (e->ftags) return (FieldTag *)e->ftags;
+    if (e->kind == NK_IDENT && e->sym && e->sym->ftags)
+        return (FieldTag *)e->sym->ftags;
+    return NULL;
+}
+
+/* 「形参字段被 free」的事实账（与被调/调用先后无关）：被调体检查时
+ * free 的指针实参剥到「形参符号 . 字段」记一条；调用点传结构体实参
+ * 时按形参符号对上，把字段槽标 FREED——所有权移交在任何声明顺序下
+ * 都成立（与直接指针形参的 ever_freed 同口径：体内 free 过即终局）。 */
+typedef struct { Symbol *psym; const char *fname; } ParamFieldFree;
+static ParamFieldFree *g_pff;
+static int g_npff, g_cpff;
+
+static void pff_add(Symbol *ps, const char *fname) {
+    for (int i = 0; i < g_npff; i++)
+        if (g_pff[i].psym == ps && !strcmp(g_pff[i].fname, fname)) return;
+    if (g_npff == g_cpff) {
+        int nc = g_cpff ? g_cpff * 2 : 16;
+        ParamFieldFree *p2 = realloc(g_pff, (size_t)nc * sizeof(ParamFieldFree));
+        if (!p2) return;
+        g_pff = p2; g_cpff = nc;
+    }
+    g_pff[g_npff].psym = ps;
+    g_pff[g_npff].fname = fname;
+    g_npff++;
+}
+
+static bool pff_has(Symbol *ps, const char *fname) {
+    for (int i = 0; i < g_npff; i++)
+        if (g_pff[i].psym == ps && !strcmp(g_pff[i].fname, fname)) return true;
+    return false;
+}
+
+/* 字段槽的释放事件：槽标 FREED（口径同 tag_free_event，调用点只在
+ * 被调方确实 free 过时才走到这里），g_locals 上的 LIVE 载体同步。 */
+static void ft_mark_freed(int slot, Node *site) {
+    TagSlot *t = tag_slot(slot);
+    if (!t || t->state != TST_LIVE) return;
+    t->state = TST_FREED;
+    t->ever_freed = true;
+    if (site) { t->free_line = site->line; t->free_col = site->col; }
+    for (Symbol *ls = g_locals; ls; ls = ls->locals_next)
+        if (ls->tag_id == slot && ls->tag_state == TC_LIVE)
+            ls->tag_state = TC_FREED;
+}
+
+/* 扫 return 的结构体值字段账本（剥铸型/解包），多路合并。 */
+static void ft_scan_returns(Node *n, FieldTag **out) {
+    if (!n || n->kind == NK_FN) return;
+    if (n->kind == NK_RETURN && n->a) {
+        Node *src = n->a;
+        for (int g = 0; g < 6 && src &&
+             (src->kind == NK_CAST || src->kind == NK_UNWRAP ||
+              src->kind == NK_TRY); g++)
+            src = src->kind == NK_CAST ? (src->b ? src->b : src->a) : src->a;
+        FieldTag *fs = ftags_of_expr(src);
+        if (fs) {
+            if (!*out) *out = ft_clone(fs);
+            else *out = ft_merge(*out, fs);
+        }
+        return;
+    }
+    ft_scan_returns(n->a, out);
+    ft_scan_returns(n->b, out);
+    ft_scan_returns(n->c, out);
+    ft_scan_returns(n->d, out);
+    for (int i = 0; i < n->nitems; i++) ft_scan_returns(n->items[i], out);
+}
+
 /* 表达式携带的 tag 载体：(id = TagSlot 下标+1, 载体状态)。id=0 = 不带 tag。
  * 顺序：节点自带的标记（贴标/合并/传播时填好）优先，ident 查符号，
  * 收割冒泡到值。 */
@@ -2805,6 +2949,20 @@ static void tag_of_expr(Node *e, int *id, int *state) {
     /* §173：`p.?`（未烙 COND→LIVE 印的普通解包）与切片 `.ptr` 沿基址追：
      * free 的实参常写成 `(*u8)s.ptr`，没有这条 free 事件就记不上账。 */
     if (e->kind == NK_UNWRAP && e->a) { tag_of_expr(e->a, id, state); return; }
+    /* §173：结构体字段携带的 tag —— `s.name` / `make().name`。符号基址
+     * 查符号的字段表，表达式基址（调用/字面量）查节点字段表；铸型/
+     * 解包先剥。嵌套字段（s.inner.name）暂不追（已知限制）。 */
+    if (e->kind == NK_FIELD && e->name && e->a) {
+        Node *fb = e->a;
+        for (int g = 0; g < 6 && fb &&
+             (fb->kind == NK_CAST || fb->kind == NK_UNWRAP); g++)
+            fb = fb->kind == NK_CAST ? (fb->b ? fb->b : fb->a) : fb->a;
+        if (fb && fb->kind == NK_IDENT && fb->sym &&
+            ft_member_of((FieldTag *)fb->sym->ftags, e->name, id, state))
+            return;
+        if (fb && ft_member_of((FieldTag *)fb->ftags, e->name, id, state))
+            return;
+    }
     if (e->kind == NK_FIELD && e->name && !strcmp(e->name, "ptr") && e->a) {
         tag_of_expr(e->a, id, state);
         return;
@@ -2973,6 +3131,17 @@ static void tag_note_free(Node *call) {
     Node *a = call->a;
     if (!a || a->kind != NK_FIELD || !a->name || strcmp(a->name, "free") ||
         !a->a || !is_allocator_ty(a->a->ty) || call->nitems != 3) return;
+    /* §173：形参字段被 free 的事实账（见 pff_add 注释）。 */
+    {
+        Node *pa = call->items[1];
+        for (int g = 0; g < 6 && pa &&
+             (pa->kind == NK_CAST || pa->kind == NK_UNWRAP); g++)
+            pa = pa->kind == NK_CAST ? (pa->b ? pa->b : pa->a) : pa->a;
+        if (pa && pa->kind == NK_FIELD && pa->name && pa->a &&
+            pa->a->kind == NK_IDENT && pa->a->sym &&
+            pa->a->sym->kind == SK_PARAM)
+            pff_add(pa->a->sym, pa->name);
+    }
     tag_free_event(call, call->items[1]);
 }
 
@@ -3104,6 +3273,13 @@ static void fn_stamp_ret_flow(Node *fn) {
     if (ok && k >= 0) fn->tag_state = k + 1;
     else if (ok && slot > 0) fn->index = slot;
     else { fn->tag_state = -1; fn->index = -1; }
+    /* §173：结构体返回值携带的字段账烙到 fn（多路 return 合并）；
+     * 调用点继承后 DECL 绑到载体符号，`s.name` 的 free/解引用即可追。 */
+    if (!fn->ftags) {
+        FieldTag *fs = NULL;
+        ft_scan_returns(fn->b, &fs);
+        if (fs) fn->ftags = fs;
+    }
 }
 
 /* 贴标（NK_TAG_APPLY 带 b）：把分配 / 同标签载体绑到 tag 上。
@@ -3555,6 +3731,24 @@ static Type *check_assign(Node *n) {
                 if (ts && ts->carrier == n->a->sym) ts->carrier = NULL;
                 n->a->sym->tag_id = 0;
                 n->a->sym->tag_state = TC_NONE;
+            }
+            /* §173：整结构体赋值重绑字段账本（赋成不带账的值就清掉，
+             * 与 tag_id 的作废口径一致）；字段赋值 `s.f = expr` 只重绑
+             * 该字段。臂内赋值的快照回滚暂不含字段账（已知限制）。 */
+            if (n->a->kind == NK_IDENT && n->a->sym) {
+                FieldTag *fs2 = ftags_of_expr(n->b);
+                n->a->sym->ftags = fs2 ? ft_clone(fs2) : NULL;
+            } else if (n->a->kind == NK_FIELD && n->a->name && n->a->a &&
+                       n->a->a->kind == NK_IDENT && n->a->a->sym) {
+                int ftid, ftst;
+                tag_of_expr(n->b, &ftid, &ftst);
+                Symbol *bs = n->a->a->sym;
+                if (ftid && (ftst == TC_LIVE || ftst == TC_FREED))
+                    ft_set((FieldTag **)&bs->ftags, n->a->name, ftid);
+                else {
+                    FieldTag *f0 = ft_find((FieldTag *)bs->ftags, n->a->name);
+                    if (f0) f0->slot = 0;
+                }
             }
         }
     } else if (lt && lt->kind == TY_PTR) {
@@ -5342,6 +5536,19 @@ static Type *check_call(Node *n, Type *expect) {
         for (int i = 0; i < n->nitems; i++) {
             int tid, tst;
             tag_of_expr(n->items[i], &tid, &tst);
+            /* §173：形参字段被 free 的事实账——free 的指针实参剥到
+             * 「形参符号 . 字段」记一条（必须在 devirt 改写 .free 之前，
+             * tag_note_free 看到的已是改写形状）。 */
+            if (free_call) {
+                Node *pa = n->items[i];
+                for (int g = 0; g < 6 && pa &&
+                     (pa->kind == NK_CAST || pa->kind == NK_UNWRAP); g++)
+                    pa = pa->kind == NK_CAST ? (pa->b ? pa->b : pa->a) : pa->a;
+                if (pa && pa->kind == NK_FIELD && pa->name && pa->a &&
+                    pa->a->kind == NK_IDENT && pa->a->sym &&
+                    pa->a->sym->kind == SK_PARAM)
+                    pff_add(pa->a->sym, pa->name);
+            }
             if (!tid) continue;
             /* §173：精确释放判定 —— 被调方的第 i 个形参抽象槽真的被
              * free 掉（state FREED），调用点才记释放事件；否则是借出
@@ -5387,6 +5594,24 @@ static Type *check_call(Node *n, Type *expect) {
             /* fn_ret_cache == -1（body 未查的前向引用）：返回流未知，
              * 不当场扫、不缓存——直接绑定的载体已在 DECL/ASSIGN
              * 登记 pending，被调 body 查完时由 fn_stamp_ret_flow 回填。 */
+        }
+        /* §173：结构体实参/返回值携带的字段账本：
+         * ① 被调方体内 free 过的字段（pff 事实账）→ 调用点把槽标
+         *    FREED——所有权已移交，调用方不再欠释放（防假 E0513），
+         *    之后再 free 报 E0509、解引用报 E0512；
+         * ② 结构体返回值带字段账 → 调用节点继承，DECL 再绑到载体
+         *    符号（deps 拓扑补查保证被调 body 先查，fn->ftags 已就位）。 */
+        if (fn) {
+            for (int i = 0; i < n->nitems && i < fn->nitems; i++) {
+                Symbol *ps = fn->items[i]->sym;
+                if (!ps) continue;
+                FieldTag *fs = ftags_of_expr(n->items[i]);
+                for (; fs; fs = fs->next)
+                    if (fs->slot > 0 && pff_has(ps, fs->name))
+                        ft_mark_freed(fs->slot, n);
+            }
+            if (!releaser && !free_call && fn->ftags && !n->ftags)
+                n->ftags = ft_clone((FieldTag *)fn->ftags);
         }
     }
     /* 函数指针字段的分发：能证明目标就改成直调（§138） */
@@ -5507,6 +5732,13 @@ static Type *check_lit_fields(Node *n, Type *t) {
                 }
             Type *vt = check_expr(p->a, t->fields[idx].ty);
             coerce_node(p->a, vt, t->fields[idx].ty, "field initializer");
+            /* §173：字段值携带的 tag 烙进字面量的字段账本 */
+            {
+                int ftid, ftst;
+                tag_of_expr(p->a, &ftid, &ftst);
+                if (ftid && (ftst == TC_LIVE || ftst == TC_FREED))
+                    ft_set((FieldTag **)&n->ftags, p->name, ftid);
+            }
         }
         int set = 0;
         for (int i = 0; i < t->nfields; i++) {
@@ -6050,6 +6282,13 @@ static Type *check_expr_raw(Node *n, Type *expect) {
             for (int i = 0; i < n->nitems; i++)
                 coerce_node(n->items[i]->a, check_expr(n->items[i]->a,
                             t->fields[i].ty), t->fields[i].ty, "field");
+        }
+        /* §173：无期望类型的匿名结构体同样烙字段账本 */
+        for (int i = 0; i < n->nitems; i++) {
+            int ftid, ftst;
+            tag_of_expr(n->items[i]->a, &ftid, &ftst);
+            if (ftid && (ftst == TC_LIVE || ftst == TC_FREED))
+                ft_set((FieldTag **)&n->ftags, n->items[i]->name, ftid);
         }
         return type_of(n, t);
     }
@@ -7148,6 +7387,9 @@ static void check_stmt(Node *n) {
                 /* const 别名只是句柄不是指针载体，不进账本（§172） */
                 if (ts && n->sym->kind != SK_CONST) ts->carrier = n->sym;
             }
+            /* §173：结构体值的字段账本随绑定落到符号上 */
+            FieldTag *fs = ftags_of_expr(n->b);
+            if (fs) n->sym->ftags = ft_clone(fs);
         }
         return;
 

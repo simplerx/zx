@@ -122,6 +122,8 @@ struct Node {
      * 全是编译期信息，编译完擦除。 */
     int           tag_id;
     int           tag_state;
+    void          *ftags;     /* §173：结构体值携带的字段标记账本
+                                 * （FieldTag 链，sema 私有类型） */
 };
 
 Node *node_new(NodeKind k, int line, int col);
