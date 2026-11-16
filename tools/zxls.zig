@@ -9854,11 +9854,33 @@ fn publishDiags(doc: *const Document, diags: []const Diag) void {
     sendRaw(j.buf.items);
 }
 
+/// zxc.exe 的 mtime：编译器被重编替换后，已打开文档的旧诊断就过时了，
+/// 文档不编辑永远停在旧诊断上（用户 2026-11-17 §173 补丁实测：CLI 已报
+/// E0509、Zed 纹丝不动）。诊断线程周期 stat，一变就把全部文档标 dirty。
+fn zxc_exe_mtime() i96 {
+    const st = Io.Dir.cwd().statFile(g_io, zxc_path, .{}) catch return 0;
+    return st.mtime.nanoseconds;
+}
+
 fn diagnosticsWorker() void {
+    var zxc_mtime: i96 = 0;           // 0 → 首个 tick 必触发一轮全量重查
+    var mtime_tick: u32 = 0;
     while (true) {
         docs_mu.lockUncancelable(g_io);
-        while (dirty.count() == 0 and !quitting)
+        while (dirty.count() == 0 and !quitting) {
             docs_cond.waitTimeout(g_io, &docs_mu, .{ .duration = .{ .raw = Io.Duration.fromMilliseconds(250), .clock = .awake } }) catch {};
+            mtime_tick += 1;
+            if (mtime_tick >= 8) {    // ~2s 一次 stat，开销可忽略
+                mtime_tick = 0;
+                const m = zxc_exe_mtime();
+                if (m != zxc_mtime) {
+                    zxc_mtime = m;
+                    var dit = docs.iterator();
+                    while (dit.next()) |e|
+                        dirty.put(gpa, e.key_ptr.*, {}) catch {};
+                }
+            }
+        }
         if (quitting) {
             docs_mu.unlock(g_io);
             return;
