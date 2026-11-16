@@ -1,0 +1,21 @@
+// expect: already died with its scope
+// expect-code: E0509
+// expect-count: 1
+// §173：stackAlloc 指针逃逸 + 前向引用 —— 调用方定义在被调方之前，
+// body 队列按调用依赖补查后，返回流在调用点检查时就绪，双重释放
+// 才能被记账（2026-11-17 用户实测：声明序检查时漏检，运行即崩）。
+const std = @mod("std");
+
+const main = fn () void {
+    let p = alloc();
+    release((*u8)p);
+};
+
+const alloc = fn () *u8 {
+    let p = std.stackAlloc(i32, 10);
+    return (*u8)p;
+};
+
+const release = fn (p: *u8) void {
+    std.heap.page.free(std.heap.page.ctx, p, 10);
+};

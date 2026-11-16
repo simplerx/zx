@@ -3065,24 +3065,45 @@ static void tag_scan_returns(Node *n, Node *fn, int *pk, int *pslot, bool *ok) {
     for (int i = 0; i < n->nitems; i++) tag_scan_returns(n->items[i], fn, pk, pslot, ok);
 }
 
-/* 返回流查询：*k_out >= 0 → 形参下标；*slot_out > 0 → 体内槽 id；都 <0/0 → 无。 */
-static void fn_returns_tag(Node *fn, int *k_out, int *slot_out) {
-    *k_out = -1; *slot_out = 0;
-    if (!fn || fn->kind != NK_FN || !fn->b) return;
-    if (fn->tag_state == -1 || fn->index == -1 ||
-        fn->tag_state > 0 || fn->index > 0) {
-        if (fn->tag_state > 0) *k_out = fn->tag_state - 1;
-        if (fn->index > 0) *slot_out = fn->index;
-        return;
+/* 直接调用的目标 fn 节点（直呼名字/实例化；函数指针分发拿不到）。 */
+static Node *call_direct_fn(Node *call) {
+    Node *a = call->a;
+    if (!a) return NULL;
+    if (a->sym && a->sym->decl) {
+        Node *d = a->sym->decl;
+        if (d->kind == NK_FN) return d;
+        if (d->kind == NK_DECL && d->b && d->b->kind == NK_FN) return d->b;
+        return NULL;
     }
+    if (a->inst && a->inst->kind == NK_FN) return a->inst;
+    return NULL;
+}
+
+/* 返回流缓存三态：1 = 有（*k_out 形参下标 / *slot_out 体内槽）；
+ * 0 = 确认无（body 已查完、扫过）；-1 = 未分析（body 还没查）。
+ * 扫描依赖 sema 产出的节点烙印与局部符号，前向引用的调用点先于
+ * 被调方到达时当场扫必然失败——绝不能缓存成“确认无”（用户 2026-11-17
+ * 实测：alloc 定义在 main 之后时逃逸检测失效），body 查完时由
+ * fn_stamp_ret_flow 统一烙缓存并回填。 */
+static int fn_ret_cache(Node *fn, int *k_out, int *slot_out) {
+    *k_out = -1; *slot_out = 0;
+    if (!fn || fn->kind != NK_FN || !fn->b) return 0;
+    if (fn->tag_state == 0 && fn->index == 0) return -1;   /* 未分析 */
+    if (fn->tag_state > 0) *k_out = fn->tag_state - 1;
+    if (fn->index > 0) *slot_out = fn->index;
+    return 1;
+}
+
+/* body 查完时烙返回流缓存（此时 cast 烙印/局部符号已就位）。 */
+static void fn_stamp_ret_flow(Node *fn) {
+    if (!fn || fn->kind != NK_FN || !fn->b) return;
+    if (fn->tag_state != 0 || fn->index != 0) return;      /* 已烙 */
     int k = -1, slot = 0;
     bool ok = true;
     tag_scan_returns(fn->b, fn, &k, &slot, &ok);
     if (ok && k >= 0) fn->tag_state = k + 1;
     else if (ok && slot > 0) fn->index = slot;
     else { fn->tag_state = -1; fn->index = -1; }
-    if (fn->tag_state > 0) *k_out = fn->tag_state - 1;
-    if (fn->index > 0) *slot_out = fn->index;
 }
 
 /* 贴标（NK_TAG_APPLY 带 b）：把分配 / 同标签载体绑到 tag 上。
@@ -5344,7 +5365,7 @@ static Type *check_call(Node *n, Type *expect) {
          * 调用结果继承 tag（调用方不 free 就是真泄漏）。 */
         if (fn && !releaser && !free_call) {
             int k = -1, slot = 0;
-            fn_returns_tag(fn, &k, &slot);
+            if (fn_ret_cache(fn, &k, &slot) == 1) {
             if (k >= 0 && k < n->nitems) {
                 int tid, tst;
                 tag_of_expr(n->items[k], &tid, &tst);
@@ -5362,6 +5383,10 @@ static Type *check_call(Node *n, Type *expect) {
                     n->tag_state = (t->state == TST_FREED) ? TC_FREED : TC_LIVE;
                 }
             }
+            }
+            /* fn_ret_cache == -1（body 未查的前向引用）：返回流未知，
+             * 不当场扫、不缓存——直接绑定的载体已在 DECL/ASSIGN
+             * 登记 pending，被调 body 查完时由 fn_stamp_ret_flow 回填。 */
         }
     }
     /* 函数指针字段的分发：能证明目标就改成直调（§138） */
@@ -7057,6 +7082,8 @@ static Type *check_fn_body(Node *fn) {
     g_locals = save_locals;
     scope_pop(&sc);
     g_cur_fn_name = prev_fn;    /* 还原外层函数名（嵌套/错误路径安全） */
+    /* §173：返回流缓存在 body 查完时烙——此时 cast 烙印/局部符号已就位。 */
+    fn_stamp_ret_flow(fn);
     return ft;
 }
 
@@ -8289,6 +8316,64 @@ static Type *coerce_node(Node *e, Type *from, Type *to, const char *ctx) {
 
 /* ---------------- 入口 ---------------- */
 
+/* §173：body 队列按调用依赖补查 —— 前向引用（main 调 alloc、alloc
+ * 定义在后）时被调方 body 还在队，返回流未分析，调用点的
+ * free/解引用记账拿不到载体标签。按生命周期链（调用依赖）
+ * 先查被调方：扫 fn body AST 里的直接调用（ident 名字），从
+ * 待查条目的作用域快照解析到队列里的 fn，先查它再查自己。
+ * 互递归由队列摘除（置 fn=NULL）防死循环，互递对之间仍有一
+ * 方先查，行为等同旧声明序（此时其返回流未分析，调用点不
+ * 继承载体——已知限制）。补查发生在主循环层（不嵌套在
+ * 表达式检查里），臂/循环账本的全局状态不会串台。 */
+static Node *deps_fn_of_name(const char *name, Scope *ps) {
+    for (Scope *sc = ps; sc; sc = sc->parent) {
+        Symbol *s = scope_find_here(sc, name);
+        if (!s || !s->decl) continue;
+        Node *d = s->decl;
+        if (d->kind == NK_FN) return d;
+        if (d->kind == NK_DECL && d->b && d->b->kind == NK_FN) return d->b;
+    }
+    return NULL;
+}
+
+static void deps_check_calls(Node *n, Scope *ps);
+
+static void deps_check_one(Node *fn) {
+    for (int j = 0; j < g_npending; j++) {
+        if (g_pending[j].fn != fn) continue;
+        /* 进入即摘除：依赖链上的互递归（A 调 B、B 又调 A）会再
+         * 找到自己——不先摘除就是无限递归爆栈。在途的体对
+         * 更晚的调用点而言返回流未分析，行为等同旧声明序。 */
+        g_pending[j].fn = NULL;
+        Module *sm = g_mod;
+        Scope  *ss = g_scope;
+        const char *sp = g_srcpath;
+        if (g_pending[j].mod) {
+            g_mod = g_pending[j].mod;
+            g_scope = g_pending[j].scope
+                    ? g_pending[j].scope : &g_pending[j].mod->scope;
+            g_srcpath = g_pending[j].mod->path;
+        }
+        if (fn->b) deps_check_calls(fn->b, g_scope);
+        check_fn_body(fn);
+        g_mod = sm; g_scope = ss; g_srcpath = sp;
+        return;
+    }
+}
+
+static void deps_check_calls(Node *n, Scope *ps) {
+    if (!n || n->kind == NK_FN) return;  /* 嵌套函数体不算 */
+    if (n->kind == NK_CALL && n->a && n->a->kind == NK_IDENT && n->a->name) {
+        Node *dfn = deps_fn_of_name(n->a->name, ps);
+        if (dfn) deps_check_one(dfn);
+    }
+    deps_check_calls(n->a, ps);
+    deps_check_calls(n->b, ps);
+    deps_check_calls(n->c, ps);
+    deps_check_calls(n->d, ps);
+    for (int j = 0; j < n->nitems; j++) deps_check_calls(n->items[j], ps);
+}
+
 void sema_check(Node *root) {
     Module *m0 = calloc(1, sizeof(Module));
     m0->path = g_srcpath;
@@ -8325,11 +8410,13 @@ void sema_check(Node *root) {
     check_stmts(root);
     g_root_stmts = false;
 
+
     /* 函数体：每个都回到它所属模块的作用域里检查。
      * 检查过程中可能又冒出新的待检查体（泛型实例、模块里的函数），
      * 所以这里边跑边长。 */
     for (int i = 0; i < g_npending; i++) {
         Pending *p = &g_pending[i];
+        if (!p->fn) continue;       /* 被依赖补查掉的（§173） */
         Module *sm = g_mod;
         Scope  *ss = g_scope;
         const char *sp = g_srcpath;
@@ -8338,7 +8425,15 @@ void sema_check(Node *root) {
             g_scope = p->scope ? p->scope : &p->mod->scope;
             g_srcpath = p->mod->path;
         }
-        check_fn_body(p->fn);
+        /* 先按调用依赖查掃它引用的、还在队里的被调方（§173）。
+         * 自己先摘除（置 fn=NULL）：递归函数调自己，不摘就是
+         * deps_check_one 无限重入爆栈。摘除/读都按索引访 g_pending：
+         * deps 补查与 check_fn_body 里都会再 schedule 新体（队列
+         * realloc 扩容），循环头取的 p 指针会悬垂。 */
+        Node *pfn = p->fn;
+        g_pending[i].fn = NULL;
+        if (pfn->b) deps_check_calls(pfn->b, g_scope);
+        check_fn_body(pfn);
         g_mod = sm;
         g_scope = ss;
         g_srcpath = sp;
