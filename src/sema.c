@@ -1474,14 +1474,13 @@ static bool can_coerce(Type *from, Type *to) {
 
     if (from->kind == TY_UNDEF) return true;
 
-    /* `null` 的落点：`?T`（空）、裸指针/函数指针（C 的 NULL）、`bool`
-     *（`p == false` 那种），以及 **`error`**——此时它就是保留码 65535，
-     * 和 `error.null` 是同一个值（用户 2026-11-09 第 15 条：
-     * "null 也是一种错误，或者可以接收用 null 给 error 赋值"）。 */
+    /* `null` 的落点：`?T`（空）、裸指针/函数指针（C 的 NULL），以及
+     * **`error`**——此时它就是保留码 65535，和 `error.null` 是同一个值
+     * （用户 2026-11-09 第 15 条）。**不含 bool**：bool 只有 true/false
+     * 两个值，`var b: bool = null;` 必须报错（用户 2026-11-16）。 */
     if (from->kind == TY_NULL)
         return to->kind == TY_OPT || to->kind == TY_PTR ||
-               to->kind == TY_FN || to->kind == TY_BOOL ||
-               to->kind == TY_ERROR;
+               to->kind == TY_FN || to->kind == TY_ERROR;
 
     /* 目标是 ?T / !T：先拆包装，再看载荷（R7.4：T → ?T、T → !T） */
     if (to->kind == TY_OPT) return can_coerce(from, to->elem);
@@ -2243,8 +2242,6 @@ static Type *unify(Node *at, Type *a, Type *b) {
      * 就落在这里——`ok: b;` 与 `ok: null;` 的公共类型是 `?*[N]T`） */
     if (a->kind == TY_NULL && b->kind == TY_PTR) return ty_opt(b);
     if (b->kind == TY_NULL && a->kind == TY_PTR) return ty_opt(a);
-    if (a->kind == TY_NULL && b->kind == TY_BOOL) return a;
-    if (b->kind == TY_NULL && a->kind == TY_BOOL) return b;
 
     if (a->kind == TY_ERROR) return ty_err(b);
     if (b->kind == TY_ERROR) return ty_err(a);
@@ -2771,8 +2768,6 @@ typedef struct {
 } TagSlot;
 static TagSlot *g_tslots;
 static int      g_ntslots, g_ctslots;
-static bool     g_tags_closed;  /* §170：全局开关——任一文件写 tag.close;
-                                 * 整个程序都不再强制贴标 */
 
 static Module *g_std_mod;       /* 5931 附近定义：std 模块（豁免判定用） */
 
@@ -3171,13 +3166,12 @@ static void tag_ledger_final(const char *entry_path) {
             g_rslots[c->reg_slot - 1].tag) continue;   /* 已贴标 */
         if (c->tag_id) continue;                       /* heapSlice 已贴标 */
         if (!m || m->tags_closed) continue;
-        if (g_tags_closed) continue;                   /* 全局开关：任一文件声明即全关 */
         if (tag_module_exempt(m)) continue;
         (void)entry_path;
         diag_code_at("E0517", c->line, c->col,
             "every heap allocation must be tagged -- write "
             "`let p = tag.myTag : std.heapAlloc(...);` (or declare "
-            "`tag.close;` in any file of the program to opt out globally)");
+            "`tag.close;` in this file to opt out)");
     }
 }
 
@@ -5250,8 +5244,8 @@ static Type *check_builtin(Node *n, Type *expect) {
         return type_of(n, sema_type_type());
     }
 
-    if (!strcmp(nm, "compileError")) {
-        /* 只有真的执行到这一行才报错：放在 `if` 里的 @compileError 是编译期
+    if (!strcmp(nm, "error")) {
+        /* 只有真的执行到这一行才报错：放在 `if` 里的 @error 是编译期
          * 分支的一部分，不能在检查函数体时就炸。 */
         return type_of(n, ty_noreturn());
     }
@@ -5362,6 +5356,8 @@ static Type *check_builtin(Node *n, Type *expect) {
             { "select",   "moved to std.simd.select -- `@Vec` is the only vector builtin" },
             { "any",      "moved to std.simd.any" },
             { "all",      "moved to std.simd.all" },
+            /* 1.4.3：@compileError 改名为 @error（内建仍是九个，通道不变）。 */
+            { "compileError", "renamed to @error -- same channel, shorter name" },
         };
         for (size_t i = 0; i < sizeof gone / sizeof gone[0]; i++)
             if (!strcmp(nm, gone[i].name))
@@ -5575,6 +5571,53 @@ static Type *check_expr_raw(Node *n, Type *expect) {
             }
         }
         return type_of(n, t->elem);
+    }
+
+    /* §171 `try e err { … }` —— 捕获形式：出错不外抛，err 绑错误码，
+     * 块产出兜底值 T；成功取载荷。两臂 unify，整体类型 T。
+     * tag 臂账本挂在本节点上（helper 不会自动覆盖新分支）。 */
+    case NK_TRY_CAPTURE: {
+        Type *t = check_expr(n->a, NULL);
+        if (!t || t->kind == TY_INVALID) {
+            check_block(n->b);             /* 别把块里的错漏掉 */
+            return ty_invalid();
+        }
+        if (t->kind != TY_ERR && t->kind != TY_OPT)
+            return BAD(n, "`try ... err` needs an error union or an optional, found `%s`",
+                       ty_str(t));
+        /* `?T` 的空值走捕获时错误码是保留码 error.null（65535）。 */
+        Type *payload = t->elem;
+
+        ArmExit exOK = { 0, TC_NONE, NULL };   /* 成功臂：无 tag 事件 */
+        ArmExit exErr;
+        TagSnap snapT;
+        tag_snap(&snapT);
+        Type *bt;
+        {
+            Scope sc;
+            scope_push(&sc);
+            if (n->name) {
+                Symbol *s = scope_add(&sc, n->name, SK_CAPTURE);
+                if (s) { s->ty = ty_error(); s->state = 2;
+                         s->reg_slot = region_of_expr(n->a);
+                         s->cap_src = n->a; }
+            }
+            bt = check_block(n->b);
+            if (n->b->kind == NK_BLOCK) {
+                exErr = tag_arm_reconcile(n->b->d, snapT.state, snapT.n);
+            } else {
+                exErr = (ArmExit){ 0, TC_NONE, NULL };
+            }
+            tag_restore(&snapT);
+            scope_pop(&sc);
+        }
+        /* 成功臂没动 tag；错误臂若臂内 free/alloc 未按约定传出，reconcile 已报。
+         * 合并：LIVE⊔FREED(null 载体)→COND，等待使用者判空防守。 */
+        tag_join_arms(n, exOK, exErr);
+
+        if (!bt || bt->kind == TY_INVALID) return ty_invalid();
+        Type *r = unify(n, payload, bt);
+        return type_of(n, r);
     }
 
     /* `a orelse b` —— 有值取载荷，空/错取 b。b 只在真的空/错时求值。 */
@@ -6733,12 +6776,8 @@ static void check_stmt(Node *n) {
         if (!strcmp(n->name, "close")) {
             if (n->b)
                 err_at(n->line, n->col, "`tag.close` takes no value");
-            else {
-                /* §170：全局开关。任何一个文件声明一次，整个程序
-                 * （所有模块）都不再强制贴标——库作者关一次即可。 */
-                g_tags_closed = true;
-                if (g_mod) g_mod->tags_closed = true;
-            }
+            else if (g_mod)
+                g_mod->tags_closed = true;   /* §170：本模块关闭强制贴标 */
             return;
         }
         if (!n->b) {
@@ -6867,14 +6906,14 @@ static void check_stmt(Node *n) {
     }
 
     default: {
-        /* 顶层语句是裸 @compileError 时只查类型、不做投机折叠：check_expr
-         * 会顺手 fold 填缓存，而 fold 到 compileError 就是引爆——可这里的
+        /* 顶层语句是裸 @error 时只查类型、不做投机折叠：check_expr
+         * 会顺手 fold 填缓存，而 fold 到 @error 就是引爆——可这里的
          * 语句值是要丢弃的，前面一条 `if (…) { return …; }` 特化成恒真
          * 返回后，这句在运行时根本到不了（2026-11-10 用户实测踩中：
          * "不支持类型"守卫一实例化就假爆）。真要炸的路径有三条，都不经过
          * 这里：if 语句的臂（check_arm 里 fold）、编译期执行真的走到
          * （ct_run）、以及当值被取的编译期表达式。 */
-        if (n->kind == NK_BUILTIN && n->name && !strcmp(n->name, "compileError")) {
+        if (n->kind == NK_BUILTIN && n->name && !strcmp(n->name, "error")) {
             check_expr_raw(n, NULL);
             return;
         }
@@ -7905,7 +7944,6 @@ void sema_check(Node *root) {
     g_std_mod = NULL;
     g_ntslots = 0;              /* §170：tag 账本同样按轮清零 */
     g_ntag_allocs = 0;
-    g_tags_closed = false;
     stamp_mod(root, g_srcpath);
     g_cmods = 8;
     g_mods = calloc((size_t)g_cmods, sizeof(Module *));
@@ -8691,14 +8729,14 @@ static Value *ct_eval(Node *n) {
                     n->nitems >= 1 &&
                     !(n->items[0]->ty && n->items[0]->ty->kind == TY_TYPE) &&
                     addr_ok(n->items[0]) ? n->items[0] : NULL) : NULL);
-        } else if (!strcmp(nm, "compileError")) {
+        } else if (!strcmp(nm, "error")) {
             if (!n->flag) {            /* 折叠可能重试，只报一次 */
                 n->flag = true;
                 if (n->nitems >= 1 && n->items[0]->kind == NK_STR)
-                    err_at(n->line, n->col, "@compileError: %.*s",
+                    err_at(n->line, n->col, "@error: %.*s",
                            n->items[0]->str_len, n->items[0]->str);
                 else
-                    err_at(n->line, n->col, "@compileError");
+                    err_at(n->line, n->col, "@error");
             }
             g_ct_stuck = true;
             return NULL;

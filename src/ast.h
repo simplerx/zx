@@ -58,6 +58,9 @@ typedef enum {
     NK_TAG_APPLY,       /* tag.name / tag.name.static / tag.name : expr
                          * name = 标签名，b = 被贴标表达式（NULL = 定义/引用），
                          * flag = static（声明处），ival = tag 账本 id（sema 填） */
+    NK_TRY_CAPTURE,     /* try expr err { ... }：a = !T/?T 表达式，
+                         * name = 错误捕获名，b = 捕获块（产出兜底值 T）。
+                         * 出错不外抛，在块里处理；tag 臂账本挂在本节点上。 */
 } NodeKind;
 
 struct Node;

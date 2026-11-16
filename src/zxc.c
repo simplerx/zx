@@ -77,7 +77,7 @@ static const DiagRule g_rules[] = {
 
     /* 语言规则 */
     { "division by zero",                 "E0505" },
-    { "@compileError",                    "E0507" },
+    { "@error",                           "E0507" },
     { "@trap",                            "E0507" },
     { "reached at compile time",          "E0507" },
     { "must be computable at compile time", "E0501" },

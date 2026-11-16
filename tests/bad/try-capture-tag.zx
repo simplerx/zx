@@ -1,0 +1,16 @@
+// expect: was freed inside this branch
+// expect-code: E0514
+// §171 + §170：try 错误臂里 free 了贴标指针，必须传 null 作兜底值。
+const std = @mod("std");
+tag.buf;
+const error_read = error { failed };
+const fail = fn () error_read!i32 { return error.failed; };
+const main = fn () u8 {
+    var p = tag.buf : std.heapAlloc(std.heap.page, i32, 4);
+    let v = try fail() err {
+        std.heap.page.free(std.heap.page.ctx, (*u8)p, 16);
+        err: 0;
+    };
+    _ = v;
+    return 0;
+};

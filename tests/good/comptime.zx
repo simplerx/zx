@@ -17,8 +17,8 @@ const table = build: {
     build: t;
 };
 
-// 编译期断言：@compileError 只在真的执行到的时候才报
-const checked = if (table.2 != 3) @compileError("table[2] should be 3") else 0;
+// 编译期断言：@error 只在真的执行到的时候才报
+const checked = if (table.2 != 3) @error("table[2] should be 3") else 0;
 
 const main = fn () u8 {
     var _: *[N]i32 = undefined;             // 长度 14

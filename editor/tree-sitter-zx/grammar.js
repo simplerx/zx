@@ -350,6 +350,8 @@ module.exports = grammar({
         $.binary_expression,
         $.range_expression,
         $.try_expression,
+        $.try_capture_expression,
+        $.tag_application,
         $.container_type,
         $.error_set_type,
       ),
@@ -607,6 +609,29 @@ module.exports = grammar({
       ),
 
     try_expression: ($) => prec(PREC.UNARY, seq("try", field("operand", $._expression))),
+
+    // §171 try 捕获形式：`try expr err { … }` —— err 是捕获名
+    try_capture_expression: ($) =>
+      prec(
+        PREC.UNARY + 1,
+        seq("try", field("operand", $._expression), field("binding", $.identifier), field("body", $.block)),
+      ),
+
+    // §170 贴标：`tag.name;` / `tag.name.static;` / `tag.name : expr`
+    // 上下文关键字：只有 `tag` + `.` + 名字才是标签，其他位置的 tag 仍按标识符
+    tag_application: ($) =>
+      prec.right(
+        PREC.CALL + 1,
+        seq(
+          "tag",
+          ".",
+          field("name", $.identifier),
+          optional(alias($._tag_static, $.tag_static)),
+          optional(seq(":", field("value", $._expression))),
+        ),
+      ),
+
+    _tag_static: ($) => seq(".", "static"),
 
     return_statement: ($) =>
       seq("return", optional(field("value", $._expression)), ";"),

@@ -18,11 +18,11 @@ const sizeOfT = fn (T: type) usize {
 };
 
 // 编译期类型分派：T 的比较在 specialize 时折成常量，死分支不检查、
-// 裸 @compileError 守卫只对没列出的类型炸（E0301/B1001 守门）
+// 裸 @error 守卫只对没列出的类型炸（E0301/B1001 守门）
 const dispatch = fn (T: type, x: T) T {
     if (T == i32) { return x + 1; }
     if (T == f64) { return x * 2.0; }
-    @compileError("dispatch: unsupported type");
+    @error("dispatch: unsupported type");
 };
 
 const main = fn () u8 {

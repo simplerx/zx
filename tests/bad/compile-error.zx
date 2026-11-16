@@ -1,4 +1,4 @@
-// expect: @compileError: 不支持
-// @compileError 只有真的执行到才报错；这里是真会执行到的
-const x = if (1 > 0) @compileError("不支持") else 0;
+// expect: @error: 不支持
+// @error 只有真的执行到才报错；这里是真会执行到的
+const x = if (1 > 0) @error("不支持") else 0;
 const main = fn () void {};

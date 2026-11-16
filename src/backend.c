@@ -947,6 +947,7 @@ static void gen_if_value(Node *n, const char *slot, Type *slot_ty);
 static void gen_loop_value(Node *n, const char *slot, Type *slot_ty);
 static void gen_for_body(Node *n, int id);
 static void gen_block_stmts(Node *b);
+static void gen_arm(Node *arm, const char *slot, Type *slot_ty);
 static void run_defers(int down_to);
 static void emit_region_free(int gid, uint64_t total, Node *al);
 static char *inst_name(Node *g, const char *base);   /* 泛型实例的 C 名 */
@@ -1532,7 +1533,7 @@ static void ex_builtin(Buf *b, Node *n) {
         buf_free(&d); buf_free(&s); buf_free(&c);
         return;
     }
-    if (!strcmp(nm, "compileError")) {
+    if (!strcmp(nm, "error")) {
         buf_puts(b, "abort()");
         return;
     }
@@ -5589,6 +5590,54 @@ static void ex(Buf *b, Node *n) {
          * 让表达式语句合法，别留下 `_ty1.payload;` 这种无用值警告。 */
         if (t->elem && t->elem->kind == TY_VOID) buf_puts(b, "(void)0");
         else buf_printf(b, "%s.payload", tmp);
+        return;
+    }
+
+    /* §171 `try e err { … }`：出错不外抛。用一个临时槽收两臂的兜底值：
+     * 成功写载荷，失败进块写兜底（块里的 err 绑到错误码）。整表达式的值
+     * 就是该槽——和 gen_if_value 的两臂写槽同一套路子。 */
+    case NK_TRY_CAPTURE: {
+        Type *t = n->a->ty;
+        Type *slot_ty = n->ty;
+        if (!t || (t->kind != TY_ERR && t->kind != TY_OPT)) { ex(b, n->a); return; }
+        static int tc_;
+        char tmp[64], slot[64];
+        snprintf(tmp,  sizeof tmp,  "_tcv%d", tc_);
+        snprintf(slot, sizeof slot, "_tcr%d", tc_);
+        tc_++;
+        line("%s %s = %s;", cty(t), tmp, cxs(n->a, t));
+
+        bool flat = t->kind == TY_OPT && ty_opt_flat(t);
+        if (slot_ty && slot_ty->kind != TY_VOID)
+            line("%s %s;", cty(slot_ty), slot);
+
+        /* 成功分支：写载荷 */
+        line(flat ? "if (%s) {" : (t->kind == TY_OPT ? "if (%s.tag) {" : "if (%s.tag == 0) {"), tmp);
+        g_ind++;
+        {
+            CScope s; cscope_push(&s);
+            if (slot_ty && slot_ty->kind != TY_VOID)
+                line("%s = %s%s;", slot, tmp, (flat || t->elem->kind == TY_VOID) ? "" : ".payload");
+            cscope_leave();
+        }
+        g_ind--;
+        line("} else {");
+        g_ind++;
+        {
+            CScope s; cscope_push(&s);
+            /* 捕获名绑错误码：!T 是 .tag，?T 的空是保留码 65535。 */
+            if (n->name) {
+                const char *cpt = (!strcmp(n->name, "_")) ? ignored_cname() : cnames(n->name);
+                if (t->kind == TY_OPT) line("%s %s = 65535;", cty(ty_error()), cpt);
+                else                   line("%s %s = %s.tag;", cty(ty_error()), cpt, tmp);
+            }
+            gen_arm(n->b, slot_ty && slot_ty->kind != TY_VOID ? slot : NULL, slot_ty);
+            cscope_leave();
+        }
+        g_ind--;
+        line("}");
+        if (slot_ty && slot_ty->kind != TY_VOID) buf_puts(b, slot);
+        else buf_puts(b, "(void)0");
         return;
     }
 

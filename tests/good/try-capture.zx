@@ -1,0 +1,22 @@
+// try-capture.zx —— §171 try 捕获形式：出错不外抛，块产出兜底值
+const std = @mod("std");
+const error_read = error { failed };
+const fail = fn () error_read!i32 { return error.failed; };
+const win = fn () error_read!i32 { return 7; };
+
+const main = fn () u8 {
+    let a = try win() err {
+        std.println("unexpected: {d}", err);
+        err: 0;
+    };
+    let b = try fail() err {
+        std.println("caught: {d}", err);
+        err: 9;
+    };
+    std.println("a={d} b={d}", a, b);
+    return 0;
+};
+
+// expect-output
+// caught: 1
+// a=7 b=9

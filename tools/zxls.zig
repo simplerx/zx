@@ -173,6 +173,8 @@ const snippets = [_]Snip{
     .{ .label = "defer", .body = "defer $0;", .detail = "代码片段 defer" },
     .{ .label = "errdefer", .body = "errdefer $0;", .detail = "代码片段 errdefer" },
     .{ .label = "try", .body = "try $0", .detail = "代码片段 try" },
+    .{ .label = "trycap", .body = "try ${1:expr} ${2:err} {\n    $0\n    ${2:err}: 0;\n};", .detail = "代码片段 try 捕获错误（§171）" },
+    .{ .label = "tag", .body = "tag.${1:name};\n${2:var} ${3:p} = tag.${1:name} : $0;", .detail = "代码片段 tag 贴标分配（§170）" },
     .{ .label = "return", .body = "return $0;", .detail = "代码片段 return" },
     .{ .label = "continue", .body = "continue;", .detail = "代码片段 continue" },
     .{ .label = "orelse", .body = "orelse $0", .detail = "代码片段 orelse" },
@@ -320,13 +322,13 @@ const builtin_docs = [_]BuiltinDoc{
     .{ .name = "link", .detail = "@link(\"lib\") 链接外部库" },
     .{ .name = "shim", .detail = "@shim(\"impl.c\") 把一份 C 源文件编进程序（自包含 TU，路径相对本文件）" },
     .{ .name = "trap", .detail = "@trap() 触发断点/中止" },
-    .{ .name = "compileError", .detail = "@compileError(msg) 编译期报错" },
+    .{ .name = "error", .detail = "@error(msg) 编译期报错" },
     .{ .name = "Vec", .detail = "@Vec(T, N) 向量类型：N 个 T 的向量值（N 只能是 1/2/4/8/16/32/64），`(@Vec(T, N))x` 把标量铺满各分量，`@Vec(T, N){a, b, …}` 是字面量" },
 };
 
 const toplevel_builtins = [_][]const u8{
     "type",   "memcpy",  "memmove", "memset",
-    "link",   "shim",    "trap",    "compileError",
+    "link",   "shim",    "trap",    "error",
     "Vec",
 };
 

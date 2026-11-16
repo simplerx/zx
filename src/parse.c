@@ -987,11 +987,24 @@ static Node *parse_unary(P *p) {
     }
     case TOK_KW_TRY: {
         /* `try e`：e 是 !T，成功取载荷，出错带着同一个码返回。
-         * 它只是 `if (e) v { v } else err { return err; }` 的简写——
-         * 没有栈展开、没有 catch 块，错误值始终在返回值里。 */
+         * `try e err { … }`（§171）：捕获形式，出错不外抛——err 是捕获名，
+         * 块必须产出与成功载荷同类型的兜底值。只有紧跟 `IDENT {` 才按
+         * 捕获形式解析；`try f() + 1` 之类仍走传播形式。 */
         advance(p);
+        Node *a = parse_unary(p);
+        if (at(p, TOK_IDENT) && peek(p, 1)->kind == TOK_LBRACE) {
+            Node *n = node_new(NK_TRY_CAPTURE, t->line, t->col);
+            n->a = a;
+            n->name = take_ident(p);
+            n->b = parse_block(p);
+            /* 捕获名兼作块的收割标签：块内写 `err: value;` 交出兜底值
+             * （Zx 的块值只来自标签收割，见 §6）。标签与变量分属两张表，
+             * 同名合法。 */
+            if (n->b->kind == NK_BLOCK) n->b->label = n->name;
+            return n;
+        }
         Node *n = node_new(NK_TRY, t->line, t->col);
-        n->a = parse_unary(p);
+        n->a = a;
         return n;
     }
     default:
@@ -1154,11 +1167,15 @@ static Node *parse_primary(P *p) {
     case TOK_AT: {
         advance(p);
         Node *n = node_new(NK_BUILTIN, t->line, t->col);
-        /* `@type` 的 type 在词法上是关键字（`X: type` 用），`@` 后面这
-         * 一处必须当普通标识符收——否则最常用的内建反而写不出来。 */
+        /* `@type` / `@error` 的 type、error 在词法上是关键字（`X: type`、
+         * `error{a,b}` 用），`@` 后面这处必须当普通标识符收——否则内建
+         * 反而写不出来。`@compileError` 是旧名，sema 里报 E0211 迁移提示。 */
         if (at(p, TOK_KW_TYPE)) {
             advance(p);
             n->name = "type";
+        } else if (at(p, TOK_KW_ERROR)) {
+            advance(p);
+            n->name = "error";
         } else {
             n->name = take_ident(p);
         }
@@ -2075,6 +2092,7 @@ static const char *nk_name(NodeKind k) {
     case NK_ERR_SET:  return "errset";
     case NK_VEC_TYPE: return "vec";
     case NK_TAG_APPLY: return "tag";
+    case NK_TRY_CAPTURE: return "try";
     case NK_ROOT: return "root";
     }
     return "?";

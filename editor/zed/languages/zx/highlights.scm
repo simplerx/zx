@@ -27,6 +27,12 @@
 
 "orelse" @keyword.operator
 
+; §170 贴标：只染 `tag.` 的 tag（上下文关键字，v.tag 里的 tag 不受影响）
+(tag_application "tag" @keyword)
+
+; §171 try 捕获形式（try 本身已在关键字表里，这里染捕获绑定名）
+(try_capture_expression binding: (identifier) @variable)
+
 ; ------------------------------------------------------------ 内建 --
 (builtin_function) @function.builtin
 

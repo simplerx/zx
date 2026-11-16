@@ -126,6 +126,7 @@ pub const NK = enum {
     err_set,          // error{a, b} —— 追加在末尾，老编号不漂移
     vec,              // @Vec(T, N) —— 同样追加在末尾（§162）
     tag_apply,        // tag.name / tag.name : expr —— 追加在末尾（§170）
+    try_capture,      // try expr err { ... } —— 追加在末尾（§171）
 };
 
 pub const Node = struct {
@@ -208,6 +209,7 @@ const nk_name = fn (k: NK) []const u8 {
         .err_set: "errset";
         .vec: "vec";
         .tag_apply: "tag";
+        .try_capture: "try";
     };
 };
 
@@ -1492,9 +1494,22 @@ pub const Parser = struct {
         }
         if (t.kind == lex.Kind.kw_try) {
             // `try e`：出错带着同一个码返回
+            // `try e err { … }`（§171）：捕获形式，err 是捕获名，块产出兜底值
             _ = self.advance();
+            let a = try self.parse_unary();
+            if (self.cur().kind == lex.Kind.ident &&
+                self.peek_tok(1).kind == lex.Kind.lbrace) {
+                let n = self.new_at(NK.try_capture, t);
+                n.a = a;
+                n.name = self.tok_text(self.cur());
+                _ = self.advance();
+                n.b = try self.parse_block();
+                // 捕获名兼作收割标签：块内 `err: value;` 交出兜底值（§171）
+                if (n.b) n.b.?.label = n.name;
+                return n;
+            }
             let n = self.new_at(NK.try_, t);
-            n.a = try self.parse_unary();
+            n.a = a;
             return n;
         }
         if (t.kind == lex.Kind.ident && std.str.eq(self.tok_text(t), "tag") &&
@@ -1680,11 +1695,14 @@ pub const Parser = struct {
         if (t.kind == lex.Kind.at) {
             _ = self.advance();
             let n = self.new_at(NK.builtin, t);
-            // `@type` 的 type 在词法上是关键字（`X: type` 用），@ 后面这
-            // 一处必须当普通标识符收——否则最常用的内建反而写不出来。
+            // `@type` / `@error` 的 type、error 在词法上是关键字
+            // （`X: type`、`error{a,b}` 用），@ 后面这处必须当普通标识符收。
             if (self.at(lex.Kind.kw_type)) {
                 _ = self.advance();
                 n.name = "type";
+            } else if (self.at(lex.Kind.kw_error)) {
+                _ = self.advance();
+                n.name = "error";
             } else {
                 n.name = try self.take_ident();
             }

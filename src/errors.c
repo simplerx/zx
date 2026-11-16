@@ -103,7 +103,7 @@ static const ErrDoc g_errs[] = {
       "the divisor is 0 at compile time; compute runtime values through variables instead of constants" },
     { "E0506", "`.?` unwrap on a value that is null at compile time",
       "check for null first, or use `orelse` to provide a default" },
-    { "E0507", "`@compileError` triggered / `@trap` reached at compile time",
+    { "E0507", "`@error` triggered / `@trap` reached at compile time",
       "this is a deliberate error: read its message; inside a generic it means these arguments are unsupported" },
     { "E0508", "error code uses a reserved value",
       "`0` means \"no error\", `65535` belongs to `error.null` -- pick another number, and do not name a member `null` (that code is fixed)" },
@@ -126,7 +126,7 @@ static const ErrDoc g_errs[] = {
     { "E0516", "tagged allocation inside a loop is not balanced",
       "allocate and free within the same iteration, or move the allocation outside the loop; a loop cannot yield a tagged pointer" },
     { "E0517", "heap allocation without a tag (mandatory tagging)",
-      "every heap allocation must be tagged: `let p = tag.x : std.heapAlloc(...)`; declare `tag.close;` in any file to opt out globally" },
+      "every heap allocation must be tagged: `let p = tag.x : std.heapAlloc(...)`; write `tag.close;` in this file to opt out" },
     { "E0518", "tag already owns an allocation",
       "a tag is a single-instance label: free the current allocation or use a second tag" },
 

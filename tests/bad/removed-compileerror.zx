@@ -1,0 +1,4 @@
+// expect: @compileError was removed
+// expect-code: E0211
+// 1.4.3：@compileError 改名 @error（内建仍九个，通道不变）。旧名给迁移提示。
+const x = if (1 > 0) @compileError("old name") else 0;

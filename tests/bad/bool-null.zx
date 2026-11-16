@@ -1,0 +1,8 @@
+// expect: expected `bool`, found `null`
+// expect-code: E0301
+// bool 只有 true/false 两个值；null 不能再赋给 bool（2026-11-16）。
+const main = fn () u8 {
+    var b: bool = null;
+    _ = b;
+    return 0;
+};
