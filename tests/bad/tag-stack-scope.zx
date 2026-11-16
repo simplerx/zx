@@ -1,0 +1,14 @@
+// expect: use after scope
+// expect-code: E0512
+// §173：stackAlloc 也建槽，离开作用域自动回收；外层副本再用即拦截。
+const std = @mod("std");
+
+const main = fn () u8 {
+    var q: ?*i32 = null;
+    {
+        var p = std.stackAlloc(i32, 4);
+        p[0] = 5;
+        q = p;
+    }
+    return (u8)q.?[0];               // 栈存储随作用域消亡
+};

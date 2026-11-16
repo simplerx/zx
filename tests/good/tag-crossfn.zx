@@ -1,0 +1,35 @@
+// tag-crossfn.zx —— §173 跨函数全链路：形参借出、工厂返回流（所有权随
+// 返回值转移）、别名贴标（const buf = tag.buf; 之后 buf : expr）、
+// allocator.deinit(slice) 与 stackAlloc 作用域自动回收。
+const std = @mod("std");
+
+const make = fn () *[4]i32 {
+    var p = std.heapAlloc(std.heap.page, i32, 4);   // 工厂体内自动建槽（*[4]i32 带长度）
+    p[0] = 20;
+    return p;                        // 返回流：tag 随返回值转移
+};
+
+const score = fn (p: *i32) i32 {
+    return p[0] + 2;                 // 借出：体内照常解引用
+};
+
+const main = fn () u8 {
+    var q = make();                  // q 继承工厂里的槽
+    var v = score(q);                // 借出
+    std.println("v={d}", v);
+    std.heap.page.deinit(q);         // deinit(*[N]T)
+
+    const buf = tag.buf;             // 一等 tag 值
+    var s = buf : std.heapSlice(std.heap.page, i32, 2);   // 别名贴标
+    s[0] = 7;
+    std.heap.page.deinit(s);         // deinit(slice)
+
+    var st = std.stackAlloc(i32, 2); // 栈分配：自动建槽，作用域退出自动回收
+    st[0] = 3;
+    std.println("st={d}", st[0]);
+    return 0;
+};
+
+// expect-output
+// v=22
+// st=3

@@ -1,0 +1,14 @@
+// expect: use after free
+// expect-code: E0512
+// §173：释放器的调用点就是释放事件（形参抽象槽在体内被 free）。
+const std = @mod("std");
+
+const release = fn (p: *i32) void {
+    std.heap.page.free(std.heap.page.ctx, (*u8)p, 16);
+};
+
+const main = fn () u8 {
+    var p = std.heapAlloc(std.heap.page, i32, 4);
+    release(p);
+    return (u8)p[0];                 // 释放后使用
+};

@@ -1,0 +1,16 @@
+// expect: is still LIVE at the end of the program
+// expect-code: E0513
+// §173：工厂把分配传出来，调用方不 free 就是真泄漏（行号指向工厂体内）。
+const std = @mod("std");
+
+const make = fn () *i32 {
+    var p = std.heapAlloc(std.heap.page, i32, 4);
+    p[0] = 1;
+    return p;
+};
+
+const main = fn () u8 {
+    var q = make();
+    _ = q;
+    return 0;                        // 没 free
+};

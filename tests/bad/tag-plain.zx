@@ -1,10 +1,9 @@
-// expect: must be tagged
-// expect-code: E0517
-// §170：强制贴标——没贴标的堆分配报错；逃生口是 tag.close;（全局开关）。
+// expect: is still LIVE at the end of the program
+// expect-code: E0513
+// §173：分配自动建槽 —— 没贴标也是被追踪的；不 free 就是真泄漏。
 const std = @mod("std");
 const main = fn () u8 {
     var p = std.heapAlloc(std.heap.page, i32, 4);
     p[0] = 1;
-    std.heap.page.free(std.heap.page.ctx, (*u8)p, 16);
     return 0;
 };

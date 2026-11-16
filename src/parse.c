@@ -710,6 +710,18 @@ static Node *parse_expr(P *p) {
         n->b = rhs;
         return n;
     }
+    /* §173：别名贴标 —— `buf : expr`（buf 是 tag 值的 const 绑定）。
+     * 与 `tag.x : expr` 同一个节点（a 存原标识符，sema 按符号优先
+     * 解析）；语句级的 `label: stmt` 不走表达式解析，互不相犯；
+     * 下标区间用 `..`，表达式位置的 `:` 只有这一种含义。 */
+    if (at(p, TOK_COLON) && lhs->kind == NK_IDENT) {
+        advance(p);
+        Node *n = node_new(NK_TAG_APPLY, lhs->line, lhs->col);
+        n->name = lhs->name;
+        n->a = lhs;
+        n->b = parse_expr(p);
+        return n;
+    }
     return lhs;
 }
 

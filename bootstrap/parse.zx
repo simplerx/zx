@@ -1219,6 +1219,19 @@ pub const Parser = struct {
             n.b = rhs;
             return n;
         }
+        // \u00a7173\uff1a\u522b\u540d\u8d34\u6807 \u2014\u2014 `buf : expr`\uff08buf \u662f tag \u503c\u7684 const \u7ed1\u5b9a\uff09\u3002
+        // \u4e0e `tag.x : expr` \u540c\u4e00\u8282\u70b9\uff08a \u5b58\u539f\u6807\u8bc6\u7b26\uff0csema \u6309\u7b26\u53f7\u4f18\u5148\u89e3\u6790\uff09\uff1b
+        // \u8bed\u53e5\u7ea7\u7684 `label: stmt` \u4e0d\u8d70\u8868\u8fbe\u5f0f\u89e3\u6790\uff0c\u4e92\u4e0d\u76f8\u72af\u3002
+        if (self.at(lex.Kind.colon) && lhs.kind == NK.id) {
+            _ = self.advance();
+            let n = self.new(NK.tag_apply);
+            n.line = lhs.line;
+            n.col = lhs.col;
+            n.name = lhs.name;
+            n.a = lhs;
+            n.b = try self.parse_expr();
+            return n;
+        }
         return lhs;
     };
 
