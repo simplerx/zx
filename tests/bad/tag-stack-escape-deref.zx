@@ -1,0 +1,16 @@
+// expect: use after scope
+// expect-code: E0512
+// expect-count: 1
+// §173：stackAlloc 指针逃逸出函数体后解引用 —— 槽已随作用域 FREED，
+// 调用点继承悬垂状态，解引用报 E0512（use after scope）。
+const std = @mod("std");
+
+const alloc = fn () *u8 {
+    let p = (*u8)std.stackAlloc(i32, 10);
+    return p;
+};
+
+const main = fn () void {
+    let p = alloc();
+    let x = p[0];
+};

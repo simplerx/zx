@@ -1,0 +1,17 @@
+// expect: already died with its scope
+// expect-code: E0509
+// expect-count: 1
+// §173：stackAlloc 指针逃逸出函数体（返回值），栈存储随帧消亡，
+// 调用方拿到的是已 FREED 的悬垂载体 —— 再 free 是双重释放。
+// 返回流把被调方的终局状态（FREED）带到调用点，释放事件才能记账。
+const std = @mod("std");
+
+const alloc = fn () *u8 {
+    let p = (*u8)std.stackAlloc(i32, 10);
+    return p;
+};
+
+const main = fn () void {
+    let p = alloc();
+    std.heap.page.free(std.heap.page.ctx, (*u8)p, 10);
+};

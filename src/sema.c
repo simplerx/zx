@@ -2859,12 +2859,14 @@ static void tag_auto_decl(Node *call, bool stack) {
  * 载体被存进容器/传出去之后再用，撞上的是 E0512（追踪不到容器里那份，
  * 但同一符号的 outer 副本还能追到）。 */
 static void tag_scope_exit(Scope *sc, Node *n) {
+    Node *tail = (n->nitems > 0 && n->items[n->nitems - 1])
+                 ? n->items[n->nitems - 1] : n;   /* 块的 line 是起点行 */
     for (Symbol *s = sc->first; s; s = s->next) {
         if (!s->tag_id || s->tag_state != TC_LIVE) continue;
         TagSlot *t = tag_slot(s->tag_id);
         if (!t || !t->stack || t->state != TST_LIVE) continue;
         t->state = TST_FREED;
-        t->free_line = n->line; t->free_col = n->col;
+        t->free_line = tail->line; t->free_col = tail->col;
         t->scope_freed = true;
         s->tag_state = TC_FREED;
         if (t->carrier) t->carrier->tag_state = TC_FREED;
@@ -2937,9 +2939,16 @@ static bool tag_free_event(Node *site, Node *ptr) {
     if (!t) return false;
     if (t->state == TST_FREED) {
         if (t->free_line == site->line && t->free_col == site->col) return true;
-        diag_code_at("E0509", site->line, site->col,
-            "tag '%s' was already freed (allocated at line %d, first freed "
-            "at line %d)", t->name, t->line, t->free_line);
+        if (t->scope_freed)
+            diag_code_at("E0509", site->line, site->col,
+                "tag '%s' is a stack allocation that already died with its "
+                "scope (allocated at line %d, scope ended at line %d) -- the "
+                "pointer escaped its frame, so releasing it again is a "
+                "double free", t->name, t->line, t->free_line);
+        else
+            diag_code_at("E0509", site->line, site->col,
+                "tag '%s' was already freed (allocated at line %d, first freed "
+                "at line %d)", t->name, t->line, t->free_line);
         return true;
     }
     /* UNKNOWN / COND：防守二（使用者宣告终结）与 null 合并载体的放行。
@@ -5345,9 +5354,12 @@ static Type *check_call(Node *n, Type *expect) {
                 }
             } else if (slot > 0) {
                 TagSlot *t = tag_slot(slot);
-                if (t && t->state == TST_LIVE) {
+                /* 终局状态随返回值带过来：LIVE → 调用方负责 free；
+                 * FREED（体内已 free，或 stackAlloc 槽随作用域消亡）→ 调用方
+                 * 拿到悬垂载体，再 free 报 E0509、解引用报 E0512。 */
+                if (t && t->state != TST_UNBOUND) {
                     n->tag_id = slot;
-                    n->tag_state = TC_LIVE;
+                    n->tag_state = (t->state == TST_FREED) ? TC_FREED : TC_LIVE;
                 }
             }
         }
