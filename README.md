@@ -149,7 +149,6 @@ projects rebuild incrementally per-module `.o`; the language server computes
 | `tests/` | `good/` positive cases, `bad/` negative cases (with expected error codes), `multi/` multi-file |
 | `demo/` | `snake.zx` console game; `ffi/` Win32 + OpenGL binding demos |
 | `bench/` | benchmarks against hand-written C, plus baselines |
-| `spec/` | `zx-spec.md` the spec, `zx.ebnf` the grammar, `decisions.md` design decisions |
 | `editor/` | Zed extension and the language server source `tools/zxls.zig` |
 
 ## Error codes
@@ -160,19 +159,5 @@ zxc explain E0304        # meaning and fixes for one code
 ```
 
 The error text lives in `src/errors.c`; `zxc errors` / `zxc explain` read it
-directly, so there is nothing to look up by hand. The full reference is in
-`docs/errors.md` (the `details:` links in diagnostics and clicking a code in
-the editor both jump there).
-
-## Docs
-
-| File | Contents |
-| --- | --- |
-| `docs/manual.md` | getting started: first program through concurrency, JSON, and memory |
-| `docs/reference.md` | quick reference: syntax, types, builtins, the full std API, tooling (version 1.4.2) |
-| `docs/errors.md` | every error code explained (same as `zxc explain CODE`) |
-| `spec/zx-spec.md` / `spec/decisions.md` | the language spec and design decisions |
-
-The standard library is still evolving: the source order and comments in `std/`,
-and editor completion (signatures + members), are always the most up-to-date
-reference; there is no separate documentation site for now.
+directly, so there is nothing to look up by hand. Clicking a code in the
+editor jumps to the matching entry.
