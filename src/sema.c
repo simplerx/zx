@@ -2768,6 +2768,9 @@ typedef struct {
     int         state;     /* TST_*：分配事实 */
     int         region;    /* 当前关联的 region token（0 = 无） */
     int         free_line, free_col;
+    int         own_line, own_col;  /* §173：当前所有权归属点（最近一次
+                          LIVE 载体绑定/调用点继承的位置，0 = 仍在
+                          分配处）——泄漏终扫把错误指到这里而非分配行 */
     Symbol     *carrier;   /* 当前载体符号（free 事件写它的 tag_state；
                             * 臂快照要连同它一起回滚，否则 then 臂的
                             * 释放事实会污染 else 臂的检查） */
@@ -3575,11 +3578,22 @@ static void tag_ledger_final(const char *entry_path) {
     for (int i = 0; i < g_ntslots; i++) {
         TagSlot *t = &g_tslots[i];
         if (t->state != TST_LIVE || t->abstract) continue;
-        diag_code_at("E0513", t->line, t->col,
-            "tag '%s' is still LIVE at the end of the program (allocated at "
-            "line %d) -- alloc and free must come in pairs; free it before "
-            "the program ends",
-            t->name, t->line);
+        /* §173：错误指到所有权归属点（调用/绑定处），分配行留在消息里。
+         * 跨函数移交后泄漏，第一现场是调用方接过所有权的那一行。 */
+        int rl = t->own_line ? t->own_line : t->line;
+        int rc = t->own_line ? t->own_col : t->col;
+        if (t->own_line && t->own_line != t->line)
+            diag_code_at("E0513", rl, rc,
+                "tag '%s' is still LIVE at the end of the program (ownership "
+                "bound at line %d, allocated at line %d) -- alloc and free "
+                "must come in pairs; free it before the program ends",
+                t->name, t->own_line, t->line);
+        else
+            diag_code_at("E0513", rl, rc,
+                "tag '%s' is still LIVE at the end of the program (allocated at "
+                "line %d) -- alloc and free must come in pairs; free it before "
+                "the program ends",
+                t->name, t->line);
     }
     /* §173：E0517（强制贴标终扫）退役 —— 分配调用点自动建槽，
      * 没有不被追踪的堆分配；tag.close 模块在 tag_auto_decl 里跳过。 */
@@ -3725,7 +3739,12 @@ static Type *check_assign(Node *n) {
                 n->a->sym->tag_id = tid;
                 n->a->sym->tag_state = tst;
                 TagSlot *ts = tag_slot(tid);
-                if (ts) ts->carrier = n->a->sym;
+                if (ts) {
+                    ts->carrier = n->a->sym;
+                    if (tst == TC_LIVE && n->b) {   /* 所有权落在这个赋值点 */
+                        ts->own_line = n->b->line; ts->own_col = n->b->col;
+                    }
+                }
             } else if (n->a->sym->tag_id) {
                 TagSlot *ts = tag_slot(n->a->sym->tag_id);
                 if (ts && ts->carrier == n->a->sym) ts->carrier = NULL;
@@ -7385,7 +7404,12 @@ static void check_stmt(Node *n) {
                 n->sym->tag_id = tid; n->sym->tag_state = tst;
                 TagSlot *ts = tag_slot(tid);
                 /* const 别名只是句柄不是指针载体，不进账本（§172） */
-                if (ts && n->sym->kind != SK_CONST) ts->carrier = n->sym;
+                if (ts && n->sym->kind != SK_CONST) {
+                    ts->carrier = n->sym;
+                    if (tst == TC_LIVE && n->b) {   /* 所有权落在这个调用点 */
+                        ts->own_line = n->b->line; ts->own_col = n->b->col;
+                    }
+                }
             }
             /* §173：结构体值的字段账本随绑定落到符号上 */
             FieldTag *fs = ftags_of_expr(n->b);
