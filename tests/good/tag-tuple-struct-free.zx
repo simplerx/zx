@@ -1,0 +1,25 @@
+// §175：元组元素是结构体、指针存进嵌套字段——经释放函数释放。
+// tup.1 = alloc() 的元素赋值重绑字段账（"1.child.name"→槽），
+// release(tup.1.child.name) 的 pff 对账把实例槽标 FREED。
+const std = @mod("std");
+pub const Person = struct {
+    name: *u8,
+    child: Child,
+    pub const Child = struct { name: *u8 };
+};
+pub const alloc = fn () Person {
+    let p = std.heapAlloc(std.heap.page, i32, 10);
+    return .{.name = (*u8)"parent", .child = .{.name = (*u8)p}};
+};
+pub const release = fn (p: *u8) void {
+    std.heap.page.free(std.heap.page.ctx, p, 10);
+};
+pub const main = fn () i32 {
+    var tup = {
+        Person{ .name = (*u8)"eh", .child = .{.name = (*u8)"eqnn"} },
+        Person{ .name = (*u8)"h", .child = .{.name = (*u8)"nn"} },
+    };
+    tup.1 = alloc();
+    release(tup.1.child.name);
+    return 0;
+};

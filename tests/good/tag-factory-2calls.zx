@@ -1,0 +1,13 @@
+// §175：同一工厂函数两次调用 = 两份运行期分配。调用点槽实例化后
+// 各自记账，两次调用各自 free 不再假报 E0509。
+const std = @mod("std");
+pub const allocp = fn () *u8 {
+    return (*u8)std.heapAlloc(std.heap.page, u8, 10);
+};
+pub const main = fn () i32 {
+    let a = allocp();
+    let b = allocp();
+    std.heap.page.free(std.heap.page.ctx, a, 10);
+    std.heap.page.free(std.heap.page.ctx, b, 10);
+    return 0;
+};

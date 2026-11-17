@@ -726,6 +726,23 @@ pub const Lexer = struct {
             '.' : {
                 if (self.peek() == '{') { _ = self.adv(); self.emit(Kind.dot_brace, start); }
                 else if (self.peek() == '.') { _ = self.adv(); self.emit(Kind.dotdot, start); }
+                else if (is_digit(self.peek())) {
+                    // 元组下标：一口气扫完整段数字再发 INT。不能只发 dot
+                    // 让下一轮走数字扫描——`t.0.0` 的第二个 `0.0` 会被
+                    // float 规则吞掉。下标上下文不可能出现 float。
+                    self.emit(Kind.dot, start);
+                    let nstart = self.p;
+                    var v: u64 = 0;
+                    var ovf = false;
+                    while (is_digit(self.peek()) || self.peek() == '_') {
+                        let c = self.adv();
+                        if (c == '_') { continue; }
+                        let nv = v * 10 + (u64)(c - '0');
+                        if (nv < v) { ovf = true; }
+                        v = nv;
+                    }
+                    self.emit_int(nstart, v, ovf);
+                }
                 else { self.emit(Kind.dot, start); }
             };
 

@@ -1,0 +1,13 @@
+// §175：聚合抽取 let inner = tt.0——值拷贝，字段账子树跟着拷到
+// 新载体（"0.0"→槽 变 "0"→槽），inner.0 的 free 照常对账。
+const std = @mod("std");
+pub const allocp = fn () *u8 {
+    return (*u8)std.heapAlloc(std.heap.page, u8, 10);
+};
+pub const main = fn () i32 {
+    var tt = { { allocp(), (*u8)"a" }, { (*u8)"b", allocp() } };
+    let inner = tt.0;
+    std.heap.page.free(std.heap.page.ctx, inner.0, 10);
+    std.heap.page.free(std.heap.page.ctx, tt.1.1, 10);
+    return 0;
+};

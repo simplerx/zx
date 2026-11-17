@@ -1,0 +1,15 @@
+// expect: is still LIVE at the end of the program
+// expect-code: E0513
+// expect-count: 1
+// §175：元组元素结构体嵌套字段接过所有权后不释放——实例槽报泄漏，
+// 归属点在绑定行。
+const std = @mod("std");
+pub const P2 = struct { name: *u8 };
+pub const allocp = fn () *u8 {
+    return (*u8)std.heapAlloc(std.heap.page, u8, 10);
+};
+pub const main = fn () i32 {
+    var tup = { P2{ .name = (*u8)"a" }, P2{ .name = (*u8)"b" } };
+    tup.1.name = allocp();
+    return 0;
+};

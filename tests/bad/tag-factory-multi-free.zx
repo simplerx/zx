@@ -1,0 +1,15 @@
+// expect: was already freed
+// expect-code: E0509
+// expect-count: 1
+// §175：两次调用各自拿到独立的实例槽；同一实例 free 两次仍报
+// E0509（实例化修的是"两次调用各自 free"的假阳，不是豁免双放）。
+const std = @mod("std");
+pub const allocp = fn () *u8 {
+    return (*u8)std.heapAlloc(std.heap.page, u8, 10);
+};
+pub const main = fn () i32 {
+    let a = allocp();
+    std.heap.page.free(std.heap.page.ctx, a, 10);
+    std.heap.page.free(std.heap.page.ctx, a, 10);
+    return 0;
+};

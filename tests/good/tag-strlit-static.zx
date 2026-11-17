@@ -1,0 +1,16 @@
+// §175：字符串字面量指针是静态数据，天然在 tag 账外——
+// free 合法、不 free 不报泄漏、存进结构体字段也不产生账目。
+const std = @mod("std");
+pub const P2 = struct { name: *u8, buf: *u8 };
+pub const allocp = fn () *u8 {
+    return (*u8)std.heapAlloc(std.heap.page, u8, 10);
+};
+pub const main = fn () i32 {
+    let lit = (*u8)"hello";
+    std.heap.page.free(std.heap.page.ctx, lit, 5);
+    let lit2 = (*u8)"world";
+    _ = lit2;
+    var p = P2{ .name = (*u8)"static", .buf = allocp() };
+    std.heap.page.free(std.heap.page.ctx, p.buf, 10);
+    return 0;
+};

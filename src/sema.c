@@ -2793,6 +2793,14 @@ typedef struct {
                               * 续链接管 / 手动终结即清；没处理则终扫报
                               * E0521——"必须处理"而非当场拦死。 */
     int         rt_line, rt_col;   /* 运行期写入处（E0521 报出点） */
+    Node       *ret_fn;      /* §175：分配经返回流转出所有权的工厂函数
+                                （fn->index = 本槽）。零调用工厂的分配
+                                运行期不发生，终扫豁免。 */
+    int         inst_of;     /* §175：本槽是某工厂槽的调用点实例（母槽
+                                索引+1，0 = 原生槽）。工厂每次调用都是
+                                一份新分配，实例槽各自记账。 */
+    int         ninst;       /* §175：已派生的调用点实例数（母槽用）。
+                                > 0 时终扫由实例接管，母槽退役。 */
 } TagSlot;
 static TagSlot *g_tslots;
 static int      g_ntslots, g_ctslots;
@@ -2849,6 +2857,40 @@ static FieldTag *ft_clone(FieldTag *src) {
     return out;
 }
 
+/* §175：聚合抽取（let inner = tt.0）——取母账里 key 前缀的子树，
+ * 剥掉前缀返回新链（"0.0"→槽 变 "0"→槽）。找不到返回 NULL。 */
+static FieldTag *ft_subtree(FieldTag *list, const char *key) {
+    FieldTag *out = NULL, **tail = &out;
+    size_t kl = strlen(key);
+    for (; list; list = list->next) {
+        if (!list->name) continue;
+        const char *rest = NULL;
+        if (strncmp(list->name, key, kl) == 0 && list->name[kl] == '.')
+            rest = list->name + kl + 1;
+        else if (strcmp(list->name, key) == 0)
+            rest = "";
+        if (!rest) continue;
+        FieldTag *f = malloc(sizeof *f);
+        if (!f) break;
+        f->name = strdup(*rest ? rest : key);
+        f->slot = list->slot; f->next = NULL;
+        *tail = f; tail = &f->next;
+    }
+    return out;
+}
+
+/* §175：清掉 key 及其子树（"key" 与 "key.xxx"）——整段值被覆盖时
+ * 旧条目作废，防止后续读到陈旧槽。 */
+static void ft_clear_prefix(FieldTag *list, const char *key) {
+    size_t kl = strlen(key);
+    for (; list; list = list->next) {
+        if (!list->name) continue;
+        if (!strncmp(list->name, key, kl) &&
+            (list->name[kl] == '\0' || list->name[kl] == '.'))
+            list->slot = 0;
+    }
+}
+
 /* 合并两条 return 路径的字段表；同名字段槽不一致 = 状态不一致，丢弃。 */
 static FieldTag *ft_merge(FieldTag *a, FieldTag *b) {
     FieldTag *out = NULL;
@@ -2880,20 +2922,34 @@ static bool ft_path_key(Node *e, char *buf, size_t cap, Node **base_out) {
     Node *fb = e;
     /* §174：元组字段访问被改写成 NK_FIELD（name=NULL、ival=下标）——
      * 基址类型是元组的数字分量按 "N" 进点路径；基址是指针的同形状节点
-     * 是方法接收者补的解引用（(*p)），路径在此截断（保守漏报）。 */
-    while (fb && fb->kind == NK_FIELD && np < 8 &&
-           (fb->name || (fb->ival >= 0 && fb->a && fb->a->ty &&
-                         fb->a->ty->kind == TY_TUPLE))) {
-        if (fb->name) {
-            names[np] = fb->name;
+     * 是方法接收者补的解引用（(*p)），路径在此截断（保守漏报）。
+     * §175：常索引数组/切片元素 arr[1] 同样按下标分量进路径（下标
+     * 必须是整型字面量；运行期索引在此截断，写入处另报 E0521）。 */
+    while (fb && np < 8 &&
+           (fb->kind == NK_FIELD &&
+            (fb->name || (fb->ival >= 0 && fb->a && fb->a->ty &&
+                          fb->a->ty->kind == TY_TUPLE)) ||
+            (fb->kind == NK_INDEX && fb->b && fb->b->kind == NK_INT &&
+             fb->a))) {
+        if (fb->kind == NK_FIELD) {
+            if (fb->name) {
+                names[np] = fb->name;
+            } else {
+                snprintf(idxbuf[np], sizeof idxbuf[np], "%d", (int)fb->ival);
+                names[np] = idxbuf[np];
+            }
         } else {
-            snprintf(idxbuf[np], sizeof idxbuf[np], "%d", (int)fb->ival);
+            snprintf(idxbuf[np], sizeof idxbuf[np], "%d",
+                     (int)fb->b->ival);
             names[np] = idxbuf[np];
         }
         np++;
         fb = fb->a;
     }
-    if (!fb || np == 0 || np == 8) return false;
+    if (!fb || np == 0 || np == 8) {
+        if (base_out) *base_out = fb;   /* §175：截断点带回（运行期索引判定用） */
+        return false;
+    }
     /* names[0] 是最内层（叶子字段名），names[np-1] 是最外层——倒着拼 */
     size_t off = 0;
     for (int i = np - 1; i >= 0; i--) {
@@ -3237,10 +3293,42 @@ static void tag_auto_decl(Node *call, bool stack) {
     call->tag_state = TC_LIVE;
 }
 
+/* §175：调用点槽实例化。工厂函数（分配经返回流转出所有权）每次调用
+ * 都产生一份新的运行期分配——所有调用点共享同一个静态槽会把第二次
+ * free 假报成 E0509。克隆槽继承分配事实（allocated at 分配行），泄漏
+ * 归属点记在调用行；母槽一旦派生实例就退役（终扫由实例接管）。
+ * 注意 tag_decl 可能 realloc 槽表——先存母槽索引再回取。 */
+static int tag_clone_site(TagSlot *src, Node *call, bool freed) {
+    int sidx = (int)(src - g_tslots) + 1;
+    char namebuf[32];
+    do {
+        snprintf(namebuf, sizeof namebuf, "alloc%d", ++g_tag_auto_seq);
+    } while (tag_by_name(namebuf));
+    char *nm = strdup(namebuf);
+    if (!nm) return 0;
+    Node tmp; memset(&tmp, 0, sizeof tmp);
+    tmp.line = call->line; tmp.col = call->col;
+    TagSlot *t = tag_decl(nm, &tmp);
+    if (!t) return 0;
+    t->auto_n = true;
+    t->state = freed ? TST_FREED : TST_LIVE;
+    t->ever_freed = freed || src->ever_freed;
+    t->inst_of = sidx;
+    t->stack = src->stack;             /* 文案/作用域语义随母槽 */
+    t->scope_freed = src->scope_freed;
+    if (freed) { t->free_line = src->free_line; t->free_col = src->free_col; }
+    src = tag_slot(sidx);
+    if (src) src->ninst++;
+    t->line = src ? src->line : call->line;        /* 分配事实留在分配行 */
+    t->col = src ? src->col : call->col;
+    t->own_line = call->line;                      /* 归属点在调用行 */
+    t->own_col = call->col;
+    return (int)(t - g_tslots) + 1;
+}
+
 /* §173：离开作用域 —— stackAlloc 的槽自动标 free（栈存储随帧消亡）。
  * 载体被存进容器/传出去之后再用，撞上的是 E0512（追踪不到容器里那份，
- * 但同一符号的 outer 副本还能追到）。 */
-static void tag_scope_exit(Scope *sc, Node *n) {
+ * 但同一符号的 outer 副本还能追到）。 */static void tag_scope_exit(Scope *sc, Node *n) {
     Node *tail = (n->nitems > 0 && n->items[n->nitems - 1])
                  ? n->items[n->nitems - 1] : n;   /* 块的 line 是起点行 */
     for (Symbol *s = sc->first; s; s = s->next) {
@@ -3518,6 +3606,10 @@ static void fn_stamp_ret_flow(Node *fn) {
         /* §174：臂内分配由臂值携带身份、槽状态已回滚——把返回节点
          * 的终局状态烙进 fn，调用点槽状态 UNBOUND 时靠它继承。 */
         if (st == TC_LIVE || st == TC_FREED) fn->ret_tag_state = st;
+        /* §175：工厂链登记——所有权经返回流转出，泄漏责任在调用方；
+         * 零调用的工厂分配运行期不发生，终扫豁免其槽。 */
+        TagSlot *ts = tag_slot(slot);
+        if (ts && !ts->ret_fn) ts->ret_fn = fn;
     }
     else { fn->tag_state = -1; fn->index = -1; }
     /* §173：结构体返回值携带的字段账烙到 fn（多路 return 合并）；
@@ -3526,6 +3618,12 @@ static void fn_stamp_ret_flow(Node *fn) {
         FieldTag *fs = NULL;
         ft_scan_returns(fn->b, &fs);
         if (fs) fn->ftags = fs;
+    }
+    /* §175：字段账里的槽同样登记工厂链（返回结构体/元组的工厂）。 */
+    for (FieldTag *g = (FieldTag *)fn->ftags; g; g = g->next) {
+        if (g->slot <= 0) continue;
+        TagSlot *ts = tag_slot(g->slot);
+        if (ts && !ts->ret_fn) ts->ret_fn = fn;
     }
 }
 
@@ -3879,6 +3977,11 @@ static void tag_ledger_final(const char *entry_path) {
         TagSlot *t = &g_tslots[i];
         if (t->state != TST_LIVE || t->abstract) continue;
         if (t->rt_pending) continue;   /* §174：断线由 E0521 报，不双报 */
+        /* §175：工厂零调用豁免——所有权已流转给调用方，调用方一个
+         * 都没有 = 分配在运行期根本不发生。 */
+        if (t->ret_fn && t->ret_fn->tag_calls == 0) continue;
+        /* §175：已派生调用点实例的母槽退役——泄漏/双放由实例槽记账。 */
+        if (t->ninst > 0) continue;
         /* §173：错误指到所有权归属点（调用/绑定处），分配行留在消息里。
          * 跨函数移交后泄漏，第一现场是调用方接过所有权的那一行。 */
         int rl = t->own_line ? t->own_line : t->line;
@@ -4105,29 +4208,58 @@ static Type *check_assign(Node *n) {
          * 该字段。臂快照含字段账（补丁五），臂内赋值可安全回滚。 */
         if (n->a->kind == NK_IDENT && n->a->sym) {
             FieldTag *fs2 = ftags_of_expr(n->b);
+            if (!fs2 && n->b && n->b->kind == NK_FIELD) {
+                /* §175：聚合抽取 let inner = tt.0——值是拷贝，字段账
+                 * 子树跟着拷到新载体（"0.0"→槽 变 "0"→槽）。 */
+                char key2[128];
+                Node *fb2 = NULL;
+                if (ft_path_key(n->b, key2, sizeof key2, &fb2) &&
+                    fb2->kind == NK_IDENT && fb2->sym)
+                    fs2 = ft_subtree((FieldTag *)fb2->sym->ftags, key2);
+            }
             n->a->sym->ftags = fs2 ? ft_clone(fs2) : NULL;
-        } else if (n->a->kind == NK_FIELD && n->a->name && n->a->a) {
+        } else if (n->a->kind == NK_FIELD && n->a->a) {
             /* §173 补丁八：字段赋值（含嵌套 s.inner.name = q）——目标
              * 字段链折成点路径；右值是结构体值时把它的字段账拍平进
-             * 前缀（s.inner = structval → "inner.name"→槽）。 */
+             * 前缀（s.inner = structval → "inner.name"→槽）。
+             * §175：元组数字分量 tup.1 = expr 同走这里（name=NULL、
+             * ival=下标）——ft_path_key 对基址是 TY_TUPLE 的数字节点
+             * 放行、对基址是指针的（解引用）自行拒绝。 */
             char key[128];
             Node *fb = NULL;
+            if (getenv("ZX_TAG_DBG") && n->a->kind == NK_FIELD && !n->a->name)
+                fprintf(stderr, "[asgn] numeric-lval ival=%d\n", (int)n->a->ival);
             if (ft_path_key(n->a, key, sizeof key, &fb) &&
                 fb->kind == NK_IDENT && fb->sym) {
                 int ftid, ftst;
                 tag_of_expr(n->b, &ftid, &ftst);
                 Symbol *bs = fb->sym;
+                ft_clear_prefix((FieldTag *)bs->ftags, key);
                 if (ftid && (ftst == TC_LIVE || ftst == TC_FREED)) {
                     char *pk = ft_path_dup(NULL, key);
                     if (pk) ft_set((FieldTag **)&bs->ftags, pk, ftid);
                 } else {
-                    FieldTag *f0 = ft_find((FieldTag *)bs->ftags, key);
-                    if (f0) f0->slot = 0;
                     FieldTag *inft = ftags_of_expr(n->b);
                     for (FieldTag *g = inft; g; g = g->next) {
                         if (g->slot <= 0) continue;
                         char *pk = ft_path_dup(key, g->name);
                         if (pk) ft_set((FieldTag **)&bs->ftags, pk, g->slot);
+                    }
+                }
+            } else if (fb && fb->kind == NK_INDEX &&
+                       (!fb->b || fb->b->kind != NK_INT)) {
+                /* §175：arr[i].name = tagged（运行期索引的嵌套字段）——
+                 * 追踪必断线，同数组元素写入记 pending，续链/终结接管，
+                 * 没处理终扫报 E0521。 */
+                int ftid2, ftst2;
+                tag_of_expr(n->b, &ftid2, &ftst2);
+                if (ftid2) {
+                    TagSlot *ts = tag_slot(ftid2);
+                    if (ts) {
+                        ts->rt_pending = true;
+                        ts->rt_line = fb->b ? fb->b->line : n->a->line;
+                        ts->rt_col = fb->b ? fb->b->col : n->a->col;
+                        ts->arr_esc = true;
                     }
                 }
             }
@@ -5954,6 +6086,11 @@ static void tag_call_flow(Node *n) {
         }
         else if (n->a->inst && n->a->inst->kind == NK_FN)
             fn = n->a->inst;
+        /* §175：调用计数——零调用工厂的流转槽终扫豁免（分配运行期
+         * 不发生）。递归自调用不计：外层没人进不来。 */
+        if (fn && fn->kind == NK_FN && g_cur_fn_name &&
+            !(fn->name && strcmp(fn->name, g_cur_fn_name) == 0))
+            fn->tag_calls++;
         bool releaser = fn_is_releaser(fn);
         /* Allocator.free(ctx, ptr, bytes) 自身就是释放通路：实参放行，
          * 释放事件由 tag_note_free 在 NK_CALL 出口统一记账。 */
@@ -6022,15 +6159,18 @@ static void tag_call_flow(Node *n) {
                 TagSlot *t = tag_slot(slot);
                 /* 终局状态随返回值带过来：LIVE → 调用方负责 free；
                  * FREED（体内已 free，或 stackAlloc 槽随作用域消亡）→ 调用方
-                 * 拿到悬垂载体，再 free 报 E0509、解引用报 E0512。 */
+                 * 拿到悬垂载体，再 free 报 E0509、解引用报 E0512。
+                 * §175：工厂槽按调用点实例化——每次调用都是一份新分配，
+                 * 各自记账（两次调用各自 free 不再假报 E0509）。 */
                 if (t && t->state != TST_UNBOUND) {
-                    n->tag_id = slot;
-                    n->tag_state = (t->state == TST_FREED) ? TC_FREED : TC_LIVE;
+                    bool fr = t->state == TST_FREED;
+                    n->tag_id = tag_clone_site(t, n, fr);
+                    n->tag_state = fr ? TC_FREED : TC_LIVE;
                 } else if (fn->ret_tag_state) {
                     /* §174：臂内分配的身份由臂值节点携带、槽状态已被
                      * tag_restore 回滚（UNBOUND）——继承返回节点烙的
                      * 终局状态，调用点照常对账。 */
-                    n->tag_id = slot;
+                    n->tag_id = tag_clone_site(t, n, fn->ret_tag_state == TC_FREED);
                     n->tag_state = fn->ret_tag_state;
                 }
             }
@@ -7983,6 +8123,15 @@ static void check_stmt(Node *n) {
             }
             /* §173：结构体值的字段账本随绑定落到符号上 */
             FieldTag *fs = ftags_of_expr(n->b);
+            if (!fs && n->b && n->b->kind == NK_FIELD) {
+                /* §175：聚合抽取 let inner = tt.0——值是拷贝，字段账
+                 * 子树跟着拷到新载体（"0.0"→槽 变 "0"→槽）。 */
+                char key2[128];
+                Node *fb2 = NULL;
+                if (ft_path_key(n->b, key2, sizeof key2, &fb2) &&
+                    fb2->kind == NK_IDENT && fb2->sym)
+                    fs = ft_subtree((FieldTag *)fb2->sym->ftags, key2);
+            }
             if (fs) n->sym->ftags = ft_clone(fs);
         }
         return;

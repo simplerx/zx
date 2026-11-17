@@ -1,0 +1,12 @@
+// §175：元组套元组，链式数字下标 t.0.0 / t.1.1 的 free 记账。
+// 词法器：`.0.0` 按两级下标切分（下标上下文不吞 float）。
+const std = @mod("std");
+pub const allocp = fn () *u8 {
+    return (*u8)std.heapAlloc(std.heap.page, u8, 10);
+};
+pub const main = fn () i32 {
+    var tt = { { allocp(), (*u8)"a" }, { (*u8)"b", allocp() } };
+    std.heap.page.free(std.heap.page.ctx, tt.0.0, 10);
+    std.heap.page.free(std.heap.page.ctx, tt.1.1, 10);
+    return 0;
+};

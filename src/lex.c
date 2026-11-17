@@ -456,8 +456,26 @@ static void lex_token(Lex *l) {
     case '.':
         if (peek(l) == '{') { adv(l); emit(l, TOK_DOT_BRACE, start); return; }
         if (peek(l) == '.') { adv(l); emit(l, TOK_DOTDOT, start); return; }
-        /* '.' + digit: index — the NUMBER is lexed by the caller loop;
-           here emit DOT and let the next iteration lex the int. */
+        /* '.' + digit: tuple index — 在这里一口气扫完整段数字再发
+         * INT。不能只发 DOT 让下一轮走数字扫描：`t.0.0` 的第二个
+         * `0.0` 会被 float 规则吞掉（报"expected a member name"）。
+         * 下标上下文里不可能出现 float，整段按整数读。 */
+        if (is_digit(peek(l))) {
+            const char *nstart = l->p;
+            emit(l, TOK_DOT, start);
+            uint64_t val = 0;
+            bool ovf = false;
+            while (is_digit(peek(l)) || peek(l) == '_') {
+                char c = adv(l);
+                if (c == '_') continue;
+                uint64_t nv = val * 10 + (uint64_t)(c - '0');
+                if (nv < val) ovf = true;
+                val = nv;
+            }
+            Token *tk = emit(l, TOK_INT, nstart);
+            tk->v.int_val = ovf ? 0 : (long long)val;
+            return;
+        }
         emit(l, TOK_DOT, start);
         return;
 

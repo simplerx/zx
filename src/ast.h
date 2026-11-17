@@ -136,6 +136,11 @@ struct Node {
      * 跨函数返回流在调用点读不到槽状态时靠这个字段继承。
      * 只挂 NK_FN（sema 私有，编译完擦除）。 */
     int           ret_tag_state;
+
+    /* §175：本函数被直接调用的次数（sema 私有，只挂 NK_FN）。
+     * 工厂函数（分配经返回流转出所有权）零调用 = 分配在运行期
+     * 根本不发生，终扫豁免其槽。 */
+    int           tag_calls;
 };
 
 Node *node_new(NodeKind k, int line, int col);
