@@ -272,6 +272,10 @@ const std_builtin_docs = [_]StdBuiltin{
        .snip = "(${1:T}, ${2:n})$0" },
     .{ .path = "std.heapAlloc", .sig = "heapAlloc(alloc: Allocator, T: type, n: usize) *[n]T — 堆分配，OOM abort",
        .snip = "(${1:alloc}, ${2:T}, ${3:n})$0" },
+    .{ .path = "std.heapSlice", .sig = "heapSlice(alloc: Allocator, T: type, n: usize) []T — 堆分配，n 可运行期",
+       .snip = "(${1:alloc}, ${2:T}, ${3:n})$0" },
+    .{ .path = "std.free", .sig = "free(alloc: Allocator, s: ([]T | *[n]T)) void — 释放（a.deinit(s) 的函数形式，自动算字节量）",
+       .snip = "(${1:alloc}, ${2:p})$0" },
 };
 
 /// std 内建条目的 CompletionItemKind：签名里带 `type` 的是类型（22），
@@ -307,7 +311,7 @@ fn isCtBuiltin(name: []const u8) bool {
 // std 顶层由编译器 seed 的名字（src/sema.c g_std_seeded；std.zx 自己的声明另行扫描）
 const std_seeded = [_][]const u8{
     "print",     "println", "format",   "heap",     "file",
-    "io",        "Allocator", "stackAlloc", "heapAlloc", "process",
+    "io",        "Allocator", "stackAlloc", "heapAlloc", "heapSlice", "free", "process",
 };
 
 const BuiltinDoc = struct { name: []const u8, detail: []const u8 };
@@ -5618,11 +5622,14 @@ const BuiltinFieldDef = struct { name: []const u8, ty: []const u8 };
 const BuiltinTyDef = struct { name: []const u8, fields: []const BuiltinFieldDef };
 
 const builtin_ty_table = [_]BuiltinTyDef{
-    // 顺序同 sema_allocator_type：ctx / alloc / free
+    // 顺序同 sema_allocator_type：ctx / alloc / free。
+    // deinit 是编译期变换（§173 a.deinit(s) → a.free(a.ctx, (*u8)ptr, 字节量)），
+    // 不是真字段——但必须出现在补全里（用户 2026-11-17：看不见就不知道有）。
     .{ .name = "Allocator", .fields = &.{
         .{ .name = "ctx", .ty = "?*u8" },
         .{ .name = "alloc", .ty = "fn (?*u8, usize) ?*u8" },
         .{ .name = "free", .ty = "fn (?*u8, *u8, usize) void" },
+        .{ .name = "deinit", .ty = "fn (s: []T | *[n]T) void — 释放，自动算字节量（std.free(a, s) 的方法形式）" },
     } },
     // Type  = { name, size, align, ty, fieldCount, fields: []Field, statics: []Field }
     .{ .name = "Type", .fields = &.{
@@ -9814,6 +9821,19 @@ fn diagRange(text: []const u8, line0: u32, bytecol: u32) Range {
     return .{ .s = s, .e = e };
 }
 
+/// §177：内存账家族（E05xx）的编辑器行内只显示原因。诊断正文是
+/// 「原因 -- 修法建议; 调用链」，后面还挂着 help:/note: 行——行内红字
+/// 全量渲染太吵（用户 2026-11-17："提示前面的没释放就可以了"）。这里在
+/// 第一个 " -- "（或换行）处截断；其余诊断（拼错字段、缺 cast……）
+/// 仍然全量，终端编译输出也仍然是全量消息，细节走错误码链接。
+fn inlayMsg(code: []const u8, msg: []const u8) []const u8 {
+    if (!std.mem.startsWith(u8, code, "E05")) return msg;
+    var end = msg.len;
+    if (std.mem.indexOf(u8, msg, " -- ")) |p| end = p;
+    if (std.mem.indexOfScalar(u8, msg[0..end], '\n')) |p| end = p;
+    return msg[0..end];
+}
+
 fn publishDiags(doc: *const Document, diags: []const Diag) void {
     var j = Json{};
     // 所有含字面花括号的片段用 appendSlice 写入，绕开 fmt 的 {{ }} 转义；
@@ -9846,7 +9866,7 @@ fn publishDiags(doc: *const Document, diags: []const Diag) void {
             j.buf.appendSlice(gpa, "\"}") catch @panic("oom");
         }
         j.buf.appendSlice(gpa, ",\"source\":\"zxc\",\"message\":") catch @panic("oom");
-        j.str(d.msg);
+        j.str(inlayMsg(d.code, d.msg));
         j.buf.appendSlice(gpa, "}") catch @panic("oom");
     }
     j.buf.appendSlice(gpa, "]}}") catch @panic("oom");

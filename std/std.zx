@@ -6,6 +6,7 @@
 //   file / io                  整块读写文件 / 带句柄的分次读写
 //   stackAlloc / heapAlloc     编译期常量长度 -> *[N]T
 //   heapSlice                  运行期长度     -> []T
+//   free(a, s)                 释放（a.deinit(s) 的函数形式，自动算字节量）
 // 其余都是普通 Zx 代码——包括下面这个可增长数组和两个缓冲流。
 
 // 字符串工具（str.zx）。`std.str.eq(a, b)`、`std.str.split(alloc, s, ",")` 之类。

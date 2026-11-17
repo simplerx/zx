@@ -83,7 +83,7 @@ static const char *suggest_member(const char *bad, Type *t) {
 static const char *suggest_std_member(const char *ns, const char *bad) {
     static const char *const std_top[] = { "print", "println", "format", "heap",
         "file", "io", "Allocator", "Type", "Field",
-        "stackAlloc", "heapAlloc", "process", NULL };
+        "stackAlloc", "heapAlloc", "heapSlice", "free", "process", NULL };
     static const char *const io_m[] = { "read", "write", "openRead", "openWrite",
         "openAppend", "seek", "tell", "close", "flush", "stdin", "stdout",
         "stderr", NULL };
@@ -579,6 +579,7 @@ static Type *base_type(const char *n) {
 
 enum { BI_NONE, BI_PRINT, BI_PRINTLN, BI_FORMAT, BI_HEAP, BI_FILE, BI_FILE_FN,
        BI_IO, BI_IO_FN, BI_IO_PRINT, BI_STACKALLOC, BI_HEAPALLOC, BI_HEAPSLICE,
+       BI_FREE,
        BI_PROC, BI_PROC_FN, BI_DEBUG, BI_DEBUG_FN, BI_TASK, BI_TASK_FN,
        BI_SYNC, BI_SYNC_FN };
 
@@ -593,6 +594,7 @@ const char *sema_sym_builtin_name(Symbol *s) {
     case BI_STACKALLOC: return "stackAlloc";
     case BI_HEAPALLOC:  return "heapAlloc";
     case BI_HEAPSLICE:  return "heapSlice";
+    case BI_FREE:       return "free";
     default:            return NULL;
     }
 }
@@ -810,6 +812,7 @@ static Symbol *std_builtin(const char *name) {
     static Symbol print_s, println_s, format_s, heap_s, page_s, file_s, alloc_s;
     static Symbol type_s, field_s;
     static Symbol salloc_s, halloc_s, hslice_s;
+    static Symbol free_s;
     static Symbol f_read, f_write, f_append, f_exists, f_remove;
     static Symbol io_s, i_openr, i_openw, i_opena, i_read, i_write;
     static Symbol i_seek, i_tell, i_close, i_flush, i_stdin, i_stdout, i_stderr;
@@ -841,6 +844,9 @@ static Symbol *std_builtin(const char *name) {
         halloc_s.builtin = BI_HEAPALLOC; halloc_s.state = 2;
         hslice_s.name = "heapSlice"; hslice_s.kind = SK_NS;
         hslice_s.builtin = BI_HEAPSLICE; hslice_s.state = 2;
+        /* §177：std.free(a, s) —— 释放的对称面，改写成 a.deinit(s) */
+        free_s.name = "free"; free_s.kind = SK_NS;
+        free_s.builtin = BI_FREE; free_s.state = 2;
 
         file_s.name = "file"; file_s.kind = SK_NS; file_s.builtin = BI_FILE;
         file_s.state = 2; file_s.ty = ty_type(); file_s.type_val = ty_void();
@@ -1055,6 +1061,7 @@ static Symbol *std_builtin(const char *name) {
     if (!strcmp(name, "stackAlloc")) return &salloc_s;
     if (!strcmp(name, "heapAlloc"))  return &halloc_s;
     if (!strcmp(name, "heapSlice"))  return &hslice_s;
+    if (!strcmp(name, "free"))       return &free_s;
     if (!strcmp(name, "read"))      return &f_read;
     if (!strcmp(name, "write"))     return &f_write;
     if (!strcmp(name, "append"))    return &f_append;
@@ -1094,7 +1101,7 @@ static Symbol *std_builtin(const char *name) {
 /* 挂进 std 模块作用域的那些名字（std.zx 自己的声明另外由 hoist 加进来） */
 static const char *g_std_seeded[] = {
     "print", "println", "format", "heap", "file", "io", "Allocator",
-    "Type", "Field", "stackAlloc", "heapAlloc", "heapSlice", "process",
+    "Type", "Field", "stackAlloc", "heapAlloc", "heapSlice", "free", "process",
     "debug", "atomic", NULL
 };
 
@@ -3030,6 +3037,7 @@ static FieldTag *ftags_of_expr(Node *e) {
 
 static void tag_of_expr(Node *e, int *id, int *state);   /* 定义在贴标一节 */
 static void tuple_stamp_ftags(Node *n);                  /* 定义在元组字面量 */
+static void tag_transform_deinit(Node *call);            /* 定义在贴标一节 */
 
 /* §174：捕获载荷继承主语的 tag 账（switch 的 union(enum) 变体捕获、
  * if/while/try 的 ?T / !T 捕获）。
@@ -4335,8 +4343,6 @@ static Type *check_assign(Node *n) {
              * 放行、对基址是指针的（解引用）自行拒绝。 */
             char key[128];
             Node *fb = NULL;
-            if (getenv("ZX_TAG_DBG") && n->a->kind == NK_FIELD && !n->a->name)
-                fprintf(stderr, "[asgn] numeric-lval ival=%d\n", (int)n->a->ival);
             if (ft_path_key(n->a, key, sizeof key, &fb) &&
                 fb->kind == NK_IDENT && fb->sym) {
                 int ftid, ftst;
@@ -5992,7 +5998,8 @@ static Type *check_call(Node *n, Type *expect) {
         if (s && s->kind == SK_NS &&
             (s->builtin == BI_PRINT || s->builtin == BI_PRINTLN ||
              s->builtin == BI_FORMAT || s->builtin == BI_STACKALLOC ||
-             s->builtin == BI_HEAPALLOC || s->builtin == BI_HEAPSLICE)) {
+             s->builtin == BI_HEAPALLOC || s->builtin == BI_HEAPSLICE ||
+             s->builtin == BI_FREE)) {
             n->a->sym = s;
             s->used = true;
             m = s;
@@ -6068,6 +6075,28 @@ static Type *check_call(Node *n, Type *expect) {
                                                  * 作用域退出自动标 free */
             }
             return type_of(n, ty_ptr(elem, false, true, c.v));
+        }
+        /* §177：std.free(a, s) —— 释放的对称面。改写成 a.deinit(s)
+         * 再走 §173 的同一条变换（切片/定长指针两种形状、字节量计算、
+         * cast *u8、tag/region 释放事件全部复用）。分配器显式当第一
+         * 实参传，与 heapAlloc/heapSlice 对称——arena/池的内存归还给
+         * 原分配器，绝不悄悄落到 malloc 上。 */
+        if (m->builtin == BI_FREE) {
+            if (n->nitems != 2)
+                return BAD(n, "std.free takes an allocator and the "
+                           "slice/sized pointer to release");
+            Node *recv = n->items[0], *arg = n->items[1];
+            Node *nf = node_new(NK_FIELD, n->a->line, n->a->col);
+            nf->a = recv; nf->name = "deinit";
+            n->a = nf;
+            Node **it = calloc(1, sizeof(Node *));
+            if (!it) return type_of(n, ty_invalid());
+            it[0] = arg;
+            free(n->items);
+            n->items = it;
+            n->nitems = 1;
+            tag_transform_deinit(n);
+            return check_call(n, expect);
         }
     }
 
@@ -6314,8 +6343,40 @@ static void tag_call_flow(Node *n) {
                     if (fs->slot > 0 && pff_has(ps, fs->name))
                         ft_mark_freed(fs->slot, n);
             }
-            if (!releaser && !free_call && fn->ftags && !n->ftags)
+            /* §177：继承的字段账在调用点实例化——工厂（返回的结构体/
+             * 元组里带着体内分配）每调一次都是一份新分配，泄漏责任
+             * 落在调用行（与直接指针返回流的 tag_clone_site 同口径）。
+             * 只实例化"出生在被调体内"的槽：def_fn 是被调（体内
+             * heapAlloc 母槽）或 inst_of 非零（体内调用点实例，嵌套
+             * 工厂链）。透传（形参字段账）与全局槽不动——它们不是
+             * 每次调用新发生的分配。tag_decl 可能 realloc 槽表：先收
+             * 集旧槽 id，逐个回取再克隆。 */
+            if (!releaser && !free_call && fn->ftags && !n->ftags) {
                 n->ftags = ft_clone((FieldTag *)fn->ftags);
+                int olds[64], nolds = 0;
+                for (FieldTag *g = (FieldTag *)n->ftags; g && nolds < 64; g = g->next) {
+                    if (g->slot <= 0) continue;
+                    bool seen = false;
+                    for (int q = 0; q < nolds; q++) if (olds[q] == g->slot) { seen = true; break; }
+                    if (!seen) olds[nolds++] = g->slot;
+                }
+                for (int q = 0; q < nolds; q++) {
+                    TagSlot *ts = tag_slot(olds[q]);
+                    if (!ts || ts->abstract) continue;
+                    if (ts->state != TST_LIVE && ts->state != TST_FREED) continue;
+                    bool born_here =
+                        (ts->def_fn && fn->name && !strcmp(ts->def_fn, fn->name)) ||
+                        ts->inst_of != 0;
+                    if (!born_here) continue;
+                    int nid = tag_clone_site(ts, n, ts->state == TST_FREED);
+                    if (!nid) continue;
+                    for (FieldTag *g = (FieldTag *)n->ftags; g; g = g->next)
+                        if (g->slot == olds[q]) g->slot = nid;
+                }
+            } else if (!releaser && !free_call && fn->ftags && n->ftags) {
+                /* 调用节点已带账（克隆体复检等）：槽已被实例化过，
+                 * 幂等不动。 */
+            }
         }
     }
 }

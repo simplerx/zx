@@ -1,0 +1,17 @@
+// std.free(a, s) / a.deinit(s)：切片与定长指针两种形状都能释放，
+// tag 账同步记释放事件（free 后不报泄漏，重复 free 报 E0509）。
+const std = @mod("std");
+
+pub const main = fn () i32 {
+    var p = std.heapAlloc(std.heap.page, i32, 10);
+    p[0] = 42;
+    std.free(std.heap.page, p);
+
+    var s = std.heapSlice(std.heap.page, u8, 100);
+    s[0] = 1;
+    std.heap.page.deinit(s);
+
+    var q = std.heapAlloc(std.heap.page, i32, 4);
+    std.heap.page.deinit(q);
+    return 0;
+};
