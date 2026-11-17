@@ -1,0 +1,3 @@
+const std = @mod("std");
+const u = @mod("base.zx");
+pub const two = fn () i32 { return u.one() + 1; };

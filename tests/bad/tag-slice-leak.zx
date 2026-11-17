@@ -1,0 +1,20 @@
+// expect: is never freed
+// expect-code: E0513
+// §179：工厂经切片字段把贴标内存装进结构体返回——账随切片走，
+// 泄漏报在调用行（main 的 alloc()），note 指分配行。
+const std = @mod("std");
+
+pub const Person = struct {
+    pub age: []u8,
+};
+
+pub const alloc = fn () Person {
+    var p = std.heapAlloc(std.heap.page, u8, 10);
+    return .{ .age = p[0..] };
+};
+
+pub const main = fn () !i32 {
+    var person = alloc();
+    person.age[0] = 42;
+    return 0;
+};

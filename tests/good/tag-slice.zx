@@ -1,0 +1,15 @@
+// §179：切片是同一份内存的视图——标签跟着走。p[0..]、cast 到切片家族、
+// (usize)p 读地址（不转移所有权，原载体照旧记账）三种都不丢账。
+const std = @mod("std");
+
+const main = fn () !i32 {
+    var p = tag.h : std.heapAlloc(std.heap.page, u8, 10);
+    p[0] = 42;
+
+    var s = p[0..];              // 切片携带标签
+    var w = ([]u8)s;             // 家族内 cast 身份不变
+    let addr = (usize)p;         // 读地址：不转移所有权，不报 E0514
+    if (w[0] != 42 || addr == 0) { return 1; }
+    std.heap.page.deinit(w);     // 释放责任精确落账
+    return 0;
+};

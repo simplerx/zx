@@ -1,0 +1,7 @@
+// expect: cyclic module dependency
+// expect-code: E0601
+// §179：函数体互相调用对方——环在模块加载窗口之外，靠导入边图判定。
+const std = @mod("std");
+const a = @mod("a.zx");
+
+const main = fn () i32 { return a.fa(); };

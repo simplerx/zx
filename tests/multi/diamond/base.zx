@@ -1,0 +1,2 @@
+const std = @mod("std");
+pub const one = fn () i32 { return 1; };

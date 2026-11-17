@@ -216,6 +216,10 @@ typedef struct Module {
     Symbol     *ns;        /* 对外的命名空间符号 */
     bool        loading;   /* 正在加载：用来发现循环导入 */
     bool        tags_closed; /* §170：本模块写了 `tag.close;`，堆分配不强制贴标 */
+    /* §179：已解析的导入边（绑定真正被引用才登记——惰性：声明了但
+     * 从未引用的 @mod 不是真实依赖）。循环导入按边图判定。 */
+    struct Module **imports;
+    int          nimports, cimports;
 } Module;
 
 static Module **g_mods;
@@ -1184,6 +1188,14 @@ static Symbol *ns_member(Symbol *ns, const char *name, int line, int col) {
     }
     /* 文件模块：只认带 pub 的顶层声明 */
     if (ns->mod && ns->mod->root) {
+        /* §179：环检测兜底。惰性绑定直接拿到"加载中"的模块对象，
+         * 成员表还没 hoist 完——报 "has no member" 会误导人去找名字，
+         * 真相是循环导入。 */
+        if (ns->mod->loading) {
+            err_at(line, col, "cyclic module dependency: '%s' is still being loaded",
+                   ns->mod->path ? ns->mod->path : ns->mod->stem);
+            return NULL;
+        }
         for (Symbol *m = ns->mod->scope.first; m; m = m->next) {
             if (!m->name || strcmp(m->name, name)) continue;
             if (!m->is_pub) {
@@ -1238,6 +1250,7 @@ static void ensure(Symbol *s);
 static bool decl_is_lazy_module(Node *d);
 static Module *module_load(const char *rel, int line, int col);
 static Module *module_load_full(const char *full, int line, int col);
+static bool mod_reaches(struct Module *from, struct Module *target, int depth);
 static Module *module_load_std(int line, int col);
 static void sym_copy(Symbol *dst, Symbol *src, const char *name);
 
@@ -3260,6 +3273,16 @@ static void tag_of_expr(Node *e, int *id, int *state) {
     /* §173：`p.?`（未烙 COND→LIVE 印的普通解包）与切片 `.ptr` 沿基址追：
      * free 的实参常写成 `(*u8)s.ptr`，没有这条 free 事件就记不上账。 */
     if (e->kind == NK_UNWRAP && e->a) { tag_of_expr(e->a, id, state); return; }
+    /* §179：切片是同一份内存的视图——p[0..] 携带基址的标签；cast 结果
+     * 落在指针/切片家族时身份同样跟过去（节点烙印只盖指针→指针，切片
+     * 家族在这里兜底；抽象借用槽不追）。 */
+    if ((e->kind == NK_SLICE || e->kind == NK_CAST) && e->a && e->ty &&
+        (e->ty->kind == TY_SLICE || e->ty->kind == TY_PTR) &&
+        !(e->kind == NK_CAST && e->a->tag_id &&
+          tag_slot(e->a->tag_id) && tag_slot(e->a->tag_id)->abstract)) {
+        tag_of_expr(e->a, id, state);
+        return;
+    }
     /* §173 补丁十（收紧版）：常索引读精确元素账——`let q = xs[0];`
      * 标签精确跟出（槽共享）、`free(xs[0])` 记得上账。运行期索引：
      * 数组存过贴标指针就报 E0521（无法指认元素，标签绝不静默丢失；
@@ -4845,9 +4868,15 @@ static Type *check_cast(Node *n) {
         int tid, tst;
         tag_of_expr(n->b, &tid, &tst);
         if (tid) {
-            if (to->kind == TY_PTR && from->kind == TY_PTR) {
+            if ((to->kind == TY_PTR || to->kind == TY_SLICE) &&
+                (from->kind == TY_PTR || from->kind == TY_SLICE)) {
+                /* §179：指针/切片家族互转身份不变——切片还是同一份内存
+                 * 的视图（元素重解释不改归属）；释放责任跟着标签走。 */
                 n->tag_id = tid;
                 n->tag_state = tst;
+            } else if (to->kind != TY_PTR && to->kind != TY_SLICE) {
+                /* §179：cast 成非指针（(usize)p 读地址当数字）不转移
+                 * 所有权——标签不跟着走，原载体照旧记账；这不是断链。 */
             } else if (tag_slot(tid) && tag_slot(tid)->abstract) {
                 /* §173：借出槽的摘要 cast（`(usize)p` 之类）不追身份 */
             } else {
@@ -7294,6 +7323,28 @@ static Type *check_expr_raw(Node *n, Type *expect) {
             n->sym = NULL;
             return type_of(n, ty_type());
         }
+        /* §179：循环导入判定（边图版）。模块级 loading 标志只罩住顶层
+         * 检查窗口，函数体是惰性检查的——A 的体调 B、B 的体用 A 这种
+         * 环在窗口外发生，loading 抓不住。绑定解析时若目标已能传递地
+         * 回到当前模块，就是环。 */
+        if (g_mod && m != g_mod && !mod_reaches(g_mod, m, 0)) {
+            if (mod_reaches(m, g_mod, 0)) {
+                err_at(n->line, n->col,
+                       "cyclic module dependency: '%s' (transitively) imports "
+                       "'%s' back -- break the cycle so imports form a DAG",
+                       m->stem ? m->stem : "?",
+                       g_mod->stem ? g_mod->stem : "?");
+                n->sym = NULL;
+                return type_of(n, ty_type());
+            }
+            if (g_mod->nimports == g_mod->cimports) {
+                g_mod->cimports = g_mod->cimports ? g_mod->cimports * 2 : 8;
+                g_mod->imports = realloc(g_mod->imports,
+                                         sizeof(Module *) * (size_t)g_mod->cimports);
+                if (!g_mod->imports) { fprintf(stderr, "zxc: out of memory\n"); exit(1); }
+            }
+            g_mod->imports[g_mod->nimports++] = m;
+        }
         n->sym = m->ns;
         return type_of(n, ty_type());
     }
@@ -8150,6 +8201,15 @@ static Module *module_load(const char *rel, int line, int col) {
 
     Module *m = module_load_full(full, line, col);
     return m;
+}
+
+/* §179：from 的导入图能否（传递地）到达 target。 */
+static bool mod_reaches(Module *from, Module *target, int depth) {
+    if (!from || depth > 64) return false;
+    if (from == target) return true;
+    for (int i = 0; i < from->nimports; i++)
+        if (mod_reaches(from->imports[i], target, depth + 1)) return true;
+    return false;
 }
 
 static Module *module_load_full(const char *full_in, int line, int col) {

@@ -1,0 +1,6 @@
+// §179：菱形依赖不是环——base 被两条路径引用，照常编译。
+const std = @mod("std");
+const u1 = @mod("base.zx");
+const u2 = @mod("leaf.zx");
+
+const main = fn () i32 { return u1.one() + u2.two(); };
