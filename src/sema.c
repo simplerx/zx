@@ -3154,6 +3154,69 @@ static bool pff_has(Symbol *ps, const char *fname) {
     return false;
 }
 
+/* §180：「形参被解引用」事实账。deps 拓扑下被调体先查、抽象槽共用，
+ * 函数体内看到的形参永远是 TC_LIVE（调用点的 FREED 状态进不去）——
+ * 所以 use-after-free 只能在**调用点**判：被调体检查时在这里记下哪些
+ * 形参符号被 deref 过（p[0] / p.0 / p.field / *p），调用点传进来的
+ * 实参若已 FREED 且对应形参在账里，就报 E0512。与 pff（体内 free →
+ * 调用点标 FREED）方向相反、机制对称；按符号指针记账，跨声明序稳定。 */
+static Symbol **g_pderef;
+static int      g_npderef, g_cpderef;
+static void pderef_add(Symbol *ps) {
+    if (!ps || ps->kind != SK_PARAM) return;
+    for (int i = 0; i < g_npderef; i++)
+        if (g_pderef[i] == ps) return;
+    if (g_npderef == g_cpderef) {
+        int nc = g_cpderef ? g_cpderef * 2 : 16;
+        Symbol **p2 = realloc(g_pderef, (size_t)nc * sizeof(Symbol *));
+        if (!p2) return;
+        g_pderef = p2; g_cpderef = nc;
+    }
+    g_pderef[g_npderef++] = ps;
+}
+static bool pderef_has(Symbol *ps) {
+    for (int i = 0; i < g_npderef; i++)
+        if (g_pderef[i] == ps) return true;
+    return false;
+}
+/* 形参抽象槽 → 形参符号（别名 `let q = p; q[0]` 也能归到 p）。 */
+typedef struct { int tag_id; Symbol *psym; } ParamSlotSym;
+static ParamSlotSym *g_pslotsym;
+static int g_npslotsym, g_cpslotsym;
+static void pslot_sym_add(int tag_id, Symbol *ps) {
+    if (!tag_id || !ps) return;
+    for (int i = 0; i < g_npslotsym; i++)
+        if (g_pslotsym[i].tag_id == tag_id) return;
+    if (g_npslotsym == g_cpslotsym) {
+        int nc = g_cpslotsym ? g_cpslotsym * 2 : 16;
+        ParamSlotSym *p2 = realloc(g_pslotsym, (size_t)nc * sizeof(ParamSlotSym));
+        if (!p2) return;
+        g_pslotsym = p2; g_cpslotsym = nc;
+    }
+    g_pslotsym[g_npslotsym].tag_id = tag_id;
+    g_pslotsym[g_npslotsym].psym = ps;
+    g_npslotsym++;
+}
+static Symbol *pslot_sym_find(int tag_id) {
+    for (int i = 0; i < g_npslotsym; i++)
+        if (g_pslotsym[i].tag_id == tag_id) return g_pslotsym[i].psym;
+    return NULL;
+}
+/* 从解引用 base 剥到形参：`p` / `p.0` / `p[i]` / `p.field` / `*p`。 */
+static void pderef_note(Node *base, int tag_id) {
+    Node *e = base;
+    for (int g = 0; g < 12 && e; g++) {
+        if (e->kind == NK_IDENT && e->sym) {
+            pderef_add(e->sym);
+            break;
+        }
+        e = e->kind == NK_UNWRAP || e->kind == NK_CAST ? (e->b ? e->b : e->a)
+            : (e->kind == NK_FIELD || e->kind == NK_INDEX) ? e->a : NULL;
+    }
+    Symbol *ps = pslot_sym_find(tag_id);
+    if (ps) pderef_add(ps);
+}
+
 /* §173 补丁十（用户裁定收紧）：数组/元组元素的贴标指针，只有**精确
  * 元素账 (base, idx>=0) → slot**——常索引写入。运行期索引（xs[i]，
  * i 是变量）编译期无法指认元素（i↔元素的对应是运行期事实，静态恢复
@@ -3482,6 +3545,7 @@ static TagSlot *tag_resolve(Node *n) {
 static void tag_check_deref(Node *base) {
     int id, st;
     tag_of_expr(base, &id, &st);
+    pderef_note(base, id);          /* §180：记下"形参被解引用"事实 */
     if (!id) return;
     TagSlot *t = tag_slot(id);
     if (!t) return;
@@ -3642,6 +3706,24 @@ static void tag_scan_returns(Node *n, Node *fn, int *pk, int *pslot, int *pst, b
          * 已被 tag_restore 回滚），所以返回节点携带的终局状态一并
          * 记下（多路 return 状态不一致时作废，调用点回看槽状态）。 */
         if (n->a->tag_id) {
+            /* §180：透传链（pass2 体内 `return pass1(p)`）的返回节点烙着
+             * 内层调用点的 tag_id——那往往是**本函数的形参抽象槽**（借出），
+             * 不是体内新分配。误判成工厂会让调用点 tag_clone_site 克隆一份
+             * 新槽、与实参原槽脱钩（两层转发即泄漏 + 释放不认）。先按
+             * tag_id 追到形参下标，命中即当透传形参处理。 */
+            TagSlot *rts = tag_slot(n->a->tag_id);
+            if (rts && rts->abstract) {
+                int kk = -1;
+                for (int ii = 0; ii < fn->nitems; ii++)
+                    if (fn->items[ii]->sym && fn->items[ii]->sym->tag_id == n->a->tag_id) {
+                        kk = ii; break;
+                    }
+                if (kk >= 0) {
+                    if (*pslot > 0 || (*pk >= 0 && *pk != kk)) { *ok = false; return; }
+                    *pk = kk;
+                    return;
+                }
+            }
             if (*pk >= 0 || (*pslot > 0 && *pslot != n->a->tag_id)) { *ok = false; return; }
             *pslot = n->a->tag_id;
             if (*pst == 0) *pst = n->a->tag_state;
@@ -6358,6 +6440,25 @@ static void tag_call_flow(Node *n) {
                 }
             }
             if (rel) tag_free_event(n, n->items[i]);
+            /* §180：实参已 FREED、且被调体解引用了对应形参 → 调用点报
+             * use-after-free。deps 拓扑下被调体先查、抽象槽共用，函数体
+             * 内看到的形参永远 LIVE，FREED 只在调用点可见——与 pff
+             * （体内 free → 调用点标 FREED）方向相反、机制对称。释放器/
+             * free 调用自身是合法释放通路（走 E0509 double-free），跳过。
+             * 报错落在实参（调用行），像 §176 调用链一样让人看到哪次调用
+             * 把已释放的内存递了进去。 */
+            if (!rel && !free_call && tst == TC_FREED && fn && i < fn->nitems) {
+                Symbol *ps = fn->items[i]->sym;
+                if (ps && pderef_has(ps)) {
+                    TagSlot *ft = tag_slot(tid);
+                    diag_code_at("E0512", n->items[i]->line, n->items[i]->col,
+                        "use after free: this memory was released at line %d -- "
+                        "it is passed to '%s' which reads it; drop this call or "
+                        "free the memory later",
+                        ft && ft->free_line ? ft->free_line : 0,
+                        fn->name ? fn->name : "this function");
+                }
+            }
         }
         /* §173：返回流 —— 被调方把形参/体内分配原样吐回来时，
          * 调用结果继承 tag（调用方不 free 就是真泄漏）。 */
@@ -8501,6 +8602,7 @@ static Type *check_fn_body(Node *fn) {
                         at2->state = TST_LIVE;
                         s->tag_id = (int)(at2 - g_tslots) + 1;
                         s->tag_state = TC_LIVE;
+                        pslot_sym_add(s->tag_id, s);   /* §180 */
                     }
                 }
             }
@@ -10093,6 +10195,8 @@ void sema_check(Node *root) {
     g_std_mod = NULL;
     g_ntslots = 0;              /* §170：tag 账本同样按轮清零 */
     g_tag_auto_seq = 0;         /* §173：自动槽序号同轮清零 */
+    g_npderef = 0; g_npslotsym = 0;  /* §180：形参事实账按轮清零（符号指针
+                                     * 跨轮悬垂，绝不能留到下一轮） */
     stamp_mod(root, g_srcpath);
     g_cmods = 8;
     g_mods = calloc((size_t)g_cmods, sizeof(Module *));

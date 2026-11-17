@@ -1,0 +1,31 @@
+// expect: passed to 'read' which reads it
+// expect-code: E0512
+// §180：释放后经函数形参读取——调用点报 UAF（deps 拓扑下被调体先查、
+// 抽象槽共享，函数体内看不到调用点的 FREED 状态，只能在调用点判）。
+const std = @mod("std");
+
+pub const Person = struct {
+    pub age: []u8,
+};
+
+pub const release = fn (p: []u8) void {
+    std.heap.page.deinit(p);
+};
+
+pub const read = fn (p: []u8) u8 {
+    return p[0];
+};
+
+pub const alloc = fn () Person {
+    var p = std.heapAlloc(std.heap.page, u8, 10);
+    return .{ .age = p[0..] };
+};
+
+pub const main = fn () !i32 {
+    var tup = { Person{ .age = &.{} }, Person{ .age = &.{} } };
+    tup.1 = alloc();
+    release(tup.1.age);
+    let x = read(tup.1.age);
+    _ = x;
+    return 0;
+};

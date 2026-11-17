@@ -1,0 +1,14 @@
+// §180：两层形参透传（pass2→pass1）不能再被误判成工厂槽——
+// 否则调用点克隆新槽与实参脱钩，泄漏/释放全乱。
+const std = @mod("std");
+
+const pass1 = fn (p: []u8) []u8 { return p; };
+const pass2 = fn (p: []u8) []u8 { return pass1(p); };
+
+pub const main = fn () !i32 {
+    var p = std.heapAlloc(std.heap.page, u8, 10);
+    var q = pass2(p);
+    q[0] = 42;
+    std.heap.page.deinit(q);
+    return 0;
+};
