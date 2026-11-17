@@ -1,0 +1,15 @@
+// expect-exit: 0
+// §173 补丁九：手动标记可以用使用者自己的变量名——载体变量
+// （tag.p : null）或数组基变量（tag.xs : null，标记存入它的全部
+// 槽）；自动槽名 allocN 仍可用（错误消息里给出）。不用记自动名。
+const std = @mod("std");
+pub const main = fn () i32 {
+    var xs = std.stackAlloc(*u8, 4);
+    let p = (*u8)std.heapAlloc(std.heap.page, u8, 10);
+    let q = (*u8)std.heapAlloc(std.heap.page, u8, 10);
+    xs[0] = p;
+    xs[1] = q;
+    tag.p : null;
+    tag.q : null;
+    return 0;
+};

@@ -3761,14 +3761,20 @@ static void tag_ledger_final(const char *entry_path) {
          * 跨函数移交后泄漏，第一现场是调用方接过所有权的那一行。 */
         int rl = t->own_line ? t->own_line : t->line;
         int rc = t->own_line ? t->own_col : t->col;
-        if (t->arr_esc)
+        if (t->arr_esc) {
+            /* 提示写使用者自己的变量名（载体/数组基变量）——自动槽名
+             * 记不住；都取不到再退回槽名。 */
+            const char *mn = (t->carrier && t->carrier->name)
+                             ? t->carrier->name : t->name;
             diag_code_at("E0513", rl, rc,
                 "tag '%s' is still LIVE at the end of the program (ownership "
                 "bound at line %d, allocated at line %d) -- a tagged pointer "
                 "stored into an array/tuple element cannot be tracked to its "
                 "free site; free it through a named carrier, or mark it "
-                "released with `tag.%s : null;`",
-                t->name, rl, t->line, t->name);
+                "released with `tag.%s : null;` (by its carrier variable "
+                "name, or the auto slot name '%s')",
+                t->name, rl, t->line, mn, t->name);
+        }
         else if (t->own_line && t->own_line != t->line)
             diag_code_at("E0513", rl, rc,
                 "tag '%s' is still LIVE at the end of the program (ownership "
@@ -7690,16 +7696,51 @@ static void check_stmt(Node *n) {
             /* §173 补丁六：手动标记——`tag.x : null;` 由使用者宣告该
              * 分配的释放责任自负。元素级释放（批量存储进数组/元组）
              * 追踪不到 free 终点时的逃生口：终扫 E0513 报出后，在这里
-             * 标记即回到正常流程（之后解引用/再 free 照常报错）。 */
+             * 标记即回到正常流程（之后解引用/再 free 照常报错）。
+             * 三级解析（补丁九）：名字可以写自动槽名（allocN，错误
+             * 消息里有），也可以写使用者自己的变量名——接收分配的
+             * 载体（`tag.p : null;`）或存入的数组（`tag.xs : null;`），
+             * 自动槽名记不住，自己的变量名随手就能写。 */
             TagSlot *t = tag_by_name(n->name);
-            if (!t)
+            TagSlot *marks[64];
+            int nmarks = 0;
+            if (t && nmarks < 64) marks[nmarks++] = t;
+            if (!t) {
+                for (Scope *sc = g_scope; sc && !nmarks; sc = sc->parent) {
+                    Symbol *s = scope_find_here(sc, n->name);
+                    if (!s) continue;
+                    /* 载体变量：当前绑定的 tag。 */
+                    if (s->tag_id && nmarks < 64) {
+                        TagSlot *ts = tag_slot(s->tag_id);
+                        if (ts) marks[nmarks++] = ts;
+                    }
+                    /* 数组基变量：存入它的所有贴标槽（可能多个——
+                     * 释放责任对整个数组自负，逐个标记）。 */
+                    for (int i = 0; i < g_naesc && nmarks < 64; i++)
+                        if (g_aesc[i].base == s && g_aesc[i].slot > 0) {
+                            TagSlot *ts = tag_slot(g_aesc[i].slot);
+                            if (ts) marks[nmarks++] = ts;
+                        }
+                }
+            }
+            if (!nmarks) {   /* 兜底：槽的载体名（符号可能已重绑/出账） */
+                for (int i = 0; i < g_ntslots && !nmarks; i++)
+                    if (g_tslots[i].carrier && g_tslots[i].carrier->name &&
+                        !strcmp(g_tslots[i].carrier->name, n->name))
+                        marks[nmarks++] = &g_tslots[i];
+            }
+            if (!nmarks)
                 err_at(n->line, n->col,
                        "tag '%s' does not exist -- there is no allocation to "
                        "mark released", n->name);
-            else if (!t->abstract && t->state == TST_LIVE) {
-                t->state = TST_FREED;
-                t->ever_freed = true;
-                t->free_line = n->line; t->free_col = n->col;
+            else for (int i = 0; i < nmarks; i++) {
+                TagSlot *ts = marks[i];
+                if (!ts->abstract && ts->state == TST_LIVE) {
+                    ts->state = TST_FREED;
+                    ts->ever_freed = true;
+                    ts->free_line = n->line; ts->free_col = n->col;
+                    if (ts->carrier) ts->carrier->tag_state = TC_FREED;
+                }
             }
             return;
         }
