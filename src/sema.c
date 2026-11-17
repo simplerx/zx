@@ -2948,17 +2948,42 @@ static bool pff_has(Symbol *ps, const char *fname) {
     return false;
 }
 
-/* §173 补丁六：逃进数组/元组元素的贴标指针（按基变量符号记账）。
- * 单槽对应时把元素读写视作该 tag——`free(xs[i])` 记得上账；
- * 一个数组混多个 tag = 无法指认元素，追踪就此断线：终扫 E0513 指到
- * 存入处，使用者手动 `tag.<名> : null;` 宣告释放后回到正常流程。 */
-typedef struct { Symbol *base; int slot; } ArrEsc;
+/* §173 补丁十：数组/元组元素的贴标指针，两层账：
+ *  - 精确元素账 (base, idx>=0) → slot：常索引写入，读写/free 都能
+ *    指认元素——`xs[0] = p;` 之后 `free(xs[0])` 记 p 的账、
+ *    `let q = xs[0];` 标签精确跟出来（槽共享）。同 (base,idx) 覆盖
+ *    换账，旧槽若再无载体由终扫 E0513 兜底。
+ *  - 容器账 (base, -1) → slot：运行期索引写入（xs[i]）。编译期无法
+ *    指认元素（i↔元素的对应是运行期事实，静态恢复不可判定——值
+ *    追踪救不了），但**标签不静默丢失**：读出/free 时查容器账，
+ *    数组里 LIVE 槽只有一个 → 精确继承（单 tag 数组全自动）；
+ *    >=2 个 → 使用点报 E0521（消费现场断线，比终扫更早更准），
+ *    提示常索引化或手动标记。FREED 槽不入集合——循环"存了又
+ *    free"配对模式每轮容器账 LIVE 槽只有当前轮，天然工作。
+ * 运行期写入同时作废该 base 的全部精确账（任何元素都可能被覆盖）。 */
+typedef struct { Symbol *base; int idx; int slot; } ArrEsc;
 static ArrEsc *g_aesc;
 static int g_naesc, g_caesc;
 
-static void aesc_add(Symbol *base, int slot) {
-    for (int i = 0; i < g_naesc; i++)
-        if (g_aesc[i].base == base && g_aesc[i].slot == slot) return;
+static void aesc_add(Symbol *base, int idx, int slot) {
+    if (idx < 0) {                       /* 容器账：按槽去重 */
+        for (int i = 0; i < g_naesc; i++)
+            if (g_aesc[i].base == base && g_aesc[i].idx < 0 &&
+                g_aesc[i].slot == slot)
+                return;
+        /* 运行期写入覆盖了未知元素——该 base 的精确账全部作废 */
+        int w = 0;
+        for (int i = 0; i < g_naesc; i++)
+            if (!(g_aesc[i].base == base && g_aesc[i].idx >= 0))
+                g_aesc[w++] = g_aesc[i];
+        g_naesc = w;
+    } else {
+        for (int i = 0; i < g_naesc; i++)
+            if (g_aesc[i].base == base && g_aesc[i].idx == idx) {
+                g_aesc[i].slot = slot;   /* 覆盖写入：换账 */
+                return;
+            }
+    }
     if (g_naesc == g_caesc) {
         int nc = g_caesc ? g_caesc * 2 : 16;
         ArrEsc *p2 = realloc(g_aesc, (size_t)nc * sizeof(ArrEsc));
@@ -2966,21 +2991,45 @@ static void aesc_add(Symbol *base, int slot) {
         g_aesc = p2; g_caesc = nc;
     }
     g_aesc[g_naesc].base = base;
+    g_aesc[g_naesc].idx = idx;
     g_aesc[g_naesc].slot = slot;
     g_naesc++;
     TagSlot *t = tag_slot(slot);
     if (t) t->arr_esc = true;
 }
 
-/* 基变量对应的唯一贴标槽：0 = 无记录 / 多槽混淆（不可追踪）。 */
-static int aesc_unique(Symbol *base) {
-    int found = 0;
+/* 精确元素账：(base, idx) 对应的贴标槽，0 = 无账。 */
+static int aesc_find(Symbol *base, int idx) {
     for (int i = 0; i < g_naesc; i++)
-        if (g_aesc[i].base == base && g_aesc[i].slot > 0) {
-            if (found && found != g_aesc[i].slot) return 0;
-            found = g_aesc[i].slot;
-        }
-    return found;
+        if (g_aesc[i].base == base && g_aesc[i].idx == idx)
+            return g_aesc[i].slot;
+    return 0;
+}
+
+/* 容器账：base 里 LIVE 的贴标槽集合。返回条数（>cap 截断）。 */
+static int aesc_container_live(Symbol *base, int *out, int cap) {
+    int n = 0;
+    for (int i = 0; i < g_naesc && n < cap; i++)
+        if (g_aesc[i].base == base && g_aesc[i].idx < 0 && g_aesc[i].slot > 0 &&
+            ft_state_of(g_aesc[i].slot) == TC_LIVE)
+            out[n++] = g_aesc[i].slot;
+    return n;
+}
+
+/* 索引表达式是编译期常数则取值（>=0），否则 -1。 */
+static int aesc_const_index(Node *ix) {
+    if (ix && ix->kind == NK_INT && ix->ival >= 0) return (int)ix->ival;
+    return -1;
+}
+
+/* 同一坐标只报一次（读账路径会被多个消费者走到）。 */
+static bool tag_diag_once(int line, int col) {
+    static struct { int line, col; } seen[64];
+    static int nseen;
+    for (int i = 0; i < nseen; i++)
+        if (seen[i].line == line && seen[i].col == col) return false;
+    if (nseen < 64) { seen[nseen].line = line; seen[nseen].col = col; nseen++; }
+    return true;
 }
 
 /* 字段槽的释放事件：槽标 FREED（口径同 tag_free_event，调用点只在
@@ -3033,13 +3082,28 @@ static void tag_of_expr(Node *e, int *id, int *state) {
     /* §173：`p.?`（未烙 COND→LIVE 印的普通解包）与切片 `.ptr` 沿基址追：
      * free 的实参常写成 `(*u8)s.ptr`，没有这条 free 事件就记不上账。 */
     if (e->kind == NK_UNWRAP && e->a) { tag_of_expr(e->a, id, state); return; }
-    /* §173 补丁六：逃进数组/元组元素的贴标指针——单槽对应时把元素
-     * 读作该 tag（`free(xs[i])` 记得上账）。只继承 LIVE：FREED 继承
-     * 会在"另一臂没存过"的分支场景里假报 E0512；元素级的释放后使用
-     * 由槽级账本兜底。多槽混淆返回 0（不可追踪 → 终扫报错+手动标记）。 */
+    /* §173 补丁十：数组/元组元素读账——先查精确元素账（常索引写入），
+     * 未命中查容器账（运行期索引写入）：单 LIVE 槽精确继承；多槽 =
+     * 编译期无法指认这个元素装的是哪个 tag → 使用点报 E0521（标签
+     * 不静默丢失）。只继承 LIVE：FREED 继承会在"另一臂没存过"的
+     * 分支场景里假报 E0512；元素级的释放后使用由槽级账本兜底。 */
     if (e->kind == NK_INDEX && e->a && e->a->kind == NK_IDENT &&
         e->a->sym && e->a->sym->kind != SK_CONST) {
-        int aid = aesc_unique(e->a->sym);
+        int ix = aesc_const_index(e->b);
+        int aid = ix >= 0 ? aesc_find(e->a->sym, ix) : 0;
+        if (!aid) {
+            int live[16];
+            int nl = aesc_container_live(e->a->sym, live, 16);
+            if (nl == 1) aid = live[0];
+            else if (nl >= 2 && tag_diag_once(e->line, e->col))
+                diag_code_at("E0521", e->line, e->col,
+                    "this element may hold several different tags -- "
+                    "`%s[i]` was filled with a runtime index, so which tag "
+                    "an element holds cannot be identified; store each tag "
+                    "at a constant index, or mark them released with "
+                    "`tag.<var> : null;`",
+                    e->a->sym->name ? e->a->sym->name : "?");
+        }
         if (aid && ft_state_of(aid) == TC_LIVE) {
             *id = aid; *state = TC_LIVE;
             return;
@@ -3763,17 +3827,25 @@ static void tag_ledger_final(const char *entry_path) {
         int rc = t->own_line ? t->own_col : t->col;
         if (t->arr_esc) {
             /* 提示写使用者自己的变量名（载体/数组基变量）——自动槽名
-             * 记不住；都取不到再退回槽名。 */
+             * 不再可写（跨库不可预测）。 */
             const char *mn = (t->carrier && t->carrier->name)
-                             ? t->carrier->name : t->name;
-            diag_code_at("E0513", rl, rc,
-                "tag '%s' is still LIVE at the end of the program (ownership "
-                "bound at line %d, allocated at line %d) -- a tagged pointer "
-                "stored into an array/tuple element cannot be tracked to its "
-                "free site; free it through a named carrier, or mark it "
-                "released with `tag.%s : null;` (by its carrier variable "
-                "name, or the auto slot name '%s')",
-                t->name, rl, t->line, mn, t->name);
+                             ? t->carrier->name : NULL;
+            if (mn)
+                diag_code_at("E0513", rl, rc,
+                    "tag '%s' is still LIVE at the end of the program "
+                    "(ownership bound at line %d, allocated at line %d) -- a "
+                    "tagged pointer stored into an array/tuple element cannot "
+                    "be tracked to its free site; free it through a named "
+                    "carrier, or mark it released with `tag.%s : null;`",
+                    t->name, rl, t->line, mn);
+            else
+                diag_code_at("E0513", rl, rc,
+                    "tag '%s' is still LIVE at the end of the program "
+                    "(ownership bound at line %d, allocated at line %d) -- a "
+                    "tagged pointer stored into an array/tuple element cannot "
+                    "be tracked to its free site; free it through a named "
+                    "carrier, or mark it released by the variable holding it",
+                    t->name, rl, t->line);
         }
         else if (t->own_line && t->own_line != t->line)
             diag_code_at("E0513", rl, rc,
@@ -3978,13 +4050,14 @@ static Type *check_assign(Node *n) {
             }
         } else if (n->a->kind == NK_INDEX && n->a->a &&
                    n->a->a->kind == NK_IDENT && n->a->a->sym) {
-            /* §173 补丁六：贴标指针逃进数组/元组元素。记账后追踪可能
-             * 断线（多槽混淆/元素级释放查不到）——断线时终扫 E0513
-             * 指到这个存入处，手动 `tag.<名> : null;` 回到正常流程。 */
+            /* §173 补丁十：贴标指针逃进数组/元组元素。常索引 → 精确
+             * 元素账；运行期索引 → 容器账（标签不丢，读出/free 时
+             * 查：单 LIVE 槽精确继承，多槽使用点报 E0521）。写入本身
+             * 不报错——断线只会发生在消费现场。 */
             int ftid, ftst;
             tag_of_expr(n->b, &ftid, &ftst);
             if (ftid) {
-                aesc_add(n->a->a->sym, ftid);
+                aesc_add(n->a->a->sym, aesc_const_index(n->a->b), ftid);
                 TagSlot *ts = tag_slot(ftid);
                 if (ts && ftst == TC_LIVE && n->b) {
                     ts->own_line = n->b->line; ts->own_col = n->b->col;
@@ -7693,35 +7766,32 @@ static void check_stmt(Node *n) {
             return;
         }
         if (n->b && n->b->kind == NK_NULL) {
-            /* §173 补丁六：手动标记——`tag.x : null;` 由使用者宣告该
-             * 分配的释放责任自负。元素级释放（批量存储进数组/元组）
-             * 追踪不到 free 终点时的逃生口：终扫 E0513 报出后，在这里
-             * 标记即回到正常流程（之后解引用/再 free 照常报错）。
-             * 三级解析（补丁九）：名字可以写自动槽名（allocN，错误
-             * 消息里有），也可以写使用者自己的变量名——接收分配的
-             * 载体（`tag.p : null;`）或存入的数组（`tag.xs : null;`），
-             * 自动槽名记不住，自己的变量名随手就能写。 */
-            TagSlot *t = tag_by_name(n->name);
+            /* §173 补丁六/十：手动标记——`tag.<名> : null;` 由使用者
+             * 宣告该分配的释放责任自负。元素级释放追踪不到 free 终点
+             * 时的逃生口：终扫 E0513 报出后，在这里标记即回到正常流程
+             * （之后解引用/再 free 照常报错）。名字只认**使用者自己的
+             * 变量名**：接收分配的载体（`tag.p : null;`）或存入的数组
+             * （`tag.xs : null;`，标记存入它的全部槽）。自动槽名
+             * allocN 不再可写——序号全编译单元递增，引入其他库后同名
+             * 槽指向不可预测。 */
             TagSlot *marks[64];
             int nmarks = 0;
-            if (t && nmarks < 64) marks[nmarks++] = t;
-            if (!t) {
-                for (Scope *sc = g_scope; sc && !nmarks; sc = sc->parent) {
-                    Symbol *s = scope_find_here(sc, n->name);
-                    if (!s) continue;
-                    /* 载体变量：当前绑定的 tag。 */
-                    if (s->tag_id && nmarks < 64) {
-                        TagSlot *ts = tag_slot(s->tag_id);
+            for (Scope *sc = g_scope; sc && nmarks < 64; sc = sc->parent) {
+                Symbol *s = scope_find_here(sc, n->name);
+                if (!s) continue;
+                /* 载体变量：当前绑定的 tag。 */
+                if (s->tag_id && nmarks < 64) {
+                    TagSlot *ts = tag_slot(s->tag_id);
+                    if (ts) marks[nmarks++] = ts;
+                }
+                /* 数组基变量：存入它的所有贴标槽（释放责任对整个
+                 * 数组自负，逐个标记）。 */
+                for (int i = 0; i < g_naesc && nmarks < 64; i++)
+                    if (g_aesc[i].base == s && g_aesc[i].slot > 0) {
+                        TagSlot *ts = tag_slot(g_aesc[i].slot);
                         if (ts) marks[nmarks++] = ts;
                     }
-                    /* 数组基变量：存入它的所有贴标槽（可能多个——
-                     * 释放责任对整个数组自负，逐个标记）。 */
-                    for (int i = 0; i < g_naesc && nmarks < 64; i++)
-                        if (g_aesc[i].base == s && g_aesc[i].slot > 0) {
-                            TagSlot *ts = tag_slot(g_aesc[i].slot);
-                            if (ts) marks[nmarks++] = ts;
-                        }
-                }
+                if (nmarks) break;
             }
             if (!nmarks) {   /* 兜底：槽的载体名（符号可能已重绑/出账） */
                 for (int i = 0; i < g_ntslots && !nmarks; i++)
@@ -7731,8 +7801,10 @@ static void check_stmt(Node *n) {
             }
             if (!nmarks)
                 err_at(n->line, n->col,
-                       "tag '%s' does not exist -- there is no allocation to "
-                       "mark released", n->name);
+                       "no allocation named '%s' -- mark by a variable name: "
+                       "the carrier it was bound to (`tag.p : null;`) or the "
+                       "array holding it (`tag.xs : null;`)",
+                       n->name);
             else for (int i = 0; i < nmarks; i++) {
                 TagSlot *ts = marks[i];
                 if (!ts->abstract && ts->state == TST_LIVE) {

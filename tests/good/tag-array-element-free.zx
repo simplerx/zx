@@ -1,6 +1,7 @@
 // expect-exit: 0
-// §173 补丁六：单槽对应时把元素读写视作该 tag——free(xs[0]) 记得上账，
-// 不误报泄漏；手动标记 tag.allocN : null 亦是合法逃生口。
+// §173 补丁十：常索引写入精确记账——xs[0]/xs[1] 各对一个 tag，读出
+// `let h = xs[0];` 标签精确跟出（槽共享，free 一次终局）；手动标记
+// 用使用者自己的变量名（tag.p/tag.q），自动槽名 allocN 不可写。
 const std = @mod("std");
 pub const main = fn () i32 {
     var xs = std.stackAlloc(*u8, 4);
@@ -8,7 +9,10 @@ pub const main = fn () i32 {
     let q = (*u8)std.heapAlloc(std.heap.page, u8, 10);
     xs[0] = p;
     xs[1] = q;
-    tag.alloc2 : null;
-    tag.alloc3 : null;
+    let h = xs[0];
+    h[0] = 1;
+    std.heap.page.free(std.heap.page.ctx, h, 10);
+    tag.p : null;
+    tag.q : null;
     return 0;
 };

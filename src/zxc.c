@@ -104,6 +104,7 @@ static const DiagRule g_rules[] = {
     { "provenance lost",                  "E0514" },
     { "cannot cross the function boundary", "E0514" },
     { "is not a tag value",               "E0520" },
+    { "may hold several different tags",  "E0521" },
     { "cannot stay behind control flow",  "E0514" },
     { "return null as its value",         "E0514" },
     { "tagged allocation must be bound",  "E0514" },

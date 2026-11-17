@@ -1,0 +1,14 @@
+// expect-exit: 0
+// §173 补丁十：容器账——运行期索引（xs[i]）填入的单 tag 数组全自动：
+// free(xs[i]) 查容器账 LIVE 槽只有一个，精确记账，不误报。
+const std = @mod("std");
+const mk = fn () *u8 {
+    return (*u8)std.heapAlloc(std.heap.page, u8, 10);
+};
+pub const main = fn () i32 {
+    var xs = std.stackAlloc(*u8, 4);
+    let i = 1;
+    xs[i] = mk();
+    std.heap.page.free(std.heap.page.ctx, xs[i], 10);
+    return 0;
+};

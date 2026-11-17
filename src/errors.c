@@ -131,6 +131,8 @@ static const ErrDoc g_errs[] = {
       "a tag is a single-instance label: free the current allocation or use a second tag" },
     { "E0519", "manual tag declaration removed -- tags self-declare on first use",
       "a tag slot is created automatically the first time you reference it (`tag.x : expr` or `const h = tag.x;`); there is no declaration statement any more -- remove the line" },
+    { "E0521", "an element may hold several different tags",
+      "the array was filled with a runtime index (`xs[i] = p;`), so which tag an element holds cannot be identified; store each tag at a constant index, or mark them released (`tag.p : null;`)" },
 
     /* ---- 模块 ---- */
     { "E0601", "module resolution failed",
