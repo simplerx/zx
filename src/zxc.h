@@ -19,8 +19,10 @@
  * （§161）、语言级向量类型 @Vec(T, N)（§162）之后的发布版。
  * 1.4.1 = 向量只剩 @Vec 类型内建：@select / @any / @all 搬进 std.simd
  * （§165），std.simd 重写成纯 Zx 数学层 + 四元数，删掉手写 SIMD 内核。
- * 1.4.2 = std.simd 补上列主序 Mat3 / Mat4 与四元数互转（§167）。 */
-#define ZXC_VERSION "1.4.2"
+ * 1.4.2 = std.simd 补上列主序 Mat3 / Mat4 与四元数互转（§167）。
+ * 1.5.0 = tag 指针生命周期账本（§170-175，编译期内存安全）、try 捕获
+ * 形式（§171）。 */
+#define ZXC_VERSION "1.5.0"
 
 /* ---------- diagnostics ---------- */
 

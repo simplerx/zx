@@ -1,6 +1,6 @@
 # Zx
 
-A minimal systems programming language.
+A minimal systems programming language with compile-time memory safety.
 
 - **One value, one type**: `?T` and `!T` are ordinary value types, with exactly
   four ways out — `try`, catch, `orelse`, and `switch`. No guessing, no hidden paths.
@@ -8,8 +8,10 @@ A minimal systems programming language.
   coroutines, task pools, select, and default channels all hang off the instance;
   `std.io` stays purely synchronous — for concurrency you compose `task + io`
   explicitly.
-- **One memory model**: manual management. The standard library provides an
-  arena and a pool; there are no implicit allocations.
+- **Memory safety, at compile time**: manual management backed by `tag`, a
+  compile-time ledger that catches use-after-free, double-free and leaks before
+  the program runs — with no runtime cost and no borrow checker. The standard
+  library provides an arena and a pool; there are no implicit allocations.
 - **C all the way down**: the backend compiles Zx to C, then hands it to the
   bundled zig `cc`. The generated code is readable, and `--emit-c` prints it —
   performance problems never hide inside a black box.
