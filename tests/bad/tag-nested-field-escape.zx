@@ -1,0 +1,18 @@
+// expect: already died with its scope
+// expect-code: E0509
+// expect-count: 1
+// §173 补丁八：嵌套字段（s.inner.name）随结构体返回的 stack 逃逸——
+// 字段链折叠成点路径（"inner.name"）记账，字面量拍平 + 返回流继承，
+// 调用方 free 嵌套字段报 E0509。
+const std = @mod("std");
+const Inner = struct { name: *u8 };
+const Outer = struct { inner: Inner };
+const make = fn () Outer {
+    let p = std.stackAlloc(i32, 10);
+    return .{.inner = .{.name = (*u8)p}};
+};
+pub const main = fn () i32 {
+    var s = make();
+    std.heap.page.free(std.heap.page.ctx, s.inner.name, 10);
+    return 0;
+};

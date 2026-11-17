@@ -1,0 +1,17 @@
+// expect-exit: 0
+// §173 补丁五：臂内整结构体赋值的字段账快照回滚——then 臂重绑
+// s = S{...} 并释放新分配，else 臂从同一进入状态开始，释放旧分配
+// 不误报 E0509（两臂互斥，各 free 一次是合法形态）。
+const std = @mod("std");
+const S = struct { p: *u8 };
+pub const main = fn () i32 {
+    let p = (*u8)std.heapAlloc(std.heap.page, u8, 10);
+    var s = S{.p = p};
+    if ((i32)p[0] > 0) {
+        s = S{.p = (*u8)std.heapAlloc(std.heap.page, u8, 10)};
+        std.heap.page.free(std.heap.page.ctx, s.p, 10);
+    } else {
+        std.heap.page.free(std.heap.page.ctx, s.p, 10);
+    }
+    return 0;
+};

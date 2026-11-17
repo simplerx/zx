@@ -1,0 +1,14 @@
+// expect-exit: 0
+// §173 补丁六：单槽对应时把元素读写视作该 tag——free(xs[0]) 记得上账，
+// 不误报泄漏；手动标记 tag.allocN : null 亦是合法逃生口。
+const std = @mod("std");
+pub const main = fn () i32 {
+    var xs = std.stackAlloc(*u8, 4);
+    let p = (*u8)std.heapAlloc(std.heap.page, u8, 10);
+    let q = (*u8)std.heapAlloc(std.heap.page, u8, 10);
+    xs[0] = p;
+    xs[1] = q;
+    tag.alloc2 : null;
+    tag.alloc3 : null;
+    return 0;
+};

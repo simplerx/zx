@@ -1,0 +1,19 @@
+// expect: was already freed
+// expect-code: E0509
+// expect-count: 1
+// §173 补丁七：方法接收者走同一条贴标链——方法体内
+// free(self.field) 经抽象槽/pff 精确移交，调用方再 free 报 E0509。
+const std = @mod("std");
+const Box = struct {
+    p: *u8,
+    const release = fn (self: Self) void {
+        std.heap.page.free(std.heap.page.ctx, self.p, 10);
+    };
+};
+pub const main = fn () i32 {
+    let p = (*u8)std.heapAlloc(std.heap.page, u8, 10);
+    var b = Box{.p = p};
+    b.release();
+    std.heap.page.free(std.heap.page.ctx, b.p, 10);
+    return 0;
+};
