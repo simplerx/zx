@@ -1,4 +1,4 @@
-// expect: is still LIVE at the end of the program
+// expect: is never freed
 // expect-code: E0513
 // §173：分配自动建槽 —— 没贴标也是被追踪的；不 free 就是真泄漏。
 const std = @mod("std");

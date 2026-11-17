@@ -1,4 +1,4 @@
-// expect: is still LIVE at the end
+// expect: is never freed
 // expect-code: E0513
 // §170：alloc 与 free 必须成对，作用域结束仍 LIVE 报泄漏。
 const std = @mod("std");

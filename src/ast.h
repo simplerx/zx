@@ -141,6 +141,12 @@ struct Node {
      * 工厂函数（分配经返回流转出所有权）零调用 = 分配在运行期
      * 根本不发生，终扫豁免其槽。 */
     int           tag_calls;
+
+    /* §176：tag_call_flow 已在本节点完成对账（sema 私有，只挂调用节点）。
+     * ct 折堆 / deps 补查会克隆已检查过的函数体重查一遍，
+     * 克隆节点带着首次检查的这个标记——重跑只会
+     * 重复克隆工厂实例槽、记下假调用边，直接跳过。 */
+    bool          tag_done;
 };
 
 Node *node_new(NodeKind k, int line, int col);

@@ -1,4 +1,4 @@
-// expect: is still LIVE at the end of the program
+// expect: is never freed
 // expect-code: E0513
 // expect-count: 1
 // §175：元组元素结构体嵌套字段接过所有权后不释放——实例槽报泄漏，

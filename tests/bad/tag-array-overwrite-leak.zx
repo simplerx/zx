@@ -1,4 +1,4 @@
-// expect: is still LIVE at the end of the program
+// expect: is never freed
 // expect-code: E0513
 // expect-count: 1
 // §173 补丁十：常索引覆盖写入换账——xs[0] 原来装 p，被新分配覆盖后

@@ -1,4 +1,4 @@
-// expect: is still LIVE at the end of the program
+// expect: is never freed
 // expect-code: E0513
 // §173：工厂把分配传出来，调用方不 free 就是真泄漏（行号指向工厂体内）。
 const std = @mod("std");

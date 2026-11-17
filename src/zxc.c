@@ -97,19 +97,22 @@ static const DiagRule g_rules[] = {
     { "cannot prove which handle this is", "E0511" },
 
     /* §170 tag 指针生命周期账本：这些子串要放在下面的笼统规则之前，
-     * 否则会先命中 "found `" / "cannot" 之类，给出完全不对路的码。 */
+     * 否则会先命中 "found `" / "cannot" 之类，给出完全不对路的码。
+     * §176：文案去 tag 机制化，子串同步（E0513 的调用链后缀不影响）。 */
     { "use after free",                   "E0512" },
-    { "re-binding a freed tagged pointer", "E0512" },
-    { "still LIVE at the end",            "E0513" },
+    { "re-binding a freed pointer",       "E0512" },
+    { "is never freed",                   "E0513" },
+    { "provenance is lost",               "E0514" },
     { "provenance lost",                  "E0514" },
-    { "cannot cross the function boundary", "E0514" },
-    { "is not a tag value",               "E0520" },
+    { "cannot cross function boundaries",  "E0514" },
+    { "is not a label value",             "E0520" },
     { "cannot be identified",             "E0521" },
-    { "stored with a runtime index",      "E0521" },
+    { "with a runtime index",             "E0521" },
     { "cannot stay behind control flow",  "E0514" },
     { "return null as its value",         "E0514" },
     { "tagged allocation must be bound",  "E0514" },
-    { "state is undetermined",            "E0515" },
+    { "was freed inside this branch",     "E0514" },
+    { "undetermined whether this memory was freed", "E0515" },
     { "not balanced",                     "E0516" },
     { "cannot yield a tagged pointer",    "E0516" },
     { "already owns an allocation",       "E0518" },

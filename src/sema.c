@@ -2769,6 +2769,8 @@ static void region_handle_call(Node *n) {
 #define TC_COND     3
 #define TC_UNKNOWN  4
 
+static const char *g_cur_fn_name;   /* 当前函数名（7963 附近保存/还原） */
+
 typedef struct {
     const char *name;      /* 编译期唯一名（程序级，跨文件不可重名） */
     int         line, col;
@@ -2801,9 +2803,43 @@ typedef struct {
                                 一份新分配，实例槽各自记账。 */
     int         ninst;       /* §175：已派生的调用点实例数（母槽用）。
                                 > 0 时终扫由实例接管，母槽退役。 */
+    const char *def_fn;      /* §176：分配点所在函数名——泄漏诊断沿调用
+                                边回溯到 main 的起点 */
+    const char *own_fn;      /* §176：实例槽归属调用点所在函数名 */
+    const char *file;        /* §176：分配点所在文件（note 指位用） */
 } TagSlot;
 static TagSlot *g_tslots;
 static int      g_ntslots, g_ctslots;
+
+/* §176：调用边登记（谁在哪一行调了谁）。泄漏诊断要"一直回溯到 main"，
+ * 而 sema 按依赖拓扑逐函数检查、没有运行期式的调用栈——检查路径不等于
+ * 调用路径。这里在每个已解析的调用点记一条边（tag_call_flow 出口），
+ * 终扫沿边回溯。同一调用点重扫幂等（deps 拓扑补查会重跑 check_call）。 */
+typedef struct { const char *callee, *caller; int line, col; } TagCallEdge;
+static TagCallEdge *g_cedges;
+static int g_ncedges, g_ccedges;
+
+static void tag_call_edge(const char *callee, const char *caller,
+                          int line, int col) {
+    if (!callee || !*callee || !caller || !*caller) return;
+    if (!strcmp(callee, caller)) return;            /* 递归自调用不上链 */
+    for (int i = 0; i < g_ncedges; i++)
+        if (g_cedges[i].line == line && g_cedges[i].col == col &&
+            !strcmp(g_cedges[i].callee, callee) &&
+            !strcmp(g_cedges[i].caller, caller)) return;
+    if (g_ncedges == g_ccedges) {
+        int nc = g_ccedges ? g_ccedges * 2 : 32;
+        TagCallEdge *p = realloc(g_cedges, (size_t)nc * sizeof *p);
+        if (!p) return;
+        g_cedges = p;
+        g_ccedges = nc;
+    }
+    g_cedges[g_ncedges].callee = callee;
+    g_cedges[g_ncedges].caller = caller;
+    g_cedges[g_ncedges].line = line;
+    g_cedges[g_ncedges].col = col;
+    g_ncedges++;
+}
 
 static Module *g_std_mod;       /* 5931 附近定义：std 模块（豁免判定用） */
 
@@ -3190,11 +3226,9 @@ static void tag_of_expr(Node *e, int *id, int *state) {
         if (ix < 0 && aesc_any(e->a->sym) && tag_diag_once(e->line, e->col))
             diag_code_at("E0521", e->line, e->col,
                 "this element is read with a runtime index and the array "
-                "holds tagged pointers -- which tag an element carries "
-                "cannot be identified; store at a constant index, continue "
-                "the chain with `tag v : tag.x = %s[i];`, or mark them "
-                "released (`tag.<var> : null;`)",
-                e->a->sym->name ? e->a->sym->name : "?");
+                "holds tracked pointers -- which allocation an element "
+                "carries cannot be identified; store at a constant index, "
+                "or mark them released (`tag.<var> : null;`)");
         if (aid && ft_state_of(aid) == TC_LIVE) {
             *id = aid; *state = TC_LIVE;
             return;
@@ -3260,6 +3294,10 @@ static TagSlot *tag_decl(const char *name, Node *n) {
     memset(t, 0, sizeof *t);
     t->name = name;
     t->line = n->line; t->col = n->col;
+    /* §176：分配事实归谁调的——建槽即记当下函数与文件（槽幂等，
+     * 首次建槽的上下文就是分配点的上下文） */
+    t->def_fn = g_cur_fn_name;
+    t->file = (g_mod && g_mod->path) ? g_mod->path : NULL;
     return t;
 }
 
@@ -3321,6 +3359,9 @@ static int tag_clone_site(TagSlot *src, Node *call, bool freed) {
     if (src) src->ninst++;
     t->line = src ? src->line : call->line;        /* 分配事实留在分配行 */
     t->col = src ? src->col : call->col;
+    t->def_fn = src ? src->def_fn : t->def_fn;     /* §176：分配点随母槽 */
+    t->file = src ? src->file : t->file;
+    t->own_fn = g_cur_fn_name;                     /* 归属调用点所在函数 */
     t->own_line = call->line;                      /* 归属点在调用行 */
     t->own_col = call->col;
     return (int)(t - g_tslots) + 1;
@@ -3378,20 +3419,21 @@ static void tag_check_deref(Node *base) {
     if (st == TC_FREED) {
         if (t->scope_freed)
             diag_code_at("E0512", base->line, base->col,
-                "use after scope: tag '%s' is a stack allocation whose block "
-                "ended at line %d -- stack storage dies with its scope, the "
-                "pointer must not outlive it", t->name, t->free_line);
+                "use after scope: this pointer is stack storage whose block "
+                "ended at line %d -- stack memory dies with its scope, the "
+                "pointer must not outlive it", t->free_line);
         else
             diag_code_at("E0512", base->line, base->col,
-                "use after free: tag '%s' was released at line %d -- a tagged "
-                "pointer must not be dereferenced after `free`", t->name, t->free_line);
+                "use after free: this memory was released at line %d -- a "
+                "freed pointer must not be dereferenced; remove this use or "
+                "move it before the free", t->free_line);
         return;
     }
     if (st == TC_UNKNOWN) {
         diag_code_at("E0515", base->line, base->col,
-            "tag '%s' has an undetermined state here (branches disagree on "
-            "whether it was freed) -- defend first: re-bind it "
-            "(`p = %s : p.?;` asserts it is live) or `free` it", t->name, t->name);
+            "it is undetermined whether this memory was freed (the branches "
+            "disagree) -- defend before use: re-bind it (`p = tag.%s : "
+            "p.?;` asserts it is live) or `free` it", t->name);
         return;
     }
     /* COND：解引用必须先判空（`.?`），这是类型系统的事，类型层拦。 */
@@ -3422,14 +3464,15 @@ static bool tag_free_event(Node *site, Node *ptr) {
         if (t->free_line == site->line && t->free_col == site->col) return true;
         if (t->scope_freed)
             diag_code_at("E0509", site->line, site->col,
-                "tag '%s' is a stack allocation that already died with its "
+                "this pointer is stack storage that already died with its "
                 "scope (allocated at line %d, scope ended at line %d) -- the "
                 "pointer escaped its frame, so releasing it again is a "
-                "double free", t->name, t->line, t->free_line);
+                "double free", t->line, t->free_line);
         else
             diag_code_at("E0509", site->line, site->col,
-                "tag '%s' was already freed (allocated at line %d, first freed "
-                "at line %d)", t->name, t->line, t->free_line);
+                "this memory was already freed (allocated at line %d, first "
+                "freed at line %d) -- releasing it again is a double free",
+                t->line, t->free_line);
         return true;
     }
     /* UNKNOWN / COND：防守二（使用者宣告终结）与 null 合并载体的放行。
@@ -3641,7 +3684,7 @@ static int tag_check_apply(Node *n, bool *bad) {
             t = s->tag_id ? tag_slot(s->tag_id) : NULL;
             if (!t) {
                 diag_code_at("E0520", n->line, n->col,
-                    "`%s` is not a tag value -- `x : expr` needs "
+                    "`%s` is not a label value -- `x : expr` needs "
                     "`const x = tag.x;` (or write `tag.x : expr`)", n->name);
                 *bad = true;
                 return TC_NONE;
@@ -3693,8 +3736,8 @@ static int tag_check_apply(Node *n, bool *bad) {
         }
         if (t->state == TST_LIVE) {
             diag_code_at("E0518", n->line, n->col,
-                "tag '%s' already owns an allocation (bound at line %d) -- "
-                "free it first, or use a second tag", t->name, t->line);
+                "this label already owns an allocation (bound at line %d) -- "
+                "free it first, or use a second label", t->line);
             *bad = true;
             return TC_NONE;
         }
@@ -3709,8 +3752,8 @@ static int tag_check_apply(Node *n, bool *bad) {
         /* 同标签载体：重申（UNKNOWN/COND → 使用者担保 LIVE）或别名传递。 */
         if (st == TC_FREED) {
             diag_code_at("E0512", n->line, n->col,
-                "tag '%s' was freed at line %d -- re-binding a freed tagged "
-                "pointer is use after free", t->name, t->free_line);
+                "this memory was freed at line %d -- re-binding a freed "
+                "pointer is use after free; drop the re-bind", t->free_line);
             *bad = true;
             return TC_NONE;
         }
@@ -3720,9 +3763,9 @@ static int tag_check_apply(Node *n, bool *bad) {
         return TC_LIVE;
     }
     diag_code_at("E0514", n->line, n->col,
-        "tag '%s' can only bind a std.heapAlloc/std.heapSlice allocation or "
-        "a pointer that already carries this tag -- tagged pointers do not "
-        "cross function boundaries", t->name);
+        "a label can only bind a std.heapAlloc/std.heapSlice allocation or "
+        "a pointer it already owns -- a labeled pointer cannot cross "
+        "function boundaries");
     *bad = true;
     return TC_NONE;
 }
@@ -3762,9 +3805,9 @@ static ArmExit tag_arm_reconcile(Node *armval, const int *snap, int n0, int ntot
                 e.tag = i + 1; e.state = TC_FREED; e.val = NULL; e.stmt = true;
             } else {
                 diag_code_at("E0514", t->free_line, t->free_col,
-                    "tag '%s' was freed inside this branch -- the branch must "
-                    "return null as its value so the freed state travels with "
-                    "the carrier", t->name);
+                    "the allocation was freed inside this branch -- the "
+                    "branch must return null as its value so the freed "
+                    "state travels with the carrier");
                 e.tag = i + 1; e.state = TC_FREED; e.val = NULL;
             }
         } else if (t->state == TST_LIVE && snap[i] != TST_LIVE) {
@@ -3775,9 +3818,9 @@ static ArmExit tag_arm_reconcile(Node *armval, const int *snap, int n0, int ntot
                 e.tag = i + 1; e.state = TC_LIVE; e.val = armval;
             } else {
                 diag_code_at("E0514", t->line, t->col,
-                    "tag '%s' was allocated inside this branch but the branch "
-                    "does not return it -- a tagged pointer cannot stay behind "
-                    "control flow", t->name);
+                    "memory allocated inside this branch is not returned by "
+                    "it -- a labeled pointer cannot stay behind control "
+                    "flow");
                 e.tag = i + 1; e.state = TC_LIVE; e.val = NULL;
             }
         }
@@ -3936,19 +3979,18 @@ static void tag_loop_balance(Node *body, const TagSnap *snap) {
         if (ok) continue;
         TagSlot *t = &g_tslots[i];
         diag_code_at("E0516", t->line, t->col,
-            "tag '%s' is not balanced across the loop body (entered %s, left "
-            "%s) -- allocate and free it within the same iteration, or keep "
-            "the loop-external allocation alive until after the loop", t->name,
-            before == TST_LIVE ? "LIVE" : "idle",
-            after == TST_LIVE ? "LIVE" : "freed");
+            "memory allocated inside the loop is not balanced (live on "
+            "entry, freed on exit) -- allocate and free it within the same "
+            "iteration, or keep the loop-external allocation alive until "
+            "after the loop");
     }
     int id, st;
     tag_of_expr(body->kind == NK_BLOCK ? body->d : body, &id, &st);
     if (id) {
         TagSlot *t = tag_slot(id);
         if (t) diag_code_at("E0516", t->line, t->col,
-            "a loop cannot yield a tagged pointer -- the carrier's identity "
-            "differs per iteration; free inside the loop or allocate outside");
+            "a loop cannot yield this pointer -- it is a different allocation "
+            "in each iteration; free inside the loop or allocate outside");
     }
 }
 
@@ -3972,6 +4014,65 @@ static bool tag_module_exempt(Module *m) {
     return false;
 }
 
+/* §176：沿调用边从 cur 回溯到 main 的一层 DFS。返回值是 cur 之上的
+ * 调用链（每跳 = 调用方:调用行），如 cur=load 时返回 "main:5 -> init:14"
+ * ——含义是 main 在第 5 行调了 init，init 在第 14 行调了 load。
+ * 多条路优先走能到 main 的；到不了 main 的由最外层兜底给首跳。 */
+static bool tag_chain_walk(const char *cur, char *out, size_t cap,
+                           const char *visited[], int nv, int depth) {
+    if (depth > 32 || nv >= 64) return false;
+    for (int i = 0; i < g_ncedges; i++) {
+        if (!g_cedges[i].callee || strcmp(g_cedges[i].callee, cur)) continue;
+        const char *caller = g_cedges[i].caller;
+        if (!caller || !*caller) continue;
+        bool seen = false;
+        for (int j = 0; j < nv; j++)
+            if (!strcmp(visited[j], caller)) { seen = true; break; }
+        if (seen) continue;
+        if (!strcmp(caller, "main")) {
+            snprintf(out, cap, "main:%d", g_cedges[i].line);
+            return true;
+        }
+        const char *vis2[64];
+        int n2 = nv;
+        for (int j = 0; j < nv; j++) vis2[j] = visited[j];
+        vis2[n2++] = caller;
+        char sub[384];
+        if (tag_chain_walk(caller, sub, sizeof sub, vis2, n2, depth + 1)) {
+            snprintf(out, cap, "%s -> %s:%d", sub, caller, g_cedges[i].line);
+            return true;
+        }
+    }
+    return false;
+}
+
+/* §176：一份泄漏的调用链——实例槽从归属调用点所在函数回溯（精确指认
+ * 是哪一次调用），原生槽从分配点所在函数回溯。返回 false = 该函数就在
+ * main / 模块顶层里，或回溯不到任何调用方。 */
+static bool tag_chain_slot(TagSlot *t, char *out, size_t cap) {
+    const char *start = t->own_fn ? t->own_fn : t->def_fn;
+    if (!start || !*start) return false;
+    const char *visited[64];
+    char hops[384];
+    if (!tag_chain_walk(start, hops, sizeof hops, visited, 0, 0)) {
+        /* 到不了 main：至少给出首跳调用方，仍能指认是谁调进来的 */
+        for (int i = 0; i < g_ncedges; i++)
+            if (g_cedges[i].callee && !strcmp(g_cedges[i].callee, start) &&
+                g_cedges[i].caller) {
+                snprintf(out, cap, "%s:%d", g_cedges[i].caller,
+                         g_cedges[i].line);
+                return true;
+            }
+        return false;
+    }
+    if (t->own_fn)
+        snprintf(out, cap, "%s -> %s:%d -> %s", hops, t->own_fn, t->own_line,
+                 t->def_fn ? t->def_fn : "?");
+    else
+        snprintf(out, cap, "%s -> %s", hops, start);
+    return true;
+}
+
 static void tag_ledger_final(const char *entry_path) {
     for (int i = 0; i < g_ntslots; i++) {
         TagSlot *t = &g_tslots[i];
@@ -3983,9 +4084,15 @@ static void tag_ledger_final(const char *entry_path) {
         /* §175：已派生调用点实例的母槽退役——泄漏/双放由实例槽记账。 */
         if (t->ninst > 0) continue;
         /* §173：错误指到所有权归属点（调用/绑定处），分配行留在消息里。
-         * 跨函数移交后泄漏，第一现场是调用方接过所有权的那一行。 */
+         * 跨函数移交后泄漏，第一现场是调用方接过所有权的那一行。
+         * §176：文案只讲原因 + 修法；调用链一并给出、一直回溯到 main，
+         * 让人知道这份内存是在哪条调用路径上产生的。 */
         int rl = t->own_line ? t->own_line : t->line;
         int rc = t->own_line ? t->own_col : t->col;
+        char chain[512];
+        const char *cs = tag_chain_slot(t, chain, sizeof chain)
+                         ? chain : NULL;
+        const char *cp = cs ? "; called via " : "";
         if (t->arr_esc) {
             /* 提示写使用者自己的变量名（载体/数组基变量）——自动槽名
              * 不再可写（跨库不可预测）。 */
@@ -3993,33 +4100,35 @@ static void tag_ledger_final(const char *entry_path) {
                              ? t->carrier->name : NULL;
             if (mn)
                 diag_code_at("E0513", rl, rc,
-                    "tag '%s' is still LIVE at the end of the program "
-                    "(ownership bound at line %d, allocated at line %d) -- a "
-                    "tagged pointer stored into an array/tuple element cannot "
-                    "be tracked to its free site; free it through a named "
-                    "carrier, or mark it released with `tag.%s : null;`",
-                    t->name, rl, t->line, mn);
+                    "memory allocated at line %d is never freed -- it is "
+                    "stored in an array/tuple element and the compiler "
+                    "cannot track it to its free site; free it through the "
+                    "variable holding it, or mark it released with "
+                    "`tag.%s : null;`%s%s",
+                    t->line, mn, cp, cs ? cs : "");
             else
                 diag_code_at("E0513", rl, rc,
-                    "tag '%s' is still LIVE at the end of the program "
-                    "(ownership bound at line %d, allocated at line %d) -- a "
-                    "tagged pointer stored into an array/tuple element cannot "
-                    "be tracked to its free site; free it through a named "
-                    "carrier, or mark it released by the variable holding it",
-                    t->name, rl, t->line);
+                    "memory allocated at line %d is never freed -- it is "
+                    "stored in an array/tuple element and the compiler "
+                    "cannot track it to its free site; free it through the "
+                    "variable holding it%s%s",
+                    t->line, cp, cs ? cs : "");
         }
-        else if (t->own_line && t->own_line != t->line)
+        else if (t->own_line && t->own_line != t->line) {
+            /* 报在归属点，分配行用 note 指认 */
+            diag_note(t->file, t->line, t->col, "allocated here");
             diag_code_at("E0513", rl, rc,
-                "tag '%s' is still LIVE at the end of the program (ownership "
-                "bound at line %d, allocated at line %d) -- alloc and free "
-                "must come in pairs; free it before the program ends",
-                t->name, t->own_line, t->line);
+                "memory allocated at line %d is never freed -- alloc and "
+                "free must come in pairs; free it before the program "
+                "ends%s%s",
+                t->line, cp, cs ? cs : "");
+        }
         else
             diag_code_at("E0513", rl, rc,
-                "tag '%s' is still LIVE at the end of the program (allocated at "
-                "line %d) -- alloc and free must come in pairs; free it before "
-                "the program ends",
-                t->name, t->line);
+                "memory allocated at line %d is never freed -- alloc and "
+                "free must come in pairs; free it before the program "
+                "ends%s%s",
+                t->line, cp, cs ? cs : "");
     }
     /* §174：运行期索引写入未处理——使用者没有续链接管（tag v :
      * tag.x = xs[i];）也没有终结（tag.<载体> : null;），追踪断线
@@ -4031,20 +4140,19 @@ static void tag_ledger_final(const char *entry_path) {
                          ? t->carrier->name : NULL;
         if (cn)
             diag_code_at("E0521", t->rt_line, t->rt_col,
-                "a tagged pointer was stored into `xs[i]` with a runtime "
-                "index and never handled -- the tag cannot be tracked to "
-                "its free site; continue the chain with `tag v : %s = "
-                "xs[i];` (bind the lost pointer back by its carrier "
-                "variable name), mark it released with `tag.%s : null;`, "
-                "or store at a constant index",
+                "a pointer was stored into `xs[i]` with a runtime index and "
+                "never handled -- the compiler cannot track it to its free "
+                "site; continue the chain with `tag v : %s = xs[i];`, mark "
+                "it released with `tag.%s : null;`, or store at a constant "
+                "index",
                 cn, cn);
         else
             diag_code_at("E0521", t->rt_line, t->rt_col,
-                "a tagged pointer was stored into `xs[i]` with a runtime "
-                "index and never handled -- the tag cannot be tracked to "
-                "its free site; receive it into a named carrier first "
-                "(`let tmp = f(); xs[i] = tmp;`), then continue the chain "
-                "with `tag v : tmp = xs[i];`, or store at a constant index");
+                "a pointer was stored into `xs[i]` with a runtime index and "
+                "never handled -- the compiler cannot track it to its free "
+                "site; receive it into a variable first (`let tmp = f(); "
+                "xs[i] = tmp;`), then continue the chain with "
+                "`tag v : tmp = xs[i];`, or store at a constant index");
     }
     /* §173：E0517（强制贴标终扫）退役 —— 分配调用点自动建槽，
      * 没有不被追踪的堆分配；tag.close 模块在 tag_auto_decl 里跳过。 */
@@ -4701,8 +4809,9 @@ static Type *check_cast(Node *n) {
             } else {
                 TagSlot *t = tag_slot(tid);
                 diag_code_at("E0514", n->line, n->col,
-                    "tag '%s' provenance lost: a tagged pointer cannot be cast "
-                    "to `%s` -- keep it in a variable of the same pointer type",
+                    "the label's provenance is lost: a labeled pointer cannot "
+                    "be cast to `%s` -- keep it in a variable of the same "
+                    "pointer type",
                     t ? t->name : "?", ty_str(to));
             }
         }
@@ -6076,6 +6185,13 @@ static Type *check_call(Node *n, Type *expect) {
  * 完全绕过这条链）。前置：n->items 已是最终实参表（方法调用含接收者，
  * items[0] 对齐被调方的第 0 形参——抽象槽 / pff 按 fn->items 对位）。 */
 static void tag_call_flow(Node *n) {
+    /* §176：同一调用节点只对账一次。ct 折堆与 deps 补查
+     * 会克隆已检查过的体重查，克隆节点带着首次的对账结果——
+     * 重跑会重复克隆工厂实例槽、把克隆体上下文的函数名
+     * 记成假调用边（注释中的"贴标对账幂等重跑安全"
+     * 只对释放事件/事实账成立，克隆不幂等）。 */
+    if (n->tag_done) return;
+    n->tag_done = true;
     {
         Node *fn = NULL;
         if (n->a->sym && n->a->sym->decl) {
@@ -6089,8 +6205,12 @@ static void tag_call_flow(Node *n) {
         /* §175：调用计数——零调用工厂的流转槽终扫豁免（分配运行期
          * 不发生）。递归自调用不计：外层没人进不来。 */
         if (fn && fn->kind == NK_FN && g_cur_fn_name &&
-            !(fn->name && strcmp(fn->name, g_cur_fn_name) == 0))
+            !(fn->name && strcmp(fn->name, g_cur_fn_name) == 0)) {
             fn->tag_calls++;
+            /* §176：调用边入账——泄漏终扫沿边回溯到 main */
+            if (fn->name)
+                tag_call_edge(fn->name, g_cur_fn_name, n->line, n->col);
+        }
         bool releaser = fn_is_releaser(fn);
         /* Allocator.free(ctx, ptr, bytes) 自身就是释放通路：实参放行，
          * 释放事件由 tag_note_free 在 NK_CALL 出口统一记账。 */
@@ -6889,8 +7009,8 @@ static Type *check_expr_raw(Node *n, Type *expect) {
         if (!vt || vt->kind == TY_INVALID) return ty_invalid();
         if (vt->kind != TY_PTR && vt->kind != TY_SLICE) {
             err_at(n->line, n->col,
-                   "only a pointer can carry a tag -- '%s' binds a lost "
-                   "tagged pointer, not this value", n->name ? n->name : "?");
+                   "only a pointer can be tracked -- '%s' is a re-bind for a lost "
+                   "tracked pointer, not this value", n->name ? n->name : "?");
             return ty_invalid();
         }
         TagSlot *t = NULL;
@@ -6902,8 +7022,8 @@ static Type *check_expr_raw(Node *n, Type *expect) {
             t = tag_by_name(tv->name);          /* 不建槽：必须是旧标签 */
             if (!t) {
                 diag_code_at("E0300", tv->line, tv->col,
-                    "tag '%s' does not exist -- a re-bind must continue an "
-                    "existing tag; new tags only come from tagging an "
+                    "`tag.%s` does not exist -- a re-bind must continue an "
+                    "existing label; new labels only come from tagging an "
                     "allocation (`let p = tag.x : expr;`)", tv->name);
                 return ty_invalid();
             }
@@ -6912,30 +7032,30 @@ static Type *check_expr_raw(Node *n, Type *expect) {
             t = (ts && ts->tag_id) ? tag_slot(ts->tag_id) : NULL;
             if (!t) {
                 diag_code_at("E0520", tv->line, tv->col,
-                    "`%s` is not a tag value -- the re-bind needs "
-                    "`tag.x` (or a `const` tag binding)", tv->name);
+                    "`%s` is not a label value -- the re-bind needs "
+                    "`tag.x` (or a `const` label binding)", tv->name);
                 return ty_invalid();
             }
         } else {
             err_at(n->line, n->col,
-                   "the re-bind needs a tag value between ':' and '=' -- "
+                   "the re-bind needs a label value between ':' and '=' -- "
                    "write `tag v : tag.x = lost;`");
             return ty_invalid();
         }
         if (t->abstract) {
             err_at(n->line, n->col,
-                   "tag '%s' is a parameter slot -- a re-bind cannot claim "
+                   "`tag.%s` is a parameter slot -- a re-bind cannot claim "
                    "an abstract borrow", t->name);
             return ty_invalid();
         }
         if (t->state != TST_LIVE) {
             err_at(n->line, n->col,
                    t->state == TST_FREED
-                   ? "tag '%s' already ended (freed at line %d) -- a "
+                   ? "this chain already ended (freed at line %d) -- a "
                      "re-bind cannot revive a finished chain"
-                   : "tag '%s' is not tracking any allocation -- nothing "
+                   : "this label is not tracking any allocation -- nothing "
                      "to continue",
-                   t->name, t->free_line);
+                   t->free_line);
             return ty_invalid();
         }
         {
@@ -6944,9 +7064,9 @@ static Type *check_expr_raw(Node *n, Type *expect) {
             if (id) {
                 TagSlot *old = tag_slot(id);
                 diag_code_at("E0522", n->b->line, n->b->col,
-                    "this value already carries tag '%s' -- a re-bind is "
-                    "only for lost tagged pointers; free the old tag first, "
-                    "or use `let p = tag.x : expr;` to tag a fresh "
+                    "this value already carries label '%s' -- a re-bind is "
+                    "only for lost pointers; free the old allocation "
+                    "first, or use `let p = tag.x : expr;` for a fresh "
                     "allocation", old ? old->name : "?");
                 return ty_invalid();
             }
@@ -8232,8 +8352,8 @@ static void check_stmt(Node *n) {
             t = tag_by_name(tv->name);          /* 不建槽：必须是旧标签 */
             if (!t) {
                 diag_code_at("E0300", tv->line, tv->col,
-                    "tag '%s' does not exist -- a re-bind must continue an "
-                    "existing tag; new tags only come from tagging an "
+                    "`tag.%s` does not exist -- a re-bind must continue an "
+                    "existing label; new labels only come from tagging an "
                     "allocation (`let p = tag.x : expr;`)", tv->name);
                 return;
             }
@@ -8242,31 +8362,31 @@ static void check_stmt(Node *n) {
             t = (ts && ts->tag_id) ? tag_slot(ts->tag_id) : NULL;
             if (!t) {
                 diag_code_at("E0520", tv->line, tv->col,
-                    "`%s` is not a tag value -- the re-bind needs "
-                    "`tag.x` (or a `const` tag binding)", tv->name);
+                    "`%s` is not a label value -- the re-bind needs "
+                    "`tag.x` (or a `const` label binding)", tv->name);
                 return;
             }
         } else {
             err_at(n->line, n->col,
-                   "the re-bind needs a tag value after ':' -- write "
+                   "the re-bind needs a label value after ':' -- write "
                    "`tag v : tag.x;` to continue a chain, or "
                    "`tag v : null;` to mark the release as handled");
             return;
         }
         if (t->abstract) {
             err_at(n->line, n->col,
-                   "tag '%s' is a parameter slot -- a re-bind cannot claim "
+                   "`tag.%s` is a parameter slot -- a re-bind cannot claim "
                    "an abstract borrow", t->name);
             return;
         }
         if (t->state != TST_LIVE) {
             err_at(n->line, n->col,
                    t->state == TST_FREED
-                   ? "tag '%s' already ended (freed at line %d) -- a "
+                   ? "this chain already ended (freed at line %d) -- a "
                      "re-bind cannot revive a finished chain"
-                   : "tag '%s' is not tracking any allocation -- nothing "
+                   : "this label is not tracking any allocation -- nothing "
                      "to continue",
-                   t->name, t->free_line);
+                   t->free_line);
             return;
         }
         Symbol *vs = lookup(n->name);
@@ -8281,8 +8401,8 @@ static void check_stmt(Node *n) {
         if (vs->tag_id) {
             TagSlot *old = tag_slot(vs->tag_id);
             diag_code_at("E0522", n->line, n->col,
-                "'%s' already carries tag '%s' -- a re-bind is only for "
-                "lost tagged pointers; free the old tag first",
+                "'%s' already carries label '%s' -- a re-bind is only for "
+                "lost pointers; free the old allocation first",
                 n->name, old ? old->name : "?");
             return;
         }

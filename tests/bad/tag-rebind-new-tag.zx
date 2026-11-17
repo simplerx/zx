@@ -1,4 +1,4 @@
-// expect: must continue an existing tag
+// expect: must continue an existing label
 // expect-code: E0300
 // expect-count: 1
 // §174（用户裁定）：续链不能开新标签——语义是接上断掉的链，只能用

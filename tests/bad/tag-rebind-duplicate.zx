@@ -1,4 +1,4 @@
-// expect: this value already carries tag
+// expect: this value already carries label
 // expect-code: E0522
 // expect-count: 1
 // §174：续链只用于丢失标签的指针——已有标签的值再绑 = 重复标签。
