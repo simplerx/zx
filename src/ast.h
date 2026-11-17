@@ -130,6 +130,12 @@ struct Node {
     int           tag_state;
     void          *ftags;     /* §173：结构体值携带的字段标记账本
                                  * （FieldTag 链，sema 私有类型） */
+
+    /* §174：返回流烙的载体终局状态（0 无 / TC_LIVE / TC_FREED）。
+     * 臂内分配的身份由臂值节点携带、槽状态已被 tag_restore 回滚，
+     * 跨函数返回流在调用点读不到槽状态时靠这个字段继承。
+     * 只挂 NK_FN（sema 私有，编译完擦除）。 */
+    int           ret_tag_state;
 };
 
 Node *node_new(NodeKind k, int line, int col);

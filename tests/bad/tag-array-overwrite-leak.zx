@@ -9,6 +9,6 @@ pub const main = fn () i32 {
     let p = (*u8)std.heapAlloc(std.heap.page, u8, 10);
     xs[0] = p;
     xs[0] = (*u8)std.heapAlloc(std.heap.page, u8, 10);
-    tag.xs : null;
+    tag xs : null;
     return 0;
 };

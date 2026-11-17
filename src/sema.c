@@ -2875,10 +2875,22 @@ static int ft_state_of(int slot) {
  * 返回 false = 不是纯字段链（深度超限/中途出现其他节点）。 */
 static bool ft_path_key(Node *e, char *buf, size_t cap, Node **base_out) {
     const char *names[8];
+    char idxbuf[8][16];
     int np = 0;
     Node *fb = e;
-    while (fb && fb->kind == NK_FIELD && fb->name && np < 8) {
-        names[np++] = fb->name;
+    /* §174：元组字段访问被改写成 NK_FIELD（name=NULL、ival=下标）——
+     * 基址类型是元组的数字分量按 "N" 进点路径；基址是指针的同形状节点
+     * 是方法接收者补的解引用（(*p)），路径在此截断（保守漏报）。 */
+    while (fb && fb->kind == NK_FIELD && np < 8 &&
+           (fb->name || (fb->ival >= 0 && fb->a && fb->a->ty &&
+                         fb->a->ty->kind == TY_TUPLE))) {
+        if (fb->name) {
+            names[np] = fb->name;
+        } else {
+            snprintf(idxbuf[np], sizeof idxbuf[np], "%d", (int)fb->ival);
+            names[np] = idxbuf[np];
+        }
+        np++;
         fb = fb->a;
     }
     if (!fb || np == 0 || np == 8) return false;
@@ -2922,6 +2934,45 @@ static FieldTag *ftags_of_expr(Node *e) {
     if (e->kind == NK_IDENT && e->sym && e->sym->ftags)
         return (FieldTag *)e->sym->ftags;
     return NULL;
+}
+
+static void tag_of_expr(Node *e, int *id, int *state);   /* 定义在贴标一节 */
+static void tuple_stamp_ftags(Node *n);                  /* 定义在元组字面量 */
+
+/* §174：捕获载荷继承主语的 tag 账（switch 的 union(enum) 变体捕获、
+ * if/while/try 的 ?T / !T 捕获）。
+ *  - 主语顶层带 tag 且捕获类型是指针/切片（?*u8 的 .some 捕获、变体
+ *    载荷本身是指针）：捕获符号接同一槽；
+ *  - 主语字段账带「变体.子字段」路径（union(enum) 载荷是聚合）：剥掉
+ *    变体前缀落到捕获符号；
+ *  - 主语字段账无前缀（?S 载荷结构体的字段账）：原样继承。
+ * 不继承就断链：臂内 free(b.0) 记不上账，泄漏终扫误报。 */
+static void tag_capture_inherit(Symbol *cs, Node *subj, const char *vname) {
+    if (!cs) return;
+    int id, st;
+    tag_of_expr(subj, &id, &st);
+    bool ptr_cap = cs->ty && (cs->ty->kind == TY_PTR || cs->ty->kind == TY_SLICE);
+    if (id && st == TC_LIVE && ptr_cap) {
+        cs->tag_id = id;
+        cs->tag_state = st;
+    }
+    FieldTag *sft = ftags_of_expr(subj);
+    for (FieldTag *g = sft; g; g = g->next) {
+        if (g->slot <= 0) continue;
+        if (vname && vname[0]) {
+            size_t vl = strlen(vname);
+            if (!strncmp(g->name, vname, vl) && g->name[vl] == '.') {
+                char *key = ft_path_dup(NULL, g->name + vl + 1);
+                if (key) ft_set((FieldTag **)&cs->ftags, key, g->slot);
+            } else if (!strcmp(g->name, vname) && ptr_cap && !cs->tag_id) {
+                cs->tag_id = g->slot;
+                cs->tag_state = TC_LIVE;
+            }
+        } else {
+            char *key = ft_path_dup(NULL, g->name);
+            if (key) ft_set((FieldTag **)&cs->ftags, key, g->slot);
+        }
+    }
 }
 
 /* 「形参字段被 free」的事实账（与被调/调用先后无关）：被调体检查时
@@ -3096,8 +3147,11 @@ static void tag_of_expr(Node *e, int *id, int *state) {
     /* §173：结构体字段携带的 tag —— `s.name` / `make().name`。符号基址
      * 查符号的字段表，表达式基址（调用/字面量）查节点字段表；铸型/
      * 解包先剥。补丁八：嵌套字段（s.inner.name）——字段链折叠成点
-     * 路径 key（"inner.name"）查账，单层字段是深度 1 的特例。 */
-    if (e->kind == NK_FIELD && e->name && e->a) {
+     * 路径 key（"inner.name"）查账，单层字段是深度 1 的特例。
+     * §174：元组元素（t.0 / t[N] 改写成 name=NULL 的 NK_FIELD）走同
+     * 一条点路径（数字分量）；同形状但基址是指针的是解引用，沿基址追。 */
+    if (e->kind == NK_FIELD && e->a && (e->name ||
+        (e->ival >= 0 && e->a->ty && e->a->ty->kind == TY_TUPLE))) {
         char key[128];
         Node *fb = NULL;
         if (ft_path_key(e, key, sizeof key, &fb)) {
@@ -3123,6 +3177,13 @@ static void tag_of_expr(Node *e, int *id, int *state) {
         }
     }
     if (e->kind == NK_FIELD && e->name && !strcmp(e->name, "ptr") && e->a) {
+        tag_of_expr(e->a, id, state);
+        return;
+    }
+    /* §174：(*p) 解引用（方法接收者自动补的 name=NULL NK_FIELD，基址
+     * 是指针）：贴标指针经解引用身份不变。 */
+    if (e->kind == NK_FIELD && !e->name && e->a && e->a->ty &&
+        e->a->ty->kind == TY_PTR) {
         tag_of_expr(e->a, id, state);
         return;
     }
@@ -3371,15 +3432,20 @@ static Node *tag_ret_source(Node *e) {
     return NULL;
 }
 
-static void tag_scan_returns(Node *n, Node *fn, int *pk, int *pslot, bool *ok) {
+static void tag_scan_returns(Node *n, Node *fn, int *pk, int *pslot, int *pst, bool *ok) {
     if (!n || !*ok) return;
     if (n->kind == NK_FN) return;                    /* 嵌套函数体不算 */
     if (n->kind == NK_RETURN) {
         if (!n->a) { *ok = false; return; }          /* 有的路径不返回值 */
-        /* 已经烙了 tag 的节点（内层调用点/铸型）：工厂链 make()→return */
+        /* 已经烙了 tag 的节点（内层调用点/铸型/臂值 if）：工厂链
+         * make()→return。§174：臂内分配的身份由臂值节点携带（槽状态
+         * 已被 tag_restore 回滚），所以返回节点携带的终局状态一并
+         * 记下（多路 return 状态不一致时作废，调用点回看槽状态）。 */
         if (n->a->tag_id) {
             if (*pk >= 0 || (*pslot > 0 && *pslot != n->a->tag_id)) { *ok = false; return; }
             *pslot = n->a->tag_id;
+            if (*pst == 0) *pst = n->a->tag_state;
+            else if (*pst != n->a->tag_state) *pst = -1;
             return;
         }
         Node *src = tag_ret_source(n->a);
@@ -3396,16 +3462,18 @@ static void tag_scan_returns(Node *n, Node *fn, int *pk, int *pslot, bool *ok) {
         if (src->sym && src->sym->tag_id) {
             if (*pk >= 0 || (*pslot > 0 && *pslot != src->sym->tag_id)) { *ok = false; return; }
             *pslot = src->sym->tag_id;
+            if (*pst == 0) *pst = src->sym->tag_state;
+            else if (*pst != src->sym->tag_state) *pst = -1;
             return;
         }
         *ok = false;
         return;
     }
-    tag_scan_returns(n->a, fn, pk, pslot, ok);
-    tag_scan_returns(n->b, fn, pk, pslot, ok);
-    tag_scan_returns(n->c, fn, pk, pslot, ok);
-    tag_scan_returns(n->d, fn, pk, pslot, ok);
-    for (int i = 0; i < n->nitems; i++) tag_scan_returns(n->items[i], fn, pk, pslot, ok);
+    tag_scan_returns(n->a, fn, pk, pslot, pst, ok);
+    tag_scan_returns(n->b, fn, pk, pslot, pst, ok);
+    tag_scan_returns(n->c, fn, pk, pslot, pst, ok);
+    tag_scan_returns(n->d, fn, pk, pslot, pst, ok);
+    for (int i = 0; i < n->nitems; i++) tag_scan_returns(n->items[i], fn, pk, pslot, pst, ok);
 }
 
 /* 直接调用的目标 fn 节点（直呼名字/实例化；函数指针分发拿不到）。 */
@@ -3441,11 +3509,16 @@ static int fn_ret_cache(Node *fn, int *k_out, int *slot_out) {
 static void fn_stamp_ret_flow(Node *fn) {
     if (!fn || fn->kind != NK_FN || !fn->b) return;
     if (fn->tag_state != 0 || fn->index != 0) return;      /* 已烙 */
-    int k = -1, slot = 0;
+    int k = -1, slot = 0, st = 0;
     bool ok = true;
-    tag_scan_returns(fn->b, fn, &k, &slot, &ok);
+    tag_scan_returns(fn->b, fn, &k, &slot, &st, &ok);
     if (ok && k >= 0) fn->tag_state = k + 1;
-    else if (ok && slot > 0) fn->index = slot;
+    else if (ok && slot > 0) {
+        fn->index = slot;
+        /* §174：臂内分配由臂值携带身份、槽状态已回滚——把返回节点
+         * 的终局状态烙进 fn，调用点槽状态 UNBOUND 时靠它继承。 */
+        if (st == TC_LIVE || st == TC_FREED) fn->ret_tag_state = st;
+    }
     else { fn->tag_state = -1; fn->index = -1; }
     /* §173：结构体返回值携带的字段账烙到 fn（多路 return 合并）；
      * 调用点继承后 DECL 绑到载体符号，`s.name` 的 free/解引用即可追。 */
@@ -5953,6 +6026,12 @@ static void tag_call_flow(Node *n) {
                 if (t && t->state != TST_UNBOUND) {
                     n->tag_id = slot;
                     n->tag_state = (t->state == TST_FREED) ? TC_FREED : TC_LIVE;
+                } else if (fn->ret_tag_state) {
+                    /* §174：臂内分配的身份由臂值节点携带、槽状态已被
+                     * tag_restore 回滚（UNBOUND）——继承返回节点烙的
+                     * 终局状态，调用点照常对账。 */
+                    n->tag_id = slot;
+                    n->tag_state = fn->ret_tag_state;
                 }
             }
             }
@@ -6140,10 +6219,37 @@ static Type *check_struct_lit(Node *n, Type *expect) {
             Type *vt = check_expr(n->items[i]->a, t->fields[i].ty);
             coerce_node(n->items[i]->a, vt, t->fields[i].ty, "tuple element");
         }
+        tuple_stamp_ftags(n);
         return type_of(n, t);
     }
     (void)expect;
     return BAD(n, "`%s` is not a struct, union or tuple", ty_str(t));
+}
+
+/* §174：元组字面量的元素账——第 i 个元素带 tag 烙成 "i"→槽；内层是
+ * 聚合字面量时把它的字段账拍平（.{p, 0} 内层 .{.name = ptr} →
+ * "0.name"→槽）。 tagged-union 变体载荷是元组时，check_lit_fields 的
+ * 拍平分支靠这里先把载荷元组的账立起来。 */
+static void tuple_stamp_ftags(Node *n) {
+    for (int i = 0; i < n->nitems; i++) {
+        Node *it = n->items[i];
+        int ftid, ftst;
+        tag_of_expr(it, &ftid, &ftst);
+        char nb[16];
+        snprintf(nb, sizeof nb, "%d", i);
+        char *pk = ft_path_dup(NULL, nb);       /* ft_set 只存指针：必须是持久副本 */
+        if (!pk) continue;
+        if (ftid && (ftst == TC_LIVE || ftst == TC_FREED)) {
+            ft_set((FieldTag **)&n->ftags, pk, ftid);
+        } else {
+            FieldTag *inft = ftags_of_expr(it);
+            for (FieldTag *g = inft; g; g = g->next) {
+                if (g->slot <= 0) continue;
+                char *key = ft_path_dup(nb, g->name);
+                if (key) ft_set((FieldTag **)&n->ftags, key, g->slot);
+            }
+        }
+    }
 }
 
 static Type *check_tuple_lit(Node *n, Type *expect) {
@@ -6152,6 +6258,7 @@ static Type *check_tuple_lit(Node *n, Type *expect) {
             Type *it = check_expr(n->items[i], expect->fields[i].ty);
             coerce_node(n->items[i], it, expect->fields[i].ty, "tuple element");
         }
+        tuple_stamp_ftags(n);
         return type_of(n, expect);
     }
     Type **items = calloc((size_t)(n->nitems ? n->nitems : 1), sizeof(Type *));
@@ -6159,6 +6266,7 @@ static Type *check_tuple_lit(Node *n, Type *expect) {
     Type *t = ty_tuple(items, n->nitems);
     free(items);
     n->ty = t;
+    tuple_stamp_ftags(n);
     if (expect && !ty_eq(expect, t) && expect->kind != TY_VOID)
         coerce_node(n, t, expect, "value");
     return t;
@@ -7898,19 +8006,35 @@ static void check_stmt(Node *n) {
             return;
         }
         if (n->b && n->b->kind == NK_NULL) {
-            /* §173 补丁六/十：手动标记——`tag.<名> : null;` 由使用者
-             * 宣告该分配的释放责任自负。元素级释放追踪不到 free 终点
-             * 时的逃生口：终扫 E0513 报出后，在这里标记即回到正常流程
-             * （之后解引用/再 free 照常报错）。名字只认**使用者自己的
-             * 变量名**：接收分配的载体（`tag.p : null;`）或存入的数组
-             * （`tag.xs : null;`，标记存入它的全部槽）。自动槽名
-             * allocN 不再可写——序号全编译单元递增，引入其他库后同名
-             * 槽指向不可预测。 */
+            /* §174：点形式终结标记已废弃——`tag.p : null;` 里 p 是 tag
+             * 名，与"标记用使用者自己的变量名"冲突。统一写
+             * `tag p : null;`（空格形式，p 是变量名）。 */
+            diag_code_at("E0519", n->line, n->col,
+                "the `tag.<name> : null` mark form is retired -- mark by "
+                "your own variable name: `tag %s : null;`", n->name);
+            return;
+        }
+        err_at(n->line, n->col,
+               "a tagged allocation must be bound to a `let` -- write "
+               "`let p = tag.%s : expr;`", n->name);
+        check_expr(n->b, NULL);
+        return;
+
+    case NK_TAG_BIND: {
+        /* §174：语句位置（无 `= expr`）——已有变量的重绑/终结。
+         *   tag v : tag.x;   已有变量续上 tag.x 的链（值必须无标签）
+         *   tag v : null;    终结标记（释放责任自负，替代点形式） */
+        if (n->b) {          /* 有值：走 let 降糖路径（check_expr） */
+            check_expr(n, NULL);
+            return;
+        }
+        if (n->a && n->a->kind == NK_NULL) {
             TagSlot *marks[64];
             int nmarks = 0;
             for (Scope *sc = g_scope; sc && nmarks < 64; sc = sc->parent) {
                 Symbol *s = scope_find_here(sc, n->name);
                 if (!s) continue;
+                s->used = true;                 /* 标记也算使用（E0410） */
                 /* 载体变量：当前绑定的 tag。 */
                 if (s->tag_id && nmarks < 64) {
                     TagSlot *ts = tag_slot(s->tag_id);
@@ -7934,8 +8058,8 @@ static void check_stmt(Node *n) {
             if (!nmarks)
                 err_at(n->line, n->col,
                        "no allocation named '%s' -- mark by a variable name: "
-                       "the carrier it was bound to (`tag.p : null;`) or the "
-                       "array holding it (`tag.xs : null;`)",
+                       "the carrier it was bound to (`tag p : null;`) or the "
+                       "array holding it (`tag xs : null;`)",
                        n->name);
             else for (int i = 0; i < nmarks; i++) {
                 TagSlot *ts = marks[i];
@@ -7949,11 +8073,78 @@ static void check_stmt(Node *n) {
             }
             return;
         }
-        err_at(n->line, n->col,
-               "a tagged allocation must be bound to a `let` -- write "
-               "`let p = tag.%s : expr;`", n->name);
-        check_expr(n->b, NULL);
+        /* 续到已有变量：tag 必须已存在（不建槽）、槽 LIVE、变量无标签 */
+        TagSlot *t = NULL;
+        Node *tv = n->a;
+        for (int g = 0; g < 6 && tv &&
+             (tv->kind == NK_CAST || tv->kind == NK_UNWRAP); g++)
+            tv = tv->kind == NK_CAST ? (tv->b ? tv->b : tv->a) : tv->a;
+        if (tv && tv->kind == NK_TAG_APPLY && !tv->b) {
+            t = tag_by_name(tv->name);          /* 不建槽：必须是旧标签 */
+            if (!t) {
+                diag_code_at("E0300", tv->line, tv->col,
+                    "tag '%s' does not exist -- a re-bind must continue an "
+                    "existing tag; new tags only come from tagging an "
+                    "allocation (`let p = tag.x : expr;`)", tv->name);
+                return;
+            }
+        } else if (tv && tv->kind == NK_IDENT) {
+            Symbol *ts = lookup(tv->name);
+            t = (ts && ts->tag_id) ? tag_slot(ts->tag_id) : NULL;
+            if (!t) {
+                diag_code_at("E0520", tv->line, tv->col,
+                    "`%s` is not a tag value -- the re-bind needs "
+                    "`tag.x` (or a `const` tag binding)", tv->name);
+                return;
+            }
+        } else {
+            err_at(n->line, n->col,
+                   "the re-bind needs a tag value after ':' -- write "
+                   "`tag v : tag.x;` to continue a chain, or "
+                   "`tag v : null;` to mark the release as handled");
+            return;
+        }
+        if (t->abstract) {
+            err_at(n->line, n->col,
+                   "tag '%s' is a parameter slot -- a re-bind cannot claim "
+                   "an abstract borrow", t->name);
+            return;
+        }
+        if (t->state != TST_LIVE) {
+            err_at(n->line, n->col,
+                   t->state == TST_FREED
+                   ? "tag '%s' already ended (freed at line %d) -- a "
+                     "re-bind cannot revive a finished chain"
+                   : "tag '%s' is not tracking any allocation -- nothing "
+                     "to continue",
+                   t->name, t->free_line);
+            return;
+        }
+        Symbol *vs = lookup(n->name);
+        if (!vs || (vs->kind != SK_VAR && vs->kind != SK_LET &&
+                    vs->kind != SK_PARAM)) {
+            err_at(n->line, n->col,
+                   "no variable named '%s' -- the value-less re-bind "
+                   "retags an existing variable; declare it first "
+                   "(`let v = xs[i];`)", n->name);
+            return;
+        }
+        if (vs->tag_id) {
+            TagSlot *old = tag_slot(vs->tag_id);
+            diag_code_at("E0522", n->line, n->col,
+                "'%s' already carries tag '%s' -- a re-bind is only for "
+                "lost tagged pointers; free the old tag first",
+                n->name, old ? old->name : "?");
+            return;
+        }
+        vs->tag_id = (int)(t - g_tslots) + 1;
+        vs->tag_state = TC_LIVE;
+        t->carrier = vs;
+        t->own_line = n->line;
+        t->own_col = n->col;
+        t->rt_pending = false;      /* 续链即接管运行期写入 */
         return;
+    }
 
     case NK_FN:
         if (n->sym) ensure(n->sym);
@@ -8226,7 +8417,8 @@ static Type *check_if(Node *n, Type *expect) {
             Symbol *s = scope_add(&sc, n->name, SK_CAPTURE);
             if (s) { s->ty = cap_ty; s->state = 2;
                      s->reg_slot = region_of_expr(n->a);
-                     s->cap_src = n->a; }
+                     s->cap_src = n->a;
+                     tag_capture_inherit(s, n->a, NULL); }
         }
         tt = (known && !cv->bval) ? ty_void() : check_arm(n->b, expect);
         if (!(known && !cv->bval)) {
@@ -8357,7 +8549,8 @@ static Type *check_while(Node *n, Type *expect) {
         scope_push(&sc);
         if (cap_ty && n->name) {
             Symbol *s = scope_add(&sc, n->name, SK_CAPTURE);
-            if (s) { s->ty = cap_ty; s->state = 2; }
+            if (s) { s->ty = cap_ty; s->state = 2;
+                     tag_capture_inherit(s, n->a, NULL); }
         }
         TagSnap snapW;                     /* §170：循环配平 */
         tag_snap(&snapW);
@@ -8812,6 +9005,18 @@ static Type *check_switch(Node *n, Type *expect) {
     Type *s = check_expr(n->a, NULL);
     Type *result = NULL;
 
+    /* §174：switch 臂与 if 臂同口径（臂快照 / 出口对账 / 逐臂 join）。
+     * 此前臂间不回滚：第一臂的 free 事件泄漏进第二臂（两臂各 free
+     * 一次被假报 E0509 双重释放），臂内分配也无法与臂值对账。 */
+    TagSnap snapS;
+    tag_snap(&snapS);
+    ArmExit exAcc = { 0, TC_NONE, NULL, false };
+    Symbol *chAcc[TAG_SNAP_MAX];
+    FieldTag *cfAcc[TAG_SNAP_MAX];
+    int nAcc = 0;
+    n->tag_id = 0;
+    n->tag_state = TC_NONE;
+
     for (int i = 0; i < n->nitems; i++) {
         Node *arm = n->items[i];
         Label *al = arm->label ? label_push(arm->label, false) : NULL;
@@ -8851,20 +9056,85 @@ static Type *check_switch(Node *n, Type *expect) {
             }
         }
 
+        ArmExit ex = { 0, TC_NONE, NULL, false };
+        Symbol *chA[TAG_SNAP_MAX];
+        FieldTag *cfA[TAG_SNAP_MAX];
+        int nA = 0;
         {
             Scope sc;
             scope_push(&sc);
             if (arm->name && cap_ty) {
                 Symbol *cs = scope_add(&sc, arm->name, SK_CAPTURE);
-                if (cs) { cs->ty = cap_ty; cs->state = 2; }
+                if (cs) {
+                    cs->ty = cap_ty;
+                    cs->state = 2;
+                    /* §174：捕获载荷继承主语 tag 账（变体名取自模式） */
+                    const char *vn =
+                        (arm->nitems == 1 && arm->items[0]->kind == NK_FIELD &&
+                         arm->items[0]->name) ? arm->items[0]->name : NULL;
+                    tag_capture_inherit(cs, n->a, vn);
+                }
             }
             Type *at = check_arm(arm->a, expect);
+
+            /* §174：臂出口对账（同 check_if）：臂内释放的 tag 必须以
+             * null 收尾，臂内分配的必须由臂值传出；对完先收集字段账
+             * 改动再恢复快照。 */
+            Node *armval = lb ? lb->val
+                         : ((arm->a && arm->a->kind == NK_BLOCK) ? arm->a->d : arm->a);
+            ex = tag_arm_reconcile(armval, snapS.state, snapS.n, snapS.total);
+            nA = ft_arm_collect(&snapS, chA, cfA, TAG_SNAP_MAX);
+            tag_restore(&snapS);
+
             scope_pop(&sc);
 
             if (al) { at = al->has ? al->ty : ty_void(); label_pop(); }
 
             if (!result) result = at;
             else         result = unify(arm, result, at);
+        }
+
+        /* 出口逐臂 join（§170 join 表的 N 臂推广）+ 字段账逐臂保守
+         * 交集（某字段全部臂一致才保留，单臂改动丢弃——漏报不假报）。
+         * 交集直接写回符号：chAcc 的符号就是 g_locals 链上的活符号。 */
+        if (i == 0) {
+            exAcc = ex;
+            for (int k = 0; k < nA && k < TAG_SNAP_MAX; k++) {
+                chAcc[k] = chA[k];
+                cfAcc[k] = cfA[k];
+            }
+            nAcc = nA;
+        } else {
+            tag_join_arms(n, exAcc, ex);
+            exAcc.tag = n->tag_id;
+            exAcc.state = n->tag_state;
+            exAcc.val = NULL;
+            exAcc.stmt = exAcc.stmt || ex.stmt;
+            for (int a2 = 0; a2 < nAcc && a2 < TAG_SNAP_MAX; a2++)
+                for (int b2 = 0; b2 < nA && b2 < TAG_SNAP_MAX; b2++)
+                    if (chA[b2] == chAcc[a2]) {
+                        FieldTag *nt = ft_arms_intersect(cfAcc[a2], cfA[b2]);
+                        chAcc[a2]->ftags = nt;
+                        cfAcc[a2] = nt;
+                        break;
+                    }
+        }
+    }
+
+    /* §173：语句臂的臂内释放——join 后终局落账（槽 + 所有局部载体）：
+     * 后续解引用 E0512，再 free E0509。 */
+    if (exAcc.stmt && n->tag_id) {
+        TagSlot *t = tag_slot(n->tag_id);
+        if (t && t->state == TST_LIVE) {
+            t->state = TST_FREED;
+            t->ever_freed = true;
+            t->free_line = n->line;
+            t->free_col = n->col;
+            for (Symbol *ls = g_locals; ls; ls = ls->locals_next)
+                if (ls->tag_id == n->tag_id && ls->tag_state == TC_LIVE)
+                    ls->tag_state = TC_FREED;
+            if (t->carrier && t->carrier->tag_state == TC_LIVE)
+                t->carrier->tag_state = TC_FREED;
         }
     }
 

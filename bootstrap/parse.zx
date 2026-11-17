@@ -2356,24 +2356,30 @@ pub const Parser = struct {
         return (error)Fail.f;
     };
 
-    // §174 续链：`tag newVar : tag.myTag = oldVar;` —— 给丢失标签的旧值
-    // 绑回一个**已存在**的 tag。降糖成 `let newVar = <tag_bind>;`：
-    // 声明机制全部走现有 let 路径（C 版 sema 同构）。
+    // §174：`tag var : tag.x = old;` —— 给丢失标签的旧值绑回一个**已存在**
+    // 的 tag（降糖成 `let var = <tag_bind>`）。`= old` 可省：省略时是
+    // 语句位置的已有变量重绑/终结——`tag var : tag.x;` 续链、
+    // `tag var : null;` 终结标记（替代已废弃的 `tag.p : null` 点形式）。
     pub const parse_tag_rebind = fn (self: *Parser) !*Node {
         let t = self.advance();                       // tag
-        let d = self.new_at(NK.decl, t);
-        d.op2 = 1;                                    // let 语义：不可变载体
-        d.name = try self.take_ident();               // newVar
-        try self.expect(lex.Kind.colon);
         let bind = self.new_at(NK.tag_bind, t);
+        bind.name = try self.take_ident();            // var
+        try self.expect(lex.Kind.colon);
         // tag 值用不含赋值层的 parse_binary：`=` 属于本语句，不能被
         // parse_expr 吃成赋值表达式。
-        bind.a = try self.parse_binary(1);            // tag.myTag / const 名
-        try self.expect(lex.Kind.assign);
-        bind.b = try self.parse_expr();               // 丢失标签的旧值
+        bind.a = try self.parse_binary(1);            // tag.myTag / 载体名 / null
+        if (self.at(lex.Kind.assign)) {
+            _ = self.advance();
+            bind.b = try self.parse_expr();           // 丢失标签的旧值
+            try self.expect(lex.Kind.semi);
+            let d = self.new_at(NK.decl, t);
+            d.op2 = 1;                                // let 语义：不可变载体
+            d.name = bind.name;
+            d.b = bind;
+            return d;
+        }
         try self.expect(lex.Kind.semi);
-        d.b = bind;
-        return d;
+        return bind;                                  // 语句：已有变量的重绑/终结
     };
 
     pub const parse_stmt = fn (self: *Parser) !*Node {

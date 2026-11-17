@@ -946,25 +946,34 @@ static Node *parse_dot_brace(P *p, bool array_lit) {
     return n;
 }
 
-/* §174 续链：`tag newVar : tag.myTag = oldVar;` —— 给丢失标签的旧值
- * 绑回一个**已存在**的 tag。降糖成 `let newVar = <NK_TAG_BIND>;`：
- * 声明机制（符号/栈位/局部追踪/后端）全部走现有 let 路径。 */
+/* §174：`tag var : tag.x = old;` —— 给丢失标签的旧值绑回一个**已存在**
+ * 的 tag（降糖成 `let var = <NK_TAG_BIND>`：声明机制全部走现有 let 路径）。
+ * `= old` 可省：省略时是语句位置的**已有变量**重绑/终结——
+ *   tag var : tag.x;    已有变量续上 tag.x 的链
+ *   tag var : null;     终结标记（释放责任自负；替代已废弃的
+ *                       `tag.p : null` 点形式——点形式里 var 是 tag 名，
+ *                       与"使用者自己的变量名"冲突） */
 static Node *parse_tag_rebind(P *p) {
     Token *t = advance(p);                       /* tag */
-    Node *d = node_new(NK_DECL, t->line, t->col);
-    d->flag = true;                              /* let 语义：不可变载体 */
-    d->op = 1;
-    d->name = take_ident(p);                     /* newVar */
-    expect(p, TOK_COLON);
     Node *bind = node_new(NK_TAG_BIND, t->line, t->col);
+    bind->name = take_ident(p);                  /* var */
+    expect(p, TOK_COLON);
     /* tag 值用不含赋值层的 parse_binary：`=` 属于本语句，不能被
      * parse_expr 吃成赋值表达式。 */
-    bind->a = parse_binary(p, 1);                /* tag 值：tag.myTag / const 名 */
-    expect(p, TOK_ASSIGN);
-    bind->b = parse_expr(p);                     /* 丢失标签的旧值 */
+    bind->a = parse_binary(p, 1);                /* tag 值：tag.myTag / 载体名 / null */
+    if (at(p, TOK_ASSIGN)) {
+        advance(p);
+        bind->b = parse_expr(p);                 /* 丢失标签的旧值 */
+        expect(p, TOK_SEMI);
+        Node *d = node_new(NK_DECL, t->line, t->col);
+        d->flag = true;                          /* let 语义：不可变载体 */
+        d->op = 1;
+        d->name = bind->name;
+        d->b = bind;
+        return d;
+    }
     expect(p, TOK_SEMI);
-    d->b = bind;
-    return d;
+    return bind;                                 /* 语句：已有变量的重绑/终结 */
 }
 
 /* tag 指针生命周期标签（上下文关键字：`tag` 平时是普通标识符，只有
