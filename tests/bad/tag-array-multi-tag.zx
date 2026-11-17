@@ -1,10 +1,9 @@
-// expect: may hold several different tags
+// expect: was stored into `xs[i]` with a runtime index
 // expect-code: E0521
-// expect-count: 1
-// §173 补丁十：运行期索引混存多个 tag——哪个元素装哪个 tag 是运行期
-// 事实，编译期无法指认（值追踪救不了）。读出/free 时查容器账：
-// LIVE 槽不止一个 = 使用点断线报 E0521，标签不静默丢失；终扫不再兜底
-// 这种情况（写入已进容器账，free 记不上）。
+// expect-count: 2
+// §174：运行期索引混存多个贴标指针——两个槽都断线进 pending，没
+// 续链/没终结则终扫逐槽报 E0521（标签绝不静默丢失）。续链写法见
+// good/tag-rebind-chain。
 const std = @mod("std");
 pub const main = fn () i32 {
     var xs = std.stackAlloc(*u8, 4);
@@ -14,6 +13,5 @@ pub const main = fn () i32 {
     let j = 1;
     xs[i] = p;
     xs[j] = q;
-    std.heap.page.free(std.heap.page.ctx, xs[i], 10);
     return 0;
 };

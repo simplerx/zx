@@ -61,6 +61,12 @@ typedef enum {
     NK_TRY_CAPTURE,     /* try expr err { ... }：a = !T/?T 表达式，
                          * name = 错误捕获名，b = 捕获块（产出兜底值 T）。
                          * 出错不外抛，在块里处理；tag 臂账本挂在本节点上。 */
+    NK_TAG_BIND,        /* §174 续链：tag newVar : tag.myTag = oldVar; —— parse
+                         * 降糖成 `let newVar = <本节点>`。a = tag 值（已存在
+                         * 的 tag.myTag / const 名），b = 丢失标签的旧值；
+                         * ival = tag 账本 id（sema 填）。只绑**无标签**值。
+                         * 追加在末尾——与 bootstrap/parse.zx 的 NK 同序
+                         * 镜像，插在中间会让所有旧编号漂移。 */
 } NodeKind;
 
 struct Node;

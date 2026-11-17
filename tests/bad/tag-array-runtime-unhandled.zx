@@ -1,0 +1,16 @@
+// expect: was stored into `xs[i]` with a runtime index
+// expect-code: E0521
+// expect-count: 1
+// §174（用户裁定收紧）：运行期索引进数组，追踪必断线——写入记
+// pending，没续链/没终结则终扫报 E0521（报在写入处），使用者必须
+// 处理：常索引 / 续链接管 / 手动终结，标签绝不静默丢失。
+const std = @mod("std");
+const mk = fn () *u8 {
+    return (*u8)std.heapAlloc(std.heap.page, u8, 10);
+};
+pub const main = fn () i32 {
+    var xs = std.stackAlloc(*u8, 4);
+    let i = 1;
+    xs[i] = mk();
+    return 0;
+};

@@ -127,6 +127,7 @@ pub const NK = enum {
     vec,              // @Vec(T, N) —— 同样追加在末尾（§162）
     tag_apply,        // tag.name / tag.name : expr —— 追加在末尾（§170）
     try_capture,      // try expr err { ... } —— 追加在末尾（§171）
+    tag_bind,         // §174 续链：tag v : tag.x = e; —— 追加在末尾
 };
 
 pub const Node = struct {
@@ -210,6 +211,7 @@ const nk_name = fn (k: NK) []const u8 {
         .vec: "vec";
         .tag_apply: "tag";
         .try_capture: "try";
+        .tag_bind: "tagbind";
     };
 };
 
@@ -1546,6 +1548,12 @@ pub const Parser = struct {
             }
             return n;
         }
+        if (t.kind == lex.Kind.ident && std.str.eq(self.tok_text(t), "tag") &&
+            self.peek_tok(1).kind == lex.Kind.ident &&
+            self.peek_tok(2).kind == lex.Kind.colon) {
+            // §174 续链（表达式位置也收，语句位置由 parse_stmt 先拦）
+            return self.parse_tag_rebind();
+        }
         let prim = try self.parse_primary();
         return self.parse_postfix(prim);
     };
@@ -2348,6 +2356,26 @@ pub const Parser = struct {
         return (error)Fail.f;
     };
 
+    // §174 续链：`tag newVar : tag.myTag = oldVar;` —— 给丢失标签的旧值
+    // 绑回一个**已存在**的 tag。降糖成 `let newVar = <tag_bind>;`：
+    // 声明机制全部走现有 let 路径（C 版 sema 同构）。
+    pub const parse_tag_rebind = fn (self: *Parser) !*Node {
+        let t = self.advance();                       // tag
+        let d = self.new_at(NK.decl, t);
+        d.op2 = 1;                                    // let 语义：不可变载体
+        d.name = try self.take_ident();               // newVar
+        try self.expect(lex.Kind.colon);
+        let bind = self.new_at(NK.tag_bind, t);
+        // tag 值用不含赋值层的 parse_binary：`=` 属于本语句，不能被
+        // parse_expr 吃成赋值表达式。
+        bind.a = try self.parse_binary(1);            // tag.myTag / const 名
+        try self.expect(lex.Kind.assign);
+        bind.b = try self.parse_expr();               // 丢失标签的旧值
+        try self.expect(lex.Kind.semi);
+        d.b = bind;
+        return d;
+    };
+
     pub const parse_stmt = fn (self: *Parser) !*Node {
         let t = self.cur();
 
@@ -2449,6 +2477,14 @@ pub const Parser = struct {
             }
             try self.expect(lex.Kind.semi);
             return n;
+        }
+
+        // §174 续链：`tag v : tag.x = e;`（裸 tag + 名字 + ':'）——必须在
+        // label/yield 判定之前收，否则 `v :` 会被当成收割。
+        if (t.kind == lex.Kind.ident && std.str.eq(self.tok_text(t), "tag") &&
+            self.peek_tok(1).kind == lex.Kind.ident &&
+            self.peek_tok(2).kind == lex.Kind.colon) {
+            return self.parse_tag_rebind();
         }
 
         // IDENT ':' —— yield 或带标签的构造

@@ -6043,6 +6043,11 @@ static void ex(Buf *b, Node *n) {
         ex(b, n->b);
         return;
 
+    /* §174 续链：同上——运行期就是被绑的表达式本身（let 的初值） */
+    case NK_TAG_BIND:
+        ex(b, n->b);
+        return;
+
     /* 有值的控制流当普通表达式用（`std.println("{}", if (c) 1 else 0)`、
      * `f(s: blk)`、switch 表达式……）：开一个临时量，用 gen_value 把值写
      * 进去，表达式本身引用临时量。line() 在这里落盘的语句会打印在"包着

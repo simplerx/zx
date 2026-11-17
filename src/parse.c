@@ -946,13 +946,35 @@ static Node *parse_dot_brace(P *p, bool array_lit) {
     return n;
 }
 
+/* §174 续链：`tag newVar : tag.myTag = oldVar;` —— 给丢失标签的旧值
+ * 绑回一个**已存在**的 tag。降糖成 `let newVar = <NK_TAG_BIND>;`：
+ * 声明机制（符号/栈位/局部追踪/后端）全部走现有 let 路径。 */
+static Node *parse_tag_rebind(P *p) {
+    Token *t = advance(p);                       /* tag */
+    Node *d = node_new(NK_DECL, t->line, t->col);
+    d->flag = true;                              /* let 语义：不可变载体 */
+    d->op = 1;
+    d->name = take_ident(p);                     /* newVar */
+    expect(p, TOK_COLON);
+    Node *bind = node_new(NK_TAG_BIND, t->line, t->col);
+    /* tag 值用不含赋值层的 parse_binary：`=` 属于本语句，不能被
+     * parse_expr 吃成赋值表达式。 */
+    bind->a = parse_binary(p, 1);                /* tag 值：tag.myTag / const 名 */
+    expect(p, TOK_ASSIGN);
+    bind->b = parse_expr(p);                     /* 丢失标签的旧值 */
+    expect(p, TOK_SEMI);
+    d->b = bind;
+    return d;
+}
+
 /* tag 指针生命周期标签（上下文关键字：`tag` 平时是普通标识符，只有
  * 「裸 tag + . + 名字」形态才按标签语法收，v.tag / 局部变量 tag 不受影响）：
  *   tag.close;           关闭本模块的强制贴标（库/旧代码逃生口）
  *   （§172：tag.name 首次引用自动建槽，没有声明语句，也没有 .static）
  *   tag.name : expr      贴标：把 expr（heapAlloc 分配或已贴标载体）
  *                        绑到该标签上
- * 调用点已保证 cur 是裸 ident "tag" 且 peek(1) 是 '.'、peek(2) 是 ident。 */
+ *   tag v : tag.x = e;   §174 续链（parse_tag_rebind）
+ * 调用点已保证 cur 是裸 ident "tag" 且形态匹配。 */
 static Node *parse_tag(P *p) {
     Token *t = advance(p);                       /* tag（裸 ident） */
     expect(p, TOK_DOT);
@@ -1057,12 +1079,15 @@ static Node *parse_primary(P *p) {
     case TOK_KW_UNDEF: advance(p); return node_new(NK_UNDEF, t->line, t->col);
 
     case TOK_IDENT: {
-        /* tag.name / tag.name : expr —— 上下文关键字：只有「裸 tag + .
-         * + 名字」这个形态按标签语法收；`v.tag`（有 base）与名为 tag
-         * 的局部变量完全不受影响。 */
-        if (t->len == 3 && !memcmp(t->start, "tag", 3) &&
-            peek(p, 1)->kind == TOK_DOT && peek(p, 2)->kind == TOK_IDENT) {
-            return parse_tag(p);
+        /* tag.name / tag.name : expr / tag v : tag.x = e —— 上下文关键字：
+         * 只有「裸 tag + . + 名字」与「裸 tag + 名字 + :」（§174 续链）
+         * 两个形态按标签语法收；`v.tag`（有 base）与名为 tag 的局部
+         * 变量完全不受影响。 */
+        if (t->len == 3 && !memcmp(t->start, "tag", 3)) {
+            if (peek(p, 1)->kind == TOK_DOT && peek(p, 2)->kind == TOK_IDENT)
+                return parse_tag(p);
+            if (peek(p, 1)->kind == TOK_IDENT && peek(p, 2)->kind == TOK_COLON)
+                return parse_tag_rebind(p);
         }
         /* label on a block/construct in expression position:  body: { … }
          * `true` / `false` 除外——它们是 bool 字面量，不是标签。 */
@@ -1892,6 +1917,13 @@ static Node *parse_stmt(P *p) {
     default: break;
     }
 
+    /* §174 续链：`tag v : tag.x = e;`（裸 tag + 名字 + ':'）——必须在
+     * label/yield 判定之前收，否则 `v :` 会被当成收割。 */
+    if (t->kind == TOK_IDENT && t->len == 3 &&
+        !memcmp(t->start, "tag", 3) &&
+        peek(p, 1)->kind == TOK_IDENT && peek(p, 2)->kind == TOK_COLON)
+        return parse_tag_rebind(p);
+
     /* IDENT ':' — yield, or a label on a construct */
     if (t->kind == TOK_IDENT && peek(p, 1)->kind == TOK_COLON && !is_bool_word(t)) {
         TokKind after = peek(p, 2)->kind;
@@ -2098,6 +2130,7 @@ static const char *nk_name(NodeKind k) {
     case NK_ERR_SET:  return "errset";
     case NK_VEC_TYPE: return "vec";
     case NK_TAG_APPLY: return "tag";
+    case NK_TAG_BIND:  return "tagbind";
     case NK_TRY_CAPTURE: return "try";
     case NK_ROOT: return "root";
     }

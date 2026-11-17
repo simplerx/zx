@@ -2789,6 +2789,10 @@ typedef struct {
                               * 跨函数精确释放判定用） */
     bool        arr_esc;     /* §173 补丁六：逃进数组/元组元素——
                               * 元素级追踪断线时终扫给手动标记提示 */
+    bool        rt_pending;  /* §174：运行期索引写入过数组（追踪必断线）。
+                              * 续链接管 / 手动终结即清；没处理则终扫报
+                              * E0521——"必须处理"而非当场拦死。 */
+    int         rt_line, rt_col;   /* 运行期写入处（E0521 报出点） */
 } TagSlot;
 static TagSlot *g_tslots;
 static int      g_ntslots, g_ctslots;
@@ -2948,42 +2952,23 @@ static bool pff_has(Symbol *ps, const char *fname) {
     return false;
 }
 
-/* §173 补丁十：数组/元组元素的贴标指针，两层账：
- *  - 精确元素账 (base, idx>=0) → slot：常索引写入，读写/free 都能
- *    指认元素——`xs[0] = p;` 之后 `free(xs[0])` 记 p 的账、
- *    `let q = xs[0];` 标签精确跟出来（槽共享）。同 (base,idx) 覆盖
- *    换账，旧槽若再无载体由终扫 E0513 兜底。
- *  - 容器账 (base, -1) → slot：运行期索引写入（xs[i]）。编译期无法
- *    指认元素（i↔元素的对应是运行期事实，静态恢复不可判定——值
- *    追踪救不了），但**标签不静默丢失**：读出/free 时查容器账，
- *    数组里 LIVE 槽只有一个 → 精确继承（单 tag 数组全自动）；
- *    >=2 个 → 使用点报 E0521（消费现场断线，比终扫更早更准），
- *    提示常索引化或手动标记。FREED 槽不入集合——循环"存了又
- *    free"配对模式每轮容器账 LIVE 槽只有当前轮，天然工作。
- * 运行期写入同时作废该 base 的全部精确账（任何元素都可能被覆盖）。 */
+/* §173 补丁十（用户裁定收紧）：数组/元组元素的贴标指针，只有**精确
+ * 元素账 (base, idx>=0) → slot**——常索引写入。运行期索引（xs[i]，
+ * i 是变量）编译期无法指认元素（i↔元素的对应是运行期事实，静态恢复
+ * 不可判定），写入/读出/free 一律**报 E0521**（标签绝不静默丢失），
+ * 使用者必须显式处理：改常索引、用续链语句接回（tag v : tag.x =
+ * xs[i];）、或终结（tag.p : null;）。同 (base,idx) 覆盖换账，旧槽若
+ * 再无载体由终扫 E0513 兜底。 */
 typedef struct { Symbol *base; int idx; int slot; } ArrEsc;
 static ArrEsc *g_aesc;
 static int g_naesc, g_caesc;
 
 static void aesc_add(Symbol *base, int idx, int slot) {
-    if (idx < 0) {                       /* 容器账：按槽去重 */
-        for (int i = 0; i < g_naesc; i++)
-            if (g_aesc[i].base == base && g_aesc[i].idx < 0 &&
-                g_aesc[i].slot == slot)
-                return;
-        /* 运行期写入覆盖了未知元素——该 base 的精确账全部作废 */
-        int w = 0;
-        for (int i = 0; i < g_naesc; i++)
-            if (!(g_aesc[i].base == base && g_aesc[i].idx >= 0))
-                g_aesc[w++] = g_aesc[i];
-        g_naesc = w;
-    } else {
-        for (int i = 0; i < g_naesc; i++)
-            if (g_aesc[i].base == base && g_aesc[i].idx == idx) {
-                g_aesc[i].slot = slot;   /* 覆盖写入：换账 */
-                return;
-            }
-    }
+    for (int i = 0; i < g_naesc; i++)
+        if (g_aesc[i].base == base && g_aesc[i].idx == idx) {
+            g_aesc[i].slot = slot;          /* 覆盖写入：换账 */
+            return;
+        }
     if (g_naesc == g_caesc) {
         int nc = g_caesc ? g_caesc * 2 : 16;
         ArrEsc *p2 = realloc(g_aesc, (size_t)nc * sizeof(ArrEsc));
@@ -3006,14 +2991,12 @@ static int aesc_find(Symbol *base, int idx) {
     return 0;
 }
 
-/* 容器账：base 里 LIVE 的贴标槽集合。返回条数（>cap 截断）。 */
-static int aesc_container_live(Symbol *base, int *out, int cap) {
-    int n = 0;
-    for (int i = 0; i < g_naesc && n < cap; i++)
-        if (g_aesc[i].base == base && g_aesc[i].idx < 0 && g_aesc[i].slot > 0 &&
-            ft_state_of(g_aesc[i].slot) == TC_LIVE)
-            out[n++] = g_aesc[i].slot;
-    return n;
+/* 这个数组被用来存过贴标指针吗？（运行期索引读出的断线判据：
+ * 有账 = 里面可能有贴标指针，哪个元素装哪个编译期不知道。） */
+static bool aesc_any(Symbol *base) {
+    for (int i = 0; i < g_naesc; i++)
+        if (g_aesc[i].base == base) return true;
+    return false;
 }
 
 /* 索引表达式是编译期常数则取值（>=0），否则 -1。 */
@@ -3079,31 +3062,32 @@ static void tag_of_expr(Node *e, int *id, int *state) {
         *id = e->sym->tag_id; *state = e->sym->tag_state; return;
     }
     if (e->kind == NK_YIELD) { tag_of_expr(e->a, id, state); return; }
+    /* §174 续链：`tag v : tag.x = old;` 降糖成 let——DECL 绑定从这里
+     * 拿到续上的槽（case 里已守门：值无标签、槽 LIVE）。 */
+    if (e->kind == NK_TAG_BIND && e->tag_id) {
+        *id = e->tag_id; *state = TC_LIVE;
+        return;
+    }
     /* §173：`p.?`（未烙 COND→LIVE 印的普通解包）与切片 `.ptr` 沿基址追：
      * free 的实参常写成 `(*u8)s.ptr`，没有这条 free 事件就记不上账。 */
     if (e->kind == NK_UNWRAP && e->a) { tag_of_expr(e->a, id, state); return; }
-    /* §173 补丁十：数组/元组元素读账——先查精确元素账（常索引写入），
-     * 未命中查容器账（运行期索引写入）：单 LIVE 槽精确继承；多槽 =
-     * 编译期无法指认这个元素装的是哪个 tag → 使用点报 E0521（标签
-     * 不静默丢失）。只继承 LIVE：FREED 继承会在"另一臂没存过"的
-     * 分支场景里假报 E0512；元素级的释放后使用由槽级账本兜底。 */
+    /* §173 补丁十（收紧版）：常索引读精确元素账——`let q = xs[0];`
+     * 标签精确跟出（槽共享）、`free(xs[0])` 记得上账。运行期索引：
+     * 数组存过贴标指针就报 E0521（无法指认元素，标签绝不静默丢失；
+     * 续链语句的值读出由调用方预先占座豁免）。只继承 LIVE：FREED
+     * 继承会在"另一臂没存过"的分支场景里假报 E0512。 */
     if (e->kind == NK_INDEX && e->a && e->a->kind == NK_IDENT &&
         e->a->sym && e->a->sym->kind != SK_CONST) {
         int ix = aesc_const_index(e->b);
         int aid = ix >= 0 ? aesc_find(e->a->sym, ix) : 0;
-        if (!aid) {
-            int live[16];
-            int nl = aesc_container_live(e->a->sym, live, 16);
-            if (nl == 1) aid = live[0];
-            else if (nl >= 2 && tag_diag_once(e->line, e->col))
-                diag_code_at("E0521", e->line, e->col,
-                    "this element may hold several different tags -- "
-                    "`%s[i]` was filled with a runtime index, so which tag "
-                    "an element holds cannot be identified; store each tag "
-                    "at a constant index, or mark them released with "
-                    "`tag.<var> : null;`",
-                    e->a->sym->name ? e->a->sym->name : "?");
-        }
+        if (ix < 0 && aesc_any(e->a->sym) && tag_diag_once(e->line, e->col))
+            diag_code_at("E0521", e->line, e->col,
+                "this element is read with a runtime index and the array "
+                "holds tagged pointers -- which tag an element carries "
+                "cannot be identified; store at a constant index, continue "
+                "the chain with `tag v : tag.x = %s[i];`, or mark them "
+                "released (`tag.<var> : null;`)",
+                e->a->sym->name ? e->a->sym->name : "?");
         if (aid && ft_state_of(aid) == TC_LIVE) {
             *id = aid; *state = TC_LIVE;
             return;
@@ -3821,6 +3805,7 @@ static void tag_ledger_final(const char *entry_path) {
     for (int i = 0; i < g_ntslots; i++) {
         TagSlot *t = &g_tslots[i];
         if (t->state != TST_LIVE || t->abstract) continue;
+        if (t->rt_pending) continue;   /* §174：断线由 E0521 报，不双报 */
         /* §173：错误指到所有权归属点（调用/绑定处），分配行留在消息里。
          * 跨函数移交后泄漏，第一现场是调用方接过所有权的那一行。 */
         int rl = t->own_line ? t->own_line : t->line;
@@ -3859,6 +3844,31 @@ static void tag_ledger_final(const char *entry_path) {
                 "line %d) -- alloc and free must come in pairs; free it before "
                 "the program ends",
                 t->name, t->line);
+    }
+    /* §174：运行期索引写入未处理——使用者没有续链接管（tag v :
+     * tag.x = xs[i];）也没有终结（tag.<载体> : null;），追踪断线
+     * 落账。报在写入处。 */
+    for (int i = 0; i < g_ntslots; i++) {
+        TagSlot *t = &g_tslots[i];
+        if (!t->rt_pending || t->abstract) continue;
+        const char *cn = (t->carrier && t->carrier->name)
+                         ? t->carrier->name : NULL;
+        if (cn)
+            diag_code_at("E0521", t->rt_line, t->rt_col,
+                "a tagged pointer was stored into `xs[i]` with a runtime "
+                "index and never handled -- the tag cannot be tracked to "
+                "its free site; continue the chain with `tag v : %s = "
+                "xs[i];` (bind the lost pointer back by its carrier "
+                "variable name), mark it released with `tag.%s : null;`, "
+                "or store at a constant index",
+                cn, cn);
+        else
+            diag_code_at("E0521", t->rt_line, t->rt_col,
+                "a tagged pointer was stored into `xs[i]` with a runtime "
+                "index and never handled -- the tag cannot be tracked to "
+                "its free site; receive it into a named carrier first "
+                "(`let tmp = f(); xs[i] = tmp;`), then continue the chain "
+                "with `tag v : tmp = xs[i];`, or store at a constant index");
     }
     /* §173：E0517（强制贴标终扫）退役 —— 分配调用点自动建槽，
      * 没有不被追踪的堆分配；tag.close 模块在 tag_auto_decl 里跳过。 */
@@ -4050,17 +4060,32 @@ static Type *check_assign(Node *n) {
             }
         } else if (n->a->kind == NK_INDEX && n->a->a &&
                    n->a->a->kind == NK_IDENT && n->a->a->sym) {
-            /* §173 补丁十：贴标指针逃进数组/元组元素。常索引 → 精确
-             * 元素账；运行期索引 → 容器账（标签不丢，读出/free 时
-             * 查：单 LIVE 槽精确继承，多槽使用点报 E0521）。写入本身
-             * 不报错——断线只会发生在消费现场。 */
+            /* §173 补丁十（收紧版）：贴标指针进数组/元组元素只认**常
+             * 索引**精确账。运行期索引无法指认元素——写入时就报
+             * E0521，不进任何账（标签绝不静默丢失），使用者必须
+             * 显式处理：常索引 / 续链 / 终结。 */
             int ftid, ftst;
             tag_of_expr(n->b, &ftid, &ftst);
             if (ftid) {
-                aesc_add(n->a->a->sym, aesc_const_index(n->a->b), ftid);
-                TagSlot *ts = tag_slot(ftid);
-                if (ts && ftst == TC_LIVE && n->b) {
-                    ts->own_line = n->b->line; ts->own_col = n->b->col;
+                int ix = aesc_const_index(n->a->b);
+                if (ix < 0) {
+                    /* 运行期索引写入：追踪必断线。记 pending——续链
+                     * 接管（tag v : tag.x = xs[i];）或手动终结
+                     * （tag.<载体> : null;）即豁免；没处理则终扫报
+                     * E0521（"必须处理"，报在写入处）。 */
+                    TagSlot *ts = tag_slot(ftid);
+                    if (ts) {
+                        ts->rt_pending = true;
+                        ts->rt_line = n->a->b->line;
+                        ts->rt_col = n->a->b->col;
+                        ts->arr_esc = true;
+                    }
+                } else {
+                    aesc_add(n->a->a->sym, ix, ftid);
+                    TagSlot *ts = tag_slot(ftid);
+                    if (ts && ftst == TC_LIVE && n->b) {
+                        ts->own_line = n->b->line; ts->own_col = n->b->col;
+                    }
                 }
             }
         }
@@ -6595,6 +6620,113 @@ static Type *check_expr_raw(Node *n, Type *expect) {
         return vt;
     }
 
+    case NK_TAG_BIND: {
+        
+        /* §174 续链：tag newVar : tag.myTag = oldVar;（parse 降糖成
+         * `let newVar = <本节点>`）。给**丢失了标签**的值重新绑回一个
+         * **已存在**的 tag——补上数组/跨类型转换等造成的追踪断链。
+         * 守门（用户裁定）：
+         *   - tag 必须已存在：不自动建槽——语义是续上断掉的链，只能
+         *     是之前的标签，新标签报错（绑定的正确性由使用者担保：
+         *     编译期已经追踪不到这个值了）；
+         *   - 值必须无标签：已有标签的值再绑 = 重复标签（E0522），
+         *     新分配请用 `let p = tag.x : expr;`；
+         *   - 槽必须 LIVE：终结了的链不能复活；
+         *   - 值是数组元素时必须常索引：运行期索引接不回精确账。
+         * 绑定后 newVar 走正常流程（free 记账、泄漏终扫指向绑定行）。 */
+        if (n->b && n->b->kind == NK_INDEX)
+            tag_diag_once(n->b->line, n->b->col);   /* 预占座：值读出的
+                                                     * E0521 豁免（宣言场景） */
+        Type *vt = check_expr(n->b, expect);
+        if (!vt || vt->kind == TY_INVALID) return ty_invalid();
+        if (vt->kind != TY_PTR && vt->kind != TY_SLICE) {
+            err_at(n->line, n->col,
+                   "only a pointer can carry a tag -- '%s' binds a lost "
+                   "tagged pointer, not this value", n->name ? n->name : "?");
+            return ty_invalid();
+        }
+        TagSlot *t = NULL;
+        Node *tv = n->a;
+        for (int g = 0; g < 6 && tv &&
+             (tv->kind == NK_CAST || tv->kind == NK_UNWRAP); g++)
+            tv = tv->kind == NK_CAST ? (tv->b ? tv->b : tv->a) : tv->a;
+        if (tv && tv->kind == NK_TAG_APPLY && !tv->b) {
+            t = tag_by_name(tv->name);          /* 不建槽：必须是旧标签 */
+            if (!t) {
+                diag_code_at("E0300", tv->line, tv->col,
+                    "tag '%s' does not exist -- a re-bind must continue an "
+                    "existing tag; new tags only come from tagging an "
+                    "allocation (`let p = tag.x : expr;`)", tv->name);
+                return ty_invalid();
+            }
+        } else if (tv && tv->kind == NK_IDENT) {
+            Symbol *ts = lookup(tv->name);
+            t = (ts && ts->tag_id) ? tag_slot(ts->tag_id) : NULL;
+            if (!t) {
+                diag_code_at("E0520", tv->line, tv->col,
+                    "`%s` is not a tag value -- the re-bind needs "
+                    "`tag.x` (or a `const` tag binding)", tv->name);
+                return ty_invalid();
+            }
+        } else {
+            err_at(n->line, n->col,
+                   "the re-bind needs a tag value between ':' and '=' -- "
+                   "write `tag v : tag.x = lost;`");
+            return ty_invalid();
+        }
+        if (t->abstract) {
+            err_at(n->line, n->col,
+                   "tag '%s' is a parameter slot -- a re-bind cannot claim "
+                   "an abstract borrow", t->name);
+            return ty_invalid();
+        }
+        if (t->state != TST_LIVE) {
+            err_at(n->line, n->col,
+                   t->state == TST_FREED
+                   ? "tag '%s' already ended (freed at line %d) -- a "
+                     "re-bind cannot revive a finished chain"
+                   : "tag '%s' is not tracking any allocation -- nothing "
+                     "to continue",
+                   t->name, t->free_line);
+            return ty_invalid();
+        }
+        {
+            int id = 0, st = TC_NONE;
+            tag_of_expr(n->b, &id, &st);
+            if (id) {
+                TagSlot *old = tag_slot(id);
+                diag_code_at("E0522", n->b->line, n->b->col,
+                    "this value already carries tag '%s' -- a re-bind is "
+                    "only for lost tagged pointers; free the old tag first, "
+                    "or use `let p = tag.x : expr;` to tag a fresh "
+                    "allocation", old ? old->name : "?");
+                return ty_invalid();
+            }
+        }
+        if (n->b->kind == NK_INDEX && n->b->a &&
+            n->b->a->kind == NK_IDENT && n->b->a->sym) {
+            int ix = aesc_const_index(n->b->b);
+            if (ix >= 0) {
+                /* 常索引续链：宣言建精确账，之后读这个元素走账，E0521
+                 * 消失——追踪真正接回数组里。 */
+                aesc_add(n->b->a->sym, ix, (int)(t - g_tslots) + 1);
+                t->arr_esc = true;
+            }
+            /* 运行期索引续链也合法：宣言把该元素的释放责任接到 v1
+             * 这个载体上（账跟着 v1 走，不再依赖数组元素）——接管
+             * 即清写入时的 pending。数组里其他元素再读仍报 E0521，
+             * 由使用者继续处理。 */
+            t->rt_pending = false;
+        } else {
+            /* 非元素来源的续链（cast 往返、?T 解包后……）同样接管。 */
+            t->rt_pending = false;
+        }
+        n->tag_id = (int)(t - g_tslots) + 1;
+        n->tag_state = TC_LIVE;
+        n->ty = vt;
+        return vt;
+    }
+
     case NK_CALL: {
         tag_transform_deinit(n);    /* §173：a.deinit(s) → a.free(...) */
         Type *r = check_call(n, expect);
@@ -7811,6 +7943,7 @@ static void check_stmt(Node *n) {
                     ts->state = TST_FREED;
                     ts->ever_freed = true;
                     ts->free_line = n->line; ts->free_col = n->col;
+                    ts->rt_pending = false;     /* 终结即接管运行期写入 */
                     if (ts->carrier) ts->carrier->tag_state = TC_FREED;
                 }
             }

@@ -1,0 +1,13 @@
+// expect-exit: 0
+// §174：续链接管——运行期索引写入（E0521 pending）后用载体变量名
+// 把断掉的链接回新载体 v：free(v) 记得上账，泄漏终扫不误报。
+const std = @mod("std");
+pub const main = fn () i32 {
+    var xs = std.stackAlloc(*u8, 4);
+    let p = (*u8)std.heapAlloc(std.heap.page, u8, 10);
+    let i = 2;
+    xs[i] = p;
+    tag v : p = xs[i];
+    std.heap.page.free(std.heap.page.ctx, v, 10);
+    return 0;
+};

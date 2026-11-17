@@ -1,0 +1,11 @@
+// expect: this value already carries tag
+// expect-code: E0522
+// expect-count: 1
+// §174：续链只用于丢失标签的指针——已有标签的值再绑 = 重复标签。
+// 新分配请用 `let p = tag.x : expr;`。
+const std = @mod("std");
+pub const main = fn () i32 {
+    let p = (*u8)std.heapAlloc(std.heap.page, u8, 10);
+    tag v : tag.alloc1 = p;
+    return 0;
+};

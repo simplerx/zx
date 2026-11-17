@@ -1,0 +1,15 @@
+// expect: must continue an existing tag
+// expect-code: E0300
+// expect-count: 1
+// §174（用户裁定）：续链不能开新标签——语义是接上断掉的链，只能用
+// 已存在的 tag（不自动建槽）；指认用载体变量名（tag v : p = xs[i];）。
+const std = @mod("std");
+pub const main = fn () i32 {
+    var xs = std.stackAlloc(*u8, 4);
+    let p = (*u8)std.heapAlloc(std.heap.page, u8, 10);
+    let i = 0;
+    xs[i] = p;
+    tag v : p = xs[i];
+    tag v2 : tag.neverdeclared = xs[0];
+    return 0;
+};
