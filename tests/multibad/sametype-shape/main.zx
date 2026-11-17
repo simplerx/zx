@@ -1,0 +1,13 @@
+// expect: duplicate type 'Person'
+// expect-code: E0402
+const std = @mod("std");
+const m = @mod("lib.zx");
+
+pub const Person = struct {
+    pub age: i32,
+};
+
+const main = fn () i32 {
+    let p = m.Person{.age = 3, .name = (*u8)"x"};
+    return p.age;
+};

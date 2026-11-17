@@ -135,6 +135,8 @@ static const ErrDoc g_errs[] = {
       "which allocation an element holds cannot be identified at compile time; store at a constant index, continue the chain (`tag v : tag.x = xs[i];`), or mark it released (`tag.p : null;`)" },
     { "E0522", "the value already carries a label",
       "a re-bind (`tag v : tag.x = lost;`) is only for lost pointers; free the old allocation first, or use `let p = tag.x : expr;` for a fresh allocation" },
+    { "E0523", "@tag: the pointer carries no label",
+      "@tag(p) returns the label a pointer was bound with (`tag.x : expr`, or a re-bound carrier); bind this value to a label first, or pass a pointer that already carries one" },
 
     /* ---- 模块 ---- */
     { "E0601", "module resolution failed",

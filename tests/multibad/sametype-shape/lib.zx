@@ -1,0 +1,7 @@
+// expect: duplicate type 'Person'
+// expect-code: E0402
+// §178：同名 pub 类型必须形状一致——字段集不同就是重复声明。
+pub const Person = struct {
+    pub age: i32,
+    pub name: *u8,
+};

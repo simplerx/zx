@@ -1,0 +1,15 @@
+// §178：同名 pub 类型跨文件是同一个类型——main 与 lib 各自声明的
+// Person 互相传值不需要 cast；私有同名（去掉 pub）则各是各的。
+const std = @mod("std");
+const m = @mod("lib.zx");
+
+pub const Person = struct {
+    pub age: i32,
+};
+
+const main = fn () i32 {
+    let a = m.make();
+    let b = Person{.age = 3};
+    if (m.show(b) + m.show(a) != 10) { return 1; }
+    return 0;
+};

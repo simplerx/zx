@@ -1,0 +1,11 @@
+// expect: carries no label
+// expect-code: E0523
+// @tag(p) 只对绑过标签的指针成立；裸分配/派生指针没有身份可取。
+const std = @mod("std");
+const main = fn () i32 {
+    var y: i32 = 3;
+    const h = @tag(&y);
+    _ = h;
+    
+    return 0;
+};

@@ -1,0 +1,12 @@
+// lib 侧：pub Person + 接收/返回它
+pub const Person = struct {
+    pub age: i32,
+};
+
+pub const make = fn () Person {
+    return Person{.age = 7};
+};
+
+pub const show = fn (p: Person) i32 {
+    return p.age;
+};

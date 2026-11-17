@@ -1773,6 +1773,7 @@ pub const Parser = struct {
             if (std.str.eq(nm, "memcpy")) { value_first = true; }
             if (std.str.eq(nm, "memmove")) { value_first = true; }
             if (std.str.eq(nm, "memset")) { value_first = true; }
+            if (std.str.eq(nm, "tag")) { value_first = true; }
             try self.expect(lex.Kind.lparen);
             if (!self.at(lex.Kind.rparen)) {
                 var ai: usize = 0;
