@@ -7553,16 +7553,32 @@ static void err_unreachable(Node *s, Node *prev) {
 static void check_stmts(Node *blk) {
     Node *prev = NULL;
     bool dead = false;
-    for (int i = 0; i < blk->nitems; i++) {
-        Node *s = blk->items[i];
-        if (dead) err_unreachable(s, prev);
-        /* 具名绑定到 fn 字面量的，把名字贴上：const helper = fn () void{…}
-         * 这种写法下 fn 节点本身没有名字，@fnName() 就只会拿到 "?"。 */
-        if (s->kind == NK_DECL && s->name && s->b && s->b->kind == NK_FN && !s->b->name)
-            s->b->name = s->name;
-        check_stmt(s);
-        if (!dead && stmt_blocks_next(s)) dead = true;
-        prev = s;
+    /* §181：defer/errdefer 在离开作用域时才执行，后端 run_defers 按 LIFO
+     * 逆序展开。前端不能按源码顺序当场 check defer 体——否则里面登记的
+     * free 会污染其后语句，把正常读取误报成 use-after-free。
+     * 两遍：先查所有普通语句；再把 defer/errdefer 按源码逆序（=运行顺序）
+     * 查。dead/unreachable 与 fn 名贴标仍在第一遍按源码序做一次。 */
+    for (int pass = 0; pass < 2; pass++) {
+        for (int j = 0; j < blk->nitems; j++) {
+            int i = pass == 0 ? j : blk->nitems - 1 - j;
+            Node *s = blk->items[i];
+            bool is_def = (s->kind == NK_DEFER || s->kind == NK_ERRDEFER);
+            if (pass == 0) {
+                if (dead) err_unreachable(s, prev);
+                /* 具名绑定到 fn 字面量的，把名字贴上：const helper = fn () void{…}
+                 * 这种写法下 fn 节点本身没有名字，@fnName() 就只会拿到 "?"。 */
+                if (s->kind == NK_DECL && s->name && s->b && s->b->kind == NK_FN && !s->b->name)
+                    s->b->name = s->name;
+                /* defer 体留到第二遍；这里只参与 dead 传播与 prev 记录 */
+                if (is_def) { prev = s; continue; }
+                check_stmt(s);
+                if (!dead && stmt_blocks_next(s)) dead = true;
+                prev = s;
+            } else {
+                /* 第二遍：仅 defer/errdefer，逆序 = 后端 LIFO 执行顺序 */
+                if (is_def) check_stmt(s);
+            }
+        }
     }
 }
 

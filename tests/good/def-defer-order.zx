@@ -1,0 +1,35 @@
+// §181：defer 体在离开作用域时才执行（后端 run_defers 走 LIFO），
+// 前端必须最后才查 defer/errdefer 体，不能按源码顺序当场把释放记进 tag
+// 账本——否则 defer 之后的正常读取会被误报 use-after-free。
+// 本用例即用户实测场景：defer release 写在 read 之前，运行时 read 先发生，
+// 必须零诊断。逆序 LIFO 的真 UAF 由 def-defer-order-bad.zx 守门。
+const std = @mod("std");
+
+const Person = struct {
+    pub age: *u8,
+};
+
+const alloc = fn () Person {
+    let p = std.heapAlloc(std.heap.page, u8, 10);
+    return .{.age = (*u8)p};
+};
+
+const release = fn (p: *u8) void {
+    std.heap.page.free(std.heap.page.ctx, p, 10);
+};
+
+const read = fn (p: *u8) void {
+    let v = p[0];
+    std.println("read={d}", v);
+};
+
+pub const main = fn () !i32 {
+    var tup = {
+        Person{.age = (*u8)"a"},
+        Person{.age = (*u8)"b"},
+    };
+    tup.1 = alloc();
+    defer release(tup.1.age);   // 运行期：最后执行
+    read(tup.1.age);            // 运行期：先执行，必须不报 UAF
+    return 0;
+};

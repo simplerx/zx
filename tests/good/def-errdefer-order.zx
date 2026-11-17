@@ -1,0 +1,32 @@
+// §181：errdefer 体与 defer 体一样，必须最后才查——写在 read 之前也不
+// 能把释放当场记进 tag 账本而误报 use-after-free。errdefer 要求 !T 返回。
+const std = @mod("std");
+
+const Person = struct {
+    pub age: *u8,
+};
+
+const alloc = fn () Person {
+    let p = std.heapAlloc(std.heap.page, u8, 10);
+    return .{.age = (*u8)p};
+};
+
+const release = fn (p: *u8) void {
+    std.heap.page.free(std.heap.page.ctx, p, 10);
+};
+
+const read = fn (p: *u8) void {
+    let v = p[0];
+    std.println("read={d}", v);
+};
+
+pub const main = fn () !i32 {
+    var tup = {
+        Person{.age = (*u8)"a"},
+        Person{.age = (*u8)"b"},
+    };
+    tup.1 = alloc();
+    errdefer release(tup.1.age);
+    read(tup.1.age);
+    return 0;
+};

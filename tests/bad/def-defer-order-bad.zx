@@ -1,0 +1,23 @@
+// expect: use after free
+// expect-code: E0512
+// §181：两遍扫描按源码逆序查 defer 体，等于后端 run_defers 的 LIFO 执行
+// 顺序。这里 `defer read` 先登记（最后执行）、`defer free` 后登记（先执行），
+// 运行期 free 真的发生在 read 之前 —— 必须报 UAF。守的是"defer 最后查"
+// 不能被误做成"defer 不查"。
+const std = @mod("std");
+
+const release = fn (p: *u8) void {
+    std.heap.page.free(std.heap.page.ctx, p, 10);
+};
+
+const read = fn (p: *u8) void {
+    let v = p[0];
+    std.println("read={d}", v);
+};
+
+pub const main = fn () !i32 {
+    var p = std.heapAlloc(std.heap.page, u8, 10);
+    defer read((*u8)p);       // 先登记 -> 最后执行
+    defer release((*u8)p);    // 后登记 -> 先执行 -> read 时已释放
+    return 0;
+};
