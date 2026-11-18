@@ -6385,6 +6385,38 @@ static Type *check_call(Node *n, Type *expect) {
  * 共用（补丁六之前方法调用在 check_method_call 提前 return，接收者
  * 完全绕过这条链）。前置：n->items 已是最终实参表（方法调用含接收者，
  * items[0] 对齐被调方的第 0 形参——抽象槽 / pff 按 fn->items 对位）。 */
+/* §184：体未查时的调用点延迟对账。deps 拓扑只补查到「裸名 + 模块成员
+ * 链」能静态解析到的函数；方法调用（`w.show(...)`，接收者是局部值）与
+ * 别的漏网形态，调用点对账时被调体可能还没查——形参抽象槽（ps->tag_id）
+ * 还没建、pderef/pff 事实账还是空的，E0512 / 字段移交 / 精确释放判定
+ * 全部拿不到，静默漏报。这里把（调用点, 实参, 快照）记下来，等全部体
+ * 查完后重放一次对账。只重放「事实到来只会更准」的分支：E0512、pff
+ * 字段移交、精确释放事件；返回流继承需要整本账回卷，重放不保真，
+ * 维持「未分析不继承」的已知限制（与互递归同口径）。 */
+typedef struct {
+    Node *call, *arg, *fn;
+    Symbol *ps;                 /* 可为 NULL：体未查时形参符号还没绑定 */
+    int idx;                    /* 形参位——重放时按 fn->items[idx] 补解析 */
+    int tid, tst, rel;          /* 调用点当时的实参 tag 快照 / 释放判定 */
+    const char *srcpath;        /* 诊断要落在调用方文件上 */
+} TagDefer;
+static TagDefer *g_tdefer;
+static int g_ntdefer, g_ctdefer;
+
+static void tag_defer_call(Node *call, Node *arg, Node *fn, Symbol *ps,
+                           int idx, int tid, int tst, int rel) {
+    if (g_ntdefer == g_ctdefer) {
+        int nc = g_ctdefer ? g_ctdefer * 2 : 32;
+        TagDefer *p2 = realloc(g_tdefer, sizeof(TagDefer) * (size_t)nc);
+        if (!p2) return;
+        g_tdefer = p2; g_ctdefer = nc;
+    }
+    TagDefer *d = &g_tdefer[g_ntdefer++];
+    d->call = call; d->arg = arg; d->fn = fn; d->ps = ps; d->idx = idx;
+    d->tid = tid; d->tst = tst; d->rel = rel;
+    d->srcpath = g_srcpath;
+}
+
 static void tag_call_flow(Node *n) {
     /* §176：同一调用节点只对账一次。ct 折堆与 deps 补查
      * 会克隆已检查过的体重查，克隆节点带着首次的对账结果——
@@ -6461,6 +6493,13 @@ static void tag_call_flow(Node *n) {
                      * 把接收者整个标 FREED 会假报 use-after-free。 */
                     rel = fn_is_releaser(fn);
                 }
+                /* §184：形参还没有抽象槽、甚至还没有符号（跨模块方法
+                 * 的体未查，形参绑定发生在体检查里）= 事实账之后才会
+                 * 就位，记一条延迟对账（幂等：体查过、符号和槽都在的
+                 * 调用点不进来）。 */
+                if (fn->kind == NK_FN && i < fn->nitems &&
+                    (!ps || !ps->tag_id))
+                    tag_defer_call(n, n->items[i], fn, ps, i, tid, tst, rel);
             }
             if (rel) tag_free_event(n, n->items[i]);
             /* §180：实参已 FREED、且被调体解引用了对应形参 → 调用点报
@@ -6569,6 +6608,41 @@ static void tag_call_flow(Node *n) {
                  * 幂等不动。 */
             }
         }
+    }
+}
+
+/* §184：全部体查完后的延迟对账重放（见 tag_defer_call）。 */
+static void tag_deferred_replay(void) {
+    for (int i = 0; i < g_ntdefer; i++) {
+        TagDefer *d = &g_tdefer[i];
+        Symbol *ps = d->ps ? d->ps
+                   : (d->idx < d->fn->nitems ? d->fn->items[d->idx]->sym : NULL);
+        if (!ps) continue;              /* 形参最终也没绑定：无从对账 */
+        TagSlot *ats = ps->tag_id ? tag_slot(ps->tag_id) : NULL;
+        bool rel = ats && ats->abstract && ats->ever_freed;
+        const char *sp = g_srcpath;
+        g_srcpath = d->srcpath;         /* 诊断落在调用方文件 */
+        /* 首跑按释放器近似没标释放、体查完证实真是释放通路：补记。
+         * 所有权移交的事实到账，终扫不再把这块记成调用方的泄漏。 */
+        if (!d->rel && rel)
+            tag_free_event(d->call, d->arg);
+        if (!rel && d->tst == TC_FREED && pderef_has(ps)) {
+            TagSlot *ft = tag_slot(d->tid);
+            diag_code_at("E0512", d->arg->line, d->arg->col,
+                "use after free: this memory was released at line %d -- "
+                "it is passed to '%s' which reads it; drop this call or "
+                "free the memory later",
+                ft && ft->free_line ? ft->free_line : 0,
+                d->fn->name ? d->fn->name : "this function");
+        }
+        /* §173 补丁三：字段移交对账——被调体内 free 过的字段事实账
+         * 此刻已就位，重读实参的字段链补标 FREED（之后的再 free 报
+         * E0509、解引用报 E0512 才有着落）。 */
+        FieldTag *fs = ftags_of_expr(d->arg);
+        for (; fs; fs = fs->next)
+            if (fs->slot > 0 && pff_has(ps, fs->name))
+                ft_mark_freed(fs->slot, d->call);
+        g_srcpath = sp;
     }
 }
 
@@ -10189,6 +10263,50 @@ static Node *deps_fn_of_name(const char *name, Scope *ps) {
     return NULL;
 }
 
+/* §184：跨模块成员调用（`g.read(...)`）的 callee 是 NK_FIELD，裸名
+ * deps_fn_of_name 摸不到——被调体没被拓扑补查，调用点的 pderef
+ * 事实账（E0512）/ pff / 返回流全部拿不到，跨模块 UAF 静默漏报。
+ * 根标识符沿作用域链**按名字**解析（deps 扫描发生在体检查之前，
+ * 节点上还没有 sym）；ensure 成 SK_NS 拿到 mod 后逐级进成员表：
+ * 中间级可以是再导出的子模块别名（`std.fs.File.open`），末级落到
+ * 函数。ensure 对 SK_FN 会 schedule_body 入队——deps_check_one
+ * 才有东西可摘。解析不出来就返回 NULL，行为与修复前一致。 */
+static Node *deps_fn_of_field(Node *fld, Scope *ps) {
+    Node *root = fld;
+    while (root->kind == NK_FIELD && root->a) root = root->a;
+    if (root->kind != NK_IDENT || !root->name) return NULL;
+    Symbol *s = NULL;
+    for (Scope *sc = ps; sc && !s; sc = sc->parent)
+        s = scope_find_here(sc, root->name);
+    if (!s) return NULL;
+    ensure(s);                      /* 惰性模块别名在此升级成 SK_NS */
+    if (s->kind != SK_NS || !s->mod) return NULL;
+    Module *m = s->mod;
+    /* a 链收集成员（外→内是倒的）：a.b.c → [c, b]，按 b、c 序解析 */
+    Node *chain[16];
+    int nc = 0;
+    Node *lvl = fld;
+    for (; lvl && lvl->kind == NK_FIELD && nc < 16; lvl = lvl->a)
+        chain[nc++] = lvl;
+    if (lvl && lvl->kind == NK_FIELD) return NULL;   /* 链比 16 深：放弃 */
+    for (int i = nc - 1; i >= 0; i--) {
+        Symbol *ms = scope_find_here(&m->scope, chain[i]->name);
+        if (!ms) return NULL;
+        ensure(ms);                 /* 函数：解析签名并 schedule_body */
+        /* 顶层 `pub const read = fn (…) {…}` 的符号 kind 是 SK_CONST
+         * （不是 SK_FN），判断只能看 decl 形状——与 deps_fn_of_name
+         * 同一口径。 */
+        if (ms->decl && ms->decl->kind == NK_DECL && ms->decl->b &&
+            ms->decl->b->kind == NK_FN)
+            return ms->decl->b;
+        if (ms->decl && ms->decl->kind == NK_FN)
+            return ms->decl;
+        if (ms->kind == SK_NS && ms->mod) { m = ms->mod; continue; }
+        return NULL;
+    }
+    return NULL;
+}
+
 static void deps_check_calls(Node *n, Scope *ps);
 
 static void deps_check_one(Node *fn) {
@@ -10220,6 +10338,12 @@ static void deps_check_calls(Node *n, Scope *ps) {
         Node *dfn = deps_fn_of_name(n->a->name, ps);
         if (dfn) deps_check_one(dfn);
     }
+    /* §184：模块成员调用（`g.read(...)`）同样进拓扑——跨模块被调体
+     * 不提前查，§180 的 use-after-free 在调用点就瞎了。 */
+    if (n->kind == NK_CALL && n->a && n->a->kind == NK_FIELD && n->a->name) {
+        Node *dfn = deps_fn_of_field(n->a, ps);
+        if (dfn) deps_check_one(dfn);
+    }
     deps_check_calls(n->a, ps);
     deps_check_calls(n->b, ps);
     deps_check_calls(n->c, ps);
@@ -10245,6 +10369,7 @@ void sema_check(Node *root) {
     g_tag_auto_seq = 0;         /* §173：自动槽序号同轮清零 */
     g_npderef = 0; g_npslotsym = 0;  /* §180：形参事实账按轮清零（符号指针
                                      * 跨轮悬垂，绝不能留到下一轮） */
+    g_ntdefer = 0;              /* §184：延迟对账按轮清零（同上，节点指针悬垂） */
     stamp_mod(root, g_srcpath);
     g_cmods = 8;
     g_mods = calloc((size_t)g_cmods, sizeof(Module *));
@@ -10293,6 +10418,10 @@ void sema_check(Node *root) {
         g_scope = ss;
         g_srcpath = sp;
     }
+
+    /* 函数体全部查完：§184 延迟对账先重放（此刻所有 pderef/pff 事实
+     * 已入账），再做 devirt 重试。 */
+    tag_deferred_replay();
 
     /* 函数体全部查完：把第一次因工厂体未检查而没证明出来的调用点重试。 */
     devirt_retry_all();

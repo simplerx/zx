@@ -1,0 +1,11 @@
+// §184 的正面控制：跨模块**借出**（体内只读、所有权不移交）不得误报。
+// 分配 → 递给跨模块函数（只读）→ 释放——顺序合法，一个诊断都不该有。
+const std = @mod("std");
+const g = @mod("lib.zx");
+
+pub const main = fn () !i32 {
+    var tmp: *[10]u8 = std.heapAlloc(std.heap.page, u8, 10);
+    g.read(tmp[0..]);
+    std.heap.page.deinit(tmp[0..]);
+    return 0;
+};

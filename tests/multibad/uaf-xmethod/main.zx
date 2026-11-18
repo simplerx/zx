@@ -1,0 +1,15 @@
+// expect: use after free
+// expect-code: E0512
+// §184：跨模块**方法**调用同样要对账。方法接收者是局部值，deps 拓扑
+// 按名字摸不到它——被调体查完后的延迟对账补上这一环：释放过的指针
+// 递进 vendor 模块的容器方法，调用点必须报 E0512。
+const std = @mod("std");
+const g = @mod("lib.zx");
+
+pub const main = fn () !i32 {
+    var w: g.Win = g.Win{ .buf = &.{} };
+    var tmp: *[10]u8 = std.heapAlloc(std.heap.page, u8, 10);
+    std.heap.page.deinit(tmp[0..]);
+    w.show(tmp[0..]);
+    return 0;
+};

@@ -1,0 +1,9 @@
+pub const Win = struct {
+    pub buf: []u8,
+    pub const show = fn (self: *Self, extra: []u8) void {
+        var x = extra.0;
+        var y = self.buf.0;
+        _ = x;
+        _ = y;
+    };
+};

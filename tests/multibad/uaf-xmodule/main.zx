@@ -1,0 +1,27 @@
+// expect: use after free
+// expect-code: E0512
+// §184：跨模块（@mod）调用的指针状态对账。释放之后把指针递给会解引用
+// 它的跨模块函数——deps 拓扑补查 + 延迟对账保证调用点照样报
+// use-after-free，不再因为被调体属于另一个文件就静默漏掉。
+const std = @mod("std");
+const g = @mod("lib.zx");
+
+const Person = struct {
+    pub age: []u8,
+};
+
+const alloc = fn () Person {
+    var p: *[10]u8 = std.heapAlloc(std.heap.page, u8, 10);
+    return .{ .age = p[0..] };
+};
+
+pub const main = fn () !i32 {
+    var tup: {Person, Person} = {
+        Person{ .age = &.{} },
+        Person{ .age = &.{} },
+    };
+    tup.1 = alloc();
+    std.heap.page.deinit(tup.1.age);
+    g.read(tup.1.age);
+    return 0;
+};
