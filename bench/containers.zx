@@ -1,7 +1,7 @@
 // bench/containers.zx —— 标准库容器的性能锚点。
 //
 // 五个负载，各打一个校验和（改动实现时数字必须一致，性能才能比）：
-//   al-push    ArrayList 逐个 push 100 万 i32，再遍历求和
+//   al-push    std.array.List 逐个 push 100 万 i32，再遍历求和
 //   al-append  每次追加 16 个元素的切片，共 6 万次
 //   al-insert  在中点 insertAt 2 万次（固有 O(n²)，规模取小）
 //   map-put    HashMap 插入 20 万个字符串键（含多次扩容）
@@ -20,7 +20,7 @@ const N: usize = 1_000_000;
 
 const bench_push = fn (seed: u64) u64 {
     var h = seed;
-    var al = std.ArrayList(i32).init(std.heap.page);
+    var al = std.array.List(i32).init(std.heap.page);
     defer al.deinit();
     var i: usize = 0;
     while (i < N) {
@@ -40,7 +40,7 @@ const CH: usize = 16;
 
 const bench_append = fn (seed: u64) u64 {
     var h = seed;
-    var al = std.ArrayList(i32).init(std.heap.page);
+    var al = std.array.List(i32).init(std.heap.page);
     defer al.deinit();
     var chunk = &.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     var round: usize = 0;
@@ -66,7 +66,7 @@ const M: usize = 20_000;
 
 const bench_insert = fn (seed: u64) u64 {
     var h = seed;
-    var al = std.ArrayList(i32).init(std.heap.page);
+    var al = std.array.List(i32).init(std.heap.page);
     defer al.deinit();
     // 先铺 1 万个底，再往中点插 2 万个
     var i: usize = 0;

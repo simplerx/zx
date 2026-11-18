@@ -90,7 +90,7 @@ const slurp = fn (al: std.Allocator, path: []const u8) []const u8 {
 /* 重定向出来的 stdout 是 CRLF，而 `// expect-output` 里写的是 LF。
  * 比对前把 \r 全去掉，免得每个用例都因为行尾差异假失败。 */
 const no_cr = fn (al: std.Allocator, s: []const u8) []const u8 {
-    var sb = std.ArrayList(u8).init(al);
+    var sb = std.array.List(u8).init(al);
     var i: usize = 0;
     while (i < s.len) {
         if (s[i] != '\r') {
@@ -128,7 +128,7 @@ const exit_ok = fn (ps: [][]const u8, status: i32) bool {
 // 取 `// expect-output` 之后所有 `// ` 行，拼成期望的 stdout（行间 \n，末尾不带）。
 // 没有这一段就返回空串（调用方用 len 判断）。
 const expect_output = fn (al: std.Allocator, parts: [][]const u8) []const u8 {
-    var sb = std.ArrayList(u8).init(al);
+    var sb = std.array.List(u8).init(al);
     var on = false;
     var n: usize = 0;
     var broken = false;

@@ -325,7 +325,7 @@ const collectAll = fn (alloc: Allocator, itv: DirIter) ?[][]const u8 {
     var it = itv;
     defer it.close();
 
-    var list = List{ .items = undefined, .len = 0, .cap = 0, .alloc = alloc };
+    var list = PtrList{ .items = undefined, .len = 0, .cap = 0, .alloc = alloc };
     while (it.next()) name {
         let copy = zpath(alloc, name);
         if (copy) c {
@@ -338,7 +338,7 @@ const collectAll = fn (alloc: Allocator, itv: DirIter) ?[][]const u8 {
 };
 
 // 局部可增长指针数组（元素是切片）。take() 之后所有权交出去。
-const List = struct {
+const PtrList = struct {
     items: *[]const u8,
     len: usize,
     cap: usize,

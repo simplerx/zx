@@ -1,0 +1,49 @@
+// repeat-type.zx —— [T; N] 重复元组：内联值类型（N 个 T，编译期展开）。
+// 断言语言面：类型出现在字段/var 声明、真实占内存、编译期下标 .N、
+// 运行期下标经 (*[N]T)(&tup) 视图、struct 成员的内存随结构体携带。
+const std = @mod("std");
+
+// struct 字段内联：8 个 i32（32B）+ u8（1B）→ 对齐 4 → 36B
+const Holder = struct {
+    buf: [i32; 8],
+    tag: u8,
+};
+
+const sum8 = fn (a: *[8]i32) i32 {
+    var s: i32 = 0;
+    var i: usize = 0;
+    while (i < 8) { s = s + a[i]; i = i + 1; }
+    return s;
+};
+
+pub const main = fn () u8 {
+    // 大小断言：[T;N] 是值类型，不是 8 字节指针
+    if (@type(Holder).size != 36) { return 1; }
+
+    var h = Holder{ .buf = undefined, .tag = 7 };
+    let p = (*[8]i32)(&h.buf);
+    var i: usize = 0;
+    while (i < 8) { p[i] = (i32)i * 2; i = i + 1; }
+    // 编译期下标读元组；运行期下标读视图——同一块内存
+    if (h.buf.3 != 6) { return 2; }
+    if (p[7] != 14) { return 3; }
+    if (h.tag != 7) { return 4; }
+
+    // 局部 var 的类型标注位置
+    var t: [f64; 2] = undefined;
+    t.0 = 1.5;
+    let tp = (*[2]f64)(&t);
+    tp[1] = 2.5;
+    if (t.0 != 1.5) { return 5; }
+    if (tp[1] != 2.5) { return 6; }
+
+    // 视图直接喂自由函数
+    if (sum8(p) != 56) { return 7; }
+
+    std.println("ok {} {} {}", t.0, tp[1], @type(Holder).size);
+    return 0;
+};
+
+// expect-output
+// ok 1.5 2.5 36
+// expect-exit: 0

@@ -1,0 +1,9 @@
+// expect: Array(i32, 3)
+// Array(T,N) 的 N 参与类型身份：Array(i32,3) 与 Array(i32,4) 不能互赋
+const std = @mod("std");
+
+const main = fn () void {
+    var a3 = std.array.Array(i32, 3).init();
+    var a4: std.array.Array(i32, 4) = a3;
+    _ = a4;
+};

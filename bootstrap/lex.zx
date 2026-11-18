@@ -240,11 +240,11 @@ pub const Lexer = struct {
     pub p: usize,          // 当前字节偏移
     pub line: u32,
     pub col: u32,
-    pub toks: std.ArrayList(Tok),
-    pub strbuf: std.ArrayList(u8),
+    pub toks: std.array.List(Tok),
+    pub strbuf: std.array.List(u8),
     pub al: std.Allocator,
     pub n_errors: u32,
-    pub errs: std.ArrayList(LexErr),
+    pub errs: std.array.List(LexErr),
 
     pub const init = fn (al: std.Allocator, src: []const u8) Lexer {
         // UTF-8 BOM（EF BB BF）：Windows 编辑器常偷偷加上。跳过它，
@@ -255,11 +255,11 @@ pub const Lexer = struct {
         }
         return Lexer{
             .src = src, .p = bom, .line = 1, .col = 1,
-            .toks = std.ArrayList(Tok).init(al),
-            .strbuf = std.ArrayList(u8).init(al),
+            .toks = std.array.List(Tok).init(al),
+            .strbuf = std.array.List(u8).init(al),
             .al = al,
             .n_errors = 0,
-            .errs = std.ArrayList(LexErr).init(al),
+            .errs = std.array.List(LexErr).init(al),
         };
     };
 
@@ -880,7 +880,7 @@ pub const Lexer = struct {
 // ---- dump：与 src/main.c 的 dump_toklist 同一格式 ----
 //   "%4d:%-4d %-14s" + (STRING → "解码内容" | len∈(0,64) → 原文) + "\n"
 
-const put_digit_r = fn (out: *std.ArrayList(u8), v: u32, w: usize) void {
+const put_digit_r = fn (out: *std.array.List(u8), v: u32, w: usize) void {
     // 十进制右对齐
     var ds: *[12]u8 = &.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     var n: usize = 0;
@@ -908,7 +908,7 @@ const put_digit_r = fn (out: *std.ArrayList(u8), v: u32, w: usize) void {
     }
 };
 
-const put_digit_l = fn (out: *std.ArrayList(u8), v: u32, w: usize) void {
+const put_digit_l = fn (out: *std.array.List(u8), v: u32, w: usize) void {
     var ds: *[12]u8 = &.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     var n: usize = 0;
     var x = v;
@@ -933,7 +933,7 @@ const put_digit_l = fn (out: *std.ArrayList(u8), v: u32, w: usize) void {
     }
 };
 
-const put_str_l = fn (out: *std.ArrayList(u8), s: []const u8, w: usize) void {
+const put_str_l = fn (out: *std.array.List(u8), s: []const u8, w: usize) void {
     var i: usize = 0;
     while (i < s.len) {
         _ = out.push(s[i]);
@@ -945,7 +945,7 @@ const put_str_l = fn (out: *std.ArrayList(u8), s: []const u8, w: usize) void {
     }
 };
 
-pub const dump = fn (lx: *Lexer, out: *std.ArrayList(u8)) void {
+pub const dump = fn (lx: *Lexer, out: *std.array.List(u8)) void {
     let toks = lx.toks.items();
     var i: usize = 0;
     while (i < toks.len) {

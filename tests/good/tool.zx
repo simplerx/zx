@@ -15,7 +15,7 @@ const main = fn () i32 {
         let line = std.str.trim(t);
         let parts = std.str.split(al, line, ",");
         if (parts) ps {
-            var xs = std.ArrayList(i32).init(al);
+            var xs = std.array.List(i32).init(al);
             var sum: i64 = 0;
             for (ps) p {
                 if (std.str.parseInt(p)) v {          // "x" 在这里被丢掉

@@ -133,7 +133,7 @@ median of 7 runs):
 
 **Runtime performance is on par with hand-written C**: what gets generated is
 plain C — no runtime interpretation, no implicit boxing, no GC pauses.
-Containers (`ArrayList` / `HashMap`) use `@memcpy`/`@memmove`/`@memset` bulk
+Containers (`std.array.List` / `HashMap`) use `@memcpy`/`@memmove`/`@memset` bulk
 paths and cache the hash with its key on growth; measured ~23% faster than a
 naive implementation.
 

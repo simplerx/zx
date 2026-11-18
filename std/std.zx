@@ -17,6 +17,12 @@ pub const str = @mod("str.zx");
 // 分不清，类型只走一条真实路径。下面 pool/arena/task 同此约定。
 pub const map = @mod("map.zx");
 
+// 数组（array.zx）。两个类型：可增长列表 std.array.List(T)（原 ArrayList
+// 迁来），定长数组 std.array.Array(T, N)——内部 data 是 [T; N] 内联元组，
+// 真正占 N*sizeof(T) 内存，可作为其他类型的成员；下标经 (*[N]T) 视图。
+// 不设 std.ArrayList / std.Array 别名——别名和真身分不清，类型只走真实路径。
+pub const array = @mod("array.zx");
+
 // 内存池（pool.zx）。`var p = std.pool.Pool.init(std.heap.page)` 之后
 // `p.alloc(n)` / `p.free(ptr)`；重复释放会被拦下。Pool 只给单线程用，
 // 多线程共用改用 `std.pool.SyncPool.init(...)`：另一个类型，内含 Pool + 锁，
@@ -30,13 +36,13 @@ pub const fs = @mod("fs.zx");
 pub const json = @mod("json.zx");
 
 // Arena（arena.zx）。一次性批量分配：`std.arena.ArenaAllocator.init(std.heap.page)`
-// 造出 Allocator 喂给 json.parse / ArrayList / 任何吃 Allocator 的东西，
+// 造出 Allocator 喂给 json.parse / std.array.List / 任何吃 Allocator 的东西，
 // deinit 一次全释放。ctx 机制下 arena 是有状态分配器的标准实现。
 pub const arena = @mod("arena.zx");
 
 // DebugAllocator（debug_alloc.zx）。记账分配器：每次分配都留档，
 // 泄漏 / 重复释放 / 野指针当场报出来。`init(std.heap.page)` 造出来的
-// 分配器直接喂给 ArrayList / json / fs；`deinit(a)` 收尾。
+// 分配器直接喂给 std.array.List / json / fs；`deinit(a)` 收尾。
 pub const debug_alloc = @mod("debug_alloc.zx");
 
 // 时间（time.zx）。QPC 单调钟（nsBetween 测耗时）、墙钟、ISO 8601 格式化。
@@ -64,174 +70,6 @@ pub const net = @mod("net.zx");
 // 全是普通函数，没有额外的向量内建；4 分量是这一层的形状（3D 用 xyz +
 // w=0），矩阵就是三 / 四列这样的向量。
 pub const simd = @mod("simd.zx");
-
-// 可增长数组。`T` 是元素类型；容量不够时按倍数向分配器要内存、搬过去、释放旧的。
-pub const ArrayList = fn (T: type) type {
-    return struct {
-        pub buf: *T,
-        pub len: usize,
-        pub cap: usize,
-        pub alloc: Allocator,
-
-        // ---- 构造 / 释放 ----
-
-        pub const init = fn (alloc: Allocator) Self {
-            return Self{ .buf = undefined, .len = 0, .cap = 0, .alloc = alloc };
-        };
-
-        pub const deinit = fn (self: *Self) void {
-            if (self.cap > 0) {
-                self.alloc.free(self.alloc.ctx, (*u8)self.buf, self.cap * @type(T).size);
-            }
-            self.buf = undefined;
-            self.len = 0;
-            self.cap = 0;
-        };
-
-        // ---- 取值 ----
-
-        pub const at = fn (self: *Self, i: usize) ?*T {
-            if (i >= self.len) { return null; }
-            return self.buf + i;
-        };
-
-        pub const get = fn (self: *Self, i: usize) ?T {
-            if (i >= self.len) { return null; }
-            return (self.buf + i).0;
-        };
-
-        pub const set = fn (self: *Self, i: usize, v: T) bool {
-            if (i >= self.len) { return false; }
-            (self.buf + i).0 = v;
-            return true;
-        };
-
-        pub const items = fn (self: *Self) []T { return self.buf[0..self.len]; };
-
-        pub const clear = fn (self: *Self) void { self.len = 0; };
-
-        // ---- 增长 ----
-
-        // 容量不够就翻倍。搬家用一次 memcpy：T 任意大小，逐元素循环
-        // 换成内存原语后这一步从 O(n) 次访存变成一次批量搬运。
-        pub const reserve = fn (self: *Self, need: usize) bool {
-            if (need <= self.cap) { return true; }
-
-            var ncap = self.cap;
-            if (ncap == 0) { ncap = 8; }
-            while (ncap < need) { ncap = ncap * 2; }
-
-            let bytes = ncap * @type(T).size;
-            let raw = self.alloc.alloc(self.alloc.ctx, bytes);
-            if (raw) p {
-                let dst = (*T)p;
-                if (self.len > 0) {
-                    @memcpy((*u8)dst, (*u8)self.buf, self.len * @type(T).size);
-                }
-                if (self.cap > 0) {
-                    self.alloc.free(self.alloc.ctx, (*u8)self.buf, self.cap * @type(T).size);
-                }
-                self.buf = dst;
-                self.cap = ncap;
-                return true;
-            }
-            return false;
-        };
-
-        pub const push = fn (self: *Self, v: T) bool {
-            if (!self.reserve(self.len + 1)) { return false; }
-            (self.buf + self.len).0 = v;
-            self.len = self.len + 1;
-            return true;
-        };
-
-        pub const pop = fn (self: *Self) ?T {
-            if (self.len == 0) { return null; }
-            self.len = self.len - 1;
-            return (self.buf + self.len).0;
-        };
-
-        pub const first = fn (self: *Self) ?T {
-            if (self.len == 0) { return null; }
-            return (self.buf + 0).0;
-        };
-
-        pub const last = fn (self: *Self) ?T {
-            if (self.len == 0) { return null; }
-            return (self.buf + self.len - 1).0;
-        };
-
-        // 在 i 处插一个，后面的整体右移（memmove：同 buffer 内重叠）。
-        // i == len 等价于 push。
-        pub const insertAt = fn (self: *Self, i: usize, v: T) bool {
-            if (i > self.len) { return false; }
-            if (!self.reserve(self.len + 1)) { return false; }
-            if (i < self.len) {
-                @memmove((*u8)(self.buf + i + 1), (*u8)(self.buf + i),
-                         (self.len - i) * @type(T).size);
-            }
-            (self.buf + i).0 = v;
-            self.len = self.len + 1;
-            return true;
-        };
-
-        // 删掉第 i 个，后面的左移。删最后一个等价于 pop。
-        pub const removeAt = fn (self: *Self, i: usize) bool {
-            if (i >= self.len) { return false; }
-            if (i + 1 < self.len) {
-                @memmove((*u8)(self.buf + i), (*u8)(self.buf + i + 1),
-                         (self.len - i - 1) * @type(T).size);
-            }
-            self.len = self.len - 1;
-            return true;
-        };
-
-        pub const reverse = fn (self: *Self) void {
-            if (self.len < 2) { return; }
-            var i: usize = 0;
-            var j = self.len - 1;
-            while (i < j) {
-                let t = (self.buf + i).0;
-                (self.buf + i).0 = (self.buf + j).0;
-                (self.buf + j).0 = t;
-                i = i + 1;
-                j = j - 1;
-            }
-        };
-
-        // 把长度改成 n：变长用 fill 补，变短直接截断（容量不动）。
-        pub const resize = fn (self: *Self, n: usize, fill: T) bool {
-            if (n > self.len) {
-                if (!self.reserve(n)) { return false; }
-                var k = self.len;
-                while (k < n) {
-                    (self.buf + k).0 = fill;
-                    k = k + 1;
-                }
-            }
-            self.len = n;
-            return true;
-        };
-
-        // 就地交换两个元素。
-        pub const swap = fn (self: *Self, i: usize, j: usize) bool {
-            if (i >= self.len || j >= self.len) { return false; }
-            let t = (self.buf + i).0;
-            (self.buf + i).0 = (self.buf + j).0;
-            (self.buf + j).0 = t;
-            return true;
-        };
-
-        // 追加一个切片：一次 memcpy。
-        pub const append = fn (self: *Self, vs: []const T) bool {
-            if (vs.len == 0) { return true; }
-            if (!self.reserve(self.len + vs.len)) { return false; }
-            @memcpy((*u8)(self.buf + self.len), vs.ptr, vs.len * @type(T).size);
-            self.len = self.len + vs.len;
-            return true;
-        };
-    };
-};
 
 // ---- 缓冲流 ----
 //

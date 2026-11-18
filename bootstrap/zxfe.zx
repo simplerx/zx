@@ -20,7 +20,7 @@ const parse = @mod("parse.zx");
 
 const utos = fn (al: std.Allocator, v: u64) []const u8 {
     if (v == 0) { return "0"; }
-    var buf = std.ArrayList(u8).init(al);
+    var buf = std.array.List(u8).init(al);
     var x = v;
     while (x > 0) {
         _ = buf.push(((u8)(x % 10)) + '0');
@@ -55,7 +55,7 @@ const hexd = fn (v: u8) u8 {
     return v - 10 + 'a';
 };
 
-const push_esc = fn (out: *std.ArrayList(u8), s: []const u8) void {
+const push_esc = fn (out: *std.array.List(u8), s: []const u8) void {
     var ok = out.push('"');
     var i: usize = 0;
     while (i < s.len) {
@@ -82,7 +82,7 @@ const push_esc = fn (out: *std.ArrayList(u8), s: []const u8) void {
     ok = out.push('"');
 };
 
-const pushs = fn (out: *std.ArrayList(u8), s: []const u8) void {
+const pushs = fn (out: *std.array.List(u8), s: []const u8) void {
     var i: usize = 0;
     while (i < s.len) {
         _ = out.push(s[i]);
@@ -91,7 +91,7 @@ const pushs = fn (out: *std.ArrayList(u8), s: []const u8) void {
 };
 
 // 可选字符串字段：null 记 "-"
-const push_optstr = fn (_: std.Allocator, out: *std.ArrayList(u8), o: ?[]const u8) void {
+const push_optstr = fn (_: std.Allocator, out: *std.array.List(u8), o: ?[]const u8) void {
     if (o) s {
         pushs(out, " ");
         push_esc(out, s);
@@ -100,7 +100,7 @@ const push_optstr = fn (_: std.Allocator, out: *std.ArrayList(u8), o: ?[]const u
     }
 };
 
-const ser_node = fn (al: std.Allocator, out: *std.ArrayList(u8), n: *parse.Node) void {
+const ser_node = fn (al: std.Allocator, out: *std.array.List(u8), n: *parse.Node) void {
     pushs(out, "(");
     pushs(out, utos(al, (u64)(i64)(n.kind)));
     pushs(out, " ");
@@ -229,13 +229,13 @@ const main = fn () i32 {
         }
         if (pr) root {
             if (ast_mode) {
-                var out = std.ArrayList(u8).init(al);
+                var out = std.array.List(u8).init(al);
                 parse.dump(root, &out, 0);
                 std.io.print(std.io.stdout(), "{s}", out.items());
                 return 0;
             }
             if (out_path) op {
-                var out = std.ArrayList(u8).init(al);
+                var out = std.array.List(u8).init(al);
                 ser_node(al, &out, root);
                 if (std.BufWriter.create(al, op, 65536)) wr {
                     var wr2 = wr;

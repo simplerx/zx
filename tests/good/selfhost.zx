@@ -64,13 +64,13 @@ const Parser = struct {
     src: []const u8,
     i: usize,
     depth: usize,
-    nodes: std.ArrayList(*Node),
+    nodes: std.array.List(*Node),
     al: std.Allocator,
 
     const init = fn (al: std.Allocator, src: []const u8) Parser {
         return Parser{
             .src = src, .i = 0, .depth = 0,
-            .nodes = std.ArrayList(*Node).init(al), .al = al,
+            .nodes = std.array.List(*Node).init(al), .al = al,
         };
     };
 
@@ -195,7 +195,7 @@ const main = fn () i32 {
     std.println("deep={} depth={}", eval(d), deep.depth);
 
     // 结构体数组：ArrayList 收集 token
-    var list = std.ArrayList(u8).init(al);
+    var list = std.array.List(u8).init(al);
     var i: usize = 0;
     while (i < 5) {
         _ = list.push((u8)(97 + (i32)i));

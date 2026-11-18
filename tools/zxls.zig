@@ -314,20 +314,36 @@ const std_seeded = [_][]const u8{
     "io",        "Allocator", "stackAlloc", "heapAlloc", "heapSlice", "free", "process",
 };
 
-const BuiltinDoc = struct { name: []const u8, detail: []const u8 };
+const BuiltinDoc = struct {
+    name: []const u8,
+    detail: []const u8,
+    // 非空 → 补全按 LSP snippet 出（insertTextFormat=2）。插入文本**不带
+    // '@'**（宿主只替换 '@' 之后的标识符段，与 addItem 的 label 同口径），
+    // tabstop 约定与 snippets 一致：$1 起跳、$0 收尾（用户 2026-11-18）。
+    snip: []const u8 = "",
+};
 
 // @ 内建（与 src/sema.c check_builtin() 逐字对齐，1.2.2 反射只剩 @type）：
-// 类型转换统一写 `(T)value`；描述符全在编译期。
+// 类型转换统一写 `(T)value`；描述符全在编译期。全部内建都带调用骨架。
 const builtin_docs = [_]BuiltinDoc{
-    .{ .name = "type", .detail = "@type(x) 编译期描述符：.name/.size/.align/.ty/.fieldCount/.fields[i]{.name,.ty,.offset,.ptr}/.statics[i]；x 是左值时 ptr 指向该实例的字段，f.ptr.0 取值" },
-    .{ .name = "memcpy", .detail = "@memcpy(dest, src, count) 内存复制" },
-    .{ .name = "memmove", .detail = "@memmove(dest, src, count) 内存移动" },
-    .{ .name = "memset", .detail = "@memset(dest, fill, count) 内存填充" },
-    .{ .name = "link", .detail = "@link(\"lib\") 链接外部库" },
-    .{ .name = "shim", .detail = "@shim(\"impl.c\") 把一份 C 源文件编进程序（自包含 TU，路径相对本文件）" },
-    .{ .name = "trap", .detail = "@trap() 触发断点/中止" },
-    .{ .name = "error", .detail = "@error(msg) 编译期报错" },
-    .{ .name = "Vec", .detail = "@Vec(T, N) 向量类型：N 个 T 的向量值（N 只能是 1/2/4/8/16/32/64），`(@Vec(T, N))x` 把标量铺满各分量，`@Vec(T, N){a, b, …}` 是字面量" },
+    .{ .name = "type", .detail = "@type(x) 编译期描述符：.name/.size/.align/.ty/.fieldCount/.fields[i]{.name,.ty,.offset,.ptr}/.statics[i]；x 是左值时 ptr 指向该实例的字段，f.ptr.0 取值",
+       .snip = "type(${1:x})$0" },
+    .{ .name = "memcpy", .detail = "@memcpy(dest, src, count) 内存复制",
+       .snip = "memcpy(${1:dest}, ${2:src}, ${3:count})$0" },
+    .{ .name = "memmove", .detail = "@memmove(dest, src, count) 内存移动",
+       .snip = "memmove(${1:dest}, ${2:src}, ${3:count})$0" },
+    .{ .name = "memset", .detail = "@memset(dest, fill, count) 内存填充",
+       .snip = "memset(${1:dest}, ${2:fill}, ${3:count})$0" },
+    .{ .name = "link", .detail = "@link(\"lib\") 链接外部库",
+       .snip = "link(\"${1:lib}\");" },
+    .{ .name = "shim", .detail = "@shim(\"impl.c\") 把一份 C 源文件编进程序（自包含 TU，路径相对本文件）",
+       .snip = "shim(\"${1:impl.c}\");" },
+    .{ .name = "trap", .detail = "@trap() 触发断点/中止",
+       .snip = "trap()$0" },
+    .{ .name = "error", .detail = "@error(msg) 编译期报错",
+       .snip = "error(\"${1:msg}\")$0" },
+    .{ .name = "Vec", .detail = "@Vec(T, N) 向量类型：N 个 T 的向量值（N 只能是 1/2/4/8/16/32/64），`(@Vec(T, N))x` 把标量铺满各分量，`@Vec(T, N){a, b, …}` 是字面量",
+       .snip = "Vec(${1:T}, ${2:N})$0" },
 };
 
 const toplevel_builtins = [_][]const u8{
@@ -569,7 +585,7 @@ fn lineBraceDelta(line: []const u8, in_block: *bool) i32 {
 fn topLevelDecls(text: []const u8, out: *std.ArrayList(Decl), pub_only: bool) void {
     // KEEP — 必须跟花括号深度：容器体里的成员不是模块成员。2026-11-10 给
     // 容器成员加 `pub` 之后，纯行扫描把 `pub const push = fn…` 当成 std 顶层
-    // 声明，`std.` 一弹就混进 ArrayList/BufReader 的整屏方法（用户截图）。
+    // 声明，`std.` 一弹就混进 std.array.List/BufReader 的整屏方法（用户截图）。
     var depth: i32 = 0;
     // 顶层 `extern "C" { … }` 块是**透明作用域**：块里的 `pub fn glClear(…)`
     // 仍是模块成员（cbind 生成物/手写绑定都长这样）。记下块内所在的深度。
@@ -8092,7 +8108,7 @@ fn genericCalleeOf(files: []const []const u8, text: []const u8, callee0: []const
 }
 
 /// 接收者是不是**类型值**而不是实例：`const HS: type = HashMap(V: i32);`、
-/// `const V = ArrayList(i32);`、`const T = Make(i32)`（Make 返回 type）、
+/// `const V = std.array.List(i32);`、`const T = Make(i32)`（Make 返回 type）、
 /// 以及它们的别名链。类型值上只有静态成员——判错就会把字段和方法全
 /// 摆出来（用户 2026-11-10 截图：`HS.` 弹出 alloc/cap/hashes/…）。
 fn isTypeValuedRecv(files: []const []const u8, doc: *const Document,
@@ -9476,7 +9492,7 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                                 addSnippetRaw(&list, &seen, lab.items, ins.items, bd.sig);
                             }
                         }
-                        // 类型条目（`Allocator: type — …`、`ArrayList(T: type) type`）
+                        // 类型条目（`Allocator: type — …`、`std.array.List(T: type) type`）
                         // 按类型出图标，别和函数混成一片。
                         addItem(&list, &seen, m,
                             if (bd.ns) 9 else stdBuiltinKind(bd.sig), bd.sig, 3);
@@ -9495,22 +9511,26 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
             }
         }
     } else if (is_at_ctx) {
-        // @ 前缀：顶层内建
+        // @ 前缀：顶层内建，全部带 snippet（骨架在 builtin_docs.snip，
+        // 用户 2026-11-18）。insertText 不带 '@'（宿主只替换 '@' 之后的
+        // 标识符段，与 addItem 的 label 同口径）；展开后光标落在第一个
+        // 实参占位上，Tab 依次跳、$0 收尾。
         for (toplevel_builtins) |b| {
             if (std.mem.startsWith(u8, b, prefix)) {
                 var detail: []const u8 = "内建函数";
+                var snip: []const u8 = "";
                 for (builtin_docs) |bd| {
-                    if (std.mem.eql(u8, bd.name, b)) detail = bd.detail;
+                    if (std.mem.eql(u8, bd.name, b)) {
+                        detail = bd.detail;
+                        snip = bd.snip;
+                    }
                 }
-                // @type 出 snippet：`type(${1:x})$0`——展开后光标落在
-                // 参数占位上，Tab 到结尾再接 `.size` / `.fields[i]`。
-                // insertText 不带 '@'（宿主只替换 '@' 之后的标识符段，
-                // 与上面 addItem 的 label 同口径）。其余内建仍是普通补全。
-                if (std.mem.eql(u8, b, "type")) {
-                    addSnippetRaw(&list, &seen, b, "type(${1:x})$0", detail);
-                    continue;
+                if (snip.len > 0) {
+                    addSnippetRaw(&list, &seen, b, snip, detail);
+                } else {
+                    // 兜底：将来新增内建忘了写骨架也照常出普通补全
+                    addItem(&list, &seen, b, 3, detail, 0);
                 }
-                addItem(&list, &seen, b, 3, detail, 0);
             }
         }
     } else {

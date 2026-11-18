@@ -1,9 +1,9 @@
-// ArrayList 的完整 API（M19）：增删插、首尾、反转、伸缩、交换。
+// std.array.List 的完整 API（M19）：增删插、首尾、反转、伸缩、交换。
 const std = @mod("std");
 
 const main = fn () u8 {
     let al = std.heap.page;
-    var xs = std.ArrayList(i32).init(al);
+    var xs = std.array.List(i32).init(al);
 
     for (0..5) i { if (!xs.push((i32)i)) { return 1; } }
     std.println("{}", xs.items());

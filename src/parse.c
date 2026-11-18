@@ -556,10 +556,20 @@ static Node *parse_type_prefix(P *p) {
 
     case TOK_LBRACKET: {
         advance(p);
-        expect(p, TOK_RBRACKET);
-        Node *n = node_new(NK_SLICE_TYPE, t->line, t->col);
-        if (accept(p, TOK_KW_CONST)) n->flag = true;
+        /* `[]T` 切片；`[T; N]` 重复元组（N 个 T 内联，sema 展开成 TY_TUPLE）。
+         * `[` 后紧跟 `]` 才是空切片。 */
+        if (at(p, TOK_RBRACKET)) {
+            advance(p);
+            Node *n = node_new(NK_SLICE_TYPE, t->line, t->col);
+            if (accept(p, TOK_KW_CONST)) n->flag = true;
+            n->a = parse_type(p);
+            return n;
+        }
+        Node *n = node_new(NK_REPEAT_TYPE, t->line, t->col);
         n->a = parse_type(p);
+        expect(p, TOK_SEMI);
+        n->b = parse_expr(p);
+        expect(p, TOK_RBRACKET);
         return n;
     }
 

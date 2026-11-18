@@ -121,8 +121,8 @@ const main = fn () u8 {
     // §15 eql
     std.println("eql={} eql={}", eql(a, a), eql(a, Vec{ .x = 1, .y = 2 }));
 
-    // §14 ArrayList
-    var list = std.ArrayList(i32).init(std.heap.page);
+    // §14 std.array.List
+    var list = std.array.List(i32).init(std.heap.page);
     defer list.deinit();
     if (!list.push(7)) { return 1; }
     std.println("list={}", list.items());

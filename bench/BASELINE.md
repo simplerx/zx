@@ -32,7 +32,7 @@ fib 14.4 vs 14.1、mandel 130.9 vs 132.0、mmat 92.1 vs 93.6、str 2.6 vs 2.0。
 ## 容器基线（M33 之后）
 
 `sh bench/run.sh` 里的 `cont` 是标准库容器（bench/containers.zx）：
-ArrayList push/append/insertAt + HashMap put/get（含扩容），五个负载各打
+std.array.List push/append/insertAt + HashMap put/get（含扩容），五个负载各打
 一个校验和。M33 优化（@memcpy/@memmove/@memset + HashMap 哈希缓存）前后
 交替实测 6 轮：整体 171 → 131 ms（约 -23%）。校验和跨实现必须一致：
 
@@ -45,7 +45,7 @@ ArrayList push/append/insertAt + HashMap put/get（含扩容），五个负载�
 - **fib**：递归调用开销 + i64 算术（约 2,900 万次调用）
 - **mandel**：1200×800 曼德博集合，f64 乘加内层循环 + 分支预测
 - **mmat**：256×256 矩阵乘跑 3 遍，内存带宽 + 三重循环
-- **str**：2 万次整数格式化 + 逐字节追加 ArrayList(u8)，分配器压力
+- **str**：2 万次整数格式化 + 逐字节追加 std.array.List(u8)，分配器压力
 - **json / cont / pool / poolraw**：真实 std 算法与分配器对照
 
 ## 编译侧基线（v0.58，三项优化后）

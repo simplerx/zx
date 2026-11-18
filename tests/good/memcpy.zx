@@ -1,6 +1,6 @@
 // @memcpy / @memmove / @memset：批量内存操作（v0.25）。
 //
-// ArrayList 增长 / 插入删除 / append 原来是逐元素循环——T 任意大小，
+// std.array.List 增长 / 插入删除 / append 原来是逐元素循环——T 任意大小，
 // 每次搬运都是一次访存加一次循环判断。现在容器内部直接用这三个内建，
 // 一次批量搬运（C 的 memcpy / memmove / memset，SIMD 友好）。
 //
@@ -34,7 +34,7 @@ const main = fn () i32 {
     std.println("{} {}", d2[1], d2[3]);
 
     // ⑤ 容器内部也走它们：append 大批量
-    var al = std.ArrayList(i32).init(std.heap.page);
+    var al = std.array.List(i32).init(std.heap.page);
     defer al.deinit();
     var i: usize = 0;
     while (i < 64) {

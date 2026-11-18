@@ -1,0 +1,87 @@
+// array-module.zx —— std.array 模块：List（可增长）+ Array（定长内联）。
+// 验证迁移后的真实路径 std.array.List 与新增的 std.array.Array(T,N)。
+// Array 的存储是 [T;N] 内联元组：sizeof(Array) == N*sizeof(T)，
+// 作为 struct 成员时内存随结构体携带（本守门的核心断言）。
+const std = @mod("std");
+
+const A8 = std.array.Array(i32, 8);
+
+// Array 作为 struct 成员：内存内联（32+1 对齐 4 → 36 字节，不是 8 字节指针）
+const Holder = struct {
+    buf: A8,
+    tag: u8,
+};
+
+pub const main = fn () i32 {
+    let al = std.heap.page;
+
+    // ---- std.array.List(T)：从旧 ArrayList 迁来，API 不变 ----
+    var xs = std.array.List(i32).init(al);
+    for (0..4) i { if (!xs.push((i32)i)) { return 1; } }
+    if (xs.len != 4) { return 2; }
+    if (xs.get(2)) v { if (v != 2) { return 3; } } else { return 4; }
+    xs.deinit();
+
+    // ---- 内联存储断言：sizeof(Array(i32,8)) == 32，Holder == 36 ----
+    if (A8.byteSize != 32) { return 5; }
+    if (@type(A8).size != 32) { return 6; }
+    if (@type(Holder).size != 36) { return 7; }
+
+    // ---- 定长数组：init 不要 storage，内存自带 ----
+    var a = std.array.Array(i32, 4).init();
+
+    // 编译期元信息
+    if (std.array.Array(i32, 4).count != 4) { return 8; }
+    if (std.array.Array(i32, 4).byteSize != 16) { return 9; }
+    if (a.len() != 4) { return 10; }
+
+    a.fill(0);
+    if (!a.set(0, 10)) { return 11; }
+    if (!a.set(3, 40)) { return 12; }
+    if (a.first() != 10) { return 13; }
+    if (a.last() != 40) { return 14; }
+    if (a.get(3)) v { if (v != 40) { return 15; } } else { return 16; }
+
+    // 越界访问返回 null/false，不越界写
+    if (a.get(4)) v { _ = v; return 17; }
+    if (a.set(4, 99)) { return 18; }
+    if (a.at(4)) v { _ = v; return 19; }
+
+    // items() 视图 + 遍历
+    let slice = a.items();
+    if (slice.len != 4) { return 20; }
+    var sum: i32 = 0;
+    for (slice) v { sum = sum + v; }
+    if (sum != 50) { return 21; }
+
+    a.reverse();
+    if (a.first() != 40) { return 22; }
+    if (!a.swap(0, 1)) { return 23; }
+    if (a.first() != 0) { return 24; }
+
+    // fill 是逐元素语义：每个元素正好是 v。曾误改成 @memset（字节语义）——
+    // i32 的 fill(7) 会被写成 0x07070707，这里的断言就是防回归钉子。
+    a.fill(7);
+    if (a.get(0)) v { if (v != 7) { return 29; } } else { return 30; }
+    if (a.get(3)) v { if (v != 7) { return 31; } } else { return 32; }
+
+    // zero()：@memset 字节清零的正确用法（全零字节 = 任意 T 的零值）
+    if (!a.set(1, 12345)) { return 33; }
+    a.zero();
+    var zsum: i32 = 0;
+    for (a.items()) v { zsum = zsum + v; }
+    if (zsum != 0) { return 34; }
+
+    // 结构体成员里的 Array：写进去、读出来，内存就在 Holder 里
+    var h = Holder{ .buf = A8.init(), .tag = 7 };
+    if (!h.buf.set(5, 55)) { return 25; }
+    if (h.buf.get(5)) v { if (v != 55) { return 26; } } else { return 27; }
+    if (h.tag != 7) { return 28; }
+
+    std.println("array ok sum={} h5={}", sum, h.buf.get(5) orelse 0);
+    return 0;
+};
+
+// expect-output
+// array ok sum=50 h5=55
+// expect-exit: 0

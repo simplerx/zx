@@ -13,8 +13,8 @@ const std = @mod("std");
 pub const main = fn () i32 {
     var da = std.debug_alloc.DebugAllocator.init(std.heap.page);
     if (da) a {
-        // 让 ArrayList 走记账分配器：增长一次就是一次可追溯的分配
-        var list = std.ArrayList(i32).init(a);
+        // 让 std.array.List 走记账分配器：增长一次就是一次可追溯的分配
+        var list = std.array.List(i32).init(a);
         var i: usize = 0;
         while (i < 4) {
             _ = list.push((i32)i);

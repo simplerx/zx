@@ -1,4 +1,4 @@
-// 标准库能写到什么程度：ArrayList、字符串比较/查找/切分、文件读写。
+// 标准库能写到什么程度：List、字符串比较/查找/切分、文件读写。
 // 这三样齐了，一般的小程序就不用自己手搓容器和字符串处理了。
 
 const std = @mod("std");
@@ -19,8 +19,8 @@ const noop = fn (_: ?*u8, _: *u8, _: usize) void { };
 const main = fn () i32 {
     let al = std.heap.page;
 
-    // ---- std.ArrayList(T)：init / push / get / pop / items ----
-    var xs = std.ArrayList(i32).init(al);
+    // ---- std.array.List(T)：init / push / get / pop / items ----
+    var xs = std.array.List(i32).init(al);
     var i: usize = 0;
     while (i < 10) {
         if (!xs.push((i32)(i * i))) { std.println("push failed"); }
@@ -32,9 +32,9 @@ const main = fn () i32 {
     std.println("list pop {}", xs.pop());
     xs.deinit();
 
-    // ---- 同一个 ArrayList 配自建的 arena（泛型 + 自定义分配器）----
+    // ---- 同一个 List 配自建的 arena（泛型 + 自定义分配器）----
     let arena = std.Allocator{ .ctx = null, .alloc = bump, .free = noop };
-    var ys = std.ArrayList(i32).init(arena);
+    var ys = std.array.List(i32).init(arena);
     var j: usize = 0;
     while (j < 20) {
         if (!ys.push((i32)(j + 100))) { std.println("push failed at {}", j); }

@@ -1503,7 +1503,7 @@ check("inlayHint.anonNestedLiteral",
 #  1 std 命名空间去污染：TypeKind/TypeInfo/FieldInfo 纯编译期反射不进补全；
 #    Allocator/stackAlloc/heapAlloc 暴露且带 snippet（用户第 4 条）
 #  2 std 内建函数与门面子模块（std.str.split）有签名 hover、成员有调用骨架
-#  3 std 类型实体（Task/ArenaAllocator/泛型 ArrayList）成员有类型、方法有签名
+#  3 std 类型实体（Task/ArenaAllocator/泛型 List）成员有类型、方法有签名
 #  4 std.zx 不设类型别名（用户第 4 条下午：别名和真身分不清）——
 #    类型只走 std.task.Task / std.map.HashMap 这类真实路径
 STDUSE = """const std = @mod("std");
@@ -1511,7 +1511,7 @@ STDUSE = """const std = @mod("std");
 pub const main = fn () u8 {
     let g = std.task.Task.single();
     g.await(1);
-    let l = std.ArrayList(i32).init(std.heap.page);
+    let l = std.array.List(i32).init(std.heap.page);
     l.push(1);
     let t = std.task.Task{ .id = 0 };
     t.await(1);
@@ -1521,7 +1521,7 @@ pub const main = fn () u8 {
     var sm = std.fs.stat(std.heap.page, "x");
     var r = std.BufReader.open(std.heap.page, "x", 64);
     var w = std.BufWriter.create(std.heap.page, "y", 64);
-    var V: type = std.ArrayList(i32);
+    var V: type = std.array.List(i32);
     var list = V.init(std.heap.page);
     _ = dt.year;
     _ = sm.?.size;
@@ -1608,12 +1608,12 @@ check("completion.stdInstance.methodSig",
       and gk.get("await") == 15 and gt.get("await") == "await(${1:h})$0",
       "%r %r" % (gd.get("await"), gk.get("await")))
 
-# 3b 泛型容器实例：std.ArrayList(i32) → l. 出全部成员，字段带 T 类型
+# 3b 泛型容器实例：std.array.List(i32) → l. 出全部成员，字段带 T 类型
 off = STDUSE.index("    l.push(1);") + len("    l.")
 lit_ = std_items(off, 404)
 lid = {i["label"]: i.get("detail") for i in lit_}
 check("completion.genericInstance.members",
-      lid.get("push", "") == "push(self: *ArrayList, v: T) bool"
+      lid.get("push", "") == "push(self: *List, v: T) bool"
       and lid.get("buf") == "*T" and lid.get("len") == "usize", str(lid)[:240])
 
 # 3c 实例方法 hover（std 类型 + 泛型）
@@ -1687,9 +1687,9 @@ check("hover.generic.facadeDefinition",
       and "vals: *V" in std_hover("std.map.HashMap(i32)", "HashMap", 511),
       std_hover("std.map.HashMap(i32)", "HashMap", 511)[:200])
 check("hover.generic.topLevelDefinition",
-      "struct {" in std_hover("std.ArrayList(i32)", "ArrayList", 512)
-      and "buf: *T" in std_hover("std.ArrayList(i32)", "ArrayList", 512),
-      std_hover("std.ArrayList(i32)", "ArrayList", 512)[:200])
+      "struct {" in std_hover("std.array.List(i32)", "List", 512)
+      and "buf: *T" in std_hover("std.array.List(i32)", "List", 512),
+      std_hover("std.array.List(i32)", "List", 512)[:200])
 # 5 零字段容器（ArenaAllocator）：构造形态是静态 init，出 `Name.init(…)` 骨架
 arit = std_items(STDUSE.index("    std.arena.\n") + len("    std.arena."), 406)
 ard = {i["label"]: (i.get("kind"), i.get("insertText"), i.get("detail")) for i in arit}
@@ -1814,14 +1814,14 @@ check("completion.typePath.noField",
       {"open", "init"} <= bpt and not ({"next", "chunk", "readAll"} & bpt)
       and not ({"h", "buf", "cap", "start", "end", "eof", "owned", "alloc"} & bpt),
       str(sorted(bpt)))
-#  6f 类型变量绑定：`var V: type = std.ArrayList(i32)` → `V.init(…)` 的实例
-#     也要推断成 ArrayList（用户 2026-11-09 截图里的写法）
+#  6f 类型变量绑定：`var V: type = std.array.List(i32)` → `V.init(…)` 的实例
+#     也要推断成 List（用户 2026-11-09 截图里的写法）
 off = STDUSE.index("    list.\n") + len("    list.")
 lit2 = std_items(off, 419)
 lld = {i["label"]: i.get("detail") for i in lit2}
 check("completion.typeVar.instance",
-      lld.get("push") == "push(self: *ArrayList, v: T) bool" and lld.get("len") == "usize"
-      and lld.get("items") == "items(self: *ArrayList) []T", str(lld)[:240])
+      lld.get("push") == "push(self: *List, v: T) bool" and lld.get("len") == "usize"
+      and lld.get("items") == "items(self: *List) []T", str(lld)[:240])
 #  6g 三段路径的泛型容器：`std.map.HashMap.` 一个成员都不出过
 off = STDUSE.index("    std.map.HashMap.") + len("    std.map.HashMap.")
 hit3 = std_items(off, 420)
@@ -3247,8 +3247,9 @@ send({"jsonrpc": "2.0", "method": "textDocument/didClose",
 # 元组下标 + @type snippet（用户 2026-11-11 第 3 张截图）。
 #   · `const s = tup[2];` 类型丢失：inferExprType 的下标分支只认 elemTyOf
 #     （切片/数组），元组 `{i32,i32,str}` 取第 N 项要 tupleElemTy。
-#   · `@` 内建补全里 @type 出 snippet：`type(${1:x})$0`（insertTextFormat=2），
-#     其余内建（@memcpy/…）仍是普通补全。
+#   · `@` 内建补全全部带 snippet（2026-11-18）：`@type` 是
+#     `type(${1:x})$0`（insertTextFormat=2），@memcpy/@memset 等同样出骨架。
+#     守门用例在 completion.atType.snippet / completion.atBuiltins.snippet。
 TUPIDX = """const std = @mod("std");
 
 const tup: {i32,i32,str} = {10,23,"hello"};
@@ -3648,8 +3649,14 @@ check("completion.atType.snippet",
       _ats.get("type", {}).get("insertTextFormat") == 2
       and _ats.get("type", {}).get("insertText") == "type(${1:x})$0",
       str(_ats.get("type"))[:200])
-check("completion.atOthers.plain",
-      _ats.get("memcpy", {}).get("insertTextFormat") is None,
+# 2026-11-18 用户：全部内建都带 snippet（@memset 等）。骨架在 builtin_docs.snip，
+# 插入文本不带 '@'（宿主只替换 '@' 之后的标识符段）。
+check("completion.atBuiltins.snippet",
+      _ats.get("memcpy", {}).get("insertTextFormat") == 2
+      and _ats.get("memcpy", {}).get("insertText") == "memcpy(${1:dest}, ${2:src}, ${3:count})$0"
+      and _ats.get("memset", {}).get("insertText") == "memset(${1:dest}, ${2:fill}, ${3:count})$0"
+      and _ats.get("memmove", {}).get("insertText") == "memmove(${1:dest}, ${2:src}, ${3:count})$0"
+      and _ats.get("trap", {}).get("insertText") == "trap()$0",
       str(_ats.get("memcpy"))[:200])
 
 # ---------------------------------------------------------------------------
@@ -4418,10 +4425,12 @@ open(_muse_path, "w", encoding="utf-8").write(MUSE)
 muri = "file:///" + _muse_path.replace("\\", "/")
 
 # §136 泛型**值参数**容器（`fn (N: u64) type`，没有 `T: type`）：三条入口
-# 都要出字段——实例 `v.`、别名字面量 `L{ .`、直接构造 `List(2){ .`。
+# 都要出字段——实例 `v.`、别名字面量 `L{ .`、直接构造 `GvList(2){ .`。
 # 2026-11-13 用户截图：`const L: type = List(2); L.` 只有构造骨架，
 # 根因是 inferContainer 把返回类型 "type" 当容器名继续解析。
-MGV = """const List = fn (N: u64) type {
+# 容器名带 Gv 前缀：std.array.List 进 std 后，SRC_DIR 里裸名 `List`
+# 会把 `std.array.List(i32)` 的实例补全串到这个 fixture 上（同坑再踩）。
+MGV = """const GvList = fn (N: u64) type {
     return struct {
         pub genId: *[N]u64,
         pub ptr: *[N]*void,
@@ -4429,14 +4438,14 @@ MGV = """const List = fn (N: u64) type {
     };
 };
 
-const L: type = List(2);
+const L: type = GvList(2);
 
 pub const main = fn () void {
     var v: L = L{ .genId = null, .ptr = null };
     v.
     var w = L{ .
-    var z = List(2){ .
-    var y = List(2){ .genId = null, .ptr = null };
+    var z = GvList(2){ .
+    var y = GvList(2){ .genId = null, .ptr = null };
     y.
 };
 """
@@ -4448,7 +4457,7 @@ mgvuri = "file:///" + _mgv_path.replace("\\", "/")
 # 成员都不出——findDeclStmt 只认 var/let/const，形参没有声明语句；
 # anonTyOfPath 只认 `name: struct{…}` 的匿名串，`*P` / `[]T` / `List(4)` 全落空。
 # 容器名一律带 `Pv` 前缀：SRC_DIR 里所有 fixture 进同一个 scanFiles，与
-# instChain 的 `P`、gval 的 `List` 同名会互相串味（本轮已踩过一次）。
+# instChain 的 `P`、gval 的 `GvList` 同名会互相串味（本轮已踩过一次）。
 PVM = """const PvUnit = struct {
     pub a: i32,
     pub b: i32,
@@ -4545,7 +4554,7 @@ check("completion.gval.instanceMembers",
 _gv2 = mcomp(MGV, mgvuri, "var w = L{ .", "gval.aliasLiteral")
 check("completion.gval.aliasLiteral",
       {"genId", "ptr"} <= set(_gv2), str(sorted(_gv2)))
-_gv3 = mcomp(MGV, mgvuri, "var z = List(2){ .", "gval.ctorLiteral")
+_gv3 = mcomp(MGV, mgvuri, "var z = GvList(2){ .", "gval.ctorLiteral")
 check("completion.gval.ctorLiteral",
       {"genId", "ptr"} <= set(_gv3), str(sorted(_gv3)))
 # 实例来自构造字面量本身（用户截图的正规写法）——字段**和**方法都要出
@@ -4784,21 +4793,25 @@ check("completion.simd.mat4.mulSignature",
 # §160：`@shim` 要出现在 `@` 补全里；写到一半（`@sh`）同样要走这条路。
 # 旧行为：identBefore 不吃 '@'，`@sh` 的前缀是 `sh`，`off-1` 也不是 '@'
 # ——两条判据都不命中，掉进全局标识符分支，用户看到一条同名变量。
+# 2026-11-18 起内建全部带 snippet（kind=15），@shim 的骨架带 `;`（顶层声明）。
 _g160_shim = g157_comp("var p8 = @sh", 5212)
 check("completion.shim.partialAtIsBuiltin",
       len(_g160_shim) == 1
       and _g160_shim[0].get("label") == "shim"
-      and _g160_shim[0].get("kind") == 3
+      and _g160_shim[0].get("kind") == 15
+      and _g160_shim[0].get("insertTextFormat") == 2
+      and _g160_shim[0].get("insertText") == 'shim("${1:impl.c}");'
       and "@shim(" in (_g160_shim[0].get("detail") or ""),
       str(_g160_shim)[:260])
 
 # §162：`@Vec(T, N)` 是类型内建，也要进 `@` 补全（写到一半 `@Ve` 同样走
-# 这条路）。类型内建的实参是类型，不在值位置当函数看——kind 仍是 3（内建）。
+# 这条路）。类型内建的实参是类型，不在值位置当函数看——一样带 snippet。
 _g162_vec = g157_comp("var p9 = @Ve", 5214)
 check("completion.vec.partialAtIsBuiltin",
       len(_g162_vec) == 1
       and _g162_vec[0].get("label") == "Vec"
-      and _g162_vec[0].get("kind") == 3
+      and _g162_vec[0].get("kind") == 15
+      and _g162_vec[0].get("insertText") == "Vec(${1:T}, ${2:N})$0"
       and "@Vec(T, N)" in (_g162_vec[0].get("detail") or ""),
       str(_g162_vec)[:260])
 

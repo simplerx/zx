@@ -12,8 +12,8 @@ const std = @mod("std");
 const Item = struct { done: bool, text: []const u8 };
 
 // 把 todo.txt 读进列表；文件不存在就从空列表开始。
-const load = fn (al: std.Allocator) std.ArrayList(Item) {
-    var xs = std.ArrayList(Item).init(al);
+const load = fn (al: std.Allocator) std.array.List(Item) {
+    var xs = std.array.List(Item).init(al);
     let text = std.file.read(al, "todo.txt");
     if (text) t {
         let parts = std.str.split(al, t, "\n");
@@ -30,7 +30,7 @@ const load = fn (al: std.Allocator) std.ArrayList(Item) {
 };
 
 // 整体重写 todo.txt：每行 "{d}|{s}"。
-const save = fn (al: std.Allocator, var xs: std.ArrayList(Item)) bool {
+const save = fn (al: std.Allocator, var xs: std.array.List(Item)) bool {
     var out: []const u8 = "";
     for (0..xs.len) i {
         if (xs.get(i)) it {
@@ -43,7 +43,7 @@ const save = fn (al: std.Allocator, var xs: std.ArrayList(Item)) bool {
     return std.file.write("todo.txt", out);
 };
 
-const list = fn (var xs: std.ArrayList(Item)) void {
+const list = fn (var xs: std.array.List(Item)) void {
     if (xs.len == 0) { std.println("(nothing yet)"); return; }
     for (0..xs.len) i {
         if (xs.get(i)) it {
@@ -99,7 +99,7 @@ const main = fn () u8 {
                     std.println("done   [x] {s}", nit.text);
                 }
             } else {
-                if (!xs.removeAt(idx)) return 1;            // ArrayList.removeAt
+                if (!xs.removeAt(idx)) return 1;            // std.array.List.removeAt
                 if (!save(al, xs)) return 1;
                 std.println("removed #{d}", v);
             }

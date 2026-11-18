@@ -39,6 +39,8 @@ static void cstr(Buf *b, const char *s, int n);  /* C 字符串字面量：静�
 static void mname(Buf *b, const char *s);
 static void dotname(Buf *b, const char *s);
 static void arrowname(Buf *b, const char *s);
+static bool val_has_fn(Value *v);   /* §117 值槽：静态成员初始化先用（定义在下方） */
+static void val_init(Buf *b, Value *v, Type *t);
 
 /* ======================================================================
  *  行映射：生成的 C 行 → zx 源码位置
@@ -495,6 +497,12 @@ static void ensure_type(Type *t) {
                         ctype(&ts, f->ty);
                         buf_printf(&s, "((%s){ (uint8_t*)%s, %d })",
                                    ts.data, c.data, f->dflt->str_len);
+                    } else if (f->ct && !val_has_fn(f->ct)) {
+                        /* §117 值槽优先：关联常量的初值 sema 已折成编译期值
+                         * （泛型容器里 `N * @type(T).size` 这类只活编译期的
+                         * 子式，克隆体 ct 洗掉后裸发会变成 `0.size` 这种非法
+                         * C——B1003 "invalid suffix 'size'"）。 */
+                        val_init(&s, f->ct, f->ty);
                     } else {
                         ex(&s, f->dflt);
                     }
@@ -1516,7 +1524,7 @@ static void ex_builtin(Buf *b, Node *n) {
         return;
     }
     if (!strcmp(nm, "memcpy") || !strcmp(nm, "memmove") || !strcmp(nm, "memset")) {
-        /* 直接落 C 的批量内存原语：ArrayList 增长 / 搬移不再逐元素。
+        /* 直接落 C 的批量内存原语：std.array.List 增长 / 搬移不再逐元素。
          * 切片实参取 .ptr（C 侧是 ZxSlice_* 结构体，不能直接转 void*）。 */
         Buf d; buf_init(&d); ex(&d, n->items[0]);
         Buf s; buf_init(&s); ex(&s, n->items[1]);

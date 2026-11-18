@@ -24,7 +24,7 @@ const main = fn () i32 {
         var p = parse.Parser.init(al, src, &lx);
         let pr = p.parse_program();
         if (pr) root {
-            var out = std.ArrayList(u8).init(al);
+            var out = std.array.List(u8).init(al);
             parse.dump(root, &out, 0);
             std.io.print(std.io.stdout(), "{s}", out.items());
             return 0;

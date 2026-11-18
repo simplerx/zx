@@ -19,7 +19,7 @@ const main = fn () i32 {
     if (r) src {
         var lx = lex.Lexer.init(al, src);
         lx.run();
-        var out = std.ArrayList(u8).init(al);
+        var out = std.array.List(u8).init(al);
         lex.dump(&lx, &out);
         std.io.print(std.io.stdout(), "{s}", out.items());
         if (lx.n_errors > 0) { return 1; }

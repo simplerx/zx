@@ -10,7 +10,7 @@
 // 后写的会盖掉先写的，g_bad 上涨。
 //
 // 还验三件事：同一个 SyncPool 的 Allocator 视图可以喂给多条线程各自的
-// ArrayList；Pool 本身仍保留公开的无锁 alloc/free/used（没有被私有化）；
+// std.array.List；Pool 本身仍保留公开的无锁 alloc/free/used（没有被私有化）；
 // 复制一份 SyncPool 值后仍共享同一把锁与同一片池状态，deinit 把锁字按
 // 原长度还给 backing（用 DebugAllocator 当账本核）。
 // expect-output:ok:3000
@@ -46,9 +46,9 @@ const work = fn (id: usize) !usize {
         i = i + 1;
     }
 
-    // 每线程自己的 ArrayList，但共用池的 Allocator 视图。
+    // 每线程自己的 std.array.List，但共用池的 Allocator 视图。
     let a = sp.allocator();
-    var list = std.ArrayList(i32).init(a);
+    var list = std.array.List(i32).init(a);
     var j: usize = 0;
     while (j < 100) { _ = list.push((i32)j); j = j + 1; }
     let good = list.len == 100 && list.at(99).?.0 == 99;

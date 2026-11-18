@@ -1,6 +1,6 @@
 // pool-allocator.zx —— Pool.allocator() 把池接进既有 Allocator 通道。
 //
-// 复用的是 std.ArrayList / DebugAllocator 这些原本就吃 Allocator 的模块，
+// 复用的是 std.array.List / DebugAllocator 这些原本就吃 Allocator 的模块，
 // 没有为池另开一套接口。ctx 指向 *Pool 本身，所以多个视图共享同一个池，
 // 也可以用一个视图释放另一个视图发出的块。
 // expect-exit: 0
@@ -33,8 +33,8 @@ pub const main = fn () i32 {
         } else { return 1; }
         std.println("used64 after free = {}", pp.used(64));
 
-        // ② 喂给 ArrayList：增长、释放都走池
-        var list = std.ArrayList(i32).init(a);
+        // ② 喂给 std.array.List：增长、释放都走池
+        var list = std.array.List(i32).init(a);
         var i: usize = 0;
         while (i < 20) {
             _ = list.push((i32)i);
@@ -72,7 +72,7 @@ pub const main = fn () i32 {
         if (p2) pv2 {
             var pp2 = pv2;
             let a3 = pp2.allocator();
-            var v = std.ArrayList(i32).init(a3);
+            var v = std.array.List(i32).init(a3);
             var j: usize = 0;
             while (j < 8) {
                 _ = v.push((i32)j);

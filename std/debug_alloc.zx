@@ -6,7 +6,7 @@
 //
 //   var da = std.debug_alloc.DebugAllocator.init(std.heap.page);
 //   if (da) a {
-//       var list = std.ArrayList(i32).init(a);   // 谁吃 Allocator 都能套
+//       var list = std.array.List(i32).init(a);   // 谁吃 Allocator 都能套
 //       list.push(1);
 //       list.deinit();                           // 真释放
 //       std.debug_alloc.DebugAllocator.deinit(a); // 零泄漏 -> 干净退出

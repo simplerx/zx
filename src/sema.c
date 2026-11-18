@@ -1700,6 +1700,30 @@ static Type *resolve_type(Node *n) {
         return t;
     }
 
+    case NK_REPEAT_TYPE: {
+        /* [T; N]：N 个 T 的内联元组值类型。sema 期展开成 TY_TUPLE——
+         * 布局、发码、下标、反射全部复用元组机制，语言层零新增类型。 */
+        Type *elem = resolve_type(n->a);
+        if (elem->kind == TY_INVALID) return ty_invalid();
+        IntV v = ev_int(n->b);
+        if (!v.ok || v.neg)
+            return BAD(n->b, "repeat-type length must be a non-negative compile-time integer");
+        if (v.v == 0 || v.v > 4096) {
+            diag_code_at("E0305", n->line, n->col,
+                         "repeat-type length must be 1..4096 (got %llu)",
+                         (unsigned long long)v.v);
+            return ty_invalid();
+        }
+        int cnt = (int)v.v;
+        Type **items = calloc((size_t)cnt, sizeof(Type *));
+        for (int i = 0; i < cnt; i++) items[i] = elem;
+        Type *t = ty_tuple(items, cnt);
+        free(items);
+        n->ty = ty_type();
+        n->type_val = t;
+        return t;
+    }
+
     case NK_STRUCT_TYPE: {
         /* §178：这个体已并入别处声明的同名类型——直接返回本体 */
         Type *ad = adopt_find(n);
@@ -5579,7 +5603,7 @@ static Type *check_slice_expr(Node *n) {
 }
 
 /* 被调用的东西是不是泛型函数（按名字找得到，或者是一个泛型 fn 字面量） */
-/* 命名空间成员（std.ArrayList / util.make）：拿到模块里那个符号 */
+/* 命名空间成员（std.array.List / util.make）：拿到模块里那个符号 */
 static Symbol *ns_member_symbol(Node *field) {
     if (!field || field->kind != NK_FIELD || !field->a) return NULL;
     Symbol *ns = NULL;
@@ -6883,7 +6907,7 @@ static Type *check_builtin(Node *n, Type *expect) {
 
     if (!strcmp(nm, "memcpy") || !strcmp(nm, "memmove") || !strcmp(nm, "memset")) {
         /* @memcpy(dst, src, bytes) / @memmove(dst, src, bytes) /
-         * @memset(dst, byte, bytes)：批量内存操作，库容器（ArrayList 等）
+         * @memset(dst, byte, bytes)：批量内存操作，库容器（std.array.List 等）
          * 的增长、搬移不再走逐元素循环。dst 是指针或切片（memcpy/memmove
          * 的 src 同样），memset 的第二参是填充字节值。返回 void。 */
         if (n->nitems < 3) return BAD(n, "@%s needs (dest, src, bytes)", nm);
@@ -8091,8 +8115,17 @@ static void ensure_raw(Symbol *s) {
             }
             d->b->ty = t;
         }
-        /* let / const 绑定数组字面量 → 只读视图（R9） */
-        if (!d->a && t->kind == TY_PTR && t->has_len && !t->is_const && s->kind != SK_VAR) {
+        /* let / const 绑定数组字面量 → 只读视图（R9）。只收字面量本尊
+         * （`&.{…}` / `.{…}`）：字面量的匿名存储可以落成只读。cast /
+         * stackAlloc 出来的 *[N]T 指向的是**别人的存储**（struct 字段、
+         * 栈槽），可变性跟着被指物走——一刀切变 *const 会把
+         * `let p = (*[8]i32)(&h.buf)` 这种合法视图模式打死（§182）。 */
+        Node *ainit = d->b;
+        bool is_arrlit = ainit && (ainit->kind == NK_ARRAY_LIT ||
+            (ainit->kind == NK_UN && ainit->op == TOK_AMP && ainit->a &&
+             ainit->a->kind == NK_ARRAY_LIT));
+        if (!d->a && t->kind == TY_PTR && t->has_len && !t->is_const &&
+            s->kind != SK_VAR && is_arrlit) {
             t = ty_ptr(t->elem, true, true, t->len);
             d->b->ty = t;
         }
@@ -11032,10 +11065,11 @@ static Value *ct_eval(Node *n) {
         break;
     }
 
-    /* 类型表达式：struct{…} / *[N]T / Ident —— 类型是值 */
+    /* 类型表达式：struct{…} / *[N]T / [T;N] / Ident —— 类型是值 */
     case NK_TYPE_IDENT: case NK_PTR_TYPE: case NK_SLICE_TYPE:
     case NK_TUPLE_TYPE: case NK_STRUCT_TYPE: case NK_UNION_TYPE:
     case NK_ENUM_TYPE:  case NK_OPT_TYPE:   case NK_ERR_TYPE:  case NK_ERR_SET:
+    case NK_REPEAT_TYPE:
         if (n->type_val) v = val_type(n->type_val);
         break;
 
