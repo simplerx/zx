@@ -1582,8 +1582,7 @@ static Type *resolve_type(Node *n) {
             n->type_val = s->type_val ? s->type_val : ty_invalid();
             return n->type_val;
         }
-            fprintf(stderr, "DBG resolve-fail ident=%s\n", n->name);
-            return BAD(n, "'%s' is not a type", n->name);
+        return BAD(n, "'%s' is not a type", n->name);
     }
 
     case NK_VEC_TYPE: {
