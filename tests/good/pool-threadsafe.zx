@@ -73,6 +73,7 @@ pub const main = fn () i32 {
         std.println("views:{}", std.atomic.atomicLoad(&g_view));
         std.println("used64:{}", sp.used(64));
         sp.deinit();
+        tag sp: null;
     }
 
     // Pool 没有被私有化也没有被加锁：它仍有公开的无锁 alloc/free/used。
@@ -85,6 +86,7 @@ pub const main = fn () i32 {
         }
         std.println("poolused:{}", pp.used(64));
         pp.deinit();
+        tag pp: null;
     }
 
     // 顺序访问 + 记账分配器：deinit 要把档位表和锁字都还清。
@@ -100,9 +102,11 @@ pub const main = fn () i32 {
                 _ = sp2.free(b2);    // 交叉释放，走的是同一把锁
             }
             sp2.deinit();
+            tag sp2: null;
         }
         std.println("live:{}", std.debug_alloc.DebugAllocator.liveBytes(a));
         std.debug_alloc.DebugAllocator.deinit(a);
+        tag a: null;
     }
     return 0;
 };

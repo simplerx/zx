@@ -16,8 +16,9 @@ const pageAlloc = fn (_: ?*u8, n: usize) ?*u8 {
 
 pub const main = fn () i32 {
     if (pageAlloc(null, 8)) p {
-        std.heap.page.free(null, p, 8);
         std.println("page: ok");
+        defer std.heap.page.free(null, p, 8);
+        tag p: null;
     }
     return 0;
 };

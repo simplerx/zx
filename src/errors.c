@@ -86,7 +86,7 @@ static const ErrDoc g_errs[] = {
       "add `pub` in the declaring module; `extern` and friends live at file scope only" },
     { "E0405", "control-flow statement in the wrong place",
       "`continue` belongs in a loop, `return` in a function, no `return` inside "
-      "`defer`, and `errdefer` only in a function that returns `!T`; loops have "
+      "`defer`, and `defer err` only in a function that returns `!T`; loops have "
       "no `else` branch -- write that code after the loop" },
     { "E0410", "unused local variable, parameter or binding",
       "rename unused ones to `_x` or `_`; otherwise delete them until needed" },
@@ -147,6 +147,12 @@ static const ErrDoc g_errs[] = {
       "this integer came from a pointer and its provenance was lost (arithmetic or re-assignment) -- re-attach the tracking chain with `tag v : tag.x = (*T)n;`; integers that never touched a pointer need no annotation" },
     { "E0526", "the pointer is owned by an arena",
       "this pointer was adopted by an arena (`ArenaAllocator.adopt`) -- the arena frees it at deinit; free it here and the arena would free it again. To take ownership back is not supported: design the hand-over one-way" },
+    { "E0528", "release in a branch arm must be confirmed",
+      "free/deinit inside `if`/`switch`/`try` arms needs explicit confirmation: write `tag p : null;` (p = the carrier variable) right after the release to confirm the pointer is given up -- a branch may not run, so an unconfirmed release is treated as not-released at the join and the pointer stays usable; loop bodies are not arms, per-iteration release there is fine" },
+    { "E0529", "use after move",
+      "`std.move(p)` transferred the pointer's ownership to the receiver (line given in the message) -- the original variable is sealed: it can be neither dereferenced, freed, moved again, nor handed off again. Use the variable the move produced; to keep tracking on the receiving side, bind a tag there (`tag q : tag.x = ...`)" },
+    { "E0530", "std.move needs a pointer the tag ledger tracks",
+      "`std.move` transfers ownership, so the argument must be an allocation the compiler tracks -- a `std.heapAlloc`/`std.stackAlloc` site or a pointer bound with `tag.x : ...`. A bare pointer (e.g. cast back from `usize` in a thread) has no owner to transfer; bind a tag to it first" },
 
     /* ---- 模块 ---- */
     { "E0601", "module resolution failed",

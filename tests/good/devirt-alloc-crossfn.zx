@@ -32,7 +32,7 @@ const cFree = fn (_: ?*u8, _: *u8, _: usize) void { };
 var G = Allocator{ .ctx = null, .alloc = cAlloc, .free = cFree };
 
 const useIt = fn () void {
-    if (G.alloc(G.ctx, 8)) p { G.free(G.ctx, p, 8); }
+    if (G.alloc(G.ctx, 8)) p { G.free(G.ctx, p, 8); tag p: null; }
 };
 
 const spoil = fn () void {

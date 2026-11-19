@@ -14,7 +14,7 @@ pub const main = fn () u8 {
     var out = format(heap.page, "fmt={}", 7);
     if (out) s {
         println("{}", s);
-        heap.page.free(heap.page.ctx, s.ptr, s.len);
+        defer heap.page.free(heap.page.ctx, s.ptr, s.len);
     }
     return 0;
 };

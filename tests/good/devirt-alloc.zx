@@ -35,6 +35,7 @@ const countFree = fn (ctx: ?*u8, p: *u8, n: usize) void {
         let st = (*Counter)c;
         st.0.live = st.0.live - 1;
         std.heap.page.free(null, p, n);
+        tag p: null;
     }
 };
 
@@ -46,6 +47,7 @@ pub const main = fn () i32 {
     var a = std.heap.page;
     if (a.alloc(a.ctx, 32)) p1 {
         a.free(a.ctx, p1, 32);
+        tag p1: null;
     }
     std.println("page: live {} bytes {}", 0, 0);
 
@@ -54,8 +56,8 @@ pub const main = fn () i32 {
     var b = Allocator{ .ctx = (*u8)&counter, .alloc = countAlloc, .free = countFree };
     let q1 = b.alloc(b.ctx, 16);
     let q2 = b.alloc(b.ctx, 24);
-    if (q1) x1 { b.free(b.ctx, x1, 16); } else { return 1; }
-    if (q2) x2 { b.free(b.ctx, x2, 24); } else { return 1; }
+    if (q1) x1 { b.free(b.ctx, x1, 16); tag x1: null; } else { return 1; }
+    if (q2) x2 { b.free(b.ctx, x2, 24); tag x2: null; } else { return 1; }
     std.println("literal: live {} allocs {}", counter.live, counter.n);
 
     // ③ 工厂：DebugAllocator.init 的函数体里只有一条 return 字面量
@@ -63,9 +65,11 @@ pub const main = fn () i32 {
     if (dbg) d {
         if (d.alloc(d.ctx, 40)) r1 {
             d.free(d.ctx, r1, 40);
+            tag r1: null;
         }
         std.println("factory: live {}", std.debug_alloc.DebugAllocator.liveBlocks(d));
         std.debug_alloc.DebugAllocator.deinit(d);
+        tag d: null;
     }
 
     // ④ 重新绑定过：来源不再可证明，退回间接调用（行为相同）
@@ -73,6 +77,7 @@ pub const main = fn () i32 {
     c = opaque(c);
     if (c.alloc(c.ctx, 8)) s1 {
         c.free(c.ctx, s1, 8);
+        tag s1: null;
     }
     std.println("runtime: live {}", 0);
     return 0;

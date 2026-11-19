@@ -133,7 +133,7 @@ var g_in_reader: Io.File.Reader = undefined;
 const keywords = [_][]const u8{
     "const",  "let",    "var",  "fn",     "type",   "null",     "undefined",
     "if",     "else",   "while", "for",  "inline", "switch", "continue", "return",
-    "defer",  "errdefer", "struct", "union", "enum", "error",  "pub",    "extern",   "orelse",
+    "defer",  "struct", "union", "enum", "error",  "pub",    "extern",   "orelse",
     "try",
 };
 
@@ -171,7 +171,7 @@ const snippets = [_]Snip{
     .{ .label = "mod", .body = "@mod(\"${1:std}\")", .detail = "代码片段 @mod" },
     .{ .label = "shim", .body = "@shim(\"${1:impl.c}\");", .detail = "代码片段 @shim" },
     .{ .label = "defer", .body = "defer $0;", .detail = "代码片段 defer" },
-    .{ .label = "errdefer", .body = "errdefer $0;", .detail = "代码片段 errdefer" },
+    .{ .label = "defererr", .body = "defer err {`n    $0`n};", .detail = "代码片段 defer err（错误路径延迟执行，err 绑错误码）" },
     .{ .label = "try", .body = "try $0", .detail = "代码片段 try" },
     .{ .label = "trycap", .body = "try ${1:expr} ${2:err} {\n    $0\n    ${2:err}: 0;\n};", .detail = "代码片段 try 捕获错误（§171）" },
     .{ .label = "tag", .body = "tag.${1:name};\n${2:var} ${3:p} = tag.${1:name} : $0;", .detail = "代码片段 tag 贴标分配（§170）" },

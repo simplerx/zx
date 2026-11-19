@@ -477,7 +477,7 @@ if mkdir -p "$FSRV/flib-1.0/include" "$FSRV/flib-1.0/src" "$FSRV/fgit.git/includ
        && [ -f "$FDEMO/vendor/fmini.h" ] && [ -f "$FDEMO/vendor/fmini.zx" ] \
        && [ -f "$FDEMO/vendor/flib.clib" ] && [ -f "$FDEMO/vendor/fgit.zx" ] \
        && grep -q '"name": *"demo"' "$FDEMO/zx.json" \
-       && [ "$(grep -c '"\(http\|https\)://' "$FDEMO/zx.json")" -ge 3 ] \
+       && [ "$(grep -Ec '"(http|https|file)://' "$FDEMO/zx.json")" -ge 3 ] \
        && grep -q "resolved = [0-9a-f]\{40\}" "$FDEMO/zx.lock" \
        && grep -q "tree = [0-9a-f]\{64\}" "$FDEMO/zx.lock" \
        && grep -q "sha256 = [0-9a-f]\{64\}" "$FDEMO/zx.lock"; then

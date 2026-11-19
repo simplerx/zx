@@ -22,14 +22,14 @@ pub const main = fn () i32 {
     // ① 改写分发字段本身：声明初值不再是可靠证明
     var w = Allocator{ .ctx = null, .alloc = cAlloc, .free = cFree };
     w.alloc = cAlloc;
-    if (w.alloc(w.ctx, 8)) p1 { w.free(w.ctx, p1, 8); } else { return 1; }
+    if (w.alloc(w.ctx, 8)) p1 { w.free(w.ctx, p1, 8); tag p1: null; } else { return 1; }
     std.println("w: ok");
 
     // ② 把字段地址交出去：外部拿着指针就能改分发目标
     var esc = Allocator{ .ctx = null, .alloc = cAlloc, .free = cFree };
     let fp = &esc.alloc;
     _ = fp;
-    if (esc.alloc(esc.ctx, 8)) p2 { esc.free(esc.ctx, p2, 8); } else { return 1; }
+    if (esc.alloc(esc.ctx, 8)) p2 { esc.free(esc.ctx, p2, 8); tag p2: null; } else { return 1; }
     std.println("esc: ok");
     return 0;
 };

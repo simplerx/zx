@@ -989,6 +989,9 @@ static Node *parse_tag_rebind(P *p) {
 /* tag 指针生命周期标签（上下文关键字：`tag` 平时是普通标识符，只有
  * 「裸 tag + . + 名字」形态才按标签语法收，v.tag / 局部变量 tag 不受影响）：
  *   tag.close;           关闭本模块的强制贴标（库/旧代码逃生口）
+ *   tag.batch;           §188：本模块实现的分配器是整批清算型（arena），
+ *                        经它的 Allocator 视图在调用点做的 alloc/free
+ *                        一并豁免（内存由 init/deinit 容器账管）
  *   （§172：tag.name 首次引用自动建槽，没有声明语句，也没有 .static）
  *   tag.name : expr      贴标：把 expr（heapAlloc 分配或已贴标载体）
  *                        绑到该标签上
@@ -1406,8 +1409,7 @@ static bool starts_stmt_kw(TokKind k) {
  *   if (c) return x;      if (o) v return v;      if (c) defer f();
  * 它们不像 if/while/for 那样会引出"第二个分支体 vs 兄弟语句"的歧义。 */
 static bool arm_stmt_only(TokKind k) {
-    return k == TOK_KW_RETURN || k == TOK_KW_CONTINUE || k == TOK_KW_DEFER ||
-           k == TOK_KW_ERRDEFER;
+    return k == TOK_KW_RETURN || k == TOK_KW_CONTINUE || k == TOK_KW_DEFER;
 }
 
 /* 能开始一个表达式、且不是二元运算符的 token。
@@ -1905,11 +1907,26 @@ static Node *parse_stmt(P *p) {
         return f;
     }
 
-    case TOK_KW_DEFER:
-    case TOK_KW_ERRDEFER: {
+    case TOK_KW_DEFER: {
         advance(p);
-        Node *n = node_new(t->kind == TOK_KW_ERRDEFER ? NK_ERRDEFER : NK_DEFER,
-                           t->line, t->col);
+        /* §188 `defer err { … }` / `defer err <expr>;`：错误路径延迟执行，
+         * err 绑错误码（取代 errdefer 关键字——关键字保持尽量少，err 是
+         * 上下文标识符）。与表达式形式不歧义：err 后跟 `{`/标识符才吃掉
+         * err 当绑定名；`err.foo()`、`err(3)`、`err + 1` 里 err 是普通
+         * 变量（defer 表达式照旧）。 */
+        if (at(p, TOK_IDENT) && cur(p)->len == 3 &&
+            strncmp(cur(p)->start, "err", 3) == 0 &&
+            (peek(p, 1)->kind == TOK_LBRACE || peek(p, 1)->kind == TOK_IDENT)) {
+            Node *n = node_new(NK_ERRDEFER, t->line, t->col);
+            n->name = dup_tok(advance(p));               /* 吃掉 err，名字就是它 */
+            fprintf(stderr, "[S188PARSE] errdefer-hit line=%d block=%d\n",
+                    t->line, (int)at(p, TOK_LBRACE));
+            bool body_block = at(p, TOK_LBRACE);
+            n->a = body_block ? parse_block(p) : parse_expr(p);
+            if (!body_block && !at(p, TOK_RBRACE)) expect(p, TOK_SEMI);
+            return n;
+        }
+        Node *n = node_new(NK_DEFER, t->line, t->col);
         /* 块形式不要尾分号（与普通块一致）；表达式形式才收 ';'。
          * rbrace 例外是 if 单臂糖：`if (c) defer f()` 后面直接是 `}`。 */
         bool body_block = at(p, TOK_LBRACE);

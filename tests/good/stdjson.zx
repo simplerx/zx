@@ -151,7 +151,8 @@ const main = fn () i32 {
         while (di < 1040) { (dp + di).0 = ']'; di = di + 1; }
         let bd = std.json.parse(al, dp[0..1040]);
         if (bd) { bad_depth_ok = true; }
-        al.free(al.ctx, dp, 1040);
+        defer al.free(al.ctx, dp, 1040);
+        tag dp: null;
     }
     var trail_ok = false;
     let bad_trail = std.json.parse(al, "1 2");

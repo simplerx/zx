@@ -1,5 +1,5 @@
-// §181：errdefer 体与 defer 体一样，必须最后才查——写在 read 之前也不
-// 能把释放当场记进 tag 账本而误报 use-after-free。errdefer 要求 !T 返回。
+// §181：defer err 体与 defer 体一样，必须最后才查——写在 read 之前也不
+// 能把释放当场记进 tag 账本而误报 use-after-free。defer err 要求 !T 返回（§188：errdefer 关键字退役，统一为 defer err）。
 const std = @mod("std");
 
 const Person = struct {
@@ -26,7 +26,7 @@ pub const main = fn () !i32 {
         Person{.age = (*u8)"b"},
     };
     tup.1 = alloc();
-    errdefer release(tup.1.age);
+    defer err release(tup.1.age);
     read(tup.1.age);
     return 0;
 };

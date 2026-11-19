@@ -12,6 +12,7 @@
 #include "ty.h"
 #include "val.h"
 #include <time.h>   /* clock()：ZX_TIMING2 的临时埋点 */
+#include <direct.h> /* _getcwd：§189 豁免判定的相对路径绝对化 */
 
 #define BAD(n, ...) (err_at((n)->line, (n)->col, __VA_ARGS__), ty_invalid())
 /* 码由调用点指定：措辞会改，码不改（§17.1） */
@@ -217,6 +218,11 @@ typedef struct Module {
     Symbol     *ns;        /* 对外的命名空间符号 */
     bool        loading;   /* 正在加载：用来发现循环导入 */
     bool        tags_closed; /* §170：本模块写了 `tag.close;`，堆分配不强制贴标 */
+    bool        tags_batch;  /* §188：本模块写了 `tag.batch;`——批量清算型分配器
+                              * （arena）：经它的 Allocator 视图在调用点做的
+                              * alloc/free 一并豁免，内存由 init/deinit 容器账
+                              * 管。tag.close 只豁免模块内部申请；pool 这类
+                              * 逐笔释放的分配器只有 close、没有 batch。 */
     /* §179：已解析的导入边（绑定真正被引用才登记——惰性：声明了但
      * 从未引用的 @mod 不是真实依赖）。循环导入按边图判定。 */
     struct Module **imports;
@@ -459,6 +465,9 @@ static Type  *g_ret;
 static int    g_fn_depth;
 static bool   g_in_defer;
 static bool   g_in_tag_rebind;   /* §187：续链值里的 int→ptr cast 免 E0525 */
+static int    g_arm_depth;       /* §188：分支臂嵌套深度（释放禁区的判定）；
+                              * 循环体不算臂（逐迭代 alloc/free 是惯用法），
+                              * defer 体由 g_in_defer 单独豁免。 */
 
 /* 待检查函数体：先建签名、后查体，自递归/互递归天然合法。
  *
@@ -2844,6 +2853,9 @@ static void region_handle_call(Node *n) {
 #define TST_UNBOUND 0
 #define TST_LIVE    1
 #define TST_FREED   2
+#define TST_MOVED   3   /* §189：std.move —— 所有权已转移（内存还活着，
+                          * 但本账本不再负责：原载体使用/free 都报 E0529，
+                          * 泄漏终扫豁免）。区别于 FREED（内存已还）。 */
 
 /* 载体状态（Node.tag_state / Symbol.tag_state） */
 #define TC_NONE     0
@@ -2851,6 +2863,7 @@ static void region_handle_call(Node *n) {
 #define TC_FREED    2
 #define TC_COND     3
 #define TC_UNKNOWN  4
+#define TC_MOVED    5   /* §189：载体已随 std.move 转移 */
 
 static const char *g_cur_fn_name;   /* 当前函数名（7963 附近保存/还原） */
 
@@ -2860,6 +2873,13 @@ typedef struct {
     int         state;     /* TST_*：分配事实 */
     int         region;    /* 当前关联的 region token（0 = 无） */
     int         free_line, free_col;
+    int         moved_line, moved_col;  /* §189：std.move 转移点（E0529
+                                          * 指认"move at line N"） */
+    bool        confirm_arm; /* §189：臂内 `tag v : null;` 确认标记——
+                               * 证明使用者确认过本臂的释放（分支本就
+                               * 可能不走，未确认的释放合流后当作还没
+                               * 释放）。臂快照回滚时随状态清。 */
+    int         confirm_line, confirm_col;  /* 确认声明处（落空报错指位） */
     int         own_line, own_col;  /* §173：当前所有权归属点（最近一次
                           LIVE 载体绑定/调用点继承的位置，0 = 仍在
                           分配处）——泄漏终扫把错误指到这里而非分配行 */
@@ -3037,6 +3057,7 @@ static FieldTag *ft_merge(FieldTag *a, FieldTag *b) {
 static int ft_state_of(int slot) {
     TagSlot *t = tag_slot(slot);
     if (!t || t->state == TST_UNBOUND) return TC_NONE;
+    if (t->state == TST_MOVED) return TC_MOVED;   /* §189 */
     return t->state == TST_FREED ? TC_FREED : TC_LIVE;
 }
 
@@ -3620,6 +3641,8 @@ static TagSlot *tag_decl(const char *name, Node *n) {
 
 static int g_tag_auto_seq;
 static bool tag_module_exempt(Module *m);   /* §173：定义在贴标登记一节 */
+static char *path_normalize(const char *p); /* §189：定义在模块加载一节 */
+static bool find_std_path(char *out, size_t cap);
 
 /* §173：alloc 自动建槽。每个分配调用点自动获得唯一标签并预绑 LIVE——
  * `tag.x : expr` 只剩「给分配起名」的作用。tag.close / std 豁免照旧。 */
@@ -3754,6 +3777,14 @@ static void tag_check_deref(Node *base) {
             "p.?;` asserts it is live) or `free` it", t->name);
         return;
     }
+    /* §189：所有权已转移的载体不能再用——内存活着，但已不归本作用域。 */
+    if (st == TC_MOVED) {
+        diag_code_at("E0529", base->line, base->col,
+            "use after move: this pointer's ownership was moved away at "
+            "line %d (`std.move`) -- a moved pointer is neither "
+            "dereferenceable nor freeable here", t->moved_line);
+        return;
+    }
     /* COND：解引用必须先判空（`.?`），这是类型系统的事，类型层拦。 */
 }
 
@@ -3797,6 +3828,15 @@ static bool tag_free_event(Node *site, Node *ptr) {
                 "this memory was already freed (allocated at line %d, first "
                 "freed at line %d) -- releasing it again is a double free",
                 t->line, t->free_line);
+        return true;
+    }
+    /* §189：所有权已随 std.move 转移——free 它等于对别的线程/作用域
+     * 正在使用的内存下手，直接拦。 */
+    if (t->state == TST_MOVED) {
+        diag_code_at("E0529", site->line, site->col,
+            "this pointer was moved away at line %d (`std.move`) -- the "
+            "receiver owns it now; freeing it here is use after move",
+            t->moved_line);
         return true;
     }
     /* UNKNOWN / COND：防守二（使用者宣告终结）与 null 合并载体的放行。
@@ -3938,12 +3978,33 @@ static void tag_note_adopt(Node *call) {
 
 static bool fn_is_releaser(Node *fn);   /* §173：体未查时的释放器近似 */
 
-/* §187（用户裁定）：建槽的调用入口是 allocator.alloc()，free 的入口是
- * allocator.free()——所有分配/释放都经过这对接口，统一管理。特例
- * （arena 这类整批管理的分配器）由实现模块声明 `tag.close;` 单独申请
- * 豁免：分配目标落在豁免模块 → 不建槽（内存由该分配器的 init/deinit
- * 配对管，容器账兜底泄漏检测）。 */
+/* §188（用户裁定）：建槽的调用入口是 allocator.alloc()，free 的入口是
+ * allocator.free()——所有分配/释放都经过这对接口，统一管理。豁免分两层，
+ * 由实现模块各自声明：
+ *   `tag.close;`  —— 模块内部申请不建槽（pool 的块头裸指针运算这类
+ *                    实现细节不进账本）；
+ *   `tag.batch;`  —— 分配器是整批清算型（arena）：经它的 Allocator
+ *                    视图在调用点做的 alloc/free 一并豁免，内存由
+ *                    init/deinit 容器账管（pool 不声明它，用户侧
+ *                    alloc/free 照常逐笔追踪）。
+ * 判定只看 batch：close 的模块内部申请走的是调用点自己的 g_mod 豁免。 */
 static Symbol *allocator_target(Node *e, bool want_alloc, int depth); /* 定义在 devirt 一节 */
+
+/* §188：这一笔调用是不是「释放」。口径与 tag_block_has_free 一致：
+ * deinit 变换产物、Allocator.free 方法、用户释放器封装（体内有
+ * free/deinit 的函数，释放器传递）。 */
+static bool call_is_release(Node *call) {
+    if (call->xform_free) return true;
+    if (call->a && call->a->kind == NK_FIELD && call->a->name &&
+        !strcmp(call->a->name, "free") && call->a->a &&
+        (!call->a->a->ty || is_allocator_ty(call->a->a->ty)))
+        return true;
+    if (call->a && call->a->kind == NK_IDENT && call->a->sym &&
+        call->a->sym->decl && call->a->sym->decl->kind == NK_FN &&
+        fn_is_releaser(call->a->sym->decl))
+        return true;
+    return false;
+}
 
 /* 模块路径 → Module（豁免判定用；Node->mod 是装载时打的路径戳）。 */
 static Module *module_by_path(const char *path) {
@@ -3958,12 +4019,12 @@ static Module *alloc_factory_module(Node *e, int depth);   /* 定义在下面 */
 
 static bool allocator_exempt(Node *alarg) {
     Symbol *t = allocator_target(alarg, true, 0);
-    if (t && t->mod) return t->mod->tags_closed;
+    if (t && t->mod) return t->mod->tags_batch;   /* §188：批量清算才豁免视图 */
     /* 目标符号还没绑定（工厂体未查，Allocator 字面量里的实现函数符号
      * 是空的）——退一步看工厂函数自己的模块：init 的 inst 节点在模块
      * 装载时就带模块戳，不依赖体已查。 */
     Module *m = alloc_factory_module(alarg, 0);
-    return m && m->tags_closed;
+    return m && m->tags_batch;
 }
 
 /* 沿分配器值的声明链找产出它的工厂函数，返回其所在模块（只认模块，
@@ -4109,6 +4170,80 @@ static void tag_note_arena_deinit(Node *call) {
         }
     }
 }
+
+/* ---------------- §189：std.move —— 所有权转移 ----------------
+ *
+ * 用户裁定，语义很简单：
+ *   `let/var newvar = std.move(oldvar);`
+ * 1. oldvar 的标签改 MOVED——之后对 oldvar 的任何使用或 free 都报
+ *    E0529（内存还活着，只是不再归 oldvar 管）；
+ * 2. 生成新变量 newvar：新标签、值等于原值。新槽就是普通 LIVE 槽，
+ *    不 free 照样报 E0513，没有任何豁免。
+ * 识别口径与 print/println 一致：裸名 `std.move(...)`；`const s = std;
+ * s.move(...)` 别名不改道。spawn 不做自动 move（用户裁定：当普通函数）。 */
+
+static bool call_is_std_move(Node *call) {
+    return call->a && call->a->kind == NK_FIELD && call->a->name &&
+           !strcmp(call->a->name, "move") && call->a->a &&
+           call->a->a->kind == NK_IDENT && call->a->a->name &&
+           !strcmp(call->a->a->name, "std");
+}
+
+/* 检查并落账一次 std.move。返回值 = 转移后的类型（实参类型原样）。 */
+static Type *check_std_move(Node *call) {
+    Node *arg = call->nitems == 1 ? call->items[0] : NULL;
+    if (!arg) {
+        err_at(call->line, call->col,
+               "std.move takes exactly one argument -- the tagged pointer "
+               "whose ownership moves out");
+        return ty_error();
+    }
+    Type *t = check_expr(arg, NULL);
+    int id, st;
+    tag_of_expr(arg, &id, &st);
+    if (!id) {
+        diag_code_at("E0530", call->line, call->col,
+            "std.move needs a pointer the tag ledger tracks -- only "
+            "allocations bound to a tag (a std.heapAlloc/std.stackAlloc "
+            "site or `tag.x : ...`) carry ownership to move; a bare "
+            "pointer has no owner to transfer");
+        return t;
+    }
+    TagSlot *t2 = tag_slot(id);
+    if (st == TC_FREED) {
+        diag_code_at("E0512", call->line, call->col,
+            "this memory was freed at line %d -- moving a freed pointer "
+            "is use after free", t2 ? t2->free_line : 0);
+        return t;
+    }
+    if (st == TC_MOVED) {
+        diag_code_at("E0529", call->line, call->col,
+            "this pointer was already moved at line %d (`std.move`) -- a "
+            "moved pointer is neither usable nor movable again",
+            t2 ? t2->moved_line : 0);
+        return t;
+    }
+    if (t2) {
+        t2->state = TST_MOVED;
+        t2->moved_line = call->line; t2->moved_col = call->col;
+    }
+    /* 载体同步：所有 LIVE 副本一起进 MOVED（口径同 free 的副本同步），
+     * 旧副本解引用立即 E0529。 */
+    for (Symbol *ls = g_locals; ls; ls = ls->locals_next)
+        if (ls->tag_id == id && ls->tag_state == TC_LIVE)
+            ls->tag_state = TC_MOVED;
+    arg->tag_id = id; arg->tag_state = TC_MOVED;
+    /* 返回值带新槽：`let/var newvar = std.move(oldvar);` —— newvar 从
+     * 声明起就有自己的标签（普通 LIVE 槽，值等于原值；不 free 照样报
+     * E0513，没有任何豁免——用户裁定）。 */
+    tag_auto_decl(call, false);
+    return t;
+}
+
+/* §189：spawn 的 ctx 实参不做自动 move（用户裁定：spawn 当普通函数）。
+ * 多线程移交走显式 `std.move`：`g.spawn(work, (usize)std.move(p))` ——
+ * 老槽 MOVED（p 封死），move 产生的新槽是普通 LIVE 槽（泄漏照报），
+ * 接收方建自己的账（`tag q : (*u8)(ctx)` 建账贴标）。 */
 
 /* 释放器识别：fn 体里直接调用过 Allocator.free（不含嵌套 fn 体）。
  * 结果缓存在 fn 节点上（tag_id: 0=未扫 1=是 2=不是）——调用点把带 tag
@@ -4372,7 +4507,40 @@ static int tag_check_apply(Node *n, bool *bad) {
             *bad = true;
             return TC_NONE;
         }
+        /* §189：move 出去的所有权不能贴标签收回来——接收方建自己的账。 */
+        if (st == TC_MOVED) {
+            diag_code_at("E0529", n->line, n->col,
+                "this pointer was moved away at line %d (`std.move`) -- "
+                "re-binding it is use after move", t->moved_line);
+            *bad = true;
+            return TC_NONE;
+        }
         if (st == TC_LIVE) t->state = TST_LIVE;   /* 防守重申：重新拥有 */
+        n->tag_id = tid;
+        n->tag_state = TC_LIVE;
+        return TC_LIVE;
+    }
+    /* §189：接收半环 —— 无标签指针的建账贴标。多线程边界（spawn 的
+     * usize ctx）cast 回来的裸指针没有可续的账；`tag q : expr` 让接收
+     * 方从零建自己的新账（无历史事实，不违反 E0514 的跨函数防假账
+     * 口径——那是「续别人的账」）。标签必须空闲。 */
+    if (!id && n->b && n->b->ty &&
+        (n->b->ty->kind == TY_PTR || n->b->ty->kind == TY_SLICE)) {
+        if (!t->abstract && t->state == TST_LIVE) {
+            diag_code_at("E0518", n->line, n->col,
+                "this label already owns an allocation (bound at line %d) -- "
+                "free it first, or use a second label", t->line);
+            *bad = true;
+            return TC_NONE;
+        }
+        if (!t->abstract) {
+            t->state = TST_LIVE;
+            t->region = 0;
+            n->tag_id = tid;
+            n->tag_state = TC_LIVE;
+            return TC_LIVE;
+        }
+        /* 抽象槽：贴上即续借用链（形参借出口径），不记分配事实。 */
         n->tag_id = tid;
         n->tag_state = TC_LIVE;
         return TC_LIVE;
@@ -4439,7 +4607,16 @@ static ArmExit tag_arm_reconcile(Node *armval, Node *armnode,
         if (i < n0) before = snap[i];
         else if (i < ntotal) continue;
         else before = 0;
-        if (g_tslots[i].state == before) continue;
+        if (g_tslots[i].state == before) {
+            /* §189：确认声明落空——臂里没有与之配对的释放。 */
+            if (g_tslots[i].confirm_arm && g_tslots[i].state == TST_LIVE)
+                diag_code_at("E0528", g_tslots[i].confirm_line,
+                    g_tslots[i].confirm_col,
+                    "`tag : null;` confirms a release, but this pointer was "
+                    "not released in this branch arm -- remove the "
+                    "confirmation or release it first");
+            continue;
+        }
         TagSlot *t = &g_tslots[i];
         if (t->state == TST_FREED && snap[i] == TST_LIVE) {
             /* §187：终局臂（return/continue 收尾，控制不落到 join 点）
@@ -4448,6 +4625,24 @@ static ArmExit tag_arm_reconcile(Node *armval, Node *armnode,
              * 并集口径）。否则 `if (bad) { deinit(a); return 3; }`
              * 之后的正常路径会被当成"已释放"假报 E0512/E0509。 */
             if (armnode && arm_ends(armnode)) continue;
+            /* §189（用户裁定）：臂内释放必须显式确认——`tag p : null;`
+             * 写在释放之后，证明使用者确认过正确释放。没确认的释放
+             * 不落账：合流后当作还没释放（分支本就可能不走，不能错
+             * 报），不影响以后的 use/free。std 实现层 / tag.close /
+             * tag.batch 模块不受此限（账由容器/模块内部闭环）。
+             * 只对臂前就 LIVE 的槽把关——臂内新建的槽随臂消亡
+             * （alloc/free 配对在臂内闭合是常事，无需确认）。 */
+            if (before == TST_LIVE && !t->confirm_arm &&
+                !(g_mod && (g_mod->tags_closed || g_mod->tags_batch ||
+                            tag_module_exempt(g_mod)))) {
+                diag_code_at("E0528", t->free_line, t->free_col,
+                    "release in a branch arm must be confirmed -- write "
+                    "`tag p : null;` (p = the carrier variable) right after "
+                    "the free/deinit to confirm the pointer is given up; an "
+                    "unconfirmed release is treated as not-released at the "
+                    "join because the branch may not run");
+                continue;
+            }
             /* 臂内释放：值臂必须传出 null 载体（"在臂内释放，就返回空
              * 指针"）；§173：语句臂没有载体可传出——不报错，由 join
              * 之后把终局 FREED 落回槽与载体（惯用的
@@ -4467,6 +4662,13 @@ static ArmExit tag_arm_reconcile(Node *armval, Node *armnode,
                     "state travels with the carrier");
                 e.tag = i + 1; e.state = TC_FREED; e.val = NULL;
             }
+        } else if (t->state == TST_MOVED && snap[i] == TST_LIVE) {
+            /* §189（用户裁定）：臂内 std.move —— 所有权已移交给 move
+             * 产生的新槽（臂内建的槽随臂消亡，接收方的账自己闭环）。
+             * 原槽跨合流落账为 MOVED：终扫不再向本作用域讨要这笔分配，
+             * 原变量之后 use/free 报 E0529（move 之后原值的标签改为
+             * moved，不能再用）。 */
+            e.tag = i + 1; e.state = TC_MOVED; e.val = NULL; e.stmt = true;
         } else if (t->state == TST_LIVE && snap[i] != TST_LIVE) {
             /* §187：已收养给 arena 的槽不出臂——所有权已移交（内存
              * 活到 arena deinit），臂值无需携带。 */
@@ -4522,6 +4724,8 @@ static void tag_join_arms(Node *n, ArmExit a, ArmExit b) {
              (a.state == TC_NONE  && b.state == TC_LIVE))  s = TC_COND;
     else if ((a.state == TC_FREED && b.state == TC_NONE) ||
              (a.state == TC_NONE  && b.state == TC_FREED)) s = TC_FREED;
+    else if ((a.state == TC_MOVED && b.state == TC_NONE) ||
+             (a.state == TC_NONE  && b.state == TC_MOVED)) s = TC_MOVED;
     else                             s = TC_UNKNOWN;
     n->tag_id = id;
     n->tag_state = s;
@@ -4586,6 +4790,10 @@ static void tag_restore(const TagSnap *s) {
         Symbol *prev = g_tslots[i].carrier;
         g_tslots[i].state = s->state[i];
         g_tslots[i].carrier = s->carrier[i];
+        /* §189：臂确认标记随快照回滚——槽回非 FREED（本臂没释放或
+         * 释放已随落账走人）时确认不该残留到后续臂/迭代。槽保持
+         * FREED（释放发生在本臂之前）时确认仍有效。 */
+        if (g_tslots[i].state != TST_FREED) g_tslots[i].confirm_arm = false;
         if (g_tslots[i].carrier) g_tslots[i].carrier->tag_state = s->cstate[i];
         /* §187：臂内 free/deinit 事件会把载体换挂到捕获名上（free_event
          * 的 tag_carrier_sym 直改符号，捕获名不在 g_locals，lsym 回滚
@@ -4703,6 +4911,53 @@ static bool tag_module_exempt(Module *m) {
         if (a && b && (a - g_std_mod->path) == (b - m->path) &&
             !memcmp(g_std_mod->path, m->path, (size_t)(a - g_std_mod->path)))
             return true;
+    }
+    /* §189：g_std_mod 还没被加载（直检 std/ 下的文件）时，按内置
+     * stdlib 目录识别 std 内部文件——豁免口径与导入时一致：std 实现
+     * 层的账由容器/模块内部闭环，不随检查入口（直检/导入）变化。
+     * 入口文件路径可能是相对的（`zxc check std/fs.zx`），先补 cwd。 */
+    {
+        char raw[1600], stdp[1400];
+        bool isabs = (m->path[0] == '/' || m->path[0] == '\\') ||
+                     (((m->path[0] >= 'A' && m->path[0] <= 'Z') ||
+                       (m->path[0] >= 'a' && m->path[0] <= 'z')) &&
+                      m->path[1] == ':');
+        if (isabs) snprintf(raw, sizeof raw, "%s", m->path);
+        else {
+            char cwd[1200];
+            if (!_getcwd(cwd, (int)sizeof cwd)) return false;
+            snprintf(raw, sizeof raw, "%s/%s", cwd, m->path);
+        }
+        if (find_std_path(stdp, sizeof stdp)) {
+            /* find_std_path 的结果也可能是相对的（exe 相对调用时
+             * g_exe_dir 是相对目录）——同样补 cwd 再归一化。 */
+            bool sabs = (stdp[0] == '/' || stdp[0] == '\\') ||
+                        (((stdp[0] >= 'A' && stdp[0] <= 'Z') ||
+                          (stdp[0] >= 'a' && stdp[0] <= 'z')) &&
+                         stdp[1] == ':');
+            if (!sabs) {
+                char cwd2[1200];
+                char tmp[1600];
+                if (_getcwd(cwd2, (int)sizeof cwd2))
+                    snprintf(tmp, sizeof tmp, "%s/%s", cwd2, stdp);
+                else snprintf(tmp, sizeof tmp, "%s", stdp);
+                snprintf(stdp, sizeof stdp, "%s", tmp);
+            }
+            char *ns = path_normalize(stdp);
+            char *np = path_normalize(raw);
+            if (ns && np) {
+                const char *a = strrchr(ns, '/');
+                const char *b = strrchr(np, '/');
+                const char *la = strrchr(ns, '\\');
+                const char *lb = strrchr(np, '\\');
+                if (la && (!a || la > a)) a = la;
+                if (lb && (!b || lb > b)) b = lb;
+                if (a && b && (a - ns) == (b - np) &&
+                    _strnicmp(ns, np, (size_t)(a - ns)) == 0)
+                    return true;
+            }
+            free(ns); free(np);
+        }
     }
     return false;
 }
@@ -7127,8 +7382,15 @@ static void tag_call_flow(Node *n) {
                 } else if (!is_recv) {
                     /* 体未查：释放器近似。接收者绝不近似——释放器方法
                      * 体内 free 的是 self.field（字段另有 pff 对账），
-                     * 把接收者整个标 FREED 会假报 use-after-free。 */
-                    rel = fn_is_releaser(fn);
+                     * 把接收者整个标 FREED 会假报 use-after-free。
+                     * §189：近似只对指针/切片实参生效——Allocator 容器
+                     * 这类聚合实参（无形参抽象槽）传给释放器不等于容器
+                     * 本身被释放（useDbg(al) 体内 free 的是自己 alloc 的
+                     * 块，不是容器账）。 */
+                    Type *at = n->items[i]->ty;
+                    bool ptrish = at && (at->kind == TY_PTR ||
+                                         at->kind == TY_SLICE);
+                    rel = ptrish && fn_is_releaser(fn);
                 }
                 /* §184：形参还没有抽象槽、甚至还没有符号（跨模块方法
                  * 的体未查，形参绑定发生在体检查里）= 事实账之后才会
@@ -7895,10 +8157,10 @@ static Type *check_expr_raw(Node *n, Type *expect) {
     case NK_TRY: {
         Type *t = check_expr(n->a, NULL);
         if (!t || t->kind == TY_INVALID) return ty_invalid();
-        /* `defer` / `errdefer` 体里不能往外抛：两者都在返回路径上执行，
+        /* `defer` / `defer err` 体里不能往外抛：两者都在返回路径上执行，
          * 自己再"提前返回"没有意义（会把正在返回的值覆盖掉）。就地处理掉。 */
         if (g_in_defer)
-            return BAD(n, "`try` is not allowed inside `defer`/`errdefer` -- a defer body "
+            return BAD(n, "`try` is not allowed inside `defer`/`defer err` -- a defer body "
                           "cannot propagate; handle the error there (`if` capture / `orelse`)");
         /* `?T` 也行（v0.26）：空值当错误——null 抛保留错误码 error.null（65535）。
          * "可能没有"和"可能出错"不靠嵌套表达（?!T 非法），靠同一条传播路。 */
@@ -7968,7 +8230,9 @@ static Type *check_expr_raw(Node *n, Type *expect) {
                          s->reg_slot = region_of_expr(n->a);
                          s->cap_src = n->a; }
             }
+            g_arm_depth++;              /* §188：捕获臂同属释放禁区 */
             bt = check_block(n->b);
+            g_arm_depth--;
             if (n->b->kind == NK_BLOCK) {
                 exErr = tag_arm_reconcile(n->b->d, n->b, snapT.state, snapT.n, snapT.total);
             } else {
@@ -8178,7 +8442,16 @@ static Type *check_expr_raw(Node *n, Type *expect) {
     }
 
     case NK_CALL: {
+        /* §189：std.move —— 编译期账本操作（所有权转移），std 里没有
+         * 真实的 move 函数体，不走普通调用检查。 */
+        if (call_is_std_move(n)) return type_of(n, check_std_move(n));
         tag_transform_deinit(n);    /* §173：a.deinit(s) → a.free(...) */
+        /* §189（用户裁定，替代 §188 臂内释放禁区）：分支臂里允许
+         * free/deinit（直接或写在 defer 里），但必须显式确认——在释放
+         * 之后写 `tag p : null;`，证明使用者确认过正确释放。这是跟
+         * 主路径 free 的差异：分支本就可能不走，合流时没确认的释放
+         * 当作还没释放（不影响以后的 use/free），有确认的按 FREED
+         * 落账。检查与落账在 tag_arm_reconcile（臂出口）统一做。 */
         Type *r = check_call(n, expect);
         /* 实参检查完才能追 provenance：Allocator.free 是一次 release 事件 */
         region_note_free(n);
@@ -9582,12 +9855,22 @@ static void check_stmt(Node *n) {
         return;
 
     case NK_TAG_APPLY:
-        /* 语句位置：tag 定义 / tag.close / 独立贴标 */
+        /* 语句位置：tag 定义 / tag.close / tag.batch / 独立贴标 */
         if (!strcmp(n->name, "close")) {
             if (n->b)
                 err_at(n->line, n->col, "`tag.close` takes no value");
             else if (g_mod)
                 g_mod->tags_closed = true;   /* §170：本模块关闭强制贴标 */
+            return;
+        }
+        if (!strcmp(n->name, "batch")) {
+            /* §188：本模块实现的分配器是整批清算型（arena）——经它的
+             * Allocator 视图在调用点做的 alloc/free 一并豁免（内存由
+             * init/deinit 容器账管）。只对分配器实现模块有意义。 */
+            if (n->b)
+                err_at(n->line, n->col, "`tag.batch` takes no value");
+            else if (g_mod)
+                g_mod->tags_batch = true;
             return;
         }
         if (!n->b) {
@@ -9653,29 +9936,66 @@ static void check_stmt(Node *n) {
                             if (ts) marks[nmarks++] = ts;
                         }
                     }
+            /* §189（用户裁定）：臂内 `tag v : null;` 是**确认**，不是
+             * 释放事件——写在臂内释放（defer 体或直接 free）之后，
+             * 证明使用者确认过正确释放；合流时该槽按 FREED 落账。
+             * 分支本就可能不走：没确认的释放合流后当作还没释放，
+             * 不影响以后的 use/free。主路径（循环体/函数体）的终结
+             * 标记保持释放事件语义不变。 */
+            /* §189：结构体值载体的字段账——`tag s : null;` 一并
+             * 收集 s 携带的字段槽（确认/终结按当前模式生效）。 */
+            for (FieldTag *ft = s->ftags; ft && nmarks < 64; ft = ft->next)
+                if (ft->slot > 0) {
+                    bool dup = false;
+                    for (int k = 0; k < nmarks; k++)
+                        if (marks[k] == tag_slot(ft->slot))
+                            { dup = true; break; }
+                    if (!dup) {
+                        TagSlot *ts = tag_slot(ft->slot);
+                        if (ts) marks[nmarks++] = ts;
+                    }
+                }
+            bool confirm_mode = g_arm_depth > 0;
+            if (!confirm_mode) {
                 /* §185：群成员随终结一并销账 + 基变量进关闭名单
                  * （终结后再注解读取报 E0524）。显式终结是整容器
                  * 出口的唯一通路；形参数组终结记 pffa 事实账，
-                 * 调用点/重放把实参数组的群一起清（闭环）。 */
+                 * 调用点/重放把实参数组的群一起清（闭环）。
+                 * 确认模式不销账——释放还没发生（可能只是 defer
+                 * 里写着），销账是释放事件的一部分。 */
                 agt_clear(s, n);
                 if (s->kind == SK_PARAM) pffa_add(s);
-                if (nmarks) break;
             }
-            if (!nmarks) {   /* 兜底：槽的载体名（符号可能已重绑/出账） */
-                for (int i = 0; i < g_ntslots && !nmarks; i++)
-                    if (g_tslots[i].carrier && g_tslots[i].carrier->name &&
-                        !strcmp(g_tslots[i].carrier->name, n->name))
-                        marks[nmarks++] = &g_tslots[i];
-            }
-            if (!nmarks)
-                err_at(n->line, n->col,
-                       "no allocation named '%s' -- mark by a variable name: "
-                       "the carrier it was bound to (`tag p : null;`) or the "
-                       "array holding it (`tag xs : null;`)",
-                       n->name);
-            else for (int i = 0; i < nmarks; i++) {
+            if (nmarks) break;
+        }
+        if (!nmarks) {   /* 兜底：槽的载体名（符号可能已重绑/出账） */
+            for (int i = 0; i < g_ntslots && !nmarks; i++)
+                if (g_tslots[i].carrier && g_tslots[i].carrier->name &&
+                    !strcmp(g_tslots[i].carrier->name, n->name))
+                    marks[nmarks++] = &g_tslots[i];
+        }
+        if (!nmarks) {
+            /* §189：豁免模块（tag.close / std 实现层）不建槽，确认/
+             * 终结标记无处可挂——按 no-op 处理，不报 E0300。 */
+            if (g_mod && (g_mod->tags_closed || g_mod->tags_batch ||
+                          tag_module_exempt(g_mod)))
+                return;
+            err_at(n->line, n->col,
+                   "no allocation named '%s' -- mark by a variable name: "
+                   "the carrier it was bound to (`tag p : null;`) or the "
+                   "array holding it (`tag xs : null;`)",
+                   n->name);
+        }
+        else for (int i = 0; i < nmarks; i++) {
                 TagSlot *ts = marks[i];
-                if (!ts->abstract && ts->state == TST_LIVE) {
+                if (g_arm_depth > 0) {
+                    /* §189：确认模式——只挂确认标记，不动账。抽象槽
+                     * （形参）也确认：臂内释放形参同样要过确认关。 */
+                    ts->confirm_arm = true;
+                    ts->confirm_line = n->line; ts->confirm_col = n->col;
+                } else if (ts->abstract) {
+                    continue;
+                } else if (ts->state == TST_LIVE) {
                     ts->state = TST_FREED;
                     ts->ever_freed = true;
                     ts->free_line = n->line; ts->free_col = n->col;
@@ -9771,7 +10091,7 @@ static void check_stmt(Node *n) {
 
     case NK_RETURN: {
         if (!g_fn_depth) { err_at(n->line, n->col, "`return` outside a function"); return; }
-        if (g_in_defer) { err_at(n->line, n->col, "`return` is not allowed inside `defer`/`errdefer`"); }
+        if (g_in_defer) { err_at(n->line, n->col, "`return` is not allowed inside `defer`/`defer err`"); }
         Type *want = g_ret ? g_ret : ty_void();
         if (!n->a) {
             /* `!void` 的 `return;` 是"成功且没有 payload"：tag 置 0 就是全部值。
@@ -9804,11 +10124,34 @@ static void check_stmt(Node *n) {
                 return;
             }
         }
-        /* 逃逸检查（decisions §44）：不许把指向当前栈帧的指针带出去 */
-        if ((want->kind == TY_PTR || want->kind == TY_SLICE) && expr_frame(n->a))
-            err_at(n->a->line, n->a->col,
-                   "cannot return a pointer into the current function's stack frame "
-                   "(use std.heapAlloc for outliving storage)");
+        /* 逃逸检查（decisions §44）：不许把指向当前栈帧的指针带出去。
+         * §188（用户裁定）：看「是否携带标签」——返回值携带的任何栈槽
+         * 都是悬垂，不管返回类型是裸指针还是裹进结构体/元组带走（此前
+         * 只查返回类型形状，结构体裹栈指针整只漏过）。expr_frame 保留：
+         * 没进账本的来源（&局部、&.{…} 匿名存储）只能靠形状看。 */
+        {
+            bool esc = (want->kind == TY_PTR || want->kind == TY_SLICE) &&
+                       expr_frame(n->a);
+            if (!esc) {
+                int id, st;
+                tag_of_expr(n->a, &id, &st);
+                if (id) {
+                    TagSlot *t = tag_slot(id);
+                    if (t && t->stack && !t->abstract) esc = true;
+                }
+            }
+            if (!esc) {
+                for (FieldTag *g = ftags_of_expr(n->a); g; g = g->next) {
+                    if (g->slot <= 0) continue;
+                    TagSlot *t = tag_slot(g->slot);
+                    if (t && t->stack && !t->abstract) { esc = true; break; }
+                }
+            }
+            if (esc)
+                err_at(n->a->line, n->a->col,
+                       "cannot return a pointer into the current function's stack frame "
+                       "(use std.heapAlloc for outliving storage)");
+        }
         /* §173：返回贴标载体合法 —— 所有权随返回值转移，调用点的
          * 返回流分析（fn_returns_tag）会把 tag 接到调用结果上。 */
         return;
@@ -9852,17 +10195,31 @@ static void check_stmt(Node *n) {
 
     case NK_DEFER:
     case NK_ERRDEFER: {
-        /* errdefer 只在错误返回路径上执行——不返回错误的函数里它永远
-         * 不会触发，几乎肯定是写错了（Zig 同样拒绝）。 */
+        /* defer err 只在错误返回路径上执行——不返回错误的函数里它永远
+         * 不会触发，几乎肯定是写错了（Zig 的 errdefer 同样拒绝）。 */
         if (n->kind == NK_ERRDEFER && (!g_ret || g_ret->kind != TY_ERR))
             err_at(n->line, n->col,
-                   "`errdefer` requires the enclosing function to return an "
+                   "`defer err` requires the enclosing function to return an "
                    "error union `!T`, found `%s`",
                    g_ret ? ty_str(g_ret) : "void");
         bool save = g_in_defer;
         g_in_defer = true;
-        if (n->a->kind == NK_BLOCK) check_block(n->a);
-        else check_expr(n->a, NULL);
+        if (n->kind == NK_ERRDEFER && n->name) {
+            /* §188：`defer err { … }` —— err 绑错误码（与 try 捕获同一
+             * 口径：SK_CAPTURE、ty_error）。块里引用了 err 才算用过；
+             * 没引用后端就不发绑定声明（省一个未用变量）。 */
+            Scope sc;
+            scope_push(&sc);
+            Symbol *s = scope_add(&sc, n->name, SK_CAPTURE);
+            if (s) { s->ty = ty_error(); s->state = 2; }
+            if (n->a->kind == NK_BLOCK) check_block(n->a);
+            else check_expr(n->a, NULL);
+            n->ival = (s && s->used) ? 1 : 0;
+            scope_pop(&sc);
+        } else {
+            if (n->a->kind == NK_BLOCK) check_block(n->a);
+            else check_expr(n->a, NULL);
+        }
         g_in_defer = save;
         return;
     }
@@ -9898,8 +10255,10 @@ static void check_stmt(Node *n) {
 
 static Type *check_arm(Node *a, Type *expect) {
     if (!a) return ty_void();
-    if (a->kind == NK_BLOCK) return check_block(a);
-    return check_expr(a, expect);
+    g_arm_depth++;                  /* §188：臂内是释放禁区（E0528） */
+    Type *r = (a->kind == NK_BLOCK) ? check_block(a) : check_expr(a, expect);
+    g_arm_depth--;
+    return r;
 }
 
 /* 表达式是不是"纯编译期"的：没有读 var / 参数 / 捕获，也没有调用。
@@ -10114,18 +10473,29 @@ static Type *check_if(Node *n, Type *expect) {
         ft_arms_join(chT, cfT, nchT, chE, cfE, nchE);
     }
     /* §173：语句臂的臂内释放 —— 状态机直接落账（槽 + 所有局部载体）：
-     * 后续解引用 E0512，再 free E0509。 */
+     * 后续解引用 E0512，再 free E0509。§189：臂内 std.move 落 MOVED
+     * ——原变量封死（E0529），终扫豁免（接收方的账闭环）。 */
     if ((exT.stmt || exE.stmt) && n->tag_id) {
+        int jstate = exT.stmt ? exT.state : exE.state;
         TagSlot *t = tag_slot(n->tag_id);
         if (t && t->state == TST_LIVE) {
-            t->state = TST_FREED;
-            t->ever_freed = true;
-            t->free_line = n->line; t->free_col = n->col;
-            for (Symbol *ls = g_locals; ls; ls = ls->locals_next)
-                if (ls->tag_id == n->tag_id && ls->tag_state == TC_LIVE)
-                    ls->tag_state = TC_FREED;
-            if (t->carrier && t->carrier->tag_state == TC_LIVE)
-                t->carrier->tag_state = TC_FREED;
+            if (jstate == TC_MOVED) {
+                t->state = TST_MOVED;
+                for (Symbol *ls = g_locals; ls; ls = ls->locals_next)
+                    if (ls->tag_id == n->tag_id && ls->tag_state == TC_LIVE)
+                        ls->tag_state = TC_MOVED;
+                if (t->carrier && t->carrier->tag_state == TC_LIVE)
+                    t->carrier->tag_state = TC_MOVED;
+            } else {
+                t->state = TST_FREED;
+                t->ever_freed = true;
+                t->free_line = n->line; t->free_col = n->col;
+                for (Symbol *ls = g_locals; ls; ls = ls->locals_next)
+                    if (ls->tag_id == n->tag_id && ls->tag_state == TC_LIVE)
+                        ls->tag_state = TC_FREED;
+                if (t->carrier && t->carrier->tag_state == TC_LIVE)
+                    t->carrier->tag_state = TC_FREED;
+            }
         }
     }
 
@@ -10740,19 +11110,28 @@ static Type *check_switch(Node *n, Type *expect) {
     }
 
     /* §173：语句臂的臂内释放——join 后终局落账（槽 + 所有局部载体）：
-     * 后续解引用 E0512，再 free E0509。 */
+     * 后续解引用 E0512，再 free E0509。§189：臂内 std.move 落 MOVED。 */
     if (exAcc.stmt && n->tag_id) {
         TagSlot *t = tag_slot(n->tag_id);
         if (t && t->state == TST_LIVE) {
-            t->state = TST_FREED;
-            t->ever_freed = true;
-            t->free_line = n->line;
-            t->free_col = n->col;
-            for (Symbol *ls = g_locals; ls; ls = ls->locals_next)
-                if (ls->tag_id == n->tag_id && ls->tag_state == TC_LIVE)
-                    ls->tag_state = TC_FREED;
-            if (t->carrier && t->carrier->tag_state == TC_LIVE)
-                t->carrier->tag_state = TC_FREED;
+            if (exAcc.state == TC_MOVED) {
+                t->state = TST_MOVED;
+                for (Symbol *ls = g_locals; ls; ls = ls->locals_next)
+                    if (ls->tag_id == n->tag_id && ls->tag_state == TC_LIVE)
+                        ls->tag_state = TC_MOVED;
+                if (t->carrier && t->carrier->tag_state == TC_LIVE)
+                    t->carrier->tag_state = TC_MOVED;
+            } else {
+                t->state = TST_FREED;
+                t->ever_freed = true;
+                t->free_line = n->line;
+                t->free_col = n->col;
+                for (Symbol *ls = g_locals; ls; ls = ls->locals_next)
+                    if (ls->tag_id == n->tag_id && ls->tag_state == TC_LIVE)
+                        ls->tag_state = TC_FREED;
+                if (t->carrier && t->carrier->tag_state == TC_LIVE)
+                    t->carrier->tag_state = TC_FREED;
+            }
         }
     }
 

@@ -1009,8 +1009,13 @@ static CLab *lab_find_loop(const char *tag) {
  * mode 1 = 错误返回路径：NK_DEFER 照跑；NK_ERRDEFER 在 errcond 非 NULL 时
  *        包一层 `if (errcond) { … }`（返回值 tag 运行时才知道），NULL 表示
  *        错误已注定（try 传播），直接跑。两种条目按登记逆序交织——
- *        defer 和 errdefer 相邻登记时，清理顺序仍然正确。 */
-static void run_defers_m(int down_to, int mode, const char *errcond) {
+ *        defer 和 errdefer 相邻登记时，清理顺序仍然正确。
+ * errval = 展开点的错误码表达式（`_dr3.tag` / `65535` / NULL）：`defer err`
+ *        的 err 绑定声明在展开点就地发射（每个展开点自己的块作用域，
+ *        C 遮蔽保证体内引用拿到的是本点的码）。errval NULL 时绑定按 0
+ *        发（不触发绑定声明的路径没有错误码可给）。 */
+static void run_defers_m(int down_to, int mode, const char *errcond,
+                         const char *errval) {
     for (int d = g_depth - 1; d >= down_to; d--) {
         CScope *s = g_csc;
         for (int k = 0; k < g_depth - 1 - d && s; k++) s = s->parent;
@@ -1022,10 +1027,16 @@ static void run_defers_m(int down_to, int mode, const char *errcond) {
             if (iserr && errcond) {
                 line("if (%s) {", errcond);
                 g_ind++;
+                if (dn->name && dn->ival)
+                    line("%s %s = %s;", cty(ty_error()), cnames(dn->name),
+                         errval ? errval : "0");
                 gen_stmt(dn->a);
                 g_ind--;
                 line("}");
             } else {
+                if (iserr && dn->name && dn->ival && errval)
+                    line("%s %s = %s;", cty(ty_error()), cnames(dn->name),
+                         errval);
                 gen_stmt(dn->a);
             }
         }
@@ -1040,7 +1051,7 @@ static void run_defers_m(int down_to, int mode, const char *errcond) {
     }
 }
 
-static void run_defers(int down_to) { run_defers_m(down_to, 0, NULL); }
+static void run_defers(int down_to) { run_defers_m(down_to, 0, NULL, NULL); }
 
 /* ======================================================================
  *  表达式
@@ -5564,13 +5575,13 @@ static void ex(Buf *b, Node *n) {
             else      line("if (!%s.tag) {", tmp);
             g_ind++;
             if (g_is_main) {
-                run_defers_m(0, 1, NULL);
+                run_defers_m(0, 1, NULL, "65535");
                 /* main 交出去的是 int：error.null 的退出码就是 65535（OS 截 8 位） */
                 line("return (int)(65535);");
             } else {
                 line("%s %s = {0};", cty(ret), rv);
                 line("%s.tag = 65535;", rv);
-                run_defers_m(0, 1, NULL);
+                run_defers_m(0, 1, NULL, "65535");
                 line("return %s;", rv);
             }
             g_ind--;
@@ -5583,15 +5594,17 @@ static void ex(Buf *b, Node *n) {
 
         line("%s %s = %s;", cty(t), tmp, cxs(n->a, t));
         line("if (%s.tag != 0) {", tmp);
+        char ev[72];
+        snprintf(ev, sizeof ev, "%s.tag", tmp);
         g_ind++;
         if (g_is_main) {
             /* main 交出去的是 int：标签本身就是错误码，原样当退出码用 */
-            run_defers_m(0, 1, NULL);
+            run_defers_m(0, 1, NULL, ev);
             main_exit(tmp);
         } else {
             line("%s %s = {0};", cty(ret), rv);
             line("%s.tag = %s.tag;", rv, tmp);
-            run_defers_m(0, 1, NULL);
+            run_defers_m(0, 1, NULL, ev);
             line("return %s;", rv);
         }
         g_ind--;
@@ -5846,6 +5859,12 @@ static void ex(Buf *b, Node *n) {
             if (!strcmp(n->a->name, "stackAlloc")) { ex_stackalloc(b, n); return; }
             if (!strcmp(n->a->name, "heapAlloc"))  { ex_heapalloc(b, n); return; }
             if (!strcmp(n->a->name, "heapSlice"))  { ex_heapslice(b, n); return; }
+            /* §189：std.move —— 所有权转移是编译期账本操作，运行期恒等。 */
+            if (!strcmp(n->a->name, "move")) {
+                if (n->nitems >= 1) ex(b, n->items[0]);
+                else buf_puts(b, "0");
+                return;
+            }
             buf_puts(b, "0");
             return;
         }
@@ -6253,7 +6272,9 @@ static void gen_stmt(Node *n) {
             gen_value(n->a, tmp, want);
             if (errcheck) {
                 snprintf(cond, sizeof cond, "(%s).tag != 0", tmp);
-                run_defers_m(0, 1, cond);
+                char tagb[80];
+                snprintf(tagb, sizeof tagb, "%s.tag", tmp);
+                run_defers_m(0, 1, cond, tagb);
             } else run_defers(0);
             if (g_is_main) main_exit(tmp); else line("return %s;", tmp);
             return;
@@ -6278,7 +6299,9 @@ static void gen_stmt(Node *n) {
         line("{ %s %s = %s;", cty(want), tmp, v);
         if (errcheck) {
             snprintf(cond, sizeof cond, "(%s).tag != 0", tmp);
-            run_defers_m(0, 1, cond);
+            char tagb[80];
+            snprintf(tagb, sizeof tagb, "%s.tag", tmp);
+            run_defers_m(0, 1, cond, tagb);
         } else run_defers(0);
         if (g_is_main) main_exit(tmp); else line("return %s;", tmp);
         line("}");
@@ -6724,8 +6747,10 @@ static void emit_loop_cancel_check(void) {
     if (!g_need_task || g_is_main || !g_cur_ret || g_cur_ret->kind != TY_ERR)
         return;
     line("if (zx_task_cancel_check()) {");
+    char cev[24];
+    snprintf(cev, sizeof cev, "%u", (unsigned)ty_err_code("cancelled"));
     g_ind++;
-    run_defers_m(0, 1, NULL);
+    run_defers_m(0, 1, NULL, cev);
     line("return (%s){ .tag = %u };",
          cty(g_cur_ret), (unsigned)ty_err_code("cancelled"));
     g_ind--;

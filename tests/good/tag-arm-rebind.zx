@@ -9,9 +9,11 @@ pub const main = fn () i32 {
     var s = S{.p = p};
     if ((i32)p[0] > 0) {
         s = S{.p = (*u8)std.heapAlloc(std.heap.page, u8, 10)};
-        std.heap.page.free(std.heap.page.ctx, s.p, 10);
+        defer std.heap.page.free(std.heap.page.ctx, s.p, 10);
+        tag s: null;
     } else {
-        std.heap.page.free(std.heap.page.ctx, s.p, 10);
+        defer std.heap.page.free(std.heap.page.ctx, s.p, 10);
+        tag s: null;
     }
     return 0;
 };

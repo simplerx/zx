@@ -175,9 +175,11 @@ pub const stat = fn (alloc: Allocator, path: []const u8) ?Stat {
                 let s = statFrom(fd);
                 _ = FindClose(h);
                 alloc.free(alloc.ctx, fd, FD_BUF);
+                tag fd: null;
                 return s;
             }
             alloc.free(alloc.ctx, fd, FD_BUF);
+            tag fd: null;
         }
     }
     return null;
@@ -257,11 +259,16 @@ pub const DirIter = struct {
                 let fd = (*u8)b;
                 let h = FindFirstFileA((*const u8)pat.ptr, fd);
                 alloc.free(alloc.ctx, (*u8)r, need);
+                tag r: null;
                 if (h != INVALID_HANDLE) {
                     return Self{ .h = h, .buf = fd, .first = true, .done = false,
                                  .alloc = alloc };
                 }
                 alloc.free(alloc.ctx, fd, FD_BUF);
+                tag fd: null;
+            } else {
+                alloc.free(alloc.ctx, (*u8)r, need);
+                tag r: null;
             }
         }
         return null;
@@ -345,29 +352,29 @@ const PtrList = struct {
     alloc: Allocator,
 
     const push = fn (self: *Self, s: []const u8) bool {
-        if (self.len == self.cap) {
-            var ncap = self.cap * 2;
-            if (ncap < 16) { ncap = 16; }
-            let raw = self.alloc.alloc(self.alloc.ctx, ncap * @type([]const u8).size);
-            if (raw) r {
-                let dst = (*[]const u8)r;
-                if (self.len > 0) {
-                    @memcpy((*u8)dst, (*u8)self.items, self.len * @type([]const u8).size);
-                }
-                if (self.cap > 0) {
-                    self.alloc.free(self.alloc.ctx, (*u8)self.items, self.cap * @type([]const u8).size);
-                }
-                self.items = dst;
-                self.cap = ncap;
-                (self.items + self.len).0 = s;
-                self.len = self.len + 1;
-                return true;
-            }
-            return false;
+        if (self.len < self.cap) {
+            (self.items + self.len).0 = s;
+            self.len = self.len + 1;
+            return true;
         }
-        (self.items + self.len).0 = s;
-        self.len = self.len + 1;
-        return true;
+        var ncap = self.cap * 2;
+        if (ncap < 16) { ncap = 16; }
+        let raw = self.alloc.alloc(self.alloc.ctx, ncap * @type([]const u8).size);
+        if (raw) r {
+            let dst = (*[]const u8)r;
+            if (self.len > 0) {
+                @memcpy((*u8)dst, (*u8)self.items, self.len * @type([]const u8).size);
+            }
+            if (self.cap > 0) {
+                self.alloc.free(self.alloc.ctx, (*u8)self.items, self.cap * @type([]const u8).size);
+            }
+            self.items = dst;
+            self.cap = ncap;
+            (self.items + self.len).0 = s;
+            self.len = self.len + 1;
+            return true;
+        }
+        return false;
     };
 
     const deinit = fn (self: *Self) void {

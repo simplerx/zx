@@ -1,9 +1,8 @@
-// expect: already died with its scope
-// expect-code: E0509
-// expect-count: 1
-// §173：stackAlloc 指针逃逸出函数体（返回值），栈存储随帧消亡，
-// 调用方拿到的是已 FREED 的悬垂载体 —— 再 free 是双重释放。
-// 返回流把被调方的终局状态（FREED）带到调用点，释放事件才能记账。
+// expect: cannot return a pointer into the current function's stack frame
+// expect-code: E0503
+// expect-count: 2
+// §173/§188：stackAlloc 指针逃逸出函数体（返回值）——栈指针携带栈标签，
+// 返回逃逸检查（tag 驱动）在 return 处直接拦：栈存储随帧消亡，不能流出。
 const std = @mod("std");
 
 const alloc = fn () *u8 {

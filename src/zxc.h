@@ -21,8 +21,11 @@
  * （§165），std.simd 重写成纯 Zx 数学层 + 四元数，删掉手写 SIMD 内核。
  * 1.4.2 = std.simd 补上列主序 Mat3 / Mat4 与四元数互转（§167）。
  * 1.5.0 = tag 指针生命周期账本（§170-175，编译期内存安全）、try 捕获
- * 形式（§171）。 */
-#define ZXC_VERSION "1.5.0"
+ * 形式（§171）。
+ * 1.6.0 = std.move 所有权移交（§189，原值标 MOVED、新变量当场建槽）、
+ * 分支内释放显式确认（§189，`tag p : null;`——未确认的臂内释放合流
+ * 后当作未释放）、std 内部文件的账本豁免口径统一（直检与导入一致）。 */
+#define ZXC_VERSION "1.6.0"
 
 /* ---------- diagnostics ---------- */
 
@@ -128,7 +131,6 @@ void   buf_free(Buf *b);
     X(KW_CONTINUE,"'continue'")                                                \
     X(KW_RETURN,  "'return'")                                                  \
     X(KW_DEFER,   "'defer'")                                                   \
-    X(KW_ERRDEFER,"'errdefer'")                                                \
     X(KW_STRUCT,  "'struct'")                                                  \
     X(KW_UNION,   "'union'")                                                   \
     X(KW_ENUM,    "'enum'")                                                    \

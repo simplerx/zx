@@ -25,12 +25,12 @@ pub const main = fn () i32 {
 
         // ① 直接走 Allocator 的两个函数指针
         let q = a.alloc(a.ctx, 64);
-        if (q) qv {
-            let w = (*u64)qv;
-            w.0 = 12345;
-            std.println("direct = {}", w.0);
-            a.free(a.ctx, qv, 64);
-        } else { return 1; }
+        if (q == null) { return 1; }
+        let qv = q.?;
+        let w = (*u64)qv;
+        w.0 = 12345;
+        std.println("direct = {}", w.0);
+        a.free(a.ctx, qv, 64);
         std.println("used64 after free = {}", pp.used(64));
 
         // ② 喂给 std.array.List：增长、释放都走池
@@ -47,21 +47,22 @@ pub const main = fn () i32 {
         // ③ 两个视图指向同一个池，交叉释放
         let a2 = pp.allocator();
         let r = a2.alloc(a2.ctx, 32);
-        if (r) rv {
-            std.println("second view used32 = {}", pp.used(32));
-            a.free(a.ctx, rv, 32);
-            std.println("cross view free used32 = {}", pp.used(32));
-        } else { return 1; }
+        if (r == null) { return 1; }
+        let rv = r.?;
+        std.println("second view used32 = {}", pp.used(32));
+        a.free(a.ctx, rv, 32);
+        std.println("cross view free used32 = {}", pp.used(32));
 
         // ④ 大块（> 256KiB）绕过分级，但仍走同一对函数指针
         let big = a.alloc(a.ctx, 600000);
-        if (big) bb {
-            bb.0 = 7;
-            std.println("big = {}", bb.0);
-            a.free(a.ctx, bb, 600000);
-        } else { return 1; }
+        if (big == null) { return 1; }
+        let bb = big.?;
+        bb.0 = 7;
+        std.println("big = {}", bb.0);
+        a.free(a.ctx, bb, 600000);
 
         pp.deinit();
+        tag pp: null;
     }
 
     // ⑤ 池架在 DebugAllocator 上，再用 allocator() 视图跑一遍：
@@ -80,10 +81,12 @@ pub const main = fn () i32 {
             }
             v.deinit();
             pp2.deinit();
+            tag pp2: null;
         }
         std.println("B live before = {}",
             std.debug_alloc.DebugAllocator.liveBytes(backing));
         std.debug_alloc.DebugAllocator.deinit(backing);
+        tag backing: null;
         std.println("B debug_alloc deinit ok");
     }
 

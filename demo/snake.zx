@@ -497,6 +497,7 @@ const run = fn (raw: *u8) u8 {
 const main = fn () u8 {
     let pg = std.heap.page;
     let mem = pg.alloc(pg.ctx, 16384);
+    tag mem: null;   // 进程生命周期分配：账本销账（释放责任随进程退出闭合）
     let args = std.process.args();
 
     // std.process.args() 不含 argv[0]：args[0] 就是第一个真参数。

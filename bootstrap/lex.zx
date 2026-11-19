@@ -23,8 +23,8 @@ pub const Kind = enum {
     eof, ident, int, float, char, string,
     kw_const, kw_let, kw_var, kw_fn, kw_type,
     kw_null, kw_undefined, kw_if, kw_else, kw_while, kw_for,
-    kw_inline, kw_switch, kw_continue, kw_return, kw_defer, kw_errdefer,
     kw_struct, kw_union, kw_enum, kw_error, kw_pub, kw_extern,
+    kw_inline, kw_switch, kw_continue, kw_return, kw_defer,
     kw_orelse, kw_try,
     lparen, rparen, lbracket, rbracket, lbrace, rbrace,
     comma, semi, colon, at, dot, dot_brace, dotdot, arrow,
@@ -59,7 +59,6 @@ pub const spell = fn (k: Kind) []const u8 {
         .kw_continue: "KW_CONTINUE";
         .kw_return: "KW_RETURN";
         .kw_defer: "KW_DEFER";
-        .kw_errdefer: "KW_ERRDEFER";
         .kw_struct: "KW_STRUCT";
         .kw_union: "KW_UNION";
         .kw_enum: "KW_ENUM";
@@ -137,7 +136,6 @@ const keyword = fn (s: []const u8) ?Kind {
     if (std.str.eq(s, "continue")) { return Kind.kw_continue; }
     if (std.str.eq(s, "return")) { return Kind.kw_return; }
     if (std.str.eq(s, "defer")) { return Kind.kw_defer; }
-    if (std.str.eq(s, "errdefer")) { return Kind.kw_errdefer; }
     if (std.str.eq(s, "struct")) { return Kind.kw_struct; }
     if (std.str.eq(s, "union")) { return Kind.kw_union; }
     if (std.str.eq(s, "enum")) { return Kind.kw_enum; }

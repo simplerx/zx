@@ -34,10 +34,12 @@ pub const main = fn () i32 {
         let raw = a.alloc(a.ctx, 48);
         if (raw) rp {
             std.println("raw: {} {}", std.debug_alloc.DebugAllocator.liveBytes(a), 48);
-            a.free(a.ctx, rp, 48);
+            defer a.free(a.ctx, rp, 48);
+            tag rp: null;
             std.println("direct: ok");
         }
         std.debug_alloc.DebugAllocator.deinit(a);
+        tag a: null;
     }
     return 0;
 };

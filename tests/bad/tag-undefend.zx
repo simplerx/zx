@@ -1,7 +1,8 @@
-// expect: was freed inside this branch
-// expect-code: E0514 E0512
-// §170：分支内 free 必须传 null 作为臂值。free 后传出非空载体，根因在
-// 臂出口报 E0514；合并出的载体状态失效，下游使用再报一条 E0512。
+// expect: release in a branch arm must be confirmed
+// expect-code: E0528
+// expect-count: 1
+// §189：分支内 free 必须紧跟 `tag p : null;` 显式确认——没确认的释放
+// 合流后当作还没释放（分支本就可能不走），在释放处报 E0528 提示确认。
 const std = @mod("std");
 var drop: bool = false;
 

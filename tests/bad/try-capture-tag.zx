@@ -1,6 +1,7 @@
-// expect: was freed inside this branch
-// expect-code: E0514
-// §171 + §170：try 错误臂里 free 了贴标指针，必须传 null 作兜底值。
+// expect: release in a branch arm must be confirmed
+// expect-code: E0528
+// §171 + §189：try 错误臂里 free 了贴标指针，必须紧跟 `tag p : null;`
+// 确认——没确认的释放不落账，在释放处报 E0528 提示确认。
 const std = @mod("std");
 const error_read = error { failed };
 const fail = fn () error_read!i32 { return error.failed; };

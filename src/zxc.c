@@ -127,6 +127,10 @@ static const DiagRule g_rules[] = {
     { "not registered in this array",     "E0524" },
     { "provenance was lost",              "E0525" },
     { "owned by an arena",                "E0526" },
+    { "release in a branch arm",          "E0528" },
+    { "moved away",                       "E0529" },
+    { "was already moved",                "E0529" },
+    { "carry ownership to move",          "E0530" },
 
     /* 控制流位置：continue/return/defer 放错地方，标签找不到 */
     { "does not take an `else` branch",   "E0405" },

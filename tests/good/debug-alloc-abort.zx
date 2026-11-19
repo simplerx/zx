@@ -3,8 +3,49 @@
 // 交给 runner 跑（abort 会带走整个测试进程）；test.sh 用独立进程分别跑，
 // 断言 stderr 里的 panic 原因与 stdout 里的报告。
 //
+// §189：编译期账本会拦住"臂内释放不确认"与"双重释放"，这三条运行期
+// 路径都对账本不可见：
+//   - leak：主路径 `tag pp : null;` 终结标记（释放责任自负）——账本
+//     销账，运行期故意不还，deinit 时逐块列出再 panic；
+//   - double / size：第一次释放走账本，第二次经 usize 形参通道重建
+//     指针（接收半环建新账，运行期打在同一块上）。
+//
 // 用法：prog leak | double | size
 const std = @mod("std");
+
+const doLeak = fn (a: Allocator) void {
+    let p = a.alloc(a.ctx, 24);
+    if (p == null) { return; }
+    let pp = p.?;
+    tag pp: null;               // 账本销账：运行期故意不还
+    std.println("case leak: 24 byte(s) left");
+    // 故意不 free：deinit 逐块列出后 panic
+};
+
+// 从裸整数重建带账指针再释放——账本看到的是一笔新账，运行期打回原块。
+// 与线程入口 `tag q : (*u8)(ctx)` 同一口径（usize 通道 = 账本边界）。
+const rawFree = fn (a: Allocator, n: usize, sz: usize) void {
+    let q = tag.hx : (*u8)(n);
+    a.free(a.ctx, q, sz);
+};
+
+const doDouble = fn (a: Allocator) void {
+    let p = a.alloc(a.ctx, 16);
+    if (p == null) { return; }
+    let pp = p.?;
+    std.println("case double: freeing the same block twice");
+    a.free(a.ctx, pp, 16);
+    rawFree(a, (usize)pp, 16);  // 运行期 double free
+};
+
+const doSize = fn (a: Allocator) void {
+    let p = a.alloc(a.ctx, 16);
+    if (p == null) { return; }
+    let pp = p.?;
+    std.println("case size: free(64) on a 16 byte block");
+    tag pp: null;               // 账本销账：唯一一次释放走错长度
+    rawFree(a, (usize)pp, 64);  // 运行期长度不符
+};
 
 pub const main = fn () i32 {
     let args = std.process.args();
@@ -14,25 +55,14 @@ pub const main = fn () i32 {
     var da = std.debug_alloc.DebugAllocator.init(std.heap.page);
     if (da) a {
         if (std.str.eq(mode, "leak")) {
-            // 分配了不还：deinit 时逐块列出来再 panic
-            let p = a.alloc(a.ctx, 24);
-            if (p) _ = 0 else return 2;
-            std.println("case leak: 24 byte(s) left");
+            doLeak(a);
         } else if (std.str.eq(mode, "double")) {
-            let p = a.alloc(a.ctx, 16);
-            if (p) pp {
-                a.free(a.ctx, pp, 16);
-                std.println("case double: freeing the same block twice");
-                a.free(a.ctx, pp, 16);
-            }
+            doDouble(a);
         } else {
-            let p = a.alloc(a.ctx, 16);
-            if (p) pp {
-                std.println("case size: free(64) on a 16 byte block");
-                a.free(a.ctx, pp, 64);
-            }
+            doSize(a);
         }
         std.debug_alloc.DebugAllocator.deinit(a);
+        tag a: null;
     }
     return 0;
 };
