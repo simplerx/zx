@@ -1,0 +1,13 @@
+// §186 正面控制：(usize) 读地址、整数直传转回后单次 free、free 后
+// 读整数（不是解引用）都合法——账全链路闭环，零诊断。
+const std = @mod("std");
+pub const main = fn () i32 {
+    let p = std.heapAlloc(std.heap.page, u8, 10);
+    let addr = (usize)p;
+    if (addr == 0) { return 1; }
+    let n = (u64)p;
+    let r = (*u8)n;
+    r[0] = 7;
+    std.heap.page.free(std.heap.page.ctx, r, 10);
+    return 0;
+};

@@ -1,0 +1,16 @@
+// expect: use after free
+// expect-code: E0512
+// expect-count: 2
+// §185：整容器终结（tag xs : null;）后数组本体也宣告终结——再读
+// 数组元素（含注解读取）是 use after free（E0512，报在数组上），
+// 标签不在群里再报一条 E0524。终结是终点站：取出要放在终结之前。
+const std = @mod("std");
+pub const main = fn () i32 {
+    var xs = std.stackAlloc(*u8, 4);
+    let p = (*u8)std.heapAlloc(std.heap.page, u8, 10);
+    let i = 2;
+    xs[i] = p;
+    tag xs : null;
+    tag _ : p = xs[i];
+    return 0;
+};

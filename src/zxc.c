@@ -110,6 +110,12 @@ static const DiagRule g_rules[] = {
     { "with a runtime index",             "E0521" },
     { "cannot stay behind control flow",  "E0514" },
     { "return null as its value",         "E0514" },
+    /* §186：入口签名与工具链环境——放在笼统规则之前，避免落进
+     * E0300/E0900 的兜底模板。 */
+    { "main takes no parameters",         "E0309" },
+    { "cannot launch the Zx frontend",    "E1001" },
+    { "frontend (zxfe) crashed",          "E1002" },
+    { "frontend (zxfe) failed without a diagnostic", "E1002" },
     { "tagged allocation must be bound",  "E0514" },
     { "was freed inside this branch",     "E0514" },
     { "undetermined whether this memory was freed", "E0515" },
@@ -118,6 +124,7 @@ static const DiagRule g_rules[] = {
     { "already owns an allocation",       "E0518" },
     { "manual tag declaration is gone",   "E0519" },
     { "carries no label",                 "E0523" },
+    { "not registered in this array",     "E0524" },
 
     /* 控制流位置：continue/return/defer 放错地方，标签找不到 */
     { "does not take an `else` branch",   "E0405" },

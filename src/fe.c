@@ -386,6 +386,10 @@ static Node *fe_parse_zx(const char *path) {
     int ndiag = fe_replay_stderr(logp);   /* 诊断原样回放，顺带记下第一条 */
     remove(logp);
     if (rc != 0) {
+        /* 前端没产出能用的 AST：临时文件当场清掉。以前这里直接 return，
+         * spawn 失败/前端崩溃的每次尝试都在 zxc 目录漏一个 .zxfe-*.ast
+         *（实测评估期攒了 122 个），把"编译器写过哪些临时文件"糊住。 */
+        remove(tmp);
         /* 前端挂了却一条诊断都没有（栈爆掉、OOM、内部断言）——以前这里直接
          * return NULL，上层只看到"检查失败、零条消息"。补一条能定位的话。 */
         if (ndiag == 0) {

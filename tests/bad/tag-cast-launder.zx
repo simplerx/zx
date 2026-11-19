@@ -1,0 +1,16 @@
+// expect: already freed
+// expect-code: E0509
+// expect-count: 1
+// §186：整数中转不抹源——(u64)p 把出处（副本）带进整数符号，直传
+// 转回 (*u8)n 身份恢复。经 cast 转回的指针 free 与原指针 free 记的是
+// 同一槽：第二次释放报 E0509（此前这条直线 double-free 编译零诊断，
+// 只能靠运行期崩）。
+const std = @mod("std");
+pub const main = fn () i32 {
+    let p = std.heapAlloc(std.heap.page, u8, 10);
+    let n = (u64)p;
+    let r = (*u8)n;
+    std.heap.page.free(std.heap.page.ctx, r, 10);
+    std.heap.page.free(std.heap.page.ctx, p, 10);
+    return 0;
+};

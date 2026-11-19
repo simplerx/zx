@@ -1,9 +1,10 @@
-// expect: was stored into `xs[i]` with a runtime index
-// expect-code: E0521
+// expect: never freed
+// expect-code: E0513
 // expect-count: 1
-// §174（用户裁定收紧）：运行期索引进数组，追踪必断线——写入记
-// pending，没续链/没终结则终扫报 E0521（报在写入处），使用者必须
-// 处理：常索引 / 续链接管 / 手动终结，标签绝不静默丢失。
+// §185（用户裁定）：运行期索引进数组 = 槽进该数组的标签群（存入即
+// 登记，不再 rt_pending 断线拦截）。没注解读取取出、没整容器终结 →
+// 槽级泄漏终扫 E0513（群里留着 = 未释放）。注解取出/free(xs) 批量
+// 终结的写法见 good/tag-rebind-chain 与新增 tag-arr 用例。
 const std = @mod("std");
 const mk = fn () *u8 {
     return (*u8)std.heapAlloc(std.heap.page, u8, 10);

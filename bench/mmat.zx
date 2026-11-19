@@ -33,5 +33,9 @@ const main = fn () u8 {
 
     std.println("mmat c00={} cN1={} cN2={} cNN={}",
                 cs[0], cs[N + 1], cs[(N / 2) * N + N / 2], cs[N * N - 1]);
+    // 三块缓冲释放（as/bs/cs 只是视图，账都记在同一槽上）
+    al.free(al.ctx, (*u8)a, N * N * 8);
+    al.free(al.ctx, (*u8)b, N * N * 8);
+    al.free(al.ctx, (*u8)c, N * N * 8);
     return 0;
 };

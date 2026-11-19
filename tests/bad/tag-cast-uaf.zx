@@ -1,0 +1,14 @@
+// expect: use after free
+// expect-code: E0512
+// expect-count: 1
+// §186：free 经整数中转转回的指针后，解引用原指针也是 UAF——
+// 同一槽的 FREED 事实跟到两个载体上。
+const std = @mod("std");
+pub const main = fn () i32 {
+    let p = std.heapAlloc(std.heap.page, u8, 10);
+    let n = (u64)p;
+    let r = (*u8)n;
+    std.heap.page.free(std.heap.page.ctx, r, 10);
+    p[0] = 1;
+    return 0;
+};

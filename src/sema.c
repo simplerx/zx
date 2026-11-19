@@ -3293,6 +3293,139 @@ static int aesc_const_index(Node *ix) {
     return -1;
 }
 
+/* ---------------- §185 数组标签群 ----------------
+ * 运行期索引写入的贴标槽按「数组基变量」聚合（取代 §174 的
+ * rt_pending 断线拦截）：存入即登记进群，注解读取
+ * （tag v : tag.x = xs[i];）查"∈ 群"后取出销账，free 整容器
+ * 批量终结，没取走的由槽级泄漏终扫（E0513）兜底——群里留着的
+ * 标签等同未 free。
+ * 常索引条目（aesc 精确账）同样进群，free 整容器统一覆盖。
+ * 别名切片（xs[0..n]、cast 往返）沿基址解析共享同一本账；
+ * 解析不了的基址（指针别名等）保守回退 rt_pending 断线拦截。
+ * 跨函数：形参数组的「整容器终结」事实（pffa）与「常索引元素
+ * 释放」事实（pff 的 "N" 路径）在调用点/延迟重放里对账。 */
+static void ft_mark_freed(int slot, Node *site);   /* 定义在字段账一节 */
+static void agt_close(Symbol *base);               /* §185：定义在 pffa 一节 */
+typedef struct { Symbol *base; int slot; bool taken; } AgtMem;
+static AgtMem *g_agt;
+static int g_nagt, g_cagt;
+
+static void agt_add(Symbol *base, int slot) {
+    if (!base || slot <= 0) return;
+    for (int i = 0; i < g_nagt; i++)
+        if (g_agt[i].base == base && g_agt[i].slot == slot) {
+            g_agt[i].taken = false;     /* 取出后重新存入：重新登记 */
+            return;
+        }
+    if (g_nagt == g_cagt) {
+        int nc = g_cagt ? g_cagt * 2 : 16;
+        AgtMem *p2 = realloc(g_agt, (size_t)nc * sizeof(AgtMem));
+        if (!p2) return;
+        g_agt = p2; g_cagt = nc;
+    }
+    g_agt[g_nagt].base = base;
+    g_agt[g_nagt].slot = slot;
+    g_agt[g_nagt].taken = false;
+    g_nagt++;
+}
+
+static bool agt_has(Symbol *base, int slot) {
+    for (int i = 0; i < g_nagt; i++)
+        if (g_agt[i].base == base && g_agt[i].slot == slot)
+            return !g_agt[i].taken;
+    return false;
+}
+
+/* 这个数组存过贴标指针吗（读出断线判据，口径同 aesc_any）。 */
+static bool agt_any(Symbol *base) {
+    for (int i = 0; i < g_nagt; i++)
+        if (g_agt[i].base == base) return true;
+    return false;
+}
+
+static void agt_remove(Symbol *base, int slot) {
+    /* 取出销账：成员保留（taken）——agt_any 不因取空而变假，
+     * 后续再取同一标签才接得住 E0524；整容器终结走 agt_clear。 */
+    for (int i = 0; i < g_nagt; i++)
+        if (g_agt[i].base == base && g_agt[i].slot == slot)
+            g_agt[i].taken = true;
+}
+
+/* 整容器终结：群内 LIVE 槽全标 FREED（free 事件现场）、群清空。
+ * 常索引 aesc 条目同属这个容器——一并覆盖（E0509 由槽级 double-free
+ * 检查管，FREED 槽跳过）。 */
+static void agt_clear(Symbol *base, Node *site) {
+    for (int i = 0; i < g_naesc; i++)
+        if (g_aesc[i].base == base && g_aesc[i].slot > 0)
+            ft_mark_freed(g_aesc[i].slot, site);
+    for (int i = 0; i < g_nagt; ) {
+        if (g_agt[i].base == base) {
+            ft_mark_freed(g_agt[i].slot, site);
+            g_agt[i] = g_agt[g_nagt - 1];
+            g_nagt--;
+        } else i++;
+    }
+    agt_close(base);
+}
+
+/* 数组/切片基址 → 基变量符号（别名视图共享基账）。IDENT 直接取；
+ * 切片/铸型/解包沿基址剥；其余（指针算术、多级间接）解析不了返回
+ * NULL——写入处回退 rt_pending 断线拦截。 */
+static Symbol *agt_base_of(Node *e) {
+    for (int g = 0; g < 6 && e; g++) {
+        if (e->kind == NK_IDENT)
+            return (e->sym && e->sym->kind != SK_CONST) ? e->sym : NULL;
+        if (e->kind == NK_SLICE || e->kind == NK_CAST ||
+            e->kind == NK_UNWRAP) { e = e->a; continue; }
+        return NULL;
+    }
+    return NULL;
+}
+
+/* §185 跨函数：「形参数组被整容器终结」事实账（体内 free(p) 且 p
+ * 是数组/切片形参）——调用点把实参数组的群一起清掉（闭环：容器
+ * 所有权随调用移交，调用方不再欠群内标签的释放）。 */
+static Symbol **g_pffa;
+static int g_npffa, g_cpffa;
+/* §185：整容器终结过的基变量——终结后群里已无成员，注解读取的
+ * "∈ 群"校验要靠这个标记挡住（取已终结容器的标签 = E0524）。 */
+static Symbol **g_agtclosed;
+static int g_nagtclosed, g_cagtclosed;
+static void agt_close(Symbol *base) {
+    if (!base) return;
+    for (int i = 0; i < g_nagtclosed; i++)
+        if (g_agtclosed[i] == base) return;
+    if (g_nagtclosed == g_cagtclosed) {
+        int nc = g_cagtclosed ? g_cagtclosed * 2 : 16;
+        Symbol **p2 = realloc(g_agtclosed, (size_t)nc * sizeof(Symbol *));
+        if (!p2) return;
+        g_agtclosed = p2; g_cagtclosed = nc;
+    }
+    g_agtclosed[g_nagtclosed++] = base;
+}
+static bool agt_closed(Symbol *base) {
+    for (int i = 0; i < g_nagtclosed; i++)
+        if (g_agtclosed[i] == base) return true;
+    return false;
+}
+static void pffa_add(Symbol *ps) {
+    if (!ps) return;
+    for (int i = 0; i < g_npffa; i++)
+        if (g_pffa[i] == ps) return;
+    if (g_npffa == g_cpffa) {
+        int nc = g_cpffa ? g_cpffa * 2 : 16;
+        Symbol **p2 = realloc(g_pffa, (size_t)nc * sizeof(Symbol *));
+        if (!p2) return;
+        g_pffa = p2; g_cpffa = nc;
+    }
+    g_pffa[g_npffa++] = ps;
+}
+static bool pffa_has(Symbol *ps) {
+    for (int i = 0; i < g_npffa; i++)
+        if (g_pffa[i] == ps) return true;
+    return false;
+}
+
 /* 同一坐标只报一次（读账路径会被多个消费者走到）。 */
 static bool tag_diag_once(int line, int col) {
     static struct { int line, col; } seen[64];
@@ -3378,12 +3511,14 @@ static void tag_of_expr(Node *e, int *id, int *state) {
         e->a->sym && e->a->sym->kind != SK_CONST) {
         int ix = aesc_const_index(e->b);
         int aid = ix >= 0 ? aesc_find(e->a->sym, ix) : 0;
-        if (ix < 0 && aesc_any(e->a->sym) && tag_diag_once(e->line, e->col))
+        if (ix < 0 && (aesc_any(e->a->sym) || agt_any(e->a->sym)) &&
+            tag_diag_once(e->line, e->col))
             diag_code_at("E0521", e->line, e->col,
                 "this element is read with a runtime index and the array "
                 "holds tracked pointers -- which allocation an element "
-                "carries cannot be identified; store at a constant index, "
-                "or mark them released (`tag.<var> : null;`)");
+                "carries cannot be identified; take it out with an "
+                "annotated read (`tag v : tag.x = xs[i];`), or store at a "
+                "constant index");
         if (aid && ft_state_of(aid) == TC_LIVE) {
             *id = aid; *state = TC_LIVE;
             return;
@@ -3664,6 +3799,15 @@ static void tag_note_free(Node *call) {
             pa->a->sym->kind == SK_PARAM)
             pff_add(pa->a->sym, pa->name);
     }
+    /* §185：整容器终结——free 的实参是数组/切片基变量且群非空：
+     * 群内 LIVE 槽全部标 FREED、群清空（声明语义：容器所有权到此
+     * 终结，群内标签的泄漏责任一并了结；逐元素真释放按 decisions
+     * §185 在 free 之前显式取出）。实参是形参时记 pffa 事实账，
+     * 调用点/延迟重放把实参数组的群一起清（闭环）。 */
+    /* §185（用户裁定）：free 整容器**不**批量清群——数组与元素
+     * 不绑定：数组存储释放了、元素没释放，把它们标 FREED 会把真
+     * 泄漏错判成已释放。整容器终结只有显式出口 `tag xs : null;`
+     * （终结语句里清群 + 记 pffa 事实账），或逐个取出释放。 */
     tag_free_event(call, call->items[1]);
 }
 
@@ -4269,23 +4413,26 @@ static void tag_ledger_final(const char *entry_path) {
         const char *cp = cs ? "; called via " : "";
         if (t->arr_esc) {
             /* 提示写使用者自己的变量名（载体/数组基变量）——自动槽名
-             * 不再可写（跨库不可预测）。 */
+             * 不再可写（跨库不可预测）。§185：群模型口径——存入即
+             * 登记在案，取走/批量终结都在追踪范围内；留到程序结束
+             * = 泄漏。 */
             const char *mn = (t->carrier && t->carrier->name)
                              ? t->carrier->name : NULL;
             if (mn)
                 diag_code_at("E0513", rl, rc,
-                    "memory allocated at line %d is never freed -- it is "
-                    "stored in an array/tuple element and the compiler "
-                    "cannot track it to its free site; free it through the "
-                    "variable holding it, or mark it released with "
-                    "`tag.%s : null;`%s%s",
+                    "memory allocated at line %d is never freed -- it was "
+                    "stored into an array/tuple element and is still "
+                    "unreleased; take it out with an annotated read "
+                    "(`tag v : tag.x = xs[i];`) and free it, or terminate "
+                    "the whole container with `tag %s : null;`%s%s",
                     t->line, mn, cp, cs ? cs : "");
             else
                 diag_code_at("E0513", rl, rc,
-                    "memory allocated at line %d is never freed -- it is "
-                    "stored in an array/tuple element and the compiler "
-                    "cannot track it to its free site; free it through the "
-                    "variable holding it%s%s",
+                    "memory allocated at line %d is never freed -- it was "
+                    "stored into an array/tuple element and is still "
+                    "unreleased; take it out with an annotated read "
+                    "(`tag v : tag.x = xs[i];`) and free it, or terminate "
+                    "the whole container (`tag <array> : null;`)%s%s",
                     t->line, cp, cs ? cs : "");
         }
         else if (t->own_line && t->own_line != t->line) {
@@ -4528,14 +4675,20 @@ static Type *check_assign(Node *n) {
                 }
             } else if (fb && fb->kind == NK_INDEX &&
                        (!fb->b || fb->b->kind != NK_INT)) {
-                /* §175：arr[i].name = tagged（运行期索引的嵌套字段）——
-                 * 追踪必断线，同数组元素写入记 pending，续链/终结接管，
-                 * 没处理终扫报 E0521。 */
+                /* §175：arr[i].name = tagged（运行期索引的嵌套字段）。
+                 * §185：基址能解析到数组基变量 → 槽进该数组的标签群
+                 * （存入即登记，注解读取取出，free 整容器批量终结）；
+                 * 解析不了（指针别名等）→ 保守记 pending，续链/终结
+                 * 接管，没处理终扫报 E0521。 */
                 int ftid2, ftst2;
                 tag_of_expr(n->b, &ftid2, &ftst2);
                 if (ftid2) {
+                    Symbol *bs2 = agt_base_of(fb->a);
                     TagSlot *ts = tag_slot(ftid2);
-                    if (ts) {
+                    if (ts && bs2) {
+                        agt_add(bs2, ftid2);
+                        ts->arr_esc = true;
+                    } else if (ts) {
                         ts->rt_pending = true;
                         ts->rt_line = fb->b ? fb->b->line : n->a->line;
                         ts->rt_col = fb->b ? fb->b->col : n->a->col;
@@ -4543,33 +4696,52 @@ static Type *check_assign(Node *n) {
                     }
                 }
             }
-        } else if (n->a->kind == NK_INDEX && n->a->a &&
-                   n->a->a->kind == NK_IDENT && n->a->a->sym) {
-            /* §173 补丁十（收紧版）：贴标指针进数组/元组元素只认**常
-             * 索引**精确账。运行期索引无法指认元素——写入时就报
-             * E0521，不进任何账（标签绝不静默丢失），使用者必须
-             * 显式处理：常索引 / 续链 / 终结。 */
-            int ftid, ftst;
-            tag_of_expr(n->b, &ftid, &ftst);
-            if (ftid) {
-                int ix = aesc_const_index(n->a->b);
-                if (ix < 0) {
-                    /* 运行期索引写入：追踪必断线。记 pending——续链
-                     * 接管（tag v : tag.x = xs[i];）或手动终结
-                     * （tag.<载体> : null;）即豁免；没处理则终扫报
-                     * E0521（"必须处理"，报在写入处）。 */
+        } else if (n->a->kind == NK_INDEX && n->a->a) {
+            /* §173 补丁十：贴标指针进数组/元组元素认**常索引**精确账。
+             * §185：运行期索引不再一律断线——基址能解析到数组基变量
+             * （含别名切片）时槽进该数组的标签群（存入即登记）；解析
+             * 不了才保守记 pending（续链/终结接管，终扫 E0521）。 */
+            Symbol *dbs = (n->a->a->kind == NK_IDENT)
+                          ? (n->a->a->sym && n->a->a->sym->kind != SK_CONST
+                             ? n->a->a->sym : NULL)
+                          : agt_base_of(n->a->a);
+            if (dbs) {
+                int ftid, ftst;
+                tag_of_expr(n->b, &ftid, &ftst);
+                if (ftid) {
+                    int ix = aesc_const_index(n->a->b);
+                    TagSlot *ts = tag_slot(ftid);
+                    if (ix < 0) {
+                        /* §185：运行期索引写入 → 槽进群。群成员由注解
+                         * 读出（tag v : tag.x = xs[i];）逐个取出、
+                         * free(xs) 整容器批量终结；没取走的由槽级
+                         * 泄漏终扫 E0513 兜底（群里留着 = 未释放）。 */
+                        agt_add(dbs, ftid);
+                        if (ts) ts->arr_esc = true;
+                    } else {
+                        /* 常索引：aesc 精确账已覆盖（覆盖写入换账、
+                         * 精确读/free）；不进群——群是"运行期索引"
+                         * 成员的集合摘要，常索引的容器终结由
+                         * agt_clear 扫 aesc 统一覆盖。 */
+                        aesc_add(dbs, ix, ftid);
+                        if (ts && ftst == TC_LIVE && n->b) {
+                            ts->own_line = n->b->line; ts->own_col = n->b->col;
+                        }
+                    }
+                }
+            } else if (n->a->a->kind == NK_IDENT && n->a->a->sym) {
+                /* 基址解析不了的别名写入：追踪必断线，保守记 pending
+                 * （§174 口径不变：续链接管或终结，没处理终扫报
+                 * E0521——标签绝不静默丢失）。 */
+                int ftid, ftst;
+                tag_of_expr(n->b, &ftid, &ftst);
+                if (ftid) {
                     TagSlot *ts = tag_slot(ftid);
                     if (ts) {
                         ts->rt_pending = true;
-                        ts->rt_line = n->a->b->line;
-                        ts->rt_col = n->a->b->col;
+                        ts->rt_line = n->a->b ? n->a->b->line : n->a->line;
+                        ts->rt_col = n->a->b ? n->a->b->col : n->a->col;
                         ts->arr_esc = true;
-                    }
-                } else {
-                    aesc_add(n->a->a->sym, ix, ftid);
-                    TagSlot *ts = tag_slot(ftid);
-                    if (ts && ftst == TC_LIVE && n->b) {
-                        ts->own_line = n->b->line; ts->own_col = n->b->col;
                     }
                 }
             }
@@ -4973,17 +5145,35 @@ static Type *check_cast(Node *n) {
         int tid, tst;
         tag_of_expr(n->b, &tid, &tst);
         if (tid) {
-            if ((to->kind == TY_PTR || to->kind == TY_SLICE) &&
-                (from->kind == TY_PTR || from->kind == TY_SLICE)) {
+            bool to_ps = (to->kind == TY_PTR || to->kind == TY_SLICE);
+            bool from_ps = (from->kind == TY_PTR || from->kind == TY_SLICE);
+            bool to_int = (to->kind == TY_INT || to->kind == TY_ENUM ||
+                           to->kind == TY_COMPTIME_INT);
+            bool from_int = (from->kind == TY_INT || from->kind == TY_ENUM ||
+                             from->kind == TY_COMPTIME_INT);
+            if (to_ps && from_ps) {
                 /* §179：指针/切片家族互转身份不变——切片还是同一份内存
                  * 的视图（元素重解释不改归属）；释放责任跟着标签走。 */
                 n->tag_id = tid;
                 n->tag_state = tst;
-            } else if (to->kind != TY_PTR && to->kind != TY_SLICE) {
-                /* §179：cast 成非指针（(usize)p 读地址当数字）不转移
-                 * 所有权——标签不跟着走，原载体照旧记账；这不是断链。 */
             } else if (tag_slot(tid) && tag_slot(tid)->abstract) {
                 /* §173：借出槽的摘要 cast（`(usize)p` 之类）不追身份 */
+            } else if (!to_ps && to_int) {
+                /* §186：整数中转不抹源——`(usize)p` 把地址当数字读，
+                 * 出处（副本）随值走：原载体照旧记账，整数本身也携带
+                 * 同一槽的身份。整数经算术运算即丢（binop 不透传 tag，
+                 * 赋值重绑同样清掉）；直传转回 `(*u8)n` 时身份恢复——
+                 * 抹源 double-free/UAF 的直线形态从此编译期可拦。 */
+                n->tag_id = tid;
+                n->tag_state = tst;
+            } else if (to_ps && from_int) {
+                /* §186：转回——从带出处的整数直接恢复身份（直传数据
+                 * 流）。算术洗源后的整数不带出处，走下面的 E0514。 */
+                n->tag_id = tid;
+                n->tag_state = tst;
+            } else if (!to_ps) {
+                /* §179：cast 成其他非指针（f64 等）不转移所有权——
+                 * 标签不跟着走，原载体照旧记账；这不是断链。 */
             } else {
                 TagSlot *t = tag_slot(tid);
                 diag_code_at("E0514", n->line, n->col,
@@ -6572,6 +6762,31 @@ static void tag_call_flow(Node *n) {
                 for (; fs; fs = fs->next)
                     if (fs->slot > 0 && pff_has(ps, fs->name))
                         ft_mark_freed(fs->slot, n);
+                /* §185：数组跨函数对账——体内 free(p.N)（常索引元素
+                 * 释放，pff 事实账 "N"）→ 实参数组的对应元素槽标
+                 * FREED；体内 free(p) 整容器终结（pffa）→ 实参数组
+                 * 的群整批清掉（所有权随调用移交，闭环）。 */
+                {
+                    Node *aa = n->items[i];
+                    for (int g = 0; g < 6 && aa &&
+                         (aa->kind == NK_CAST || aa->kind == NK_UNWRAP ||
+                          aa->kind == NK_SLICE ||
+                          (aa->kind == NK_FIELD && aa->name &&
+                           !strcmp(aa->name, "ptr"))); g++)
+                        aa = aa->kind == NK_CAST ? (aa->b ? aa->b : aa->a)
+                            : aa->kind == NK_FIELD ? aa->a : aa->a;
+                    Symbol *abs2 = agt_base_of(aa);
+                    if (abs2) {
+                        for (int k = 0; k < 32; k++) {
+                            char nk[8];
+                            snprintf(nk, sizeof nk, "%d", k);
+                            if (!pff_has(ps, nk)) continue;
+                            int es = aesc_find(abs2, k);
+                            if (es) ft_mark_freed(es, n);
+                        }
+                        if (pffa_has(ps)) agt_clear(abs2, n);
+                    }
+                }
             }
             /* §177：继承的字段账在调用点实例化——工厂（返回的结构体/
              * 元组里带着体内分配）每调一次都是一份新分配，泄漏责任
@@ -6642,6 +6857,29 @@ static void tag_deferred_replay(void) {
         for (; fs; fs = fs->next)
             if (fs->slot > 0 && pff_has(ps, fs->name))
                 ft_mark_freed(fs->slot, d->call);
+        /* §185：数组群对账（跨模块重放）——体内整容器终结（pffa）/
+         * 常索引元素释放（pff "N"）的事实账此刻已就位。 */
+        {
+            Node *aa = d->arg;
+            for (int g = 0; g < 6 && aa &&
+                 (aa->kind == NK_CAST || aa->kind == NK_UNWRAP ||
+                  aa->kind == NK_SLICE ||
+                  (aa->kind == NK_FIELD && aa->name &&
+                   !strcmp(aa->name, "ptr"))); g++)
+                aa = aa->kind == NK_CAST ? (aa->b ? aa->b : aa->a)
+                    : aa->kind == NK_FIELD ? aa->a : aa->a;
+            Symbol *abs2 = agt_base_of(aa);
+            if (abs2) {
+                for (int k = 0; k < 32; k++) {
+                    char nk[8];
+                    snprintf(nk, sizeof nk, "%d", k);
+                    if (!pff_has(ps, nk)) continue;
+                    int es = aesc_find(abs2, k);
+                    if (es) ft_mark_freed(es, d->call);
+                }
+                if (pffa_has(ps)) agt_clear(abs2, d->call);
+            }
+        }
         g_srcpath = sp;
     }
 }
@@ -7414,6 +7652,51 @@ static Type *check_expr_raw(Node *n, Type *expect) {
                    "an abstract borrow", t->name);
             return ty_invalid();
         }
+        /* §185：群成员校验在状态检查**之前**——终结后再取出（槽已
+         * FREED）要报 E0524（容器已终结），而不是落进笼统的"链已
+         * 结束"。 */
+        if (n->b->kind == NK_INDEX && n->b->a) {
+            int sid = (int)(t - g_tslots) + 1;
+            int ix = aesc_const_index(n->b->b);
+            if (ix >= 0) {
+                /* 常索引续链：宣言建精确账，之后读这个元素走账，E0521
+                 * 消失——追踪真正接回数组里。 */
+                if (n->b->a->kind == NK_IDENT && n->b->a->sym)
+                    aesc_add(n->b->a->sym, ix, sid);
+                t->arr_esc = true;
+            } else {
+                /* §185：运行期索引的注解读取——这是群成员的**取出**
+                 * 通路：基址能解析到数组基变量且群非空时，校验
+                 * tag.x ∈ 群，取出即销账（二次取出、取出后再取、
+                 * 取没存过的标签都报 E0524）。基址解析不了（指针
+                 * 别名）或群里没账（§175 旧断线场景）→ 保留旧语义：
+                 * 宣言接管 pending，绑定正确性由使用者担保。 */
+                Symbol *bs3 = agt_base_of(n->b->a);
+                if (bs3 && (agt_any(bs3) || agt_closed(bs3))) {
+                    if (agt_has(bs3, sid)) {
+                        agt_remove(bs3, sid);
+                    } else {
+                        diag_code_at("E0524", n->b->line, n->b->col,
+                            "`tag.%s` is not registered in this array's "
+                            "group -- it was never stored here, was "
+                            "already taken out, the container was already "
+                            "terminated, or the store went through an "
+                            "alias the compiler cannot prove; only labels "
+                            "stored into this array can be taken out",
+                            t->name);
+                        return ty_invalid();
+                    }
+                }
+            }
+            /* 运行期索引续链也合法：宣言把该元素的释放责任接到 v1
+             * 这个载体上（账跟着 v1 走，不再依赖数组元素）——接管
+             * 即清写入时的 pending。数组里其他元素再读仍报 E0521，
+             * 由使用者继续处理。 */
+            t->rt_pending = false;
+        } else {
+            /* 非元素来源的续链（cast 往返、?T 解包后……）同样接管。 */
+            t->rt_pending = false;
+        }
         if (t->state != TST_LIVE) {
             err_at(n->line, n->col,
                    t->state == TST_FREED
@@ -7436,24 +7719,6 @@ static Type *check_expr_raw(Node *n, Type *expect) {
                     "allocation", old ? old->name : "?");
                 return ty_invalid();
             }
-        }
-        if (n->b->kind == NK_INDEX && n->b->a &&
-            n->b->a->kind == NK_IDENT && n->b->a->sym) {
-            int ix = aesc_const_index(n->b->b);
-            if (ix >= 0) {
-                /* 常索引续链：宣言建精确账，之后读这个元素走账，E0521
-                 * 消失——追踪真正接回数组里。 */
-                aesc_add(n->b->a->sym, ix, (int)(t - g_tslots) + 1);
-                t->arr_esc = true;
-            }
-            /* 运行期索引续链也合法：宣言把该元素的释放责任接到 v1
-             * 这个载体上（账跟着 v1 走，不再依赖数组元素）——接管
-             * 即清写入时的 pending。数组里其他元素再读仍报 E0521，
-             * 由使用者继续处理。 */
-            t->rt_pending = false;
-        } else {
-            /* 非元素来源的续链（cast 往返、?T 解包后……）同样接管。 */
-            t->rt_pending = false;
         }
         n->tag_id = (int)(t - g_tslots) + 1;
         n->tag_state = TC_LIVE;
@@ -7777,6 +8042,26 @@ static void hoist(Scope *sc, Node *blk) {
             err_at(it->line, it->col,
                    "only the entry file may declare `main`; '%s' is a module",
                    g_mod->stem);
+
+        /* §186：入口签名在语义阶段把关——main 带形参会原样生成 C 的
+         * `int main(…)`，bool/f64 之类到 clang 才炸，被报成
+         * "compiler bug"（B1002）。命令行参数一律走
+         * std.process.args()（argv[0] 是程序名，不在列表里）。 */
+        if (file_scope && g_mod == g_mods[0]) {
+            Node *mf = NULL;
+            if (it->kind == NK_FN && it->name && !strcmp(it->name, "main"))
+                mf = it;
+            else if (it->kind == NK_DECL && it->name &&
+                     !strcmp(it->name, "main") && it->b &&
+                     it->b->kind == NK_FN)
+                mf = it->b;
+            if (mf && mf->nitems > 0)
+                diag_code_at("E0309", mf->line, mf->col,
+                    "main takes no parameters -- command-line arguments come "
+                    "from std.process.args() (argv[0] is the program name and "
+                    "is excluded); a main with parameters cannot map to a "
+                    "valid C entry signature");
+        }
 
         if (it->kind == NK_DECL) {
             if (it->c) {
@@ -8891,12 +9176,30 @@ static void check_stmt(Node *n) {
                     if (ts) marks[nmarks++] = ts;
                 }
                 /* 数组基变量：存入它的所有贴标槽（释放责任对整个
-                 * 数组自负，逐个标记）。 */
+                 * 数组自负，逐个标记）。§185：动态索引入群的槽同样
+                 * 在此终结（群随后清空，双重标记按槽去重）。 */
                 for (int i = 0; i < g_naesc && nmarks < 64; i++)
                     if (g_aesc[i].base == s && g_aesc[i].slot > 0) {
                         TagSlot *ts = tag_slot(g_aesc[i].slot);
                         if (ts) marks[nmarks++] = ts;
                     }
+                for (int i = 0; i < g_nagt && nmarks < 64; i++)
+                    if (g_agt[i].base == s && g_agt[i].slot > 0) {
+                        bool dup = false;
+                        for (int k = 0; k < nmarks; k++)
+                            if (marks[k] == tag_slot(g_agt[i].slot))
+                                { dup = true; break; }
+                        if (!dup) {
+                            TagSlot *ts = tag_slot(g_agt[i].slot);
+                            if (ts) marks[nmarks++] = ts;
+                        }
+                    }
+                /* §185：群成员随终结一并销账 + 基变量进关闭名单
+                 * （终结后再注解读取报 E0524）。显式终结是整容器
+                 * 出口的唯一通路；形参数组终结记 pffa 事实账，
+                 * 调用点/重放把实参数组的群一起清（闭环）。 */
+                agt_clear(s, n);
+                if (s->kind == SK_PARAM) pffa_add(s);
                 if (nmarks) break;
             }
             if (!nmarks) {   /* 兜底：槽的载体名（符号可能已重绑/出账） */

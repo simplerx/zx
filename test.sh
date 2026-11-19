@@ -41,6 +41,26 @@ mkdir -p "$ZIG_LOCAL_CACHE_DIR" "$ZIG_GLOBAL_CACHE_DIR"
 TPFX="$ROOTW/.tmp/zxc_test.$$"
 fail=0
 
+# python 探测：Windows 上 `python` 常是 Microsoft Store 的壳（能找到但
+# 一跑就 9009/49），裸用会让回归跑到 add/fetch 段静默中止。探不到可用的
+# python 时，pyjson 直接放行并提示一次——JSON 断言跳过，其余照跑。
+HAVE_PY=0
+if command -v python >/dev/null 2>&1 && python -c "print(1)" >/dev/null 2>&1; then
+    HAVE_PY=1
+fi
+PYSKIP_NOTE=""
+pyjson() {
+    if [ "$HAVE_PY" = 1 ]; then
+        python "$@"
+    else
+        if [ -z "$PYSKIP_NOTE" ]; then
+            printf "  skip  未检测到可用 python，跳过 JSON 断言（Store 壳 python 请装真 Python 或配 PATH）\n"
+            PYSKIP_NOTE=1
+        fi
+        return 0
+    fi
+}
+
 # 0. 用哪份编译器
 if [ "${ZX_CHECKED:-0}" = "1" ]; then
     printf "== 构建编译器（Debug -O0，zig 的运行时检查开着）\n"
@@ -476,7 +496,7 @@ if mkdir -p "$FSRV/flib-1.0/include" "$FSRV/flib-1.0/src" "$FSRV/fgit.git/includ
        && ( cd "$FDEMO" && ZX_ALLOW_LOCAL_FETCH=1 "$ZXCW" add "file:///$FSRV/fgit.git" > "$TPFX.cli.fa3" 2>&1 ) \
        && [ -f "$FDEMO/vendor/fmini.h" ] && [ -f "$FDEMO/vendor/fmini.zx" ] \
        && [ -f "$FDEMO/vendor/flib.clib" ] && [ -f "$FDEMO/vendor/fgit.zx" ] \
-       && python -c "import json,sys; d=json.load(open(sys.argv[1])); \
+       && pyjson -c "import json,sys; d=json.load(open(sys.argv[1])); \
 assert set(d) <= set(['name','version','main','out','deps','vendor']), d; \
 assert isinstance(d['vendor'], list) and len(d['vendor'])==3, d['vendor']; \
 assert all(isinstance(x,str) for x in d['vendor']), d['vendor']; \
@@ -580,7 +600,7 @@ assert d['name']=='demo'" "$FDEMO/zx.json" \
         printf "  ok   声明 URL 变更被拒绝（要求 --force 重新锁定）\n"
     fi
     # 声明里凭空多一个新源：fetch 只复现锁，绝不替人下载并写锁
-    python -c "import json,sys; p=sys.argv[1]; d=json.load(open(p)); d['vendor'].append('https://example.com/newlib.h'); open(p,'w').write(json.dumps(d,indent=2))" "$FDEMO/zx.json"
+    pyjson -c "import json,sys; p=sys.argv[1]; d=json.load(open(p)); d['vendor'].append('https://example.com/newlib.h'); open(p,'w').write(json.dumps(d,indent=2))" "$FDEMO/zx.json"
     if ( cd "$FDEMO" && "$ZXCW" fetch newlib > "$TPFX.cli.fnew" 2>&1 ) \
        || ! grep -q "not in zx.lock" "$TPFX.cli.fnew"; then
         printf "  FAIL fetch 竟引入未锁定的新源\n"; cat "$TPFX.cli.fnew" 2>/dev/null; fail=1
@@ -1148,6 +1168,24 @@ if $ZXC demo/snake.zx -o "$SNK" > "$TPFX.snakebuild" 2>&1; then
     fi
 else
     printf "  FAIL demo/snake.zx 编译失败\n"; cat "$TPFX.snakebuild"; fail=1
+fi
+
+# 2.1b 基准校验和闸门：bench/containers.zx 五负载校验和必须与基线逐字符
+# 一致（bench/BASELINE.md——差分测试锚点，跨后端/跨优化等级都要一致）。
+# 2026-11-19 曾失效过一阵：std 容器行为变了、文档没跟上，没有测试守它。
+printf "\n== 基准校验和（bench/containers.zx，对齐 bench/BASELINE.md）\n"
+CNT="$TPFX.cont.exe"
+if $ZXC bench/containers.zx -o "$CNT" > "$TPFX.contbuild" 2>&1; then
+    CONT_OUT="$("$CNT" 2>/dev/null | tail -n 1 | tr -d '\r')"
+    if [ "$CONT_OUT" = "7385034332107988923 6784541450624509831 4843076618602921639 2486116468307319228 17061912414904705757" ]; then
+        printf "  ok   cont 五负载校验和与基线一致\n"
+    else
+        printf "  FAIL cont 校验和漂移（got: %s）——std 容器行为变了：先确认是不是有意的，\n" "$CONT_OUT"
+        printf "        是就同步 bench/BASELINE.md 与本行锚点，不是就先修容器\n"
+        fail=1
+    fi
+else
+    printf "  FAIL bench/containers.zx 编译失败\n"; cat "$TPFX.contbuild"; fail=1
 fi
 
 printf "\n== §144 heapSlice / @mod / 数组指针下标\n"

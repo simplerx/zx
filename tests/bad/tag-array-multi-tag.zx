@@ -1,9 +1,10 @@
-// expect: was stored into `xs[i]` with a runtime index
-// expect-code: E0521
+// expect: never freed
+// expect-code: E0513
 // expect-count: 2
-// §174：运行期索引混存多个贴标指针——两个槽都断线进 pending，没
-// 续链/没终结则终扫逐槽报 E0521（标签绝不静默丢失）。续链写法见
-// good/tag-rebind-chain。
+// §185：运行期索引混存多个贴标指针——两个槽都进该数组的标签群，
+// 没注解读取取出、没整容器终结则终扫逐槽报 E0513。注解读取
+// （tag v : tag.x = xs[i];）逐个取出、free(xs)/tag xs : null 批量
+// 终结的写法见 good/tag-rebind-chain 与 tag-arr 用例。
 const std = @mod("std");
 pub const main = fn () i32 {
     var xs = std.stackAlloc(*u8, 4);

@@ -1,0 +1,19 @@
+// §185 正面控制：运行期索引存入标签群（不报 E0521）→ 常索引精确读
+// → 运行期索引注解读取取出 → 逐个 free → 显式终结 tag xs : null;
+// 全链路闭环，一个诊断都不该有。
+const std = @mod("std");
+pub const main = fn () i32 {
+    var xs = std.stackAlloc(*u8, 4);
+    let i = 1;
+    let p = (*u8)std.heapAlloc(std.heap.page, u8, 10);
+    let q = (*u8)std.heapAlloc(std.heap.page, u8, 10);
+    xs[0] = p;
+    xs[i] = q;
+    let a = xs[0];
+    a[0] = 1;
+    std.heap.page.free(std.heap.page.ctx, a, 10);
+    tag b : q = xs[i];
+    std.heap.page.free(std.heap.page.ctx, b, 10);
+    tag xs : null;
+    return 0;
+};

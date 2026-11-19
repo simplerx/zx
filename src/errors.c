@@ -69,6 +69,10 @@ static const ErrDoc g_errs[] = {
       "a bare `error` (or a bare `error{a, b}`) says nothing about whether the "
       "function can fail: return `error.x` from a `!T` function, declare "
       "`error{a, b}!void`, or use `!void`" },
+    { "E0309", "invalid entry signature",
+      "main takes no parameters -- read command-line arguments with "
+      "std.process.args() instead (argv[0] is the program name and is "
+      "excluded from the list)" },
 
     /* ---- 名字与可见性 ---- */
     { "E0401", "unknown identifier or type",
@@ -137,6 +141,8 @@ static const ErrDoc g_errs[] = {
       "a re-bind (`tag v : tag.x = lost;`) is only for lost pointers; free the old allocation first, or use `let p = tag.x : expr;` for a fresh allocation" },
     { "E0523", "@tag: the pointer carries no label",
       "@tag(p) returns the label a pointer was bound with (`tag.x : expr`, or a re-bound carrier); bind this value to a label first, or pass a pointer that already carries one" },
+    { "E0524", "the label is not registered in this array's group",
+      "an annotated read (`tag v : tag.x = xs[i];`) takes a label out of the array's group -- only labels stored into this array qualify, and each only once; it was never stored, already taken out, or the store went through an alias the compiler cannot prove" },
 
     /* ---- 模块 ---- */
     { "E0601", "module resolution failed",
@@ -162,6 +168,16 @@ static const ErrDoc g_errs[] = {
       "same as above: widen the return type, or `catch` before the `try`" },
     { "E0903", "`try` propagates any error set but the function declares a narrow one",
       "declare the return type as `!T` (no set), or handle the errors one by one" },
+
+    /* ---- 工具链与环境 ---- */
+    { "E1001", "cannot launch the Zx frontend (zxfe)",
+      "this is an environment fault, not a problem in your source: check that "
+      "zxfe.exe sits next to zxc.exe, that its directory is writable, and that "
+      "antivirus/sandbox software is not blocking unsigned executables" },
+    { "E1002", "the Zx frontend (zxfe) exited abnormally without a diagnostic",
+      "the frontend died (crash or non-zero exit) before it could report "
+      "anything -- retry with `--fe=c` to narrow it down, and report the "
+      "smallest reproducing file if it persists" },
 };
 
 #define NERRS ((int)(sizeof g_errs / sizeof g_errs[0]))

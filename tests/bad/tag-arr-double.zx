@@ -1,0 +1,15 @@
+// expect: not registered in this array
+// expect-code: E0524
+// expect-count: 1
+// §185：注解读取是「取出」——取出即销账。同一标签二次取出报
+// E0524（群成员一枚一取：取两次等于给同一份内存两重 UAF 豁免）。
+const std = @mod("std");
+pub const main = fn () i32 {
+    var xs = std.stackAlloc(*u8, 4);
+    let p = (*u8)std.heapAlloc(std.heap.page, u8, 10);
+    let i = 0;
+    xs[i] = p;
+    tag _ : p = xs[i];
+    tag _ : p = xs[i];
+    return 0;
+};

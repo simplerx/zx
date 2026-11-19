@@ -1,0 +1,14 @@
+// §185 正面控制（批量终结）：运行期索引存入堆切片的标签群 → 显式
+// tag xs : null; 整容器终结（群内槽全标 FREED、数组本体的存储槽
+// 一并宣告释放责任自负）→ 零诊断。注意 free/deinit 整容器不清群
+// （数组与元素不绑定，用户裁定）。
+const std = @mod("std");
+pub const main = fn () i32 {
+    var xs = std.heapSlice(std.heap.page, *u8, 4);
+    let i = 2;
+    var a = tag.m : std.heapAlloc(std.heap.page, u8, 16);
+    a[0] = 7;
+    xs[i] = a;
+    tag xs : null;
+    return 0;
+};
