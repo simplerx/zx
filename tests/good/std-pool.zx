@@ -88,7 +88,9 @@ const main = fn () u8 {
     let p = std.pool.Pool.init(std.heap.page);
     if (p) pv {
         var pp = pv;
-        return run(&pp);
+        let rc = run(&pp);
+        pp.deinit();
+        return rc;
     }
     return 1;
 };

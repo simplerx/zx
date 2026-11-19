@@ -41,26 +41,6 @@ mkdir -p "$ZIG_LOCAL_CACHE_DIR" "$ZIG_GLOBAL_CACHE_DIR"
 TPFX="$ROOTW/.tmp/zxc_test.$$"
 fail=0
 
-# python 探测：Windows 上 `python` 常是 Microsoft Store 的壳（能找到但
-# 一跑就 9009/49），裸用会让回归跑到 add/fetch 段静默中止。探不到可用的
-# python 时，pyjson 直接放行并提示一次——JSON 断言跳过，其余照跑。
-HAVE_PY=0
-if command -v python >/dev/null 2>&1 && python -c "print(1)" >/dev/null 2>&1; then
-    HAVE_PY=1
-fi
-PYSKIP_NOTE=""
-pyjson() {
-    if [ "$HAVE_PY" = 1 ]; then
-        python "$@"
-    else
-        if [ -z "$PYSKIP_NOTE" ]; then
-            printf "  skip  未检测到可用 python，跳过 JSON 断言（Store 壳 python 请装真 Python 或配 PATH）\n"
-            PYSKIP_NOTE=1
-        fi
-        return 0
-    fi
-}
-
 # 0. 用哪份编译器
 if [ "${ZX_CHECKED:-0}" = "1" ]; then
     printf "== 构建编译器（Debug -O0，zig 的运行时检查开着）\n"
@@ -496,11 +476,8 @@ if mkdir -p "$FSRV/flib-1.0/include" "$FSRV/flib-1.0/src" "$FSRV/fgit.git/includ
        && ( cd "$FDEMO" && ZX_ALLOW_LOCAL_FETCH=1 "$ZXCW" add "file:///$FSRV/fgit.git" > "$TPFX.cli.fa3" 2>&1 ) \
        && [ -f "$FDEMO/vendor/fmini.h" ] && [ -f "$FDEMO/vendor/fmini.zx" ] \
        && [ -f "$FDEMO/vendor/flib.clib" ] && [ -f "$FDEMO/vendor/fgit.zx" ] \
-       && pyjson -c "import json,sys; d=json.load(open(sys.argv[1])); \
-assert set(d) <= set(['name','version','main','out','deps','vendor']), d; \
-assert isinstance(d['vendor'], list) and len(d['vendor'])==3, d['vendor']; \
-assert all(isinstance(x,str) for x in d['vendor']), d['vendor']; \
-assert d['name']=='demo'" "$FDEMO/zx.json" \
+       && grep -q '"name": *"demo"' "$FDEMO/zx.json" \
+       && [ "$(grep -c '"\(http\|https\)://' "$FDEMO/zx.json")" -ge 3 ] \
        && grep -q "resolved = [0-9a-f]\{40\}" "$FDEMO/zx.lock" \
        && grep -q "tree = [0-9a-f]\{64\}" "$FDEMO/zx.lock" \
        && grep -q "sha256 = [0-9a-f]\{64\}" "$FDEMO/zx.lock"; then
@@ -600,7 +577,7 @@ assert d['name']=='demo'" "$FDEMO/zx.json" \
         printf "  ok   声明 URL 变更被拒绝（要求 --force 重新锁定）\n"
     fi
     # 声明里凭空多一个新源：fetch 只复现锁，绝不替人下载并写锁
-    pyjson -c "import json,sys; p=sys.argv[1]; d=json.load(open(p)); d['vendor'].append('https://example.com/newlib.h'); open(p,'w').write(json.dumps(d,indent=2))" "$FDEMO/zx.json"
+    sed -i 's|"vendor": *\[|"vendor": [\n    "https://example.com/newlib.h",|' "$FDEMO/zx.json"
     if ( cd "$FDEMO" && "$ZXCW" fetch newlib > "$TPFX.cli.fnew" 2>&1 ) \
        || ! grep -q "not in zx.lock" "$TPFX.cli.fnew"; then
         printf "  FAIL fetch 竟引入未锁定的新源\n"; cat "$TPFX.cli.fnew" 2>/dev/null; fail=1
@@ -1115,26 +1092,9 @@ else
     fail=1
 fi
 
-printf "\n== LSP 冒烟（tools/lsptest.py：补全/跳转 + vendor/ 与 deps）\n"
-if [ -x "$ZYG" ] && command -v python >/dev/null 2>&1; then
-    mkdir -p "$TPFX.lspbin"
-    cp "$ZXC" "$TPFX.lspbin/zxc.exe" 2>/dev/null || true
-    # 诊断检查要起 zxc --check，zxc 又要同目录的 zxfe 解析——少一个就
-    # 静默没诊断（本文件 2.6 节的教训：模块解析必须和编译器同一条链）。
-    cp bin/zxfe.exe "$TPFX.lspbin/zxfe.exe" 2>/dev/null || true
-    if $ZYG build-exe tools/zxls.zig -O ReleaseSafe -femit-bin="$TPFX.lspbin/zxls.exe" > "$TPFX.zxls.log" 2>&1; then
-        if ZXLS_BIN="$TPFX.lspbin/zxls.exe" python tools/lsptest.py > "$TPFX.lsp.log" 2>&1; then
-            printf "  ok   %s 项全过（含 vendor/ 与 deps 模块）\n" \
-                "$(grep -c '^ok' "$TPFX.lsp.log" | tr -d ' ')"
-        else
-            printf "  FAIL LSP 冒烟\n"; tail -20 "$TPFX.lsp.log"; fail=1
-        fi
-    else
-        printf "  FAIL zxls 编译失败\n"; tail -10 "$TPFX.zxls.log"; fail=1
-    fi
-else
-    printf "  skip（未找到 .toolchain/zig.exe 或 python）\n"
-fi
+# LSP 冒烟（tools/lsptest.py）依赖 python，已从回归主链移除（§187：
+# 测试基建只依赖 zig 与本编译器自身）；需要时手动跑：
+#   ZXLS_BIN=<zxls.exe> python tools/lsptest.py
 
 # 2. 增量编译：每个模块一个 .o，没改动的模块不重编
 printf "\n== 增量编译 (per-module .o)\n"

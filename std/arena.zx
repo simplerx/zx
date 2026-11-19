@@ -1,3 +1,6 @@
+// §187：整批管理分配器豁免（单独申请）：本模块实现的分配器不逐笔
+// 建槽/记账——内存由 init/deinit 配对管（容器账兜底泄漏检测）。
+tag.close;
 // arena.zx —— 有状态 Arena 分配器。
 //
 // Allocator 现在带 ctx（v0.59 起），arena 终于可以做成"真"分配器：
@@ -35,6 +38,15 @@ const State = struct {
     backing: Allocator,
     head: ?*Block,
     nblocks: usize,
+    adopted: ?*AdoptNode,   // §187：收养的贴标指针移交表，deinit 统一归还
+};
+
+// §187 收养表节点：外部（贴标的 heapAlloc）分配移交给 arena 后记在这里，
+// deinit 时逐个归还 backing。表节点自身的存储也从 backing 出。
+const AdoptNode = struct {
+    next: ?*AdoptNode,
+    p: *u8,
+    n: usize,
 };
 
 const alignUp = fn (n: usize) usize {
@@ -84,10 +96,26 @@ pub const ArenaAllocator = struct {
         let sb = backing.alloc(backing.ctx, @type(State).size);
         if (sb) q {
             let st = (*State)q;
-            st.0 = State{ .backing = backing, .head = null, .nblocks = 0 };
+            st.0 = State{ .backing = backing, .head = null, .nblocks = 0,
+                          .adopted = null };
             return Allocator{ .ctx = (*u8)st, .alloc = bumpAlloc, .free = bumpFree };
         }
         return null;
+    };
+
+    // §187 所有权移交（唯一入口账本口径）：把一个已贴标的堆分配移交给
+    // arena——编译期记 free 事件（移交后手动 free 报 E0526），运行期记
+    // 进移交表，deinit 统一归还 backing。移交是单向的。
+    pub const adopt = fn (a: Allocator, p: *u8, n: usize) void {
+        if (a.ctx) c {
+            let st = (*State)c;
+            let node = st.0.backing.alloc(st.0.backing.ctx, @type(AdoptNode).size);
+            if (node) q {
+                let ad = (*AdoptNode)q;
+                ad.0 = AdoptNode{ .next = st.0.adopted, .p = p, .n = n };
+                st.0.adopted = ad;
+            }
+        }
     };
 
     // 帧重置：保留已开的块，只把 bump 指针归零。游戏主循环一帧一
@@ -107,10 +135,18 @@ pub const ArenaAllocator = struct {
         }
     };
 
-    // 总清算：所有块 + 状态本身。
+    // 总清算：所有块 + 收养的贴标指针 + 状态本身。
     pub const deinit = fn (a: Allocator) void {
         if (a.ctx) c {
             let st = (*State)c;
+            // §187：先归还收养的贴标指针（移交表的每个节点也要还）
+            var ad = st.0.adopted;
+            while (ad) x {
+                let nxt = x.0.next;
+                st.0.backing.free(st.0.backing.ctx, x.0.p, x.0.n);
+                st.0.backing.free(st.0.backing.ctx, (*u8)x, @type(AdoptNode).size);
+                ad = nxt;
+            }
             var h = st.0.head;
             var i: usize = 0;
             while (i < st.0.nblocks) {

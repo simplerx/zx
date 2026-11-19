@@ -125,6 +125,8 @@ static const DiagRule g_rules[] = {
     { "manual tag declaration is gone",   "E0519" },
     { "carries no label",                 "E0523" },
     { "not registered in this array",     "E0524" },
+    { "provenance was lost",              "E0525" },
+    { "owned by an arena",                "E0526" },
 
     /* 控制流位置：continue/return/defer 放错地方，标签找不到 */
     { "does not take an `else` branch",   "E0405" },

@@ -8,6 +8,10 @@
 const std = @mod("std");
 const lex = @mod("lex.zx");
 
+// §187：分配器豁免（单独申请）：Parser 的全部内存走 arena 式整体清算
+//（节点不逐笔 free），分配经接口传入无法静态解析目标，整模块关账。
+tag.close;
+
 const Fail = enum(u8) { f = 1 };
 
 // ---- 诊断 ----

@@ -1,0 +1,14 @@
+// §187：adopt——贴标指针移交 arena，deinit 统一终结（运行期移交表归还
+// backing），槽保持 LIVE 到 deinit，零诊断。
+const std = @mod("std");
+const main = fn () u8 {
+    var ar = std.arena.ArenaAllocator.init(std.heap.page);
+    if (ar) a {
+        let p = std.heapAlloc(std.heap.page, u8, 10);
+        p[0] = 9;
+        std.arena.ArenaAllocator.adopt(a, p, 10);
+        std.arena.ArenaAllocator.deinit(a);
+        return 0;
+    }
+    return 5;
+};

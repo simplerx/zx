@@ -1,0 +1,14 @@
+// expect: provenance was lost
+// expect-code: E0525
+// §187：整数中转洗源（算术/重绑）后转回指针——污点传递，报 E0525；
+// 续链 `tag v : tag.x = (*T)n;` 显式贴标放行。
+const std = @mod("std");
+const main = fn () u8 {
+    let p = std.heapAlloc(std.heap.page, u8, 10);
+    let n = (u64)p;
+    let m = n + 0;
+    let r = (*u8)m;
+    r[0] = 1;
+    std.heap.page.free(std.heap.page.ctx, r, 10);
+    return 0;
+};

@@ -1,0 +1,13 @@
+// expect: is never torn down
+// expect-code: E0513
+// §187：arena init 无 deinit——容器账配对检测；arena 内部 alloc 豁免建槽。
+const std = @mod("std");
+const main = fn () u8 {
+    var ar = std.arena.ArenaAllocator.init(std.heap.page);
+    if (ar) a {
+        let m = a.alloc(a.ctx, 64);
+        if (m) mm { return 0; }
+        return 1;
+    }
+    return 5;
+};

@@ -24,7 +24,9 @@ const main = fn () u8 {
     std.println("roundtrip={} same={}", back.0, back == p);
 
     q.0 = 122;                          // 写成 'z'
-    let z = (*u8)(addr + 3);            // 按字节 +3 再读回来
+    // §187：`(*u8)(addr + 3)` 这类洗源转回须显式续链贴标（守门见
+    // tag-provenance-launder）；此处语义等价的指针算术写法：
+    let z = p + 3;                      // 按字节 +3 再读回来
     std.println("z={}", z.0);
 
     var r = p;                          // 原地移动

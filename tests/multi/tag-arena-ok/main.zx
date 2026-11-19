@@ -1,0 +1,15 @@
+// §187：arena——alloc 不建槽（tag.close 豁免）、init/deinit 容器账配对，零诊断。
+const std = @mod("std");
+const main = fn () u8 {
+    var ar = std.arena.ArenaAllocator.init(std.heap.page);
+    if (ar) a {
+        let m = a.alloc(a.ctx, 64);
+        if (m) mm {
+            let p = (*u8)mm;
+            p[0] = 7;
+        }
+        std.arena.ArenaAllocator.deinit(a);
+        return 0;
+    }
+    return 5;
+};

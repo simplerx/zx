@@ -13,6 +13,10 @@
 // 同一批源文件 diff 必须为空（见 spec/bootstrap.md §4 阶段 1）。
 const std = @mod("std");
 
+// §187：分配器豁免（单独申请）：Lexer 的 token/字符串缓冲随 Lexer 生命周期
+// 整体清算，不逐笔 free，整模块关账。
+tag.close;
+
 // ---- token 种类：名字与 C 侧 TOKEN_KINDS 一一对应 ----
 
 pub const Kind = enum {

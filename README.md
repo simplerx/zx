@@ -72,12 +72,8 @@ The toolchain ships inside the repo (`.toolchain/zig.exe`, not tracked, ~360 MB)
 If it is missing, unpack zig 0.17.0 to `.toolchain/zig.exe`, or run
 `ZIG=zig sh build.sh` to use a system zig. Windows is the primary platform
 (the FFI demos and the language server are written against it); other
-platforms are unverified.
-
-`test.sh` also needs a working `python` on PATH for its CLI/lock-file JSON
-assertions (it skips them with a visible `skip` line when python is missing
-or is a Microsoft Store stub — the stub is detectable because it exits 9009).
-Install a real Python 3 and make sure `python -c "print(1)"` exits 0.
+platforms are unverified. The test suite depends on nothing beyond zig and
+the compiler itself.
 
 A demo with built-in self-checks:
 

@@ -132,6 +132,16 @@ struct Node {
      * 全是编译期信息，编译完擦除。 */
     int           tag_id;
     int           tag_state;
+    /* §187：整数表达式带「指针出处」污点——值曾由指针→整数转换得来
+     * （算术运算不洗源）。污点整数再转回指针必须显式贴标（E0525）。
+     * 编译期信息，编译完擦除。 */
+    unsigned char ptr_taint;
+    /* §187：std.free / a.deinit(s) 变换产物（改写形状 a.free(...)）。
+     * 唯一入口拦截（E0527）要放行变换产物、只拦手写的 al.free(...)。 */
+    unsigned char xform_free;
+    /* §187：adopt / 容器开账 / 总清算三个钩子已在该调用节点跑过
+     * （deps 拓扑会复检函数体，钩子必须节点级幂等）。 */
+    unsigned char tag_hooks_done;
     void          *ftags;     /* §173：结构体值携带的字段标记账本
                                  * （FieldTag 链，sema 私有类型） */
 

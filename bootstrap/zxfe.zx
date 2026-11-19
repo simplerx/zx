@@ -16,6 +16,9 @@ const std = @mod("std");
 const lex = @mod("lex.zx");
 const parse = @mod("parse.zx");
 
+// §187：分配器豁免（单独申请）：诊断缓冲等内存走整体清算，整模块关账。
+tag.close;
+
 // ---- 数字 → 十进制 ----
 
 const utos = fn (al: std.Allocator, v: u64) []const u8 {

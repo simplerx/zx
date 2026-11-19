@@ -1,0 +1,8 @@
+// §187：List + deinit 配对——容器账闭合，零诊断。
+const std = @mod("std");
+const main = fn () u8 {
+    var list = std.array.List(i32).init(std.heap.page);
+    _ = list.push(10);
+    list.deinit();
+    return 0;
+};

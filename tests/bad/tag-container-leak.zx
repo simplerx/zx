@@ -1,0 +1,11 @@
+// expect: is never torn down
+// expect-code: E0513
+// §187：std 容器 .init 调用点自动开账（通用规则，不点名容器），
+// 漏 deinit 报 E0513 专属文案（resource ... never torn down）。
+const std = @mod("std");
+const main = fn () u8 {
+    var list = std.array.List(i32).init(std.heap.page);
+    _ = list.push(10);
+    // list.deinit();
+    return 0;
+};

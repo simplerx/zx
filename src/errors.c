@@ -143,6 +143,10 @@ static const ErrDoc g_errs[] = {
       "@tag(p) returns the label a pointer was bound with (`tag.x : expr`, or a re-bound carrier); bind this value to a label first, or pass a pointer that already carries one" },
     { "E0524", "the label is not registered in this array's group",
       "an annotated read (`tag v : tag.x = xs[i];`) takes a label out of the array's group -- only labels stored into this array qualify, and each only once; it was never stored, already taken out, or the store went through an alias the compiler cannot prove" },
+    { "E0525", "integer-to-pointer cast needs a label",
+      "this integer came from a pointer and its provenance was lost (arithmetic or re-assignment) -- re-attach the tracking chain with `tag v : tag.x = (*T)n;`; integers that never touched a pointer need no annotation" },
+    { "E0526", "the pointer is owned by an arena",
+      "this pointer was adopted by an arena (`ArenaAllocator.adopt`) -- the arena frees it at deinit; free it here and the arena would free it again. To take ownership back is not supported: design the hand-over one-way" },
 
     /* ---- 模块 ---- */
     { "E0601", "module resolution failed",
