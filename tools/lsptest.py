@@ -226,6 +226,13 @@ check("initialize.caps", all(k in caps for k in (
     "completionProvider", "definitionProvider", "hoverProvider",
     "signatureHelpProvider", "documentFormattingProvider",
     "documentSymbolProvider", "referencesProvider")), str(sorted(caps.keys())))
+# §193 补丁：编辑触发符——逗号重新弹补全（用户 Ctrl+J 手动唤回的场景）、
+# 括号/逗号出签名且逗号可 retrigger（编辑实参时签名持续在屏）。
+check("initialize.caps.triggers",
+      "," in (caps.get("completionProvider") or {}).get("triggerCharacters", [])
+      and set(["(", ")", ","]) <= set((caps.get("signatureHelpProvider") or {}).get("triggerCharacters", []))
+      and "," in (caps.get("signatureHelpProvider") or {}).get("retriggerCharacters", []),
+      json.dumps(caps.get("completionProvider")) + " / " + json.dumps(caps.get("signatureHelpProvider")))
 
 send({"jsonrpc": "2.0", "method": "initialized", "params": {}})
 

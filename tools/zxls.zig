@@ -10782,7 +10782,7 @@ fn handle(v: std.json.Value) ?[]const u8 {
         writeId(&j, id);
         // KEEP: inlayHintProvider 不能删 —— Zed 靠这个声明决定要不要发
         // textDocument/inlayHint；删掉等于行内类型提示整条线失效。
-        j.buf.appendSlice(gpa, ",\"result\":{\"capabilities\":{\"textDocumentSync\":{\"openClose\":true,\"change\":1},\"completionProvider\":{\"triggerCharacters\":[\".\",\"@\"]},\"definitionProvider\":true,\"hoverProvider\":true,\"inlayHintProvider\":true,\"signatureHelpProvider\":{\"triggerCharacters\":[\"(\",\",\"]},\"documentFormattingProvider\":true,\"documentSymbolProvider\":true,\"referencesProvider\":true}}}") catch @panic("oom");
+        j.buf.appendSlice(gpa, ",\"result\":{\"capabilities\":{\"textDocumentSync\":{\"openClose\":true,\"change\":1},\"completionProvider\":{\"triggerCharacters\":[\".\",\"@\",\",\"]},\"definitionProvider\":true,\"hoverProvider\":true,\"inlayHintProvider\":true,\"signatureHelpProvider\":{\"triggerCharacters\":[\"(\",\")\",\",\"],\"retriggerCharacters\":[\",\"]},\"documentFormattingProvider\":true,\"documentSymbolProvider\":true,\"referencesProvider\":true}}}") catch @panic("oom");
         // 工程根的 vendor/ 与 deps：补全/跳转/悬停都靠这张表找模块文件
         initModuleDirs();
         // 落一行能力协商结果：改了 codeDescription 相关逻辑后，看这条就知道
