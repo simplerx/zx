@@ -6,8 +6,13 @@
 # 前置：仓库根跑过 `sh build.sh`（生成 bin/zxls.exe——语言服务器本身）。
 # 安装完在 Zed 里重开窗口，或执行 `editor: restart language server`。
 #
-# 注意：Zed 的卸载会删掉整个 installed/zx 目录，重装必须恢复全部 6 个文件：
-#   extension.toml / extension.wasm / grammars/zx.wasm / languages/zx/{config,highlights,outline}
+# 注意：Zed 的卸载会删掉整个 installed/zx 目录，重装必须恢复全部 7 个文件：
+#   extension.toml / extension.wasm / grammars/zx.wasm /
+#   languages/zx/{config,highlights,indents,outline}
+#
+# 注意：languages/*.scm 引用的节点名必须与 grammars/zx.wasm 匹配——
+# grammar.js 变更后要先 `sh editor/tree-sitter-zx/build-wasm.sh` 重编 wasm，
+# 否则 Zed 加载语言失败（failed to load language Zx），扩展在 UI 里就像被卸载了。
 set -e
 SRC="$(cd "$(dirname "$0")" && pwd)"
 INST="${LOCALAPPDATA:-$HOME/.local/share}/Zed/extensions/installed/zx"
@@ -23,7 +28,8 @@ cp "$SRC/extension.toml" "$INST/"
 cp "$SRC/zx.wasm" "$INST/extension.wasm"
 cp "$SRC/grammars/zx.wasm" "$INST/grammars/"
 cp "$SRC/languages/zx/config.toml" "$SRC/languages/zx/highlights.scm" \
-   "$SRC/languages/zx/outline.scm" "$INST/languages/zx/"
+   "$SRC/languages/zx/indents.scm" "$SRC/languages/zx/outline.scm" \
+   "$INST/languages/zx/"
 
 echo "installed -> $INST"
 find "$INST" -type f
