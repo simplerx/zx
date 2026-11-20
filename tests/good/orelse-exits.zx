@@ -1,0 +1,74 @@
+// orelse-exits.zx —— §200：`orelse` 的兜底臂以 return / continue / noreturn /
+// 无限循环发散（永不落到块尾）时，它不产出值，是纯语句。sema 之前把这种臂
+// 按 void coerce 到左载荷，误报 E0301；后端之前把它摊进 C 三元式。
+// 现在 sema 识别发散臂跳过 coerce，后端改成「左进临时量 → 空则跑右臂语句
+// → 值取左载荷」。覆盖扁平 ?*T、带标签 ?T、错误联合 !T、循环里的 continue。
+// expect-exit: 0
+// expect-output
+// ptr-empty
+// ptr-has: 5
+// P-empty
+// P-has: 11
+// E-empty
+// E-has: 42
+// loop=9
+const std = @mod("std");
+
+var gv: i32 = 5;
+var gv2: i32 = 9;
+const getp = fn (x: bool) ?*i32 { if (x) return &gv; return null; };
+const getr = fn (x: bool) ?*i32 { if (x) return &gv2; return null; };
+
+const P = struct { v: i32 };
+var gp = P{ .v = 11 };
+const getP = fn (x: bool) ?P { if (x) return gp; return null; };
+
+const getE = fn (x: bool) !i32 { if (x) return 42; return error.No; };
+
+// 扁平 ?*T：空 → return（携带退出码）
+const takePtr = fn (x: bool) i32 {
+    var p = getp(x) orelse {
+        std.println("ptr-empty");
+        return 7;
+    };
+    std.println("ptr-has: {}", p.0);
+    return 0;
+};
+
+// 带标签 ?T：空 → return
+const takeP = fn (x: bool) i32 {
+    var p = getP(x) orelse {
+        std.println("P-empty");
+        return 8;
+    };
+    std.println("P-has: {}", p.v);
+    return 0;
+};
+
+// 错误联合 !T：错 → return
+const takeE = fn (x: bool) i32 {
+    var v = getE(x) orelse {
+        std.println("E-empty");
+        return 9;
+    };
+    std.println("E-has: {}", v);
+    return 0;
+};
+
+pub const main = fn () i32 {
+    if (takePtr(false) != 7) return 1;
+    if (takePtr(true) != 0) return 2;
+    if (takeP(false) != 8) return 3;
+    if (takeP(true) != 0) return 4;
+    if (takeE(false) != 9) return 5;
+    if (takeE(true) != 0) return 6;
+
+    // 循环里的 continue：空则跳过本轮（发散臂不能当值塞进三元式）
+    var i: i32 = 0;
+    while (i < 3) {
+        i = i + 1;
+        var r = getr(i == 2) orelse { continue; };
+        std.println("loop={}", r.0);
+    }
+    return 0;
+};

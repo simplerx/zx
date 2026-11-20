@@ -8600,7 +8600,16 @@ static Type *check_expr_raw(Node *n, Type *expect) {
             return BAD(n, "`orelse` needs an optional or an error union, found `%s`", ty_str(t));
         Type *elem = t->elem;
         Type *alt = check_expr(n->b, elem);
-        coerce_node(n->b, alt, elem, "`orelse` alternative");
+        /* §200：`orelse` 的兜底臂不产出值时允许——臂末尾是 `return` /
+         * `continue` / noreturn 调用 / 无限循环（永不落到块尾），它根本
+         * 不会给表达式贡献值，整条 orelse 的值只能来自左臂载荷 elem。
+         * check_block 对这种臂一律回 void，不能拿它去 coerce 载荷（会误报
+         * E0301）。用 stmt_ends/falls_through 的同一套"末尾可达吗"判定。 */
+        bool alt_exits = (alt && alt->kind == TY_NORETURN) ||
+                         (n->b && n->b->kind == NK_BLOCK && !falls_through(n->b));
+        n->flag = alt_exits;         /* 后端据此跳过右支的 C 表达式位置 */
+        if (!alt_exits)
+            coerce_node(n->b, alt, elem, "`orelse` alternative");
         return type_of(n, elem);
     }
     case NK_CAST:     return check_cast(n);

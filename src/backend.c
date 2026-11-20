@@ -1090,6 +1090,13 @@ static char *cxs(Node *e, Type *to) {
     return b.data;
 }
 
+/* §200：裸 `fn (…) … { … }` 当值用（struct 字段初值 / 实参 / 返回值…）时，
+ * 它是 NK_FN 节点、没有绑定名字——命名 fn 靠 NK_IDENT + localfn_impl_name
+ * 绕开了表达式发射器，裸 fn 字面量却砸进 ex() 的 default（"node 38"）。
+ * 和局部 fn 绑定同一套办法：给它发一个 static C 函数，值位置发函数名字。
+ * ex(NK_FN) 只登记名字；函数体在本单元正文发完后由 flush_anon_fns 补齐。 */
+static char *anonfn_cname(Node *fn);
+
 static bool is_ctl(Node *n) {
     if (!n) return false;
     switch (n->kind) {
@@ -5749,9 +5756,28 @@ static void ex(Buf *b, Node *n) {
         char tmp[64];
         snprintf(tmp, sizeof tmp, "_or%d", on++);
         line("%s %s = %s;", cty(t), tmp, cxs(n->a, t));
-        buf_printf(b, "((%s)%s ? %s%s : (", tmp, has, tmp, pay);
-        coerce(b, n->b, t->elem);
-        buf_puts(b, "))");
+        if (n->flag) {
+            /* §200：兜底臂发散（末尾 `return` / `continue` / noreturn 调用 /
+             * 无限循环）——它不产出值，是纯语句。 sema 已把这条 orelse 的
+             * 类型定为左载荷 elem，别再拿 void 兜底臂去 coerce。
+             * 发射等价于：左为空则跑右臂（其中的 return 直接退函数），
+             * 能走到表达式位置的只有"左有值"，所以值就是左载荷。 */
+            line("if (!((%s)%s)) {", tmp, has);
+            g_ind++;
+            {
+                CScope s; cscope_push(&s);
+                gen_arm(n->b, NULL, NULL);   /* slot=NULL：当语句发，保留 return */
+                cscope_leave();
+            }
+            g_ind--;
+            line("}");
+            /* 值就是左载荷：扁平 ?T 是 tmp 本身，带标签的是 tmp.payload */
+            buf_printf(b, "(%s%s)", tmp, pay);
+        } else {
+            buf_printf(b, "((%s)%s ? %s%s : (", tmp, has, tmp, pay);
+            coerce(b, n->b, t->elem);
+            buf_puts(b, "))");
+        }
         return;
     }
 
@@ -6128,6 +6154,21 @@ static void ex(Buf *b, Node *n) {
             coerce(b, f->dflt, f->ty);
         }
         buf_puts(b, " })");
+        return;
+    }
+
+    /* §200：匿名 fn 字面量当值用——它是 NK_FN 但没有绑定符号，命名 fn 的
+     * NK_IDENT 分支够不着。登记一个 static C 函数名，值位置发这个名字；
+     * 函数体在单元正文发完后统一补发（flush_anon_fns）。泛型 fn 没有单态
+     * 实例，当普通值用没有意义，退回 0 免得砸出未定义符号。 */
+    case NK_FN: {
+        if (n->b && !fn_is_generic(n)) {
+            const char *nm = anonfn_cname(n);
+            need_by_cname(nm);
+            buf_puts(b, nm);
+        } else {
+            buf_puts(b, "0");
+        }
         return;
     }
 
@@ -7514,6 +7555,43 @@ static bool is_view_expr(Node *n) {
     }
 }
 
+/* §200：匿名 fn 字面量当值用的 C 名字登记。ex(NK_FN) 把节点登记进来，
+ * 单元正文发完后 flush_anon_fns 统一发函数体——不能在 ex() 中途调用
+ * gen_fn：它会改 g_out/g_ind、压 CScope，套在半条表达式里会错位。 */
+typedef struct { Node *fn; const char *name; } AnonFn;
+static AnonFn *g_anonfns;
+static int     g_nanon, g_canon;
+
+static char *anonfn_cname(Node *fn) {
+    for (int i = 0; i < g_nanon; i++)
+        if (g_anonfns[i].fn == fn) return (char *)g_anonfns[i].name;
+    char buf[80];
+    snprintf(buf, sizeof buf, "anonfn_%d_%d", g_cur_unit, g_nanon);
+    char *nm = malloc(strlen(buf) + 1);
+    strcpy(nm, buf);
+    if (g_nanon == g_canon) {
+        g_canon = g_canon ? g_canon * 2 : 8;
+        g_anonfns = realloc(g_anonfns, sizeof(AnonFn) * (size_t)g_canon);
+    }
+    g_anonfns[g_nanon].fn = fn;
+    g_anonfns[g_nanon].name = nm;
+    g_nanon++;
+    return nm;
+}
+
+/* 把一个单元登记过的匿名 fn 全部发成 static C 函数。gen_fn 内部可能
+ * 又登记新的（嵌套匿名 fn），循环到不再增长为止。 */
+static void flush_anon_fns(void) {
+    int done = 0;
+    while (done < g_nanon) {
+        Node *fn = g_anonfns[done].fn;
+        const char *nm = g_anonfns[done].name;
+        done++;
+        gen_fn(fn, nm, false, false);
+    }
+    g_nanon = 0;                 /* 跨单元：名字带单元号，不复用 */
+}
+
 static Node **g_late;      /* 需要运行时初始化的全局 */
 static int    g_nlate, g_clate;
 
@@ -7930,6 +8008,7 @@ int backend_emit_split(Node *root, Buf *header, Buf *rt, BUnit *units, int maxun
             }
         }
         emit_init_fn(mi);
+        flush_anon_fns();        /* §200：本单元 ex() 登记的匿名 fn 补发函数体 */
 
         /* 组装顺序 (proto, globals, body) 决定三个缓冲在单元源文件里的
          * 起始行；映射表里记的是"缓冲内行号"，这里换算成"单元内行号"
@@ -7963,6 +8042,7 @@ int backend_emit_split(Node *root, Buf *header, Buf *rt, BUnit *units, int maxun
         g_ind = 0;
         for (int i = 0; i < g_nitab; i++)
             gen_fn(g_itab[i].fn, g_itab[i].name, false, true);
+        flush_anon_fns();        /* §200：泛型实例体里登记的匿名 fn */
         buf_puts(&units[0].src, "\n");
         buf_puts(&units[0].src, g_bproto.data ? g_bproto.data : "");
         buf_putc(&units[0].src, '\n');

@@ -1,0 +1,33 @@
+// anon-fn-value.zx —— §200：裸 `fn (…) … { … }` 当值用（不再砸进 ex() 的
+// default "expression node 38"）。命名 fn 靠 NK_IDENT + 符号 C 名发射，
+// 匿名 fn 字面量没有绑定名字，之前值位置直接报 E0300 internal。
+// 现在给它发一个 static C 函数（anonfn_<unit>_<n>），值位置发名字，
+// 函数体在本单元正文发完后统一补齐（flush_anon_fns）。
+// expect-exit: 0
+// expect-output
+// G: 5 5
+// arg: 107
+// nested: 12
+const std = @mod("std");
+
+const S = struct { f: fn (i32) i32, n: i32 };
+
+// 全局聚合初值里的匿名 fn
+var G = S{ .f = fn (x: i32) i32 { return x + 1; }, .n = 5 };
+
+const apply = fn (f: fn (i32) i32, x: i32) i32 { return f(x); };
+
+pub const main = fn () i32 {
+    std.println("G: {} {}", G.f(4), G.n);
+
+    // 匿名 fn 作实参
+    std.println("arg: {}", apply(fn (z: i32) i32 { return z + 100; }, 7));
+
+    // 函数体内局部匿名 fn，且函数体里再套一个匿名 fn（flush 循环要发全）
+    const outer = fn (a: i32) i32 {
+        const inner = fn (b: i32) i32 { return b + 1; };
+        return inner(a) * 2;
+    };
+    std.println("nested: {}", outer(5));
+    return 0;
+};
