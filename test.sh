@@ -1567,6 +1567,19 @@ else
     fail=1
 fi
 
+# §198 codegen：泛型体内"不依赖泛型参数"的嵌套 struct 跨实例共享身份——
+# 后端只发一份 struct{int32_t x;}。修前 Body(i32)/Body(u8) 各发一份同构
+# typedef（ZxS2/ZxS4），这里按发射形状钉死"只生成一份"。
+$ZXC tests/good/generic-nested-independent-type.zx --emit-c > "$TPFX.s198.c" 2>/dev/null
+nfixed=$(grep -c 'int32_t x;' "$TPFX.s198.c" || true)
+if [ "$nfixed" = "1" ]; then
+    printf "  ok   §198 泛型独立嵌套类型只发一份 C typedef\n"
+else
+    printf "  FAIL §198 泛型嵌套类型生成了 %s 份同构 typedef（应为 1）\n" "$nfixed"
+    grep -nE 'int32_t x;|typedef struct ZxS' "$TPFX.s198.c" | head -16
+    fail=1
+fi
+
 # §192：@shim 通道已删除（写它报 E0211，见 tests/bad/shim-removed.zx）；
 # 本块的「--emit-c 末尾贴 shim / C 前端通过」两项检查随之移除。
 

@@ -1568,7 +1568,80 @@ static bool can_coerce(Type *from, Type *to) {
 
 static Type *resolve_struct_body(Node *n, Type *agg, bool is_union);
 static Type *resolve_enum_body(Node *n, Type *e);
-static Type *adopt_find(Node *body);                     /* §178 定义在 ensure_raw 前 */
+
+/* ---------------- §198 泛型体内类型声明的身份锚定 ----------------
+ * 泛型 `fn (T: type) type` 体内写的局部类型声明（如
+ *   `const Fixed = struct { x: i32 };`）
+ * 若其定义**不引用任何泛型参数**，它其实是一个具体类型，跟实例无关。
+ * 但 clone_tree 深拷贝整个函数体，每个实例都拿到一份新的 NK_STRUCT_TYPE
+ * 节点，ty_agg 按 decl 节点 intern，于是 Body(i32).Fixed 与 Body(u8).Fixed
+ * 变成两个同构却不同的类型，后端发给 C 就是两个 ZxS typedef（B1001）。
+ *
+ * 修法：实例化时同步遍历模板与克隆树。对不引用泛型参数的类型声明节点，
+ * 登记「克隆节点 -> 模板节点」；ty_agg 经 ident_decl() 取模板节点作身份，
+ * 于是跨实例共享同一个 decl。引用了泛型参数的声明（含间接引用）不登记，
+ * 保持每实例各自的类型——这正是泛型该有的语义。 */
+typedef struct { Node *clone, *tmpl; } IdentAnchor;
+static IdentAnchor *g_anchors;
+static int g_nanchors, g_canchors;
+
+static void ident_anchor_set(Node *clone, Node *tmpl) {
+    if (g_nanchors == g_canchors) {
+        g_canchors = g_canchors ? g_canchors * 2 : 32;
+        g_anchors = realloc(g_anchors, sizeof(IdentAnchor) * (size_t)g_canchors);
+        if (!g_anchors) { fprintf(stderr, "zxc: out of memory\n"); exit(1); }
+    }
+    g_anchors[g_nanchors].clone = clone;
+    g_anchors[g_nanchors].tmpl  = tmpl;
+    g_nanchors++;
+}
+
+/* 类型 C 名用的 decl：克隆节点若在锚表里就换成模板节点。 */
+static Node *ident_decl(Node *n) {
+    if (!n) return n;
+    for (int i = 0; i < g_nanchors; i++)
+        if (g_anchors[i].clone == n) return g_anchors[i].tmpl;
+    return n;
+}
+
+/* 当前正在实例化的泛型参数名（anchor_types 期间有效）。 */
+static const char **g_ident_params;
+static int g_nident_params;
+
+static bool subtree_refs_params(Node *n) {
+    if (!n) return false;
+    if (n->kind == NK_TYPE_IDENT || n->kind == NK_IDENT) {
+        if (n->name) {
+            for (int i = 0; i < g_nident_params; i++)
+                if (g_ident_params[i] && !strcmp(g_ident_params[i], n->name))
+                    return true;
+        }
+    }
+    if (subtree_refs_params(n->a) || subtree_refs_params(n->b) ||
+        subtree_refs_params(n->c) || subtree_refs_params(n->d))
+        return true;
+    if (n->items)
+        for (int i = 0; i < n->nitems; i++)
+            if (subtree_refs_params(n->items[i])) return true;
+    return false;
+}
+
+/* 同步遍历模板 tmpl 与克隆 clone（结构一一对应），给"不依赖泛型参数"的
+ * 类型声明节点登记身份锚点。 */
+static void anchor_types(Node *tmpl, Node *clone) {
+    if (!tmpl || !clone) return;
+    if (tmpl->kind == NK_STRUCT_TYPE || tmpl->kind == NK_UNION_TYPE ||
+        tmpl->kind == NK_ENUM_TYPE) {
+        if (!subtree_refs_params(tmpl)) ident_anchor_set(clone, tmpl);
+    }
+    anchor_types(tmpl->a, clone->a);
+    anchor_types(tmpl->b, clone->b);
+    anchor_types(tmpl->c, clone->c);
+    anchor_types(tmpl->d, clone->d);
+    if (tmpl->items && clone->items && tmpl->nitems == clone->nitems)
+        for (int i = 0; i < tmpl->nitems; i++)
+            anchor_types(tmpl->items[i], clone->items[i]);
+}
 
 static Type *resolve_type(Node *n) {
     if (!n) return ty_void();
@@ -1741,21 +1814,17 @@ static Type *resolve_type(Node *n) {
     }
 
     case NK_STRUCT_TYPE: {
-        /* §178：这个体已并入别处声明的同名类型——直接返回本体 */
-        Type *ad = adopt_find(n);
-        Type *t = ad ? ad : ty_agg(TY_STRUCT, n, NULL);
+        Type *t = ty_agg(TY_STRUCT, ident_decl(n), NULL);
         return resolve_struct_body(n, t, false);
     }
 
     case NK_UNION_TYPE: {
-        Type *ad = adopt_find(n);
-        Type *t = ad ? ad : ty_agg(TY_UNION, n, NULL);
+        Type *t = ty_agg(TY_UNION, ident_decl(n), NULL);
         return resolve_struct_body(n, t, true);
     }
 
     case NK_ENUM_TYPE: {
-        Type *ad = adopt_find(n);
-        Type *t = ad ? ad : ty_agg(TY_ENUM, n, NULL);
+        Type *t = ty_agg(TY_ENUM, ident_decl(n), NULL);
         return resolve_enum_body(n, t);
     }
 
@@ -1815,16 +1884,7 @@ static void collect_methods(Node *n, Type *agg, const char *what) {
         if (n->items[i]->kind == NK_FN) nmeth++;
     if (!nmeth) return;
 
-    /* §178：并入的同名类型会二次进来——已有一张表就在尾部扩容追加，
-     * 不能整体覆盖（会丢先声明那份的方法）。 */
-    if (!agg->methods) {
-        agg->methods = calloc((size_t)nmeth, sizeof(Method));
-    } else {
-        agg->methods = realloc(agg->methods,
-                               sizeof(Method) * (size_t)(agg->nmethods + nmeth));
-        memset(agg->methods + agg->nmethods, 0,
-               sizeof(Method) * (size_t)nmeth);
-    }
+    agg->methods = calloc((size_t)nmeth, sizeof(Method));
     for (int i = 0; i < n->nitems; i++) {
         Node *it = n->items[i];
         if (it->kind != NK_FN) continue;
@@ -1959,16 +2019,10 @@ static bool check_c_able(Node *at, Type *t, const char *fname) {
 }
 
 static Type *resolve_struct_body(Node *n, Type *agg, bool is_union) {
-    /* §178：成员表已就位的重入有两种——普通的重复 resolve（直接返回）
-     * 与并入的跨模块同名声明（本体已解析，本份声明只做成员 hoist 与
-     * 方法并表；形状一致性由 ensure_raw 里的 named_ty_verify 校验）。 */
-    bool merge = agg->fields != NULL;
-    if (merge && !adopt_find(n)) return agg;          /* 已解析 */
-    if (!merge) {
-        /* 成员默认只在本文件可见：把声明文件记在类型上（声明处的模块先由
-         * sema 打戳进 Node.mod，泛型单态化克隆 AST 时一并带过来）。 */
-        agg->mod = n->mod;
-    }
+    if (agg->fields != NULL) return agg;              /* 已解析 */
+    /* 成员默认只在本文件可见：把声明文件记在类型上（声明处的模块先由
+     * sema 打戳进 Node.mod，泛型单态化克隆 AST 时一并带过来）。 */
+    agg->mod = n->mod;
 
     /* extern struct / extern union（FFI）：镜像外部 C 结构体的布局。
      * 只允许"数据"——方法、静态成员、字段默认值都不进布局，一律拒绝。 */
@@ -2053,14 +2107,6 @@ static Type *resolve_struct_body(Node *n, Type *agg, bool is_union) {
             }
             else { s->decl = it; it->sym = s; s->in_agg = n; }
         }
-    }
-
-    /* §178：并入模式到方法并表为止——字段/变体/静态成员不再填（本体
-     * 已就位，形状一致性由 ensure_raw 里的 named_ty_verify 负责）。 */
-    if (merge) {
-        collect_methods(n, agg, is_union ? "union" : "struct");
-        scope_pop(&sc);
-        return agg;
     }
 
     Field *fs = calloc((size_t)(nfields ? nfields : 1), sizeof(Field));
@@ -2186,12 +2232,9 @@ static Type *resolve_struct_body(Node *n, Type *agg, bool is_union) {
 }
 
 static Type *resolve_enum_body(Node *n, Type *e) {
-    /* §178：并入的跨模块同名声明——本体已解析，只 hoist 成员并并表方法。 */
-    bool merge = e->fields != NULL;
-    if (merge && !adopt_find(n)) return e;            /* 已解析 */
-    if (!merge) e->mod = n->mod;
-    e->elem = merge ? e->elem
-                    : (n->a ? resolve_type(n->a) : ty_int(32, false));  /* 底层，默认 u32 */
+    if (e->fields != NULL) return e;                  /* 已解析 */
+    e->mod = n->mod;
+    e->elem = n->a ? resolve_type(n->a) : ty_int(32, false);  /* 底层，默认 u32 */
 
     /* 枚举体也是作用域：变体之外还能写 `const` 和 `fn`（方法）。 */
     Scope sc;
@@ -2229,13 +2272,6 @@ static Type *resolve_enum_body(Node *n, Type *e) {
             }
             else { s->decl = it; it->sym = s; s->in_agg = n; }
         }
-    }
-
-    /* §178：并入模式到方法并表为止——变体/静态成员不再填。 */
-    if (merge) {
-        collect_methods(n, e, "enum");
-        scope_pop(&sc);
-        return e;
     }
 
     e->fields = calloc((size_t)(cnt ? cnt : 1), sizeof(Field));
@@ -9138,124 +9174,6 @@ static void hoist(Scope *sc, Node *blk) {
     }
 }
 
-/* ---------------- §178 跨模块同名类型统一 ----------------
- * nominal 类型（struct/union/enum）的身份 = 声明节点。同一类型在两个
- * 模块各声明一份（main.zx 的 Person 与 lib.zx 的 Person），以前是两个
- * 不同的类型对象，跨模块传值报 E0301 "expected `Person`, found
- * `Person`"。现在按声明名归一：先声明的那份是本体，后声明的形状一致
- * 就并入同一份（方法并表、重名方法保留先声明的），形状不一致在第二
- * 处报 duplicate（E0402）。函数值/静态变量等单一声明跨模块引用本就
- * 按符号解析到同一份，不需要这套。函数体内的同名声明（泛型体克隆）
- * 不进注册表——两次实例化各是各的。 */
-
-typedef struct { const char *name; Type *t; Node *decl; } NamedTy;
-static NamedTy *g_ntys;
-static int g_nntys, g_cntys;
-
-static NamedTy *named_ty_find(const char *name) {
-    if (!name) return NULL;
-    for (int i = 0; i < g_nntys; i++)
-        if (!strcmp(g_ntys[i].name, name)) return &g_ntys[i];
-    return NULL;
-}
-
-/* 并入的声明体 → 本体类型：resolve_type 重入这个体时（外壳已采用先
- * 声明那份）返回同一份，自引用字段才指向本体而不是丢弃的影子。 */
-typedef struct { Node *body; Type *t; } Adopt;
-static Adopt *g_adopts;
-static int g_nadopts, g_capadopts;
-
-static Type *adopt_find(Node *body) {
-    for (int i = 0; i < g_nadopts; i++)
-        if (g_adopts[i].body == body) return g_adopts[i].t;
-    return NULL;
-}
-
-/* 形状比对（以第一份声明为准）：struct/union 按序比对字段名、类型
- * 文本与可见性；enum 再比对变体值与底层类型。类型比文本（ty_str）而
- * 不用 ty_eq——字段引用的嵌套类型可能还没走到自己的统一点，文本比
- * 对与声明顺序无关。 */
-static bool named_ty_fields_ok(Node *body, Type *t1, Node *first) {
-    int cnt = 0, j = 0;
-    for (int i = 0; i < body->nitems; i++)
-        if (body->items[i]->kind == NK_PARAM || body->items[i]->kind == NK_PAIR) cnt++;
-    for (int i = 0; i < t1->nfields; i++)
-        if (!t1->fields[i].is_static) j++;
-    if (cnt != j) goto mismatch;
-    j = 0;
-    for (int i = 0; i < body->nitems; i++) {
-        Node *it = body->items[i];
-        if (it->kind != NK_PARAM && it->kind != NK_PAIR) continue;
-        while (j < t1->nfields && t1->fields[j].is_static) j++;
-        Field *f = &t1->fields[j++];
-        if (!f->name || !it->name || strcmp(it->name, f->name) ||
-            f->is_pub != it->is_pub) goto mismatch;
-        Type *ft = resolve_type(it->a);          /* union 变体的载荷类型 */
-        if (!ft || strcmp(ty_str(ft), ty_str(f->ty))) goto mismatch;
-    }
-    return true;
-mismatch:
-    diag_note(first->mod, first->line, first->col,
-              "type '%s' first declared here", first->name ? first->name : "?");
-    err_at(body->line, body->col,
-           "duplicate type '%s': this declaration has a different shape "
-           "from the one at line %d -- same-named types are one type across "
-           "files, so their fields must match exactly",
-           first->name ? first->name : "?", first->line);
-    return false;
-}
-
-static bool named_ty_verify(Node *body, Type *t1, Node *first) {
-    if (t1->kind == TY_ENUM) {
-        int cnt = 0;
-        for (int i = 0; i < body->nitems; i++)
-            if (body->items[i]->kind == NK_PAIR) cnt++;
-        if (cnt != t1->nfields) goto mismatch;
-        int k = 0;
-        uint64_t expect = 0;   /* §197：隐式变体值按顺序重算，不读 m->ival */
-        for (int i = 0; i < body->nitems; i++) {
-            Node *m = body->items[i];
-            if (m->kind != NK_PAIR) continue;
-            Field *f = &t1->fields[k++];
-            if (!m->name || strcmp(m->name, f->name)) goto mismatch;
-            uint64_t got;
-            if (m->a) {
-                IntV v = ev_int(m->a);
-                if (!v.ok) goto mismatch;
-                got = v.v;
-            } else {
-                /* §178 merge 分支不填 m->ival（保持 0），第二份同名 enum
-                 * 声明的裸变体 B/C 全被误判成 tag=0 → E0402。按序重算即可，
-                 * 对第一份/第二份声明都成立。 */
-                got = expect;
-            }
-            if (got != f->tag) goto mismatch;
-            expect = got + 1;
-        }
-        Type *bt = body->a ? resolve_type(body->a) : ty_int(32, false);
-        if (strcmp(ty_str(bt), ty_str(t1->elem))) goto mismatch;
-        return true;
-    }
-    if (t1->kind == TY_UNION && t1->is_tagged && t1->tag_ty) {
-        /* union(enum) 糖：变体集在 tag_ty 的 fields 里，载荷类型在本体
-         * 的 fields 里；底层类型是 body->b。 */
-        if (!named_ty_fields_ok(body, t1, first)) return false;
-        Type *bt = body->b ? resolve_type(body->b) : ty_int(32, false);
-        if (strcmp(ty_str(bt), ty_str(t1->tag_ty->elem))) goto mismatch;
-        return true;
-    }
-    return named_ty_fields_ok(body, t1, first);
-mismatch:
-    diag_note(first->mod, first->line, first->col,
-              "type '%s' first declared here", first->name ? first->name : "?");
-    err_at(body->line, body->col,
-           "duplicate type '%s': this declaration has a different shape "
-           "from the one at line %d -- same-named types are one type across "
-           "files, so their members must match exactly",
-           first->name ? first->name : "?", first->line);
-    return false;
-}
-
 static void ensure_raw(Symbol *s) {
     if (!s || s->kind == SK_NS) return;
     if (s->state == 2) return;
@@ -9368,56 +9286,16 @@ static void ensure_raw(Symbol *s) {
 
     /* 自引用类型（R5）：先把聚合外壳建出来挂在符号上，字段里遇到 *Node 就有东西可取。
      * state = 3 的意思是"外壳已就绪、成员表还没填"。
-     * §178：先查同名注册表——别处已声明过这个类型名就采用它的本体
-     * （并入），本体的外壳才是身份。函数体内的声明（泛型克隆）不进
-     * 注册表：两次实例化各是各的。 */
-    Type *adopted = NULL, *shell = NULL;
-    Node *first_decl = NULL;
+     * 身份 = 声明节点：每个 struct/union/enum 声明各有自己的 Type（ty_agg
+     * 按 decl 节点 intern）。跨模块同名声明是两个不同类型；别名 `const M =
+     * mod.T` 由上面的 sym_link 直接复制同一份 Type*，是同一个类型。 */
     if (!d->a && d->b &&
         (d->b->kind == NK_STRUCT_TYPE || d->b->kind == NK_UNION_TYPE ||
          d->b->kind == NK_ENUM_TYPE)) {
         TyKind k = d->b->kind == NK_UNION_TYPE ? TY_UNION
                  : d->b->kind == NK_ENUM_TYPE  ? TY_ENUM
                  : TY_STRUCT;
-        /* §178 补订：注册表只收 pub 顶层声明——模块私有类型（如 std 各文件自用的同名结构）各是各的，不并。 */
-        bool unify = !s->in_fn && s->is_pub;
-        NamedTy *nt = unify ? named_ty_find(s->name) : NULL;
-        if (nt && nt->t->kind != k) {
-            err_at(d->line, d->col,
-                   "duplicate type '%s': already declared as a %s at line %d "
-                   "-- same-named types are one type across files",
-                   s->name ? s->name : "?",
-                   nt->t->kind == TY_ENUM ? "enum" : nt->t->kind == TY_UNION ? "union" : "struct",
-                   nt->decl->line);
-            nt = NULL;
-        }
-        if (nt) {
-            adopted = nt->t;
-            shell = nt->t;
-            first_decl = nt->decl;
-            if (g_nadopts == g_capadopts) {
-                g_capadopts = g_capadopts ? g_capadopts * 2 : 16;
-                g_adopts = realloc(g_adopts, sizeof(Adopt) * (size_t)g_capadopts);
-                if (!g_adopts) { fprintf(stderr, "zxc: out of memory\n"); exit(1); }
-            }
-            g_adopts[g_nadopts].body = d->b;
-            g_adopts[g_nadopts].t = adopted;
-            g_nadopts++;
-        } else {
-            shell = ty_agg(k, d->b, NULL);
-            if (unify && s->name && !named_ty_find(s->name)) {
-                if (g_nntys == g_cntys) {
-                    g_cntys = g_cntys ? g_cntys * 2 : 32;
-                    g_ntys = realloc(g_ntys, sizeof(NamedTy) * (size_t)g_cntys);
-                    if (!g_ntys) { fprintf(stderr, "zxc: out of memory\n"); exit(1); }
-                }
-                g_ntys[g_nntys].name = s->name;
-                g_ntys[g_nntys].t = shell;
-                g_ntys[g_nntys].decl = d;
-                g_nntys++;
-            }
-        }
-        s->type_val = shell;
+        s->type_val = ty_agg(k, ident_decl(d->b), NULL);
         s->ty = ty_type();
         s->state = 3;
     }
@@ -9435,13 +9313,6 @@ static void ensure_raw(Symbol *s) {
     }
     Type *init = d->b ? check_expr(d->b, ann) : NULL;
     if (d->b) s->stack_val = expr_frame(d->b);   /* 初值指向当前栈帧？记下来 */
-
-    /* §178：并入的同名类型——本体成员表早已就位（resolve_struct_body
-     * 的并入模式只 hoist 成员并并表方法），这里补形状校验：字段/变体
-     * 按序比对，不一致报 duplicate（E0402）。静态成员不并——第一份
-     * 声明为准。 */
-    if (adopted && init && init->kind == TY_TYPE)
-        named_ty_verify(d->b, adopted, first_decl);
 
     if (ann && init) {
         coerce_node(d->b, init, ann, "initializer");
@@ -13060,7 +12931,26 @@ static Node *specialize_raw(Node *fn, Node *call, int *ncomp, Type **out_ft, Val
     }
 
     /* 3. 克隆，先绑定参数（签名里会用到 T / n） */
+    /* §198：只在类型构造函数（ret_type）的实例化期间做身份锚定。收集编译期
+     * 参数名，克隆后同步遍历模板与克隆体，把不依赖参数的类型声明归一到模板
+     * 节点，避免"不依赖参数的嵌套 struct"在每个实例变成不同匿名类型。 */
+    const char **save_params = g_ident_params;
+    int save_np = g_nident_params;
+    const char **new_params = NULL;
+    if (ret_type && nbind > 0) {
+        new_params = calloc((size_t)nbind, sizeof(const char *));
+        for (int i = 0; i < nbind; i++)
+            new_params[i] = fn->items[i]->name;
+        g_ident_params = new_params;
+        g_nident_params = nbind;
+    }
     Node *g = clone_tree(fn);
+    if (new_params) {
+        anchor_types(fn, g);
+        g_ident_params = save_params;
+        g_nident_params = save_np;
+        free(new_params);
+    }
     g->ival = (uint64_t)nbind;      /* 前 nbind 个参数在编译期就吃掉了 */
 
     /* 泛型体在定义它的模块里检查：体内的模块级名字（`str.eq`、私有的

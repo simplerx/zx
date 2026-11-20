@@ -1,11 +1,11 @@
-// §178：同名 pub 类型跨文件是同一个类型——main 与 lib 各自声明的
-// Person 互相传值不需要 cast；私有同名（去掉 pub）则各是各的。
+// §198：类型身份 = 声明身份，不看名字。别名 `const Person = m.Person` 与
+// lib 里的 Person 是同一个类型（sym_link 复制同一个 Type 指针），可直接互传。
+// 若这里各自写一份 `pub const Person = struct{...}`，即便形状相同也是两个
+// 不同类型（见 tests/bad/same-name-distinct.zx）。
 const std = @mod("std");
 const m = @mod("lib.zx");
 
-pub const Person = struct {
-    pub age: i32,
-};
+const Person = m.Person;   // 别名 = 同一个类型
 
 const main = fn () i32 {
     let a = m.make();

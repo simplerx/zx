@@ -1,5 +1,7 @@
-// expect: duplicate type 'Person'
-// expect-code: E0402
+// expect-code: E0301
+// §198：同名类型按声明身份隔离，不再按名字合并。lib 的 Person 与本文件的
+// Person 是两个不同类型（形状还不同），把 lib.Person 传给收本地 Person 的
+// 函数必须报类型不匹配。旧语义下这里报 E0402（同名形状不一致），已作废。
 const std = @mod("std");
 const m = @mod("lib.zx");
 
@@ -7,7 +9,9 @@ pub const Person = struct {
     pub age: i32,
 };
 
+const take = fn (p: Person) i32 { return p.age; };
+
 const main = fn () i32 {
     let p = m.Person{.age = 3, .name = (*u8)"x"};
-    return p.age;
+    return take(p);   // lib.Person 不能当成本地 Person
 };

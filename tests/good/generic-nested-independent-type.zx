@@ -1,0 +1,27 @@
+// §198 codegen：泛型体内声明的、不依赖泛型参数的嵌套类型，跨实例是同一个
+// 类型，后端只发一份 C typedef。修前 Body(i32)/Body(u8) 各克隆一份 Fixed，
+// 生成 ZxS2 与 ZxS4 两个同构但不同的匿名 struct（b.f = a.f 在 C 层类型不符）。
+const std = @mod("std");
+
+const Body = fn (T: type) type {
+    const Fixed = struct { pub x: i32 };   // 与 T 无关
+    return struct { pub t: T, pub f: Fixed };
+};
+
+const A = Body(i32);
+const B = Body(u8);
+
+const main = fn () u8 {
+    var a = A{ .t = 1, .f = .{ .x = 7 } };
+    var b = B{ .t = 3, .f = .{ .x = 4 } };
+    b.f = a.f;                       // 同一 Fixed 类型 → 可跨实例赋值
+    if (b.f.x != 7) { return 1; }
+    // 依赖参数的实例仍须各自独立：A 与 B 整体不同类型（靠字段 t 区分）
+    var bb = B{ .t = 9, .f = .{ .x = 2 } };
+    if (bb.t != 9) { return 2; }
+    std.println("generic nested ok");
+    return 0;
+};
+
+// expect-output
+// generic nested ok
