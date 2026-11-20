@@ -5456,6 +5456,117 @@ check("completion.gctor.ctor",
 check("completion.gctor.call", "Person(...)" in _glabels, str(sorted(_glabels)))
 
 # ---------------------------------------------------------------------------
+# §190 补丁二 + 嵌套类型递归解析（2026-11-20 用户两张截图）。独立进程探针：
+#   1) std.heapAlloc 的类型提示出形参名 `*[n]T`，不是实参替换后的 `*[10]u8`；
+#   2) 泛型实例化外层字面量里的嵌套 `.{` 没有成员提示（'{' 前是 ')' 名字回扫断）；
+#   3) 函数形参是命名容器时匿名实参补全整条落空（structTyOf 只认内联 struct）。
+def multi_probe(body, reqs):
+    """reqs: [(method, offset, tag)]，method ∈ completion/inlayHint → {tag: result}"""
+    d = os.path.join(TESTDIR, "nest")
+    shutil.rmtree(d, ignore_errors=True)
+    os.makedirs(d)
+    doc = "file:///" + os.path.join(d, "main.zx").replace("\\", "/")
+    out = {}
+    try:
+        p3 = subprocess.Popen([ZXLS_BIN], stdin=subprocess.PIPE,
+                              stdout=subprocess.PIPE, cwd=d)
+        snd = lambda o: (p3.stdin.write(
+            ("Content-Length: %d\r\n\r\n" % len(json.dumps(o).encode())).encode()
+            + json.dumps(o).encode()), p3.stdin.flush())
+        def rcv():
+            hdr = b""
+            while not hdr.endswith(b"\r\n\r\n"):
+                c = p3.stdout.read(1)
+                if not c:
+                    return None
+                hdr += c
+            ln = int([l for l in hdr.split(b"\r\n")
+                      if l.lower().startswith(b"content-length")][0].split(b":")[1])
+            return json.loads(p3.stdout.read(ln))
+        snd({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+             "params": {"capabilities": {}, "rootUri": "file:///" + d.replace("\\", "/")}})
+        while True:
+            m = rcv()
+            if m is None or m.get("id") == 1:
+                break
+        snd({"jsonrpc": "2.0", "method": "initialized", "params": {}})
+        snd({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": {"uri": doc, "languageId": "zx", "version": 1,
+                             "text": body}}})
+        import time as _t
+        for rid, (method, off, tag) in enumerate(reqs, start=2):
+            _line = body.count("\n", 0, off)
+            _col = off - (body.rfind("\n", 0, off) + 1)
+            if method == "completion":
+                params = {"textDocument": {"uri": doc},
+                          "position": {"line": _line, "character": _col}}
+            else:
+                params = {"textDocument": {"uri": doc},
+                          "range": {"start": {"line": 0, "character": 0},
+                                    "end": {"line": body.count("\n"), "character": 0}}}
+            snd({"jsonrpc": "2.0", "id": rid, "method": "textDocument/" + method,
+                 "params": params})
+            deadline = _t.time() + 30
+            while _t.time() < deadline:
+                m = rcv()
+                if m is None:
+                    break
+                if m.get("id") == rid:
+                    r = m.get("result") or {}
+                    if isinstance(r, list):
+                        out[tag] = r
+                    else:
+                        out[tag] = r.get("items", [])
+                    if os.environ.get("NESTDBG"):
+                        print("DBG", rid, tag, json.dumps(out[tag])[:500], file=sys.stderr)
+                    break
+        return out
+    finally:
+        try:
+            p3.kill()
+        except Exception:
+            pass
+        shutil.rmtree(d, ignore_errors=True)
+
+NEST_BODY = (
+    'const Inner = struct {\n'
+    '    x: i32,\n'
+    '    y: i32,\n'
+    '};\n\n'
+    'const Person = struct(T: type, n: u32){\n'
+    '    age: T,\n'
+    '    name: []const u8,\n'
+    '    data: Inner,\n'
+    '    ptr: *T,\n'
+    '};\n\n'
+    'const take = fn (p: Person(i32, 4)) u8 {\n'
+    '    return 0;\n'
+    '};\n\n'
+    'pub const main = fn () u8 {\n'
+    '    var p = std.heapAlloc(std.heap.page, u8, 10);\n'
+    '    var q = Person(i32, 4){ .age = 1, .data = .{ . } };\n'
+    '    _ = take(.{ .age = 1, . } );\n'
+    '    _ = take(.{ .data = .{ . } });\n'
+    '    return 0;\n'
+    '}\n')
+
+_nb = NEST_BODY
+_nres = multi_probe(_nb, [
+    ("completion", _nb.index(".age = 1, .data = .{ .") + len(".age = 1, .data = .{ ."), "nestQ"),
+    ("completion", _nb.index("take(.{ .age = 1, .") + len("take(.{ .age = 1, ."), "fnArgDirect"),
+    ("completion", _nb.index("take(.{ .data = .{ .") + len("take(.{ .data = .{ ."), "fnArgNested"),
+    ("inlayHint", 0, "inlay"),
+])
+_nq = {i.get("label") for i in _nres.get("nestQ") or []}
+check("completion.nest.genericOuter.dataFields", {"x", "y"} <= _nq, str(sorted(_nq)))
+_nf = {i.get("label") for i in _nres.get("fnArgDirect") or []}
+check("completion.nest.fnArgNamedParam", {"name", "data", "ptr"} <= _nf, str(sorted(_nf)))
+_nn = {i.get("label") for i in _nres.get("fnArgNested") or []}
+check("completion.nest.fnArgNested", {"x", "y"} <= _nn, str(sorted(_nn)))
+_hlabels = [h["label"] for h in (_nres.get("inlay") or []) if h.get("kind") == 1]
+check("inlayHint.type.heapAlloc", ": *[10]u8" in _hlabels, str(_hlabels))
+
+# ---------------------------------------------------------------------------
 if fails:
     print(f"SMOKE FAILED: {len(fails)} -> {fails}"); sys.exit(1)
 print("SMOKE ALL PASS"); sys.exit(0)

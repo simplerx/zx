@@ -2882,6 +2882,110 @@ fn structTyOf(ty: []const u8) ?[]const u8 {
     return null;
 }
 
+/// 命名类型 → `struct { … }` 形参类型串（parseAnonTy 能消化的形状）。
+/// `Person(i32, 4)` / `std.map.Entry` / `?Inner` / `*Inner` 这类：抹掉
+/// 包装与实例化实参（补全字段名不需要实参），解析出容器体拼 `struct`
+/// 前缀——裸体 `{ … }` 会被 parseAnonTy 当元组、字段名全空。识别不了
+/// 返回 null。2026-11-20：函数实参位置的命名容器形参（用户「函数参数
+/// 也是」）与嵌套字段链共用。
+fn namedTyStructText(files: []const []const u8, doc: *const Document, text: []const u8, ty0: []const u8) ?[]const u8 {
+    var t0 = trimSl(ty0);
+    while (t0.len > 0 and (t0[0] == '?' or t0[0] == '!' or t0[0] == '&' or t0[0] == '*')) t0 = trimSl(t0[1..]);
+    while (t0.len > 8 and std.mem.startsWith(u8, t0, "*const ")) t0 = trimSl(t0[7..]);
+    if (t0.len == 0) return null;
+    // 实例化实参 `Person(i32, 4)` → `Person`（配平回 '('，命中即停；
+    // 不停 k 会一路减到 0、剥离失效——extra 模块扫描会捞到别处同名函数）
+    if (t0[t0.len - 1] == ')') {
+        var d: usize = 0;
+        var k = t0.len;
+        var mp: ?usize = null;
+        while (k > 0) {
+            k -= 1;
+            if (t0[k] == ')') {
+                d += 1;
+            } else if (t0[k] == '(') {
+                if (d == 0) break;
+                d -= 1;
+                if (d == 0) { mp = k; break; }
+            }
+        }
+        if (mp) |mk| t0 = trimSl(t0[0..mk]);
+    }
+    if (t0.len == 0 or !isPurePath(t0)) return null;
+    var body: []const u8 = "";
+    if (resolveContainerPath(files, doc, text, t0)) |pc| body = pc.body;
+    if (body.len == 0) {
+        if (resolveContainerPathLoose(files, doc, text, t0)) |pc| body = pc.body;
+    }
+    if (body.len == 0) {
+        var last = t0;
+        if (std.mem.lastIndexOfScalar(u8, t0, '.')) |dd| last = t0[dd + 1 ..];
+        if (findContainerBody(files, last)) |ch| body = ch.body;
+    }
+    if (body.len == 0) {
+        if (genericBodyOf(files, t0)) |gb| body = gb;
+    }
+    if (body.len == 0 or body[0] != '{') return null;
+    var out: std.ArrayList(u8) = .empty;
+    out.appendSlice(gpa, "struct ") catch return null;
+    out.appendSlice(gpa, body) catch return null;
+    return out.items;
+}
+
+
+/// 类型串是不是可解析的命名容器（含实例化 `Person(i32, 4)`、糖 / 泛型 fn
+/// 定义的容器）。匿名实参补全按它放行命名容器形参——只认内联 struct
+/// 会把 `fn work(p: Person(i32, 4))` 的实参补全整个落空（2026-11-20 用户）。
+fn namedTyResolvable(files: []const []const u8, ty0: []const u8) bool {
+    var t0 = trimSl(ty0);
+    while (t0.len > 0 and (t0[0] == '?' or t0[0] == '!' or t0[0] == '&' or t0[0] == '*')) t0 = trimSl(t0[1..]);
+    if (t0.len == 0) return false;
+    if (t0[t0.len - 1] == ')') {
+        var d: usize = 0;
+        var k = t0.len;
+        var mp: ?usize = null;
+        while (k > 0) {
+            k -= 1;
+            if (t0[k] == ')') {
+                d += 1;
+            } else if (t0[k] == '(') {
+                if (d == 0) break;
+                d -= 1;
+                if (d == 0) { mp = k; break; }
+            }
+        }
+        if (mp) |mk| t0 = trimSl(t0[0..mk]);
+    }
+    if (t0.len == 0 or !isPurePath(t0)) return false;
+    var last = t0;
+    if (std.mem.lastIndexOfScalar(u8, t0, '.')) |dd| last = t0[dd + 1 ..];
+    return findContainerBody(files, last) != null or genericBodyOf(files, t0) != null;
+}
+
+/// 形参段 `p: Person(i32, 4)` → 类型部分 `Person(i32, 4)`（深度 0 的第一个
+/// 冒号右侧；嵌套 struct{…} / 元组里的冒号不算）。没有冒号就原样返回。
+fn paramTypePart(seg: []const u8) []const u8 {
+    var d: usize = 0;
+    var in_str = false;
+    for (seg, 0..) |c, i| {
+        if (in_str) {
+            if (c == '\\') continue;
+            if (c == '"') in_str = false;
+            continue;
+        }
+        if (c == '"') {
+            in_str = true;
+            continue;
+        }
+        if (c == '(' or c == '[' or c == '{') d += 1;
+        if (c == ')' or c == ']' or c == '}') {
+            if (d > 0) d -= 1;
+        }
+        if (c == ':' and d == 0) return trimSl(seg[i + 1 ..]);
+    }
+    return seg;
+}
+
 /// `const <fname> = fn (…)` 第 argi 个形参的匿名 struct 类型串。
 /// 该位形参不是 struct 时退回第一个 struct 形参（旧口径，3d 守门依赖）。
 fn anonParamTy(files: []const []const u8, fname: []const u8, argi: usize) ?[]const u8 {
@@ -2943,20 +3047,28 @@ fn anonParamTy(files: []const []const u8, fname: []const u8, argi: usize) ?[]con
                 const t = trimSl(ftext[start..i]);
                 if (t.len > 0) segs.append(gpa, t) catch {};
             }
-            // 目标位优先，该位不是 struct 时退回第一个 struct 形参
+            // 目标位优先，该位不是 struct 时退回第一个 struct 形参；
+            // 命名容器形参（`p: Person(i32, 4)`）也算——先剥形参名取类型
+            // 部分，调用方沿 namedTyStructText 解析成 struct 串再出字段。
             var pick: ?[]const u8 = null;
-            if (argi < segs.items.len and structTyOf(segs.items[argi]) != null)
-                pick = segs.items[argi];
+            if (argi < segs.items.len) {
+                const tv = paramTypePart(segs.items[argi]);
+                if (structTyOf(tv) != null or namedTyResolvable(files, tv)) pick = tv;
+            }
             if (pick == null) {
                 for (segs.items) |sg| {
-                    if (structTyOf(sg) != null) {
-                        pick = sg;
+                    const tv = paramTypePart(sg);
+                    if (structTyOf(tv) != null or namedTyResolvable(files, tv)) {
+                        pick = tv;
                         break;
                     }
                 }
             }
             if (pick) |sg| {
+                // 内联 struct 直接返回类型串；命名容器返回类型文本，
+                // 由调用方的 namedTyStructText 兜底解析。
                 if (structTyOf(sg)) |sty| return sty;
+                return sg;
             }
             idx = hit + 1; // 本命中无 struct 形参，继续找下一处声明
         }
@@ -3182,7 +3294,34 @@ fn nestedLiteralFields(
         while (e > 0 and (text[e - 1] == ' ' or text[e - 1] == '\t')) e -= 1;
         var s = e;
         while (s > 0 and (isIdentChar(text[s - 1]) or text[s - 1] == '.')) s -= 1;
-        const nm = text[s..e];
+        var nm = text[s..e];
+        // KEEP — 泛型实例化字面量 `Person(i32, 4){`：'{' 前是 ')'，标识符
+        // 回扫得到空名 → 外层整条被跳过、嵌套字段链断掉（2026-11-20 用户
+        // 截图：加了嵌套类型就没成员提示）。配平回 '(' 拿被调路径当容器名。
+        // 配平**限定在本语句内**（';'/换行/'{'/'}' 为界）：否则会越过上一
+        // 行抓到 `std.heapAlloc(` 之类的调用名，链照样断。
+        if (nm.len == 0 and s > 0 and text[s - 1] == ')') {
+            var d9: usize = 0;
+            var k9 = s;
+            var mp: ?usize = null;
+            while (k9 > 0) {
+                k9 -= 1;
+                const c9 = text[k9];
+                if (d9 == 0 and (c9 == ';' or c9 == '\n' or c9 == '{' or c9 == '}')) break;
+                if (c9 == ')') {
+                    d9 += 1;
+                } else if (c9 == '(') {
+                    if (d9 == 0) break;
+                    d9 -= 1;
+                    if (d9 == 0) { mp = k9; break; }
+                }
+            }
+            if (mp) |mk| {
+                var s9 = mk;
+                while (s9 > 0 and (isIdentChar(text[s9 - 1]) or text[s9 - 1] == '.')) s9 -= 1;
+                if (s9 < mk) nm = text[s9..mk];
+            }
+        }
         if (nm.len == 0 or nm[0] == '.' or nm.len > 200) continue;
         var cand: []const u8 = "";
         if (modContainerOf(doc, text, nm)) |mc| {
@@ -3202,6 +3341,11 @@ fn nestedLiteralFields(
             var last = nm;
             if (std.mem.lastIndexOfScalar(u8, nm, '.')) |dd| last = nm[dd + 1 ..];
             if (findContainerBody(files, last)) |ch| cand = ch.body;
+        }
+        if (cand.len == 0) {
+            // 泛型 fn 构造函数（`const Box = fn (T: type) type { … }`）：
+            // findContainerBody 的头形判据认不出，走 genericBodyOf。
+            if (genericBodyOf(files, nm)) |gb| cand = gb;
         }
         if (cand.len == 0) continue; // fn 体 '{' 之类，继续往外找
         body = cand;
@@ -3235,6 +3379,11 @@ fn nestedLiteralFields(
         }
         if (next.len == 0) {
             if (findContainerBody(files, t0)) |ch| next = ch.body;
+        }
+        if (next.len == 0) {
+            // 泛型糖 / 泛型 fn 定义的嵌套命名类型（用户 2026-11-20：嵌套
+            // 类型要递归解析）——findContainerBody 认不出，走 genericBodyOf。
+            if (genericBodyOf(files, t0)) |gb| next = gb;
         }
         if (next.len == 0) return false;
         cur = next;
@@ -5092,7 +5241,7 @@ fn inferExprType(text: []const u8, doc: *const Document, expr: []const u8, depth
         const cs = recvExprStart(e, lp);
         const callee = trimSl(e[cs..lp]);
         if (callee.len > 0) {
-            if (resolveCalleeRet(text, doc, callee)) |rt| return rt;
+            if (resolveCalleeRet(text, doc, callee, callArgsText(e, lp))) |rt| return rt;
         }
         return null;
     }
@@ -5917,7 +6066,7 @@ fn sliceRecvTy(text: []const u8, doc: *const Document, expr0: []const u8, depth:
             while (ps > 0 and (isIdentChar(e[ps - 1]) or e[ps - 1] == '.')) ps -= 1;
             const callee = trimSl(e[ps..lp]);
             if (callee.len > 0) {
-                if (resolveCalleeRet(text, doc, callee)) |rt| {
+                if (resolveCalleeRet(text, doc, callee, callArgsText(e, lp))) |rt| {
                     if (parseSliceTy(rt)) |s| return s;
                 }
             }
@@ -5959,9 +6108,97 @@ fn strLitSpanAt(text: []const u8, off: usize) ?[]const u8 {
     return null;
 }
 
+/// 从调用表达式的开括号位置取实参文本（配平到配对 `)`）。
+fn callArgsText(e: []const u8, lp: usize) ?[]const u8 {
+    var d: usize = 0;
+    var i = lp;
+    while (i < e.len) : (i += 1) {
+        if (e[i] == '(') {
+            d += 1;
+        } else if (e[i] == ')') {
+            if (d > 0) d -= 1;
+            if (d == 0) return e[lp + 1 .. i];
+        }
+    }
+    return null;
+}
+
+/// 泛型返回类型的形参 → 实参整词替换：`heapAlloc(page, M, 1)` 的类型提示
+/// 应是 `*[1]M`，不是形参名原样透出的 `*[n]T`（2026-11-20 截图）。按位置
+/// 把 sig.params[i] 的形参名在返回类型里整词替换成第 i 个实参文本；
+/// 方法（首形参 self）的调用实参不含接收者，整体错开一位；实参缺失/
+/// 过长/含换行则跳过该形参，替换不动就原样返回。
+fn substRetByArgs(sig: FnSig, args0: []const u8) []const u8 {
+    const args = trimSl(args0);
+    if (args.len == 0 or args.len > 4096 or sig.params.len == 0) return sig.ret;
+    // 顶层逗号切分实参（括号/字符串感知）
+    var items: std.ArrayList([]const u8) = .empty;
+    defer items.deinit(gpa);
+    var d: usize = 0;
+    var in_str = false;
+    var start: usize = 0;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const c = args[i];
+        if (in_str) {
+            if (c == '\\') {
+                i += 1;
+                continue;
+            }
+            if (c == '"') in_str = false;
+            continue;
+        }
+        if (c == '"') {
+            in_str = true;
+            continue;
+        }
+        if (c == '(' or c == '[' or c == '{') d += 1;
+        if (c == ')' or c == ']' or c == '}') {
+            if (d > 0) d -= 1;
+        }
+        if (c == ',' and d == 0) {
+            items.append(gpa, trimSl(args[start..i])) catch return sig.ret;
+            start = i + 1;
+        }
+    }
+    if (start < args.len) items.append(gpa, trimSl(args[start..])) catch return sig.ret;
+    if (items.items.len == 0) return sig.ret;
+    var skip: usize = 0;
+    if (sig.params[0].len > 0 and std.mem.eql(u8, paramName(sig.params[0]), "self")) skip = 1;
+    var out = sig.ret;
+    var pi: usize = skip;
+    while (pi < sig.params.len) : (pi += 1) {
+        const ai = pi - skip;
+        if (ai >= items.items.len) break;
+        const name = paramName(sig.params[pi]);
+        const arg = items.items[ai];
+        if (name.len == 0 or arg.len == 0 or arg.len > 64) continue;
+        if (std.mem.indexOfScalar(u8, arg, '\n') != null) continue;
+        if (std.mem.indexOf(u8, out, name) == null) continue;
+        // 整词替换：前一个字符是标识符就不能当形参名（`T` 撞 `Tag` 之类）
+        var out2: std.ArrayList(u8) = .empty;
+        var sp: usize = 0;
+        var idx: usize = 0;
+        while (std.mem.indexOfPos(u8, out, idx, name)) |hp| {
+            idx = hp + name.len;
+            if (hp > 0 and isIdentChar(out[hp - 1])) continue;
+            if (idx < out.len and isIdentChar(out[idx])) continue;
+            out2.appendSlice(gpa, out[sp..hp]) catch return out;
+            out2.appendSlice(gpa, arg) catch return out;
+            sp = idx;
+        }
+        if (sp > 0) {
+            out2.appendSlice(gpa, out[sp..]) catch return out;
+            out = out2.items;
+        }
+    }
+    return out;
+}
+
 /// 调用目标 → 返回类型。callee 可为 `Add`（本文件）、`other.Add`（模块成员）、
-/// `std.print`（编译器内建）。
-fn resolveCalleeRet(text: []const u8, doc: *const Document, callee0: []const u8) ?[]const u8 {
+/// `std.print`（编译器内建）。args 是调用实参文本（泛型返回类型的形参替换
+/// 用；拿不到就传 null，行为同旧版原样返回）。
+fn resolveCalleeRet(text: []const u8, doc: *const Document, callee0: []const u8, args: ?[]const u8) ?[]const u8 {
     const callee = trimSl(callee0);
     // std 内建（编译器 seed，不在 std.zx 文本里）。format 的 []u8 统一按
     // 展示用的 `str` 出，和字符串字面量的推断保持一致。
@@ -5977,27 +6214,29 @@ fn resolveCalleeRet(text: []const u8, doc: *const Document, callee0: []const u8)
         // 逐段下钻：模块函数 / 容器方法 / 泛型实例化段（第 14 条）
         if (resolveMemberPath(sf.items, doc, text, callee, 0)) |hit| {
             const sig = sigOfStmt(hit.stmt);
-            if (sig.is_fn and sig.ret.len > 0) return selfToOwner(sig.ret, callee);
+            if (sig.is_fn and sig.ret.len > 0)
+                return selfToOwner(if (args) |at| substRetByArgs(sig, at) else sig.ret, callee);
         }
         // 实例方法（`r.next()` / `g.await(…)`）：接收者是变量
         if (instanceContainerTy(sf.items, text, bind, 0)) |ty| {
             if (findContainerBody(sf.items, ty)) |ch| {
                 if (findDeclStmt(ch.body, member)) |stmt| {
                     const sig = sigOfStmt(stmt);
-                    if (sig.is_fn and sig.ret.len > 0) return selfToOwner(sig.ret, callee);
+                    if (sig.is_fn and sig.ret.len > 0)
+                        return selfToOwner(if (args) |at| substRetByArgs(sig, at) else sig.ret, callee);
                 }
             }
         }
         // std 编译期内建（std.process.args → [][]const u8）
         if (builtinDeclStmt(callee)) |st| {
             const sig = sigOfStmt(st);
-            if (sig.is_fn and sig.ret.len > 0) return sig.ret;
+            if (sig.is_fn and sig.ret.len > 0) return if (args) |at| substRetByArgs(sig, at) else sig.ret;
         }
         return null;
     }
     if (findDeclStmt(text, callee)) |stmt| {
         const sig = sigOfStmt(stmt);
-        if (sig.is_fn and sig.ret.len > 0) return sig.ret;
+        if (sig.is_fn and sig.ret.len > 0) return if (args) |at| substRetByArgs(sig, at) else sig.ret;
     }
     return null;
 }
@@ -8770,7 +9009,11 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                             var chain = anonFieldChain(text, lpx + 1, lit_brace + 1);
                             defer chain.deinit(gpa);
                             for (chain.items) |nm| {
-                                const flds2 = parseAnonTy(pty) orelse { okc = false; break; };
+                                const flds2 = parseAnonTy(pty) orelse
+                                    (if (namedTyStructText(afiles.items, doc, text, pty)) |st2|
+                                        parseAnonTy(st2)
+                                    else
+                                        null) orelse { okc = false; break; };
                                 var hit2: ?[]const u8 = null;
                                 for (flds2.items) |f2| {
                                     if (std.mem.eql(u8, f2.name, nm)) { hit2 = f2.ty; break; }
@@ -8778,7 +9021,11 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                                 pty = hit2 orelse { okc = false; break; };
                             }
                             if (okc) {
-                                if (parseAnonTy(pty)) |flds| {
+                                if (parseAnonTy(pty) orelse
+                                    (if (namedTyStructText(afiles.items, doc, text, pty)) |st2|
+                                        parseAnonTy(st2)
+                                    else
+                                        null)) |flds| {
                                     handled = true;
                                     var done5: std.StringHashMapUnmanaged(void) = .empty;
                                     defer done5.deinit(gpa);
