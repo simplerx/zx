@@ -1,0 +1,66 @@
+// §190 泛型 struct 糖：`struct (T: type, N: usize) { 字段 }` 与手写
+// `fn (T: type, N: usize) type { return struct { 字段 }; }` 是同一个
+// AST——类型参、值参、方法（Self）、嵌套实例化、方法内调关联函数全走
+// 原有 specialize 机制。守门：两种写法的运行期行为一致。
+const std = @mod("std");
+
+// 类型参 + 值参混用；方法里 Self 照常
+pub const Ring = struct (T: type, N: usize) {
+    pub data: *[N]T,
+    pub count: usize,
+
+    pub const init = fn (d: *[N]T) Self {
+        return Self{ .data = d, .count = 0 };
+    };
+    pub const cap = fn (self: *Self) usize { return N; };
+    pub const push = fn (self: *Self, v: T) bool {
+        if (self.count >= N) { return false; }
+        (self.data + self.count).0 = v;
+        self.count = self.count + 1;
+        return true;
+    };
+};
+
+// 泛型字段引用外层参数（*T），关联函数返回 Self
+pub const Box = struct (T: type) {
+    pub v: T,
+    pub const make = fn (x: T) Self { return Self{ .v = x }; };
+    pub const get = fn (self: *Self) *T { return &self.v; };
+};
+
+// 体内实例化另一个泛型 struct（类型参透传）
+pub const Holder = struct (T: type) {
+    pub b: Box(T),
+    pub const wrap = fn (x: T) Self {
+        return Self{ .b = Box(T).make(x) };
+    };
+};
+
+// 值参进类型：方法能读编译期 N（generic-value-param 同款口径）
+pub const Fixed = struct (N: usize) {
+    pub gen: *[N]u64,
+    pub const len = fn (self: Self) u64 { return N; };
+};
+
+pub const main = fn () u8 {
+    var store: *[4]i32 = &.{ 0, 0, 0, 0 };
+    var r = Ring(i32, 4).init(store);
+    if (r.cap() != 4) { return 1; }
+    if (!r.push(7)) { return 2; }
+    if (!r.push(-2)) { return 3; }
+    if (r.count != 2) { return 4; }
+
+    var b = Box(i32).make(42);
+    if (b.get().0 != 42) { return 5; }
+
+    let h = Holder([]const u8).wrap("ok");
+    if (h.b.v.len != 2) { return 6; }
+
+    var g: *[3]u64 = &.{ 9, 9, 9 };
+    let fx = Fixed(3){ .gen = g };
+    if (fx.len() != 3) { return 7; }
+
+    std.println("ring={} box={} holder={} fixed={}",
+                r.count, b.v, h.b.v.len, fx.len());
+    return 0;
+};

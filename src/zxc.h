@@ -24,8 +24,12 @@
  * 形式（§171）。
  * 1.6.0 = std.move 所有权移交（§189，原值标 MOVED、新变量当场建槽）、
  * 分支内释放显式确认（§189，`tag p : null;`——未确认的臂内释放合流
- * 后当作未释放）、std 内部文件的账本豁免口径统一（直检与导入一致）。 */
-#define ZXC_VERSION "1.6.0"
+ * 后当作未释放）、std 内部文件的账本豁免口径统一（直检与导入一致）。
+ * 1.6.1 = 泛型 struct 糖语法（§190，`struct (T: type, N: usize) { … }`
+ * 解析期脱糖成返回 struct 的泛型函数，双端 C/bootstrap 对齐）、deinit
+ * 变换克隆丢 sym 修复（§191，std.free 改写后 .ctx 标识符悬垂 → B1001）、
+ * std/fs.zx zpath 五处泄漏修复、std 容器全部迁移到糖语法。 */
+#define ZXC_VERSION "1.6.1"
 
 /* ---------- diagnostics ---------- */
 

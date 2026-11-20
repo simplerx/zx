@@ -1681,13 +1681,14 @@ u, body = std_def("_ = std.task;", "task", 522)
 check("definition.stdReexport.alias",
       u.replace("\\", "/").endswith("std/task.zx"), f"{u}"[:240])
 # 5 泛型容器 hover 贴真实 struct 体（2026-11-09：std 全部类型都要有类型提示，
-# 泛型不能只出一行 `X(T: type) type` 签名）
+# 泛型不能只出一行 `X(T: type) type` 签名）。§190 后 std 容器写糖语法
+# `const X = struct (T: type) {`，hover 贴体时签名就是糖形状。
 check("hover.generic.facadeDefinition",
-      "struct {" in std_hover("std.map.HashMap(i32)", "HashMap", 511)
+      "struct (V: type)" in std_hover("std.map.HashMap(i32)", "HashMap", 511)
       and "vals: *V" in std_hover("std.map.HashMap(i32)", "HashMap", 511),
       std_hover("std.map.HashMap(i32)", "HashMap", 511)[:200])
 check("hover.generic.topLevelDefinition",
-      "struct {" in std_hover("std.array.List(i32)", "List", 512)
+      "struct (T: type)" in std_hover("std.array.List(i32)", "List", 512)
       and "buf: *T" in std_hover("std.array.List(i32)", "List", 512),
       std_hover("std.array.List(i32)", "List", 512)[:200])
 # 5 零字段容器（ArenaAllocator）：构造形态是静态 init，出 `Name.init(…)` 骨架
@@ -5137,7 +5138,92 @@ else:
     check("completion.dupOpen.alive", dup,
           "同一文件重复 didOpen 之后服务器死了（脏表悬垂键）")
 
-# ---------------------------------------------------------------------------
+# §191 同名局部不串味：两个函数各有一个 `p`（main 的在前、later 的在后）。
+# findDeclStmt 全文首匹配且 const→let→var→fn 按关键字顺序，later 里后出现的
+# `let p`（heapSlice 切片）会抢走 main 里 `var p`（Person 实例）的声明——
+# `p.` 弹出切片的 len 而不是字段 name/age（用户 2026-11-20 截图）。
+# 位置感知后「光标之前、最近声明赢」，main 里的 p. 必须是 Person 的字段。
+def shadow_guard():
+    import tempfile
+    d = tempfile.mkdtemp(prefix="zxshadow")
+    os.makedirs(os.path.join(d, "src"), exist_ok=True)
+    doc = "file:///" + os.path.join(d, "src", "m.zx").replace("\\", "/")
+    body = ('const std = @mod("std");\n\n'
+            'const Person = struct(T:type){\n'
+            '    name:[]const u8,\n'
+            '    age:T,\n'
+            '};\n\n'
+            'pub const main = fn () u8 {\n'
+            '    var p = Person(i32){ .name = "a", .age = 1 };\n'
+            '    p.\n'
+            '    return 0;\n'
+            '};\n\n'
+            'const later = fn () u8 {\n'
+            '    let p = std.heapSlice(std.heap.page, u8, 4);\n'
+            '    _ = p;\n'
+            '    return 0;\n'
+            '};\n')
+    try:
+        p2 = subprocess.Popen([ZXLS_BIN], stdin=subprocess.PIPE,
+                              stdout=subprocess.PIPE, cwd=d)
+        snd = lambda o: (p2.stdin.write(
+            ("Content-Length: %d\r\n\r\n" % len(json.dumps(o).encode())).encode()
+            + json.dumps(o).encode()), p2.stdin.flush())
+        def rcv():
+            hdr = b""
+            while not hdr.endswith(b"\r\n\r\n"):
+                c = p2.stdout.read(1)
+                if not c:
+                    return None
+                hdr += c
+            ln = int([l for l in hdr.split(b"\r\n")
+                      if l.lower().startswith(b"content-length")][0].split(b":")[1])
+            return json.loads(p2.stdout.read(ln))
+        snd({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+             "params": {"capabilities": {}, "rootUri": "file:///" + d.replace("\\", "/")}})
+        while True:
+            m = rcv()
+            if m is None or m.get("id") == 1:
+                break
+        snd({"jsonrpc": "2.0", "method": "initialized", "params": {}})
+        snd({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": {"uri": doc, "languageId": "zx", "version": 1,
+                             "text": body}}})
+        line = body.split("\n").index("    p.")
+        snd({"jsonrpc": "2.0", "id": 2, "method": "textDocument/completion",
+             "params": {"textDocument": {"uri": doc},
+                        "position": {"line": line, "character": 6}}})
+        labels = None
+        import time as _t
+        deadline = _t.time() + 30
+        while _t.time() < deadline:
+            m = rcv()
+            if m is None:
+                break
+            if m.get("id") == 2:
+                r = m.get("result") or {}
+                items = r.get("items", r if isinstance(r, list) else [])
+                labels = [i.get("label") for i in items]
+                break
+        return labels
+    finally:
+        try:
+            p2.kill()
+        except Exception:
+            pass
+        shutil.rmtree(d, ignore_errors=True)
+
+labels = shadow_guard()
+if labels is None:
+    print("skip completion.shadowGuard (超时)")
+else:
+    check("completion.shadowGuard.fields",
+          "name" in labels and "age" in labels,
+          "p. 应弹 Person 字段 name/age，实际: %s" % labels[:12])
+    check("completion.shadowGuard.noSliceLen",
+          "len" not in labels and "ptr" not in labels,
+          "后面函数的同名 let p 不得抢声明（不应出切片成员），实际: %s" % labels[:12])
+
 # 性能守门：inlayHint 必须是线性扫描。
 #
 # 这里踩过两次 O(文件长度) 的坑，都藏在"看起来无害"的写法里：

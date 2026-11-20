@@ -11,170 +11,167 @@
 
 // ---- 可增长列表（原 ArrayList）----
 // `T` 是元素类型；容量不够时按倍数向分配器要内存、搬过去、释放旧的。
-pub const List = fn (T: type) type {
-    return struct {
-        pub buf: *T,
-        pub len: usize,
-        pub cap: usize,
-        pub alloc: Allocator,
+pub const List = struct (T: type) {
+    pub buf: *T,
+    pub len: usize,
+    pub cap: usize,
+    pub alloc: Allocator,
 
-        // ---- 构造 / 释放 ----
+    // ---- 构造 / 释放 ----
 
-        pub const init = fn (alloc: Allocator) Self {
-            return Self{ .buf = undefined, .len = 0, .cap = 0, .alloc = alloc };
-        };
+    pub const init = fn (alloc: Allocator) Self {
+        return Self{ .buf = undefined, .len = 0, .cap = 0, .alloc = alloc };
+    };
 
-        pub const deinit = fn (self: *Self) void {
+    pub const deinit = fn (self: *Self) void {
+        if (self.cap > 0) {
+            self.alloc.free(self.alloc.ctx, (*u8)self.buf, self.cap * @type(T).size);
+        }
+        self.buf = undefined;
+        self.len = 0;
+        self.cap = 0;
+    };
+
+    // ---- 取值 ----
+
+    pub const at = fn (self: *Self, i: usize) ?*T {
+        if (i >= self.len) { return null; }
+        return self.buf + i;
+    };
+
+    pub const get = fn (self: *Self, i: usize) ?T {
+        if (i >= self.len) { return null; }
+        return (self.buf + i).0;
+    };
+
+    pub const set = fn (self: *Self, i: usize, v: T) bool {
+        if (i >= self.len) { return false; }
+        (self.buf + i).0 = v;
+        return true;
+    };
+
+    pub const items = fn (self: *Self) []T { return self.buf[0..self.len]; };
+
+    pub const clear = fn (self: *Self) void { self.len = 0; };
+
+    // ---- 增长 ----
+
+    // 容量不够就翻倍。搬家用一次 memcpy：T 任意大小，逐元素循环
+    // 换成内存原语后这一步从 O(n) 次访存变成一次批量搬运。
+    pub const reserve = fn (self: *Self, need: usize) bool {
+        if (need <= self.cap) { return true; }
+
+        var ncap = self.cap;
+        if (ncap == 0) { ncap = 8; }
+        while (ncap < need) { ncap = ncap * 2; }
+
+        let bytes = ncap * @type(T).size;
+        let raw = self.alloc.alloc(self.alloc.ctx, bytes);
+        if (raw) p {
+            let dst = (*T)p;
+            if (self.len > 0) {
+                @memcpy((*u8)dst, (*u8)self.buf, self.len * @type(T).size);
+            }
             if (self.cap > 0) {
                 self.alloc.free(self.alloc.ctx, (*u8)self.buf, self.cap * @type(T).size);
             }
-            self.buf = undefined;
-            self.len = 0;
-            self.cap = 0;
-        };
-
-        // ---- 取值 ----
-
-        pub const at = fn (self: *Self, i: usize) ?*T {
-            if (i >= self.len) { return null; }
-            return self.buf + i;
-        };
-
-        pub const get = fn (self: *Self, i: usize) ?T {
-            if (i >= self.len) { return null; }
-            return (self.buf + i).0;
-        };
-
-        pub const set = fn (self: *Self, i: usize, v: T) bool {
-            if (i >= self.len) { return false; }
-            (self.buf + i).0 = v;
+            self.buf = dst;
+            self.cap = ncap;
             return true;
-        };
+        }
+        return false;
+    };
 
-        pub const items = fn (self: *Self) []T { return self.buf[0..self.len]; };
+    pub const push = fn (self: *Self, v: T) bool {
+        if (!self.reserve(self.len + 1)) { return false; }
+        (self.buf + self.len).0 = v;
+        self.len = self.len + 1;
+        return true;
+    };
 
-        pub const clear = fn (self: *Self) void { self.len = 0; };
+    pub const pop = fn (self: *Self) ?T {
+        if (self.len == 0) { return null; }
+        self.len = self.len - 1;
+        return (self.buf + self.len).0;
+    };
 
-        // ---- 增长 ----
+    pub const first = fn (self: *Self) ?T {
+        if (self.len == 0) { return null; }
+        return (self.buf + 0).0;
+    };
 
-        // 容量不够就翻倍。搬家用一次 memcpy：T 任意大小，逐元素循环
-        // 换成内存原语后这一步从 O(n) 次访存变成一次批量搬运。
-        pub const reserve = fn (self: *Self, need: usize) bool {
-            if (need <= self.cap) { return true; }
+    pub const last = fn (self: *Self) ?T {
+        if (self.len == 0) { return null; }
+        return (self.buf + self.len - 1).0;
+    };
 
-            var ncap = self.cap;
-            if (ncap == 0) { ncap = 8; }
-            while (ncap < need) { ncap = ncap * 2; }
+    // 在 i 处插一个，后面的整体右移（memmove：同 buffer 内重叠）。
+    // i == len 等价于 push。
+    pub const insertAt = fn (self: *Self, i: usize, v: T) bool {
+        if (i > self.len) { return false; }
+        if (!self.reserve(self.len + 1)) { return false; }
+        if (i < self.len) {
+            @memmove((*u8)(self.buf + i + 1), (*u8)(self.buf + i), (self.len - i) * @type(T).size);
+        }
+        (self.buf + i).0 = v;
+        self.len = self.len + 1;
+        return true;
+    };
 
-            let bytes = ncap * @type(T).size;
-            let raw = self.alloc.alloc(self.alloc.ctx, bytes);
-            if (raw) p {
-                let dst = (*T)p;
-                if (self.len > 0) {
-                    @memcpy((*u8)dst, (*u8)self.buf, self.len * @type(T).size);
-                }
-                if (self.cap > 0) {
-                    self.alloc.free(self.alloc.ctx, (*u8)self.buf, self.cap * @type(T).size);
-                }
-                self.buf = dst;
-                self.cap = ncap;
-                return true;
-            }
-            return false;
-        };
+    // 删掉第 i 个，后面的左移。删最后一个等价于 pop。
+    pub const removeAt = fn (self: *Self, i: usize) bool {
+        if (i >= self.len) { return false; }
+        if (i + 1 < self.len) {
+            @memmove((*u8)(self.buf + i), (*u8)(self.buf + i + 1),
+                (self.len - i - 1) * @type(T).size);
+        }
+        self.len = self.len - 1;
+        return true;
+    };
 
-        pub const push = fn (self: *Self, v: T) bool {
-            if (!self.reserve(self.len + 1)) { return false; }
-            (self.buf + self.len).0 = v;
-            self.len = self.len + 1;
-            return true;
-        };
-
-        pub const pop = fn (self: *Self) ?T {
-            if (self.len == 0) { return null; }
-            self.len = self.len - 1;
-            return (self.buf + self.len).0;
-        };
-
-        pub const first = fn (self: *Self) ?T {
-            if (self.len == 0) { return null; }
-            return (self.buf + 0).0;
-        };
-
-        pub const last = fn (self: *Self) ?T {
-            if (self.len == 0) { return null; }
-            return (self.buf + self.len - 1).0;
-        };
-
-        // 在 i 处插一个，后面的整体右移（memmove：同 buffer 内重叠）。
-        // i == len 等价于 push。
-        pub const insertAt = fn (self: *Self, i: usize, v: T) bool {
-            if (i > self.len) { return false; }
-            if (!self.reserve(self.len + 1)) { return false; }
-            if (i < self.len) {
-                @memmove((*u8)(self.buf + i + 1), (*u8)(self.buf + i),
-                    (self.len - i) * @type(T).size);
-            }
-            (self.buf + i).0 = v;
-            self.len = self.len + 1;
-            return true;
-        };
-
-        // 删掉第 i 个，后面的左移。删最后一个等价于 pop。
-        pub const removeAt = fn (self: *Self, i: usize) bool {
-            if (i >= self.len) { return false; }
-            if (i + 1 < self.len) {
-                @memmove((*u8)(self.buf + i), (*u8)(self.buf + i + 1),
-                    (self.len - i - 1) * @type(T).size);
-            }
-            self.len = self.len - 1;
-            return true;
-        };
-
-        pub const reverse = fn (self: *Self) void {
-            if (self.len < 2) { return; }
-            var i: usize = 0;
-            var j = self.len - 1;
-            while (i < j) {
-                let t = (self.buf + i).0;
-                (self.buf + i).0 = (self.buf + j).0;
-                (self.buf + j).0 = t;
-                i = i + 1;
-                j = j - 1;
-            }
-        };
-
-        // 把长度改成 n：变长用 fill 补，变短直接截断（容量不动）。
-        pub const resize = fn (self: *Self, n: usize, fill: T) bool {
-            if (n > self.len) {
-                if (!self.reserve(n)) { return false; }
-                var k = self.len;
-                while (k < n) {
-                    (self.buf + k).0 = fill;
-                    k = k + 1;
-                }
-            }
-            self.len = n;
-            return true;
-        };
-
-        // 就地交换两个元素。
-        pub const swap = fn (self: *Self, i: usize, j: usize) bool {
-            if (i >= self.len || j >= self.len) { return false; }
+    pub const reverse = fn (self: *Self) void {
+        if (self.len < 2) { return; }
+        var i: usize = 0;
+        var j = self.len - 1;
+        while (i < j) {
             let t = (self.buf + i).0;
             (self.buf + i).0 = (self.buf + j).0;
             (self.buf + j).0 = t;
-            return true;
-        };
+            i = i + 1;
+            j = j - 1;
+        }
+    };
 
-        // 追加一个切片：一次 memcpy。
-        pub const append = fn (self: *Self, vs: []const T) bool {
-            if (vs.len == 0) { return true; }
-            if (!self.reserve(self.len + vs.len)) { return false; }
-            @memcpy((*u8)(self.buf + self.len), vs.ptr, vs.len * @type(T).size);
-            self.len = self.len + vs.len;
-            return true;
-        };
+    // 把长度改成 n：变长用 fill 补，变短直接截断（容量不动）。
+    pub const resize = fn (self: *Self, n: usize, fill: T) bool {
+        if (n > self.len) {
+            if (!self.reserve(n)) { return false; }
+            var k = self.len;
+            while (k < n) {
+                (self.buf + k).0 = fill;
+                k = k + 1;
+            }
+        }
+        self.len = n;
+        return true;
+    };
+
+    // 就地交换两个元素。
+    pub const swap = fn (self: *Self, i: usize, j: usize) bool {
+        if (i >= self.len || j >= self.len) { return false; }
+        let t = (self.buf + i).0;
+        (self.buf + i).0 = (self.buf + j).0;
+        (self.buf + j).0 = t;
+        return true;
+    };
+
+    // 追加一个切片：一次 memcpy。
+    pub const append = fn (self: *Self, vs: []const T) bool {
+        if (vs.len == 0) { return true; }
+        if (!self.reserve(self.len + vs.len)) { return false; }
+        @memcpy((*u8)(self.buf + self.len), vs.ptr, vs.len * @type(T).size);
+        self.len = self.len + vs.len;
+        return true;
     };
 };
 
@@ -186,86 +183,84 @@ pub const List = fn (T: type) type {
 // 第 0 个元素的地址，`(*[N]T)(&self.data)[i]` 与 C 的 arr[i] 同构。
 // 方法一律收 `self: *Self`——按值收 self 时 &self.data 指向栈副本，
 // 写了也写不进真身。元组字段里的指针不进 tag 字段账（已知限制）。
-pub const Array = fn (T: type, N: usize) type {
-    return struct {
-        // 内联存储：N 个 T。零初始化请配合 zero()（一次 memset）或逐元素 set。
-        pub data: [T; N],
+pub const Array = struct (T: type, N: usize) {
+    // 内联存储：N 个 T。零初始化请配合 zero()（一次 memset）或逐元素 set。
+    pub data: [T; N],
 
-        // 编译期元信息（§117 编译期值槽）：长度与总字节数都能静态取。
-        pub const count = N;
-        pub const byteSize = N * @type(T).size;
+    // 编译期元信息（§117 编译期值槽）：长度与总字节数都能静态取。
+    pub const count = N;
+    pub const byteSize = N * @type(T).size;
 
-        pub const init = fn () Self {
-            return Self{ .data = undefined };
-        };
+    pub const init = fn () Self {
+        return Self{ .data = undefined };
+    };
 
-        // 数组指针视图：指向内联存储的起始地址，运行期下标全走它。
-        pub const ptr = fn (self: *Self) *[N]T {
-            return (*[N]T)(&self.data);
-        };
+    // 数组指针视图：指向内联存储的起始地址，运行期下标全走它。
+    pub const ptr = fn (self: *Self) *[N]T {
+        return (*[N]T)(&self.data);
+    };
 
-        pub const len = fn (self: *Self) usize { return N; };
+    pub const len = fn (self: *Self) usize { return N; };
 
-        // 切片视图：全长借用，元素就地（不拷贝）。
-        pub const items = fn (self: *Self) []T { return self.ptr()[0..]; };
+    // 切片视图：全长借用，元素就地（不拷贝）。
+    pub const items = fn (self: *Self) []T { return self.ptr()[0..]; };
 
-        pub const at = fn (self: *Self, i: usize) ?*T {
-            if (i >= N) { return null; }
-            return &self.ptr()[i];
-        };
+    pub const at = fn (self: *Self, i: usize) ?*T {
+        if (i >= N) { return null; }
+        return &self.ptr()[i];
+    };
 
-        pub const get = fn (self: *Self, i: usize) ?T {
-            if (i >= N) { return null; }
-            return self.ptr()[i];
-        };
+    pub const get = fn (self: *Self, i: usize) ?T {
+        if (i >= N) { return null; }
+        return self.ptr()[i];
+    };
 
-        pub const set = fn (self: *Self, i: usize, v: T) bool {
-            if (i >= N) { return false; }
+    pub const set = fn (self: *Self, i: usize, v: T) bool {
+        if (i >= N) { return false; }
+        self.ptr()[i] = v;
+        return true;
+    };
+
+    pub const first = fn (self: *Self) T { return self.ptr()[0]; };
+    pub const last = fn (self: *Self) T { return self.ptr()[N - 1]; };
+
+    // 逐元素 fill：T 任意。这里不能用 @memset——它是**字节**语义
+    //（sema.c：第三参是 byte count、第二参是填充字节值）：v 是元素值
+    // 不是字节值，T 比 1 字节宽时每个字节都被写成 v 的低位字节
+    //（fill(1) 对 i32 得 0x01010101），且 f32 / 结构体 T 直接编译报错
+    //（@memset 要求填充值是整数）。
+    pub const fill = fn (self: *Self, v: T) void {
+        var i: usize = 0;
+        while (i < N) {
             self.ptr()[i] = v;
-            return true;
-        };
+            i = i + 1;
+        }
+    };
 
-        pub const first = fn (self: *Self) T { return self.ptr()[0]; };
-        pub const last = fn (self: *Self) T { return self.ptr()[N - 1]; };
+    // 清零特例：全零字节 = 零值对任意 T 成立（含指针字段 → null），
+    // 一次内存原语完成。这才是 @memset 的正确用法。
+    pub const zero = fn (self: *Self) void {
+        @memset((*u8)(&self.data), 0, N * @type(T).size);
+    };
 
-        // 逐元素 fill：T 任意。这里不能用 @memset——它是**字节**语义
-        //（sema.c：第三参是 byte count、第二参是填充字节值）：v 是元素值
-        // 不是字节值，T 比 1 字节宽时每个字节都被写成 v 的低位字节
-        //（fill(1) 对 i32 得 0x01010101），且 f32 / 结构体 T 直接编译报错
-        //（@memset 要求填充值是整数）。
-        pub const fill = fn (self: *Self, v: T) void {
-            var i: usize = 0;
-            while (i < N) {
-                self.ptr()[i] = v;
-                i = i + 1;
-            }
-        };
-
-        // 清零特例：全零字节 = 零值对任意 T 成立（含指针字段 → null），
-        // 一次内存原语完成。这才是 @memset 的正确用法。
-        pub const zero = fn (self: *Self) void {
-            @memset((*u8)(&self.data), 0, N * @type(T).size);
-        };
-
-        pub const reverse = fn (self: *Self) void {
-            if (N < 2) { return; }
-            var i: usize = 0;
-            var j: usize = N - 1;
-            while (i < j) {
-                let t = self.ptr()[i];
-                self.ptr()[i] = self.ptr()[j];
-                self.ptr()[j] = t;
-                i = i + 1;
-                j = j - 1;
-            }
-        };
-
-        pub const swap = fn (self: *Self, i: usize, j: usize) bool {
-            if (i >= N || j >= N) { return false; }
+    pub const reverse = fn (self: *Self) void {
+        if (N < 2) { return; }
+        var i: usize = 0;
+        var j: usize = N - 1;
+        while (i < j) {
             let t = self.ptr()[i];
             self.ptr()[i] = self.ptr()[j];
             self.ptr()[j] = t;
-            return true;
-        };
+            i = i + 1;
+            j = j - 1;
+        }
+    };
+
+    pub const swap = fn (self: *Self, i: usize, j: usize) bool {
+        if (i >= N || j >= N) { return false; }
+        let t = self.ptr()[i];
+        self.ptr()[i] = self.ptr()[j];
+        self.ptr()[j] = t;
+        return true;
     };
 };

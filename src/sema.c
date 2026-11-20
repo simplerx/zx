@@ -7595,6 +7595,30 @@ static void tag_deferred_replay(void) {
 
 static const char *g_cur_fn_name;   /* 当前函数名（位置实参注入用） */
 
+/* §191：改写路径的表达式克隆要保留标识符叶子上的 sym。clone_tree 一律
+ * 清 sym（泛型单态化需要干净的树），但 deinit/free 变换克隆的是**调用点
+ * 现场**的表达式——后端按 sym->cname 发名（局部名带行_列后缀），丢了就
+ * 发裸名，与生成的 C 改名对不上：B1001 use of undeclared 'pool'
+ * （std.free(pool.allocator(), pp) 的 .ctx 克隆体丢了 pool 的符号）。
+ * 源节点的 sym 都在当前作用域里活着，直接沿用安全。 */
+static void clone_keep_syms(Node *o, Node *c) {
+    if (!o || !c) return;
+    if ((o->kind == NK_IDENT || o->kind == NK_TYPE_IDENT) && o->sym)
+        c->sym = o->sym;
+    clone_keep_syms(o->a, c->a);
+    clone_keep_syms(o->b, c->b);
+    clone_keep_syms(o->c, c->c);
+    clone_keep_syms(o->d, c->d);
+    for (int i = 0; i < o->nitems && i < c->nitems; i++)
+        clone_keep_syms(o->items[i], c->items[i]);
+}
+
+static Node *clone_expr_keep_syms(Node *n) {
+    Node *c = clone_tree(n);
+    clone_keep_syms(n, c);
+    return c;
+}
+
 /* §173：`a.deinit(s)` → `a.free(a.ctx, (*u8)s.ptr, s.len * size)`。
  * 接收者求值两次（分配器值通常是无副作用读）；其余与手写 free 完全
  * 同构，tag/region 两本账本照常记账。s 可以是切片（[]T）或定长指针
@@ -7613,9 +7637,9 @@ static void tag_transform_deinit(Node *call) {
         int esz = ty_size(st->elem);
         if (esz <= 0) esz = 1;
         Node *pf = node_new(NK_FIELD, arg->line, arg->col);
-        pf->a = clone_tree(arg); pf->name = "ptr";
+        pf->a = clone_expr_keep_syms(arg); pf->name = "ptr";
         Node *lf = node_new(NK_FIELD, arg->line, arg->col);
-        lf->a = clone_tree(arg); lf->name = "len";
+        lf->a = clone_expr_keep_syms(arg); lf->name = "len";
         Node *sz = node_new(NK_INT, arg->line, arg->col);
         sz->ival = (uint64_t)esz;
         Node *mul = node_new(NK_BIN, arg->line, arg->col);
@@ -7625,7 +7649,7 @@ static void tag_transform_deinit(Node *call) {
         int esz = ty_size(st->elem);
         if (esz <= 0) esz = 1;
         uint64_t n = st->len > 0 ? st->len : 1;
-        ptrE = clone_tree(arg);
+        ptrE = clone_expr_keep_syms(arg);
         Node *sz = node_new(NK_INT, arg->line, arg->col);
         sz->ival = (uint64_t)esz * n;
         lenE = sz;
@@ -7637,7 +7661,7 @@ static void tag_transform_deinit(Node *call) {
                "`deinit` needs a slice `[]T` or a sized pointer `*[N]T` -- "
                "`%s` carries no length; free it as "
                "`free(ctx, (*u8)p, bytes)` instead", ty_str(st));
-        ptrE = clone_tree(arg);
+        ptrE = clone_expr_keep_syms(arg);
         Node *sz0 = node_new(NK_INT, arg->line, arg->col);
         sz0->ival = 0;
         lenE = sz0;
@@ -7651,7 +7675,7 @@ static void tag_transform_deinit(Node *call) {
     cast->a = pt; cast->b = ptrE;
     /* 释放器形状：a.free(a.ctx, ptr, bytes) */
     Node *cf = node_new(NK_FIELD, f->line, f->col);
-    cf->a = clone_tree(f->a); cf->name = "ctx";
+    cf->a = clone_expr_keep_syms(f->a); cf->name = "ctx";
     f->name = "free";
     Node **items = calloc(3, sizeof(Node *));
     items[0] = cf; items[1] = cast; items[2] = lenE;

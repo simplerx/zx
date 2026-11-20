@@ -16,6 +16,9 @@ const main = fn () i32 {
         return 2;
     }
     let path = args[0];
+    // 输出缓冲提在分支外：分支内分配逃进容器字段（List 的 buf）是账本
+    // 查不清的形态（E0514）；各出口 deinit 配平。
+    var out = std.array.List(u8).init(al);
     let r = std.file.read(al, path);
     if (r) src {
         var lx = lex.Lexer.init(al, src);
@@ -24,16 +27,18 @@ const main = fn () i32 {
         var p = parse.Parser.init(al, src, &lx);
         let pr = p.parse_program();
         if (pr) root {
-            var out = std.array.List(u8).init(al);
             parse.dump(root, &out, 0);
             std.io.print(std.io.stdout(), "{s}", out.items());
+            out.deinit();
             return 0;
         }
         let ct = p.cur();
         std.println("astdump: parse failed at {}:{} near token {}",
                     ct.line, ct.col, lex.spell(ct.kind));
+        out.deinit();
         return 1;
     }
+    out.deinit();
     std.println("astdump: cannot open {}", path);
     return 2;
 };

@@ -711,6 +711,98 @@ pub const Parser = struct {
         return self.parse_expr();
     };
 
+    // struct 的成员体（字段、方法、声明）。普通 struct 与 §190 泛型 struct
+    // 的体共用这一个方法，避免两份拷贝漂移（同 C parse.c）。
+    pub const parse_struct_members = fn (self: *Parser, n: *Node) !*Node {
+        try self.expect(lex.Kind.lbrace);
+        while (!self.at(lex.Kind.rbrace) && !self.at(lex.Kind.eof)) {
+            // 成员默认私有（只在声明它的文件里可见），`pub` 才对外——
+            // 和顶层声明同一套规则。
+            var mem_pub = false;
+            if (self.at(lex.Kind.kw_pub)) {
+                _ = self.advance();
+                mem_pub = true;
+            }
+            // 方法只有一种写法：`const name = fn (…) R { … };`
+            if (self.at(lex.Kind.kw_const) && self.peek_tok(1).kind == lex.Kind.ident &&
+                self.peek_tok(2).kind == lex.Kind.assign && self.peek_tok(3).kind == lex.Kind.kw_fn) {
+                _ = self.advance();
+                let mname = try self.take_ident();
+                _ = self.advance();
+                let f = try self.parse_fn(true);
+                f.name = mname;
+                f.is_pub = mem_pub;
+                try self.expect(lex.Kind.semi);
+                self.push_item(n, f);
+            } else {
+                if (self.at(lex.Kind.kw_const) || self.at(lex.Kind.kw_let) || self.at(lex.Kind.kw_var)) {
+                    let d = try self.parse_decl();
+                    d.is_pub = mem_pub;
+                    self.push_item(n, d);
+                } else {
+                    if (self.at(lex.Kind.kw_fn)) {
+                        let f = try self.parse_fn(false);
+                        f.is_pub = mem_pub;
+                        self.push_item(n, f);
+                    } else {
+                        let ftok = self.cur();
+                        let fname = try self.take_ident();
+                        try self.expect(lex.Kind.colon);
+                        let ty = try self.parse_type();
+                        // 位置取字段名，不取 `struct` 关键字（同 C parse.c）：
+                        // 重名 / 默认值错 / 递归包含都该指在字段那一行。
+                        let f = self.new_at(NK.param, ftok);
+                        f.name = fname;
+                        f.a = ty;
+                        f.is_pub = mem_pub;
+                        if (self.accept(lex.Kind.assign)) {
+                            f.b = try self.parse_expr();
+                        }
+                        _ = self.accept(lex.Kind.comma);
+                        self.push_item(n, f);
+                    }
+                }
+            }
+        }
+        try self.expect(lex.Kind.rbrace);
+        return n;
+    };
+
+    // §190 泛型 struct 糖：`struct (T: type, N: usize) { 字段 }` 脱糖成
+    // `fn (T: type, N: usize) type { return struct { 字段 }; }`——与手写
+    // 泛型函数完全同一个 AST，sema/backend 的 specialize 机制零分叉
+    // （与 src/parse.c 同一实现）。
+    pub const parse_generic_struct = fn (self: *Parser, t: lex.Tok) !*Node {
+        _ = self.advance();                      // (
+        let f = self.new_at(NK.fn_, t);
+        if (!self.at(lex.Kind.rparen)) {
+            var go = true;
+            while (go) {
+                let ptok = self.cur();
+                let pname = try self.take_ident();
+                try self.expect(lex.Kind.colon);
+                let pty = try self.parse_type();
+                let pm = self.new_at(NK.param, ptok);
+                pm.name = pname;
+                pm.a = pty;
+                self.push_item(f, pm);
+                if (!self.accept(lex.Kind.comma)) { go = false; }
+                if (self.at(lex.Kind.rparen)) { go = false; }  // 尾逗号：struct(T: type,)
+            }
+        }
+        try self.expect(lex.Kind.rparen);
+        f.a = self.type_ident("type", t);        // 返回 type：类型构造函数
+        let btok = self.cur();
+        let st = self.new_at(NK.struct_, btok);
+        _ = try self.parse_struct_members(st);
+        let ret = self.new_at(NK.return_, btok);
+        ret.a = st;
+        let blk = self.new_at(NK.block, btok);
+        self.push_item(blk, ret);
+        f.b = blk;
+        return f;
+    };
+
     pub const parse_type_primary = fn (self: *Parser) !*Node {
         let t = self.cur();
 
@@ -827,6 +919,13 @@ pub const Parser = struct {
 
         if (t.kind == lex.Kind.kw_struct) {
             _ = self.advance();
+            // §190：`struct (T: type, N: usize) { … }` 泛型糖（参数表）。
+            // 旧的 `struct(packed)` 是「IDENT 后直接 `)`」，不冲突。
+            if (self.at(lex.Kind.lparen) &&
+                self.peek_tok(1).kind == lex.Kind.ident &&
+                self.peek_tok(2).kind == lex.Kind.colon) {
+                return self.parse_generic_struct(t);
+            }
             let n = self.new_at(NK.struct_, t);
             if (self.accept(lex.Kind.lparen)) {
                 let mode = try self.take_ident();
@@ -834,57 +933,7 @@ pub const Parser = struct {
                 try self.expect(lex.Kind.rparen);
             }
             // 体：字段、方法、声明
-            try self.expect(lex.Kind.lbrace);
-            while (!self.at(lex.Kind.rbrace) && !self.at(lex.Kind.eof)) {
-                // 成员默认私有（只在声明它的文件里可见），`pub` 才对外——
-                // 和顶层声明同一套规则。
-                var mem_pub = false;
-                if (self.at(lex.Kind.kw_pub)) {
-                    _ = self.advance();
-                    mem_pub = true;
-                }
-                // 方法只有一种写法：`const name = fn (…) R { … };`
-                if (self.at(lex.Kind.kw_const) && self.peek_tok(1).kind == lex.Kind.ident &&
-                    self.peek_tok(2).kind == lex.Kind.assign && self.peek_tok(3).kind == lex.Kind.kw_fn) {
-                    _ = self.advance();
-                    let mname = try self.take_ident();
-                    _ = self.advance();
-                    let f = try self.parse_fn(true);
-                    f.name = mname;
-                    f.is_pub = mem_pub;
-                    try self.expect(lex.Kind.semi);
-                    self.push_item(n, f);
-                } else {
-                    if (self.at(lex.Kind.kw_const) || self.at(lex.Kind.kw_let) || self.at(lex.Kind.kw_var)) {
-                        let d = try self.parse_decl();
-                        d.is_pub = mem_pub;
-                        self.push_item(n, d);
-                    } else {
-                        if (self.at(lex.Kind.kw_fn)) {
-                            let f = try self.parse_fn(false);
-                            f.is_pub = mem_pub;
-                            self.push_item(n, f);
-                        } else {
-                            let ftok = self.cur();
-                            let fname = try self.take_ident();
-                            try self.expect(lex.Kind.colon);
-                            let ty = try self.parse_type();
-                            // 位置取字段名，不取 `struct` 关键字（同 C parse.c）：
-                            // 重名 / 默认值错 / 递归包含都该指在字段那一行。
-                            let f = self.new_at(NK.param, ftok);
-                            f.name = fname;
-                            f.a = ty;
-                            f.is_pub = mem_pub;
-                            if (self.accept(lex.Kind.assign)) {
-                                f.b = try self.parse_expr();
-                            }
-                            _ = self.accept(lex.Kind.comma);
-                            self.push_item(n, f);
-                        }
-                    }
-                }
-            }
-            try self.expect(lex.Kind.rbrace);
+            _ = try self.parse_struct_members(n);
             return n;
         }
 

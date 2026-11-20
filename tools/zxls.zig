@@ -999,6 +999,36 @@ fn containerSrcOf(files: []const []const u8, base: []const u8) ?[]const u8 {
 /// 之后 `l.` 一个成员都不出（用户 2026-11-09 第 3 条）。编译期实参不做
 /// 替换：字段类型里的 T 原样显示，成员名与 Self 方法照常出。
 fn genericBodyOf(files: []const []const u8, base: []const u8) ?[]const u8 {
+    // §190 泛型 struct 糖：`const X = struct (T: type, …) { … }` 直接是
+    // 类型构造函数的体（参数表判据与解析器一致：`(` 后是 IDENT ':'，
+    // 排除旧 `struct(packed)`）。命中即返回 struct 体，不再往 `= fn` 里找。
+    {
+        var sp: std.ArrayList(u8) = .empty;
+        defer sp.deinit(gpa);
+        sp.appendSlice(gpa, "const ") catch return null;
+        sp.appendSlice(gpa, base) catch return null;
+        sp.appendSlice(gpa, " = struct (") catch return null;
+        for (files) |ftext| {
+            var idx: usize = 0;
+            while (std.mem.indexOfPos(u8, ftext, idx, sp.items)) |hit| {
+                idx = hit + 1;
+                if (hit > 0 and isIdentChar(ftext[hit - 1])) continue;
+                // `(` 后必须是「IDENT ':'」才是参数表；`packed` / 空参不算糖
+                var q = hit + sp.items.len;
+                while (q < ftext.len and (ftext[q] == ' ' or ftext[q] == '\t')) q += 1;
+                if (q >= ftext.len or !isIdentChar(ftext[q])) continue;
+                var q2 = q;
+                while (q2 < ftext.len and isIdentChar(ftext[q2])) q2 += 1;
+                while (q2 < ftext.len and (ftext[q2] == ' ' or ftext[q2] == '\t')) q2 += 1;
+                if (q2 >= ftext.len or ftext[q2] != ':') continue;
+                var p = q2;
+                while (p < ftext.len and ftext[p] != '{' and ftext[p] != '\n') p += 1;
+                if (p < ftext.len and ftext[p] == '{') {
+                    if (matchBrace(ftext, p)) |close| return ftext[p .. close + 1];
+                }
+            }
+        }
+    }
     var pat: std.ArrayList(u8) = .empty;
     defer pat.deinit(gpa);
     pat.appendSlice(gpa, "const ") catch return null;
@@ -1297,10 +1327,10 @@ fn scanFiles(doc: *const Document, text: []const u8) std.ArrayList([]const u8) {
 
 /// 实例变量 → 容器类型名：`let g = std.Task.group()` → "Group"。
 /// 推断交给 inferContainer（files 需含 std 目录）。
-fn instanceContainerTy(files: []const []const u8, text: []const u8, name: []const u8) ?[]const u8 {
-    const s = findDeclStmt(text, name) orelse return null;
+fn instanceContainerTy(files: []const []const u8, text: []const u8, name: []const u8, limit: usize) ?[]const u8 {
+    const s = findDeclStmtBefore(text, name, limit) orelse return null;
     const init = declInitOf(s) orelse return null;
-    return inferContainer(files, text, init, 0);
+    return inferContainer(files, text, init, 0, limit);
 }
 
 /// KEEP — 模块容器实例的点路径类型（用户 2026-11-08 第 3 条）：
@@ -1309,12 +1339,12 @@ fn instanceContainerTy(files: []const []const u8, text: []const u8, name: []cons
 /// （modContainerOf），后续段逐层 fieldTypeIn；内联 struct 用 structTyOf
 /// 走 parseAnonTy 继续下钻。out_mtxt 出模块文件文本，供命名容器再查成员。
 fn modInstanceTyOfPath(doc: *const Document, text: []const u8, path: []const u8,
-                       out_mtxt: *?[]const u8) ?[]const u8 {
+                       out_mtxt: *?[]const u8, limit: usize) ?[]const u8 {
     out_mtxt.* = null;
     var it = std.mem.splitScalar(u8, path, '.');
     const first = it.next() orelse return null;
     if (first.len == 0) return null;
-    const s = findDeclStmt(text, first) orelse return null;
+    const s = findDeclStmtBefore(text, first, limit) orelse return null;
     const init0 = trimSl(declInitOf(s) orelse return null);
     var j: usize = 0;
     while (j < init0.len and (isIdentChar(init0[j]) or init0[j] == '.')) j += 1;
@@ -1409,13 +1439,13 @@ fn resolveMemberPath(files: []const []const u8, doc: *const Document,
     } else if (genericBodyOf(files, segs[0])) |gb| {
         cur = gb;
         owner = segs[0];
-    } else if (isTypeValuedRecv(files, doc, text, segs[0], 0)) {
+    } else if (isTypeValuedRecv(files, doc, text, segs[0], 0, 0)) {
         // 类型值绑定的首段（`const P: type = t.P1.P2;` 的 P）：P 不是容器
         // 声明，findContainerBody 按名字找不到，`P.P3.f3(…)` 的返回类型也就
         // 推不出（`var f = P.P3.f3(…);` 没有行内提示）。容器沿初值路径取，
         // 体可以在 vendor / 模块文件里。只对类型值开放——实例变量仍走
         // instanceContainerTy，避免把实例当类型。
-        const pc = containerOfBinding(files, doc, text, segs[0], 0) orelse return null;
+        const pc = containerOfBinding(files, doc, text, segs[0], 0, 0) orelse return null;
         cur = pc.body;
         owner = pc.name;
     } else return null;
@@ -1580,8 +1610,8 @@ fn literalPathOf(e0: []const u8) ?[]const u8 {
 /// 实例绑定 → 逐段解析出来的容器：`var z: A.B.C`（声明类型）或
 /// `let x = A.B.Cfg{…}`（具名字面量）里的限定路径。单段名走老路（null）。
 fn instancePathContainer(files: []const []const u8, doc: *const Document,
-                         text: []const u8, name: []const u8) ?PathContainer {
-    const st = findDeclStmt(text, name) orelse return null;
+                         text: []const u8, name: []const u8, limit: usize) ?PathContainer {
+    const st = findDeclStmtBefore(text, name, limit) orelse return null;
     var te: ?[]const u8 = null;
     if (declTyOf(st)) |dt| {
         const t = trimSl(dt);
@@ -1643,9 +1673,9 @@ fn resolveContainerPath(files: []const []const u8, doc: *const Document,
 /// 顶层容器名"，`const P = t.p1.P2T;` 之后的 `P.` 被当成实例，静态成员
 /// 与嵌套类型全丢（用户 2026-11-11："变量接收类型时不提示类型"）。
 fn containerOfBinding(files: []const []const u8, doc: *const Document,
-                      text: []const u8, name: []const u8, depth: u8) ?PathContainer {
+                      text: []const u8, name: []const u8, depth: u8, limit: usize) ?PathContainer {
     if (depth > 6 or name.len == 0) return null;
-    const st = findDeclStmt(text, name) orelse {
+    const st = findDeclStmtBefore(text, name, limit) orelse {
         // 形参 / 字段不是 const 声明（`t: *T` 里的 `t`），findDeclStmt 够不着，
         // 靠 `name: Type` 形状扫兜住。少了这条，函数体里
         // `const P = t.P1.P2;` 的 P 就成不了类型值：`Pp = P.P3` 不提示
@@ -1997,7 +2027,7 @@ fn resolveContainerPathD(files: []const []const u8, doc: *const Document,
         // 只对多段路径开放——单段名字的实例补全走 instanceContainerTy，
         // 这里放进来会让"按名字在全扫描集里找容器"的老毛病回来。
         if (n > 1) {
-            if (containerOfBinding(files, doc, text, segs[0], depth + 1)) |pc| {
+            if (containerOfBinding(files, doc, text, segs[0], depth + 1, 0)) |pc| {
                 hit = .{ .body = pc.body, .is_enum = pc.is_enum };
                 src = pc.src;
                 name = pc.name;
@@ -2020,7 +2050,7 @@ fn resolveContainerPathD(files: []const []const u8, doc: *const Document,
                     if (isPurePath(ai) and std.mem.indexOfScalar(u8, ai, '.') != null and
                         !std.mem.eql(u8, ai, path))
                     {
-                        if (containerOfBinding(files, doc, text, segs[0], depth + 1)) |pc0| {
+                        if (containerOfBinding(files, doc, text, segs[0], depth + 1, 0)) |pc0| {
                             hit = .{ .body = pc0.body, .is_enum = pc0.is_enum };
                             src = pc0.src;
                             name = pc0.name;
@@ -3914,7 +3944,7 @@ fn definitionOfMember(doc: *const Document, text: []const u8,
     const pc = resolveContainerPath(sf.items, doc, text, base) orelse
         // `const P: type = t.P1.P2;` 之后的 `P.P3`：base 就是绑定名 P，
         // 容器在它的初值路径上（containerOfBinding 内部还有末段退路）。
-        containerOfBinding(sf.items, doc, text, base, 0) orelse
+        containerOfBinding(sf.items, doc, text, base, 0, ws) orelse
         // base 本身是链（`t.P1.P2.P3`）而源头解析不到：末段退路。
         resolveContainerPathLoose(sf.items, doc, text, base) orelse return null;
     const boff = memberDeclOffset(pc.body, word) orelse return null;
@@ -4225,6 +4255,35 @@ fn trimSl(s: []const u8) []const u8 {
     return s[a..b];
 }
 
+/// 位置感知的声明查找（§191）：只认起点 < limit 的声明，取**最近**的一条。
+/// findDeclStmt 是全文首匹配、且按 const→let→var→fn 的关键字顺序——两个
+/// 函数里各有一个同名局部时，后面函数里的 `let p` 会抢走前面 `var p` 的
+/// 声明（词法作用域里根本不可见），`p.` 的成员补全整串串味。这里改成
+/// 「光标之前、最近声明赢」：块级精确作用域是文本扫描做不到的近似，但
+/// 函数级的污染（用户 2026-11-20 截图）就此杜绝。
+fn findDeclStmtBefore(text: []const u8, name: []const u8, limit: usize) ?[]const u8 {
+    if (limit == 0) return findDeclStmt(text, name);
+    const kws = [_][]const u8{ "const ", "let ", "var ", "fn " };
+    var best: ?[]const u8 = null;
+    var best_pos: usize = 0;
+    for (kws) |kw| {
+        var from: usize = 0;
+        while (std.mem.indexOfPos(u8, text, from, kw)) |c| {
+            from = c + 1;
+            if (c >= limit) break;              // 位置递增，超线即停
+            if (c > 0 and isIdentChar(text[c - 1])) continue;
+            if (inLineComment(text, c)) continue;
+            if (declStmtAt(text, c, kw, name)) |st| {
+                if (best == null or c > best_pos) {
+                    best = st;
+                    best_pos = c;
+                }
+            }
+        }
+    }
+    return best;
+}
+
 /// 找声明语句，返回从关键字到顶层 ';' 的整段。
 /// const / let / var 的 `<name> = …`、extern var 的 `<name>: T;` 都认；
 /// KEEP: `pub fn NAME(...)` 形式也认——extern "C" 块里没有 `=`，以前这里
@@ -4434,7 +4493,61 @@ fn sigOfStmt(stmt: []const u8) FnSig {
         const vs = head[vp..];
         if (std.mem.startsWith(u8, vs, "struct") or
             std.mem.startsWith(u8, vs, "union") or
-            std.mem.startsWith(u8, vs, "enum")) return r;
+            std.mem.startsWith(u8, vs, "enum"))
+        {
+            // §190 泛型糖：`const X = struct (T: type, …) { … }` 本质是类型
+            // 构造函数（解析器脱糖成 fn），签名 = 糖参数表、返回类型恒 type。
+            // 判据与解析器 / genericBodyOf 一致：容器名后跟 `(` 且括号内首段
+            // 是「IDENT ':'」——排除 `struct(packed)` 与无参普通容器。
+            const kw_len: usize = if (std.mem.startsWith(u8, vs, "struct")) 6
+            else if (std.mem.startsWith(u8, vs, "union")) 5 else 4;
+            var pp = kw_len;
+            while (pp < vs.len and (vs[pp] == ' ' or vs[pp] == '\t')) pp += 1;
+            if (pp < vs.len and vs[pp] == '(') {
+                var pe = pp + 1;
+                var pd: usize = 0;
+                while (pe < vs.len) : (pe += 1) {
+                    if (vs[pe] == '(') pd += 1;
+                    if (vs[pe] == ')') {
+                        if (pd == 0) break;
+                        pd -= 1;
+                    }
+                }
+                if (pe < vs.len) {
+                    var s1 = pp + 1;
+                    while (s1 < pe and (vs[s1] == ' ' or vs[s1] == '\t')) s1 += 1;
+                    var e1 = s1;
+                    while (e1 < pe and isIdentChar(vs[e1])) e1 += 1;
+                    while (e1 < pe and (vs[e1] == ' ' or vs[e1] == '\t')) e1 += 1;
+                    if (e1 > s1 and e1 < pe and vs[e1] == ':') {
+                        var plist2: std.ArrayList([]const u8) = .empty;
+                        var seg2: usize = pp + 1;
+                        pd = 0;
+                        var q2 = pp + 1;
+                        while (q2 < pe) : (q2 += 1) {
+                            const c2 = vs[q2];
+                            if (c2 == '(' or c2 == '[' or c2 == '{') pd += 1;
+                            if (c2 == ')' or c2 == ']' or c2 == '}') {
+                                if (pd > 0) pd -= 1;
+                            }
+                            if (c2 == ',' and pd == 0) {
+                                const t2 = trimSl(vs[seg2..q2]);
+                                if (t2.len > 0) plist2.append(gpa, t2) catch {};
+                                seg2 = q2 + 1;
+                            }
+                        }
+                        {
+                            const t2 = trimSl(vs[seg2..pe]);
+                            if (t2.len > 0) plist2.append(gpa, t2) catch {};
+                        }
+                        r.params = plist2.items;
+                        r.ret = "type";
+                        r.is_fn = true;
+                    }
+                }
+            }
+            return r;
+        }
     }
     // fn? —— 两种写法都可能出现在同一条声明里：类型构造函数写成
     // `const Gen = fn(T: type, n: T) type { return struct{ … fn (self:Self) void … }; };`
@@ -5160,13 +5273,13 @@ fn inferExprType(text: []const u8, doc: *const Document, expr: []const u8, depth
             }
             // 类型值接收者（`const P = t.p1.P2T;` 之后的 `P.P3T`）：容器是
             // 它背后的那个类型；成员本身还是类型就写 `type`，是字段出字段类型。
-            if (isTypeValuedRecv(sf.items, doc, text, base, 0)) {
+            if (isTypeValuedRecv(sf.items, doc, text, base, 0, 0)) {
                 // 容器体优先走 containerOfBinding：它沿绑定的**初值路径**逐段
                 // 解析，体可以在扫描集之外的文件里（`const P: type = t.P1.P2;`
                 // 的 P2 在 vendor/test.zx，scanFiles 只扫文档目录 + std，
                 // findContainerBody 必然落空 → `const pp = P.P3;` 没有 `: type`、
                 // `P.P3.f3(…)` 也推不出返回类型）。用户 2026-11-11 第 7 张截图。
-                if (containerOfBinding(sf.items, doc, text, base, 0)) |pc| {
+                if (containerOfBinding(sf.items, doc, text, base, 0, 0)) |pc| {
                     if (memberIsTypeDecl(sf.items, pc.body, member)) return "type";
                     if (fieldTypeIn(pc.body, member)) |t| return t;
                     if (findDeclStmt(pc.body, member)) |st3| {
@@ -5175,7 +5288,7 @@ fn inferExprType(text: []const u8, doc: *const Document, expr: []const u8, depth
                     }
                     return null;
                 }
-                if (typeValuedContainer(sf.items, doc, text, base, 0)) |tc| {
+                if (typeValuedContainer(sf.items, doc, text, base, 0, 0)) |tc| {
                     if (findContainerBody(sf.items, tc)) |ch| {
                         if (memberIsTypeDecl(sf.items, ch.body, member)) return "type";
                         if (fieldTypeIn(ch.body, member)) |t| return t;
@@ -5223,7 +5336,7 @@ fn inferExprType(text: []const u8, doc: *const Document, expr: []const u8, depth
             // 实例成员 → 容器体里的字段类型 / 方法返回类型。
             // §157：泛型 fn 的 `return struct {…}` 走 genericBodyOf，
             // 而且字段类型里的 `T` 要按调用点实参替换成具体类型。
-            if (instanceContainerTy(sf.items, text, base)) |ty| {
+            if (instanceContainerTy(sf.items, text, base, 0)) |ty| {
                 const ibody: ?[]const u8 = if (findContainerBody(sf.items, ty)) |ch|
                     ch.body
                 else
@@ -5786,7 +5899,7 @@ fn tupleRecvTy(text: []const u8, doc: *const Document, expr0: []const u8,
 /// `f(…)` 返回 `?[]T`（如 std.file.read）。识别不了返回 null。
 /// KEEP — 用户 2026-11-09：`"hello".` 与切片变量的 `.` 一个成员都不出。
 /// sema 的 TY_SLICE 分支只有 .ptr / .len / .0，源文件里没有声明文本可查。
-fn sliceRecvTy(text: []const u8, doc: *const Document, expr0: []const u8, depth: u8) ?SliceTy {
+fn sliceRecvTy(text: []const u8, doc: *const Document, expr0: []const u8, depth: u8, limit: usize) ?SliceTy {
     if (depth > 4) return null;
     const e = trimSl(expr0);
     if (e.len == 0) return null;
@@ -5807,12 +5920,12 @@ fn sliceRecvTy(text: []const u8, doc: *const Document, expr0: []const u8, depth:
     for (e, 0..) |c, i| {
         if (!isIdentChar(c) or (i == 0 and c >= '0' and c <= '9')) return null;
     }
-    const st = findDeclStmt(text, e) orelse return null;
+    const st = findDeclStmtBefore(text, e, limit) orelse return null;
     if (declTyOf(st)) |dt| {
         if (parseSliceTy(dt)) |s| return s;
     }
     if (declInitOf(st)) |ini| {
-        if (!std.mem.eql(u8, ini, e)) return sliceRecvTy(text, doc, ini, depth + 1);
+        if (!std.mem.eql(u8, ini, e)) return sliceRecvTy(text, doc, ini, depth + 1, limit);
     }
     return null;
 }
@@ -5860,7 +5973,7 @@ fn resolveCalleeRet(text: []const u8, doc: *const Document, callee0: []const u8)
             if (sig.is_fn and sig.ret.len > 0) return selfToOwner(sig.ret, callee);
         }
         // 实例方法（`r.next()` / `g.await(…)`）：接收者是变量
-        if (instanceContainerTy(sf.items, text, bind)) |ty| {
+        if (instanceContainerTy(sf.items, text, bind, 0)) |ty| {
             if (findContainerBody(sf.items, ty)) |ch| {
                 if (findDeclStmt(ch.body, member)) |stmt| {
                     const sig = sigOfStmt(stmt);
@@ -5969,7 +6082,7 @@ fn variantOwnerOf(files: []const []const u8, owner: []const u8, last: []const u8
     return null;
 }
 
-fn inferContainer(files: []const []const u8, text: []const u8, expr: []const u8, depth: u8) ?[]const u8 {
+fn inferContainer(files: []const []const u8, text: []const u8, expr: []const u8, depth: u8, limit: usize) ?[]const u8 {
     if (depth > 6) return null;
     var e = trimSl(expr);
     // `x.?` 解包不改变容器身份：`arena.?.` 的接收者是 arena 的内层值
@@ -6008,8 +6121,8 @@ fn inferContainer(files: []const []const u8, text: []const u8, expr: []const u8,
         if (isContainerIn(files, head) or genericBodyOf(files, head) != null) return head;
         // 内建类型（Allocator）：没有声明文本，但成员表在
         if (isBuiltinTy(head)) return containerNameOf(head);
-        if (findDeclStmt(text, head)) |s2| {
-            if (declInitOf(s2)) |init2| return inferContainer(files, text, init2, depth + 1);
+        if (findDeclStmtBefore(text, head, limit)) |s2| {
+            if (declInitOf(s2)) |init2| return inferContainer(files, text, init2, depth + 1, limit);
         }
         return null;
     }
@@ -6023,14 +6136,14 @@ fn inferContainer(files: []const []const u8, text: []const u8, expr: []const u8,
         // 交给 containerMembersAny 的 genericBodyOf 分支。注：以前把 "type"
         // 当容器名继续解析，`List(2).` 与 `var x = List(2); x.` 一起返回
         // null（用户 2026-11-13 截图：泛型实例查不到字段/方法）。
-        if (findDeclStmt(text, head)) |s2| {
+        if (findDeclStmtBefore(text, head, limit)) |s2| {
             const sig = sigOfStmt(s2);
             if (sig.is_fn and sig.ret.len > 0) {
                 const rt0 = trimSl(sig.ret);
                 if (std.mem.eql(u8, rt0, "type")) {
                     return if (genericBodyOf(files, head) != null) head else null;
                 }
-                return inferContainer(files, text, rt0, depth + 1);
+                return inferContainer(files, text, rt0, depth + 1, limit);
             }
         }
         // 别名 / 模块函数（模板里没有声明文本，vendor 也一样）：返回 `type`
@@ -6076,7 +6189,7 @@ fn inferContainer(files: []const []const u8, text: []const u8, expr: []const u8,
     }
     // 末段后跟 '('：先按方法调用（接收者 = 去掉末段的路径），再按泛型
     // 实例化（末段是容器），最后按模块函数（std.time.fromUnixMs → DateTime）。
-    if (inferContainer(files, text, e[0..last_dot], depth + 1)) |recv| {
+    if (inferContainer(files, text, e[0..last_dot], depth + 1, limit)) |recv| {
         if (methodRetIn(files, recv, last)) |ret| {
             const rt = trimSl(ret);
             if (std.mem.eql(u8, rt, "Self")) return recv;
@@ -6084,7 +6197,7 @@ fn inferContainer(files: []const []const u8, text: []const u8, expr: []const u8,
             // 落到下面"方法没写返回类型就按接收者算"会错成 ArenaAllocator，
             // 于是 `arena.` 弹 init/reset/deinit（全编译不过）。
             if (isBuiltinTy(rt)) return containerNameOf(rt);
-            if (inferContainer(files, text, rt, depth + 1)) |r2| return r2;
+            if (inferContainer(files, text, rt, depth + 1, limit)) |r2| return r2;
         }
         // 方法没写返回类型 / 解析不出：按接收者容器算（保底）
         if (isContainerIn(files, recv) or genericBodyOf(files, recv) != null) return recv;
@@ -6115,7 +6228,7 @@ fn moduleFnContainerRet(files: []const []const u8, fn_name: []const u8) ?[]const
 fn instanceContainerName(text: []const u8, name: []const u8) ?[]const u8 {
     const s = findDeclStmt(text, name) orelse return null;
     const init = declInitOf(s) orelse return null;
-    return inferContainer(&.{text}, text, init, 0);
+    return inferContainer(&.{text}, text, init, 0, 0);
 }
 
 fn hoverAt(doc: *const Document, line: u32, character: u32) ?[]const u8 {
@@ -6174,7 +6287,7 @@ fn hoverAt(doc: *const Document, line: u32, character: u32) ?[]const u8 {
             if (recv.len > 0 and std.mem.indexOfScalar(u8, recv, '(') != null) {
                 var sfr = scanFiles(doc, text);
                 defer sfr.deinit(gpa);
-                if (inferContainer(sfr.items, text, recv, 0)) |rty| {
+                if (inferContainer(sfr.items, text, recv, 0, 0)) |rty| {
                     const rbody: ?[]const u8 = if (findContainerBody(sfr.items, rty)) |ch|
                         ch.body
                     else
@@ -6217,7 +6330,7 @@ fn hoverAt(doc: *const Document, line: u32, character: u32) ?[]const u8 {
             }
             const recv = trimSl(text[rs .. ms - 1]);
             if (recv.len > 0) {
-                if (sliceRecvTy(text, doc, recv, 0)) |si| {
+                if (sliceRecvTy(text, doc, recv, 0, off)) |si| {
                     if (std.mem.eql(u8, mn, "len")) {
                         var b: std.ArrayList(u8) = .empty;
                         b.print(gpa, "```zx\nlen: usize\n```", .{}) catch return null;
@@ -6311,12 +6424,12 @@ fn hoverAt(doc: *const Document, line: u32, character: u32) ?[]const u8 {
             // 绑定是限定类型路径（`let x = A.B.Cfg{…}` / `var z: A.B.C`）：
             // 逐段解析拿**那一层**的容器体，和补全用同一套判定——按末段
             // 名字找会撞上外层同名容器，字段 hover 直接空掉。
-            var ipc = instancePathContainer(sf.items, doc, text, bind);
+            var ipc = instancePathContainer(sf.items, doc, text, bind, off);
             // 接收者本身是多段表达式（`t.p1.P2T` 的 bind 是 `t.p1`）：
             // 绑定名查不到，走逐段路径解析（实例起点 / 类型值都会跟）。
             if (ipc == null and std.mem.indexOfScalar(u8, bind, '.') != null)
                 ipc = resolveContainerPath(sf.items, doc, text, bind);
-            const ity: ?[]const u8 = if (ipc) |pc| pc.name else instanceContainerTy(sf.items, text, bind);
+            const ity: ?[]const u8 = if (ipc) |pc| pc.name else instanceContainerTy(sf.items, text, bind, off);
             if (ity) |ty| {
                 // 泛型容器（std.ArrayList(i32) 实例）：findContainerBody 只认
                 // `const X = struct`，泛型 fn 里的 `return struct {…}` 落空，
@@ -6387,7 +6500,7 @@ fn hoverAt(doc: *const Document, line: u32, character: u32) ?[]const u8 {
             // `v.inner.a` 的 a 类型 = 模块 Outer 里 inner 的内联 struct 字段。
             {
                 var mitxt: ?[]const u8 = null;
-                if (modInstanceTyOfPath(doc, text, path, &mitxt)) |mty| {
+                if (modInstanceTyOfPath(doc, text, path, &mitxt, off)) |mty| {
                     var b: std.ArrayList(u8) = .empty;
                     b.print(gpa, "```zx\n{s}: {s}\n```", .{ member, mty }) catch return null;
                     return hoverPayload(b.items);
@@ -6405,7 +6518,7 @@ fn hoverAt(doc: *const Document, line: u32, character: u32) ?[]const u8 {
                 if (std.mem.eql(u8, trimSl(dt0), "type")) {
                     var hf = scanFiles(doc, text);
                     defer hf.deinit(gpa);
-                    if (containerOfBinding(hf.items, doc, text, path, 0)) |pc| {
+                    if (containerOfBinding(hf.items, doc, text, path, 0, off)) |pc| {
                         var hb: std.ArrayList(u8) = .empty;
                         hb.print(gpa, "```zx\npub const {s}: type = struct ", .{path}) catch return null;
                         hb.appendSlice(gpa, if (pc.body.len > 500) pc.body[0..500] else pc.body) catch return null;
@@ -6476,6 +6589,25 @@ fn containerHoverFromStmt(name: []const u8, stmt: []const u8) ?[]const u8 {
 /// 只有一行签名 `X(T: type) type`，看不到真实形状——与非泛型容器对齐。
 fn genericContainerDef(stmt: []const u8) ?[]const u8 {
     const it0 = trimSl(declInitOf(stmt) orelse return null);
+    // §190 泛型糖：`const X = struct (T: type, …) { … };` 的初值本身就是
+    // 容器定义（参数表判据与解析器一致：`(` 后首段是「IDENT ':'」，
+    // 排除 `struct(packed)`），整段直接贴出来。
+    if (std.mem.startsWith(u8, it0, "struct") or
+        std.mem.startsWith(u8, it0, "union"))
+    {
+        const kw_len: usize = if (std.mem.startsWith(u8, it0, "struct")) 6 else 5;
+        var pp = kw_len;
+        while (pp < it0.len and (it0[pp] == ' ' or it0[pp] == '\t')) pp += 1;
+        if (pp < it0.len and it0[pp] == '(') {
+            var q2 = pp + 1;
+            while (q2 < it0.len and (it0[q2] == ' ' or it0[q2] == '\t')) q2 += 1;
+            var e2 = q2;
+            while (e2 < it0.len and isIdentChar(it0[e2])) e2 += 1;
+            while (e2 < it0.len and (it0[e2] == ' ' or it0[e2] == '\t')) e2 += 1;
+            if (e2 > q2 and e2 < it0.len and it0[e2] == ':') return it0;
+        }
+        return null;
+    }
     if (!std.mem.startsWith(u8, it0, "fn")) return null;
     var i: usize = 0;
     while (i < it0.len) : (i += 1) {
@@ -6880,7 +7012,7 @@ fn calleeStmt(ctx: *InlayCtx, callee0: []const u8) ?[]const u8 {
         //（`std.arena.ArenaAllocator.init`、`std.map.HashMap(i32).init`）
         const fl = ctx.fileList();
         if (resolveMemberPath(fl, ctx.doc, text, callee, 0)) |hit| return hit.stmt;
-        if (instanceContainerTy(fl, text, bind)) |ty| {
+        if (instanceContainerTy(fl, text, bind, 0)) |ty| {
             if (findContainerBody(fl, ty)) |ch| {
                 if (findDeclStmt(ch.body, member)) |st| return st;
             }
@@ -7376,7 +7508,7 @@ fn signatureHelpAt(doc: *const Document, line: u32, character: u32) ?[]const u8 
             var sf = scanFiles(doc, text);
             defer sf.deinit(gpa);
             var stmt: ?[]const u8 = null;
-            if (instanceContainerTy(sf.items, text, bind)) |ty| {
+            if (instanceContainerTy(sf.items, text, bind, 0)) |ty| {
                 if (findContainerBody(sf.items, ty)) |ch|
                     stmt = findDeclStmt(ch.body, member);
             }
@@ -8007,10 +8139,10 @@ fn captureBindTy(text: []const u8, doc: *const Document, name: []const u8) ?[]co
 /// 接收者的声明类型是可选值（`?T`）时，返回解包后的内层类型串。
 /// `arena.` 在 Zx 里唯一合法后缀是 `.?`——`arena.alloc` 编译不过，所以
 /// 不能把内层类型的成员摆出来（用户 2026-11-10 截图同一处）。
-fn recvOptionalTy(text: []const u8, doc: *const Document, recv: []const u8) ?[]const u8 {
+fn recvOptionalTy(text: []const u8, doc: *const Document, recv: []const u8, limit: usize) ?[]const u8 {
     if (recv.len == 0) return null;
     const ty0: []const u8 = blk: {
-        if (findDeclStmt(text, recv)) |st| {
+        if (findDeclStmtBefore(text, recv, limit)) |st| {
             if (declTyOf(st)) |dt| break :blk trimSl(dt);
         }
         break :blk inferExprType(text, doc, recv, 0) orelse return null;
@@ -8112,9 +8244,9 @@ fn genericCalleeOf(files: []const []const u8, text: []const u8, callee0: []const
 /// 以及它们的别名链。类型值上只有静态成员——判错就会把字段和方法全
 /// 摆出来（用户 2026-11-10 截图：`HS.` 弹出 alloc/cap/hashes/…）。
 fn isTypeValuedRecv(files: []const []const u8, doc: *const Document,
-                    text: []const u8, name: []const u8, depth: u8) bool {
+                    text: []const u8, name: []const u8, depth: u8, limit: usize) bool {
     if (depth > 4 or name.len == 0) return false;
-    const st = findDeclStmt(text, name) orelse return false;
+    const st = findDeclStmtBefore(text, name, limit) orelse return false;
     if (declTyOf(st)) |dt| {
         if (std.mem.eql(u8, trimSl(dt), "type")) return true;
     }
@@ -8136,7 +8268,7 @@ fn isTypeValuedRecv(files: []const []const u8, doc: *const Document,
     // 裸别名：const A = B;
     var j: usize = 0;
     while (j < e.len and isIdentChar(e[j])) j += 1;
-    if (j == e.len) return isTypeValuedRecv(files, doc, text, e, depth + 1);
+    if (j == e.len) return isTypeValuedRecv(files, doc, text, e, depth + 1, limit);
     // 限定路径别名：`const AB = m.A.B;` —— 也是类型值（此前只认裸名字
     // 别名，多段引用被判成实例，`AB.` 的静态成员与嵌套类型全被过滤掉）。
     if (isPurePath(e)) {
@@ -8145,7 +8277,7 @@ fn isTypeValuedRecv(files: []const []const u8, doc: *const Document,
     const last = finalCalleeOf(e) orelse return false;
     if (isContainerIn(files, last) or genericBodyOf(files, last) != null) return true;
     if (genericCalleeOf(files, text, last) != null) return true;
-    if (findDeclStmt(text, last)) |fst| {
+    if (findDeclStmtBefore(text, last, limit)) |fst| {
         const sg = sigOfStmt(fst);
         if (sg.is_fn and std.mem.eql(u8, trimSl(sg.ret), "type")) return true;
     }
@@ -8154,15 +8286,15 @@ fn isTypeValuedRecv(files: []const []const u8, doc: *const Document,
 
 /// 类型值背后的容器：`HS` → HashMap、`T2` → Make 体里 return 的容器。
 fn typeValuedContainer(files: []const []const u8, doc: *const Document,
-                       text: []const u8, name: []const u8, depth: u8) ?[]const u8 {
+                       text: []const u8, name: []const u8, depth: u8, limit: usize) ?[]const u8 {
     if (depth > 4 or name.len == 0) return null;
-    const st = findDeclStmt(text, name) orelse return null;
+    const st = findDeclStmtBefore(text, name, limit) orelse return null;
     const init = declInitOf(st) orelse return null;
     const e = trimSl(init);
     if (e.len == 0) return null;
     var j: usize = 0;
     while (j < e.len and isIdentChar(e[j])) j += 1;
-    if (j == e.len) return typeValuedContainer(files, doc, text, e, depth + 1);
+    if (j == e.len) return typeValuedContainer(files, doc, text, e, depth + 1, limit);
     if (isPurePath(e)) {
         if (resolveContainerPath(files, doc, text, e)) |pc| return pc.name;
         // 退路：`const P: type = t.P1.P2;` 里 t 解析不到时按末段名字找 P2，
@@ -8172,7 +8304,7 @@ fn typeValuedContainer(files: []const []const u8, doc: *const Document,
     const last = finalCalleeOf(e) orelse return null;
     if (isContainerIn(files, last) or genericBodyOf(files, last) != null) return last;
     if (genericCalleeOf(files, text, last)) |gc| return gc;
-    if (fnRetExprOf(text, last)) |ret| return inferContainer(files, text, ret, depth + 1);
+    if (fnRetExprOf(text, last)) |ret| return inferContainer(files, text, ret, depth + 1, limit);
     return null;
 }
 
@@ -8348,7 +8480,7 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                                         const cx = trimSl(text[cs2..q2]);
                                         var sfx = scanFiles(doc, text);
                                         defer sfx.deinit(gpa);
-                                        if (inferContainer(sfx.items, text, cx, 0) != null) {
+                                        if (inferContainer(sfx.items, text, cx, 0, 0) != null) {
                                             ok = true;
                                             qs = cs2;
                                         }
@@ -8413,7 +8545,7 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
         // init 的返回类型忽略、按接收者 ArenaAllocator 出 init/reset/deinit，
         // 三条全是编译错误（optional 没有成员，只有 `.?`）。
         if (!lit_ctx) {
-            if (recvOptionalTy(text, doc, path)) |inner| {
+            if (recvOptionalTy(text, doc, path, ps)) |inner| {
                 if (prefix.len == 0 or std.mem.startsWith(u8, "?", prefix)) {
                     var db: std.ArrayList(u8) = .empty;
                     db.print(gpa, "解包可选值 → {s}", .{inner}) catch {};
@@ -8537,7 +8669,7 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                         if (mtxt == null and bind.len > 0) {
                             var cf9 = scanFiles(doc, text);
                             defer cf9.deinit(gpa);
-                            if (containerOfBinding(cf9.items, doc, text, bind, 0)) |pc9| {
+                            if (containerOfBinding(cf9.items, doc, text, bind, 0, ps)) |pc9| {
                                 if (pc9.src.len > 0 and !std.mem.eql(u8, pc9.src, text)) mtxt = pc9.src;
                             } else if (resolveContainerPathLoose(cf9.items, doc, text, bind)) |pc8| {
                                 if (pc8.src.len > 0 and !std.mem.eql(u8, pc8.src, text)) mtxt = pc8.src;
@@ -8771,7 +8903,7 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                 const bare_ok = expr_recv or
                     (!isContainerIn(cf.items, path) and genericBodyOf(cf.items, path) == null);
                 if (bare_ok) infer_blk: {
-                    const ty0 = inferContainer(cf.items, text, path, 0) orelse break :infer_blk;
+                    const ty0 = inferContainer(cf.items, text, path, 0, ps) orelse break :infer_blk;
                     // 裸名字只接**泛型类型构造函数**（`List(2)`）这一种：
                     // `vp.Cfg{…}` / `std.json.Obj{…}` / `m.A.B.Cfg{…}` 这些
                     // 限定路径实例有专门的 vendor/逐段分支，抢过来只会让
@@ -8795,7 +8927,7 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                             // 单段裸名字也可能是**类型值**（`const L: type =
                             // List(2)` 的 `L.`）：那种接收者只有静态成员，
                             // 摆出字段会写成编译不过的 `L.genId`。
-                            if (isTypeValuedRecv(cf.items, doc, text, path, 0)) recv_kind = .ty;
+                            if (isTypeValuedRecv(cf.items, doc, text, path, 0, ps)) recv_kind = .ty;
                             mem_txt = ctxt0;
                             markContainerFns(ctxt0, &decls);
                             owner = ty0;
@@ -8812,7 +8944,7 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
             // TY_SLICE 分支只有 .ptr / .len（.0 取首元素，不给补全），
             // 源文件里没有声明文本，成员与类型直接按语义规则出。
             if (!handled) {
-                if (sliceRecvTy(text, doc, path, 0)) |si| {
+                if (sliceRecvTy(text, doc, path, 0, ps)) |si| {
                     handled = true;
                     addSliceMembers(&list, &seen, prefix, si);
                 }
@@ -8955,13 +9087,13 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                     // `const HS: type = std.map.HashMap(V: i32); HS.` 是"类型上
                     // 只有静态成员"，不是实例——此前按初始化式推出 HashMap 就当
                     // 实例，alloc/cap/hashes/n/vals 和全部方法一起弹出来。
-                    const recv_type = isTypeValuedRecv(files.items, doc, text, container, 0);
+                    const recv_type = isTypeValuedRecv(files.items, doc, text, container, 0, ps);
                     // 绑定的声明/初始化是限定类型路径（`var z: A.B.C`、
                     // `let x = A.B.Cfg{…}`）：逐段解析到那一层容器。以前
                     // inferContainer 把 `A.B.Cfg{…}` 折成末段 "Cfg"，撞上
                     // 顶层同名容器——字段变别人的、第三层直接空列表。
 
-                    if (instancePathContainer(files.items, doc, text, container)) |pc| {
+                    if (instancePathContainer(files.items, doc, text, container, off)) |pc| {
                         extractBraceMembers(pc.body, pc.is_enum, &decls);
                         handled = decls.items.len > 0;
                         if (handled) {
@@ -8998,10 +9130,10 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                         }
                     }
                     if (!handled) {
-                        if (inferContainer(files.items, text, container, 0) orelse blk: {
-                            const s = findDeclStmt(text, container) orelse break :blk null;
+                        if (inferContainer(files.items, text, container, 0, ps) orelse blk: {
+                            const s = findDeclStmtBefore(text, container, ps) orelse break :blk null;
                             const init2 = declInitOf(s) orelse break :blk null;
-                            break :blk inferContainer(files.items, text, init2, 1);
+                            break :blk inferContainer(files.items, text, init2, 1, ps);
                         }) |ty| {
                             // KEEP — 实例成员要带声明文件文本（用户 2026-11-09
                             // 第 2/3 条：std.Task/ArenaAllocator 实例的方法
@@ -9024,7 +9156,7 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                     // Make(i32)`，Make 的返回类型是 type，容器在它 return 的
                     // 表达式里）——按类型成员出，绝不退回实例。
                     if (!handled and recv_type) {
-                        if (typeValuedContainer(files.items, doc, text, container, 0)) |cty| {
+                        if (typeValuedContainer(files.items, doc, text, container, 0, ps)) |cty| {
                             if (containerMembersAny(files.items, cty, &decls)) |ctxt| {
                                 handled = decls.items.len > 0;
                                 if (handled) {
@@ -9057,7 +9189,7 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                             // inferExprType 只剩末段名，同名嵌套类型会解析到外层
                             // 同名容器（用户 2026-11-11 第三层空列表的根因）。
                             var tyexpr: ?[]const u8 = null;
-                            if (findDeclStmt(text, recv)) |st| {
+                            if (findDeclStmtBefore(text, recv, off)) |st| {
                                 if (declTyOf(st)) |dt| {
                                     ity = trimSl(dt);
                                     tyexpr = trimSl(dt);
@@ -9126,7 +9258,7 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                             } else {
                                 var cfp = scanFiles(doc, text);
                                 defer cfp.deinit(gpa);
-                                if (inferContainer(cfp.items, text, pt, 0)) |cy| {
+                                if (inferContainer(cfp.items, text, pt, 0, 0)) |cy| {
                                     if (containerMembersAny(cfp.items, cy, &decls)) |ctxtp| {
                                         handled = decls.items.len > 0;
                                         if (handled) {
@@ -9165,7 +9297,7 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                     // struct），`v.inner.a` 供 hover 用。前面解析不到才兜到这里。
                     if (!handled) {
                         var mitxt: ?[]const u8 = null;
-                        if (modInstanceTyOfPath(doc, text, path, &mitxt)) |mty| {
+                        if (modInstanceTyOfPath(doc, text, path, &mitxt, off)) |mty| {
                             if (parseAnonTy(mty)) |flds| {
                                 var named: usize = 0;
                                 for (flds.items) |f| {
@@ -9453,7 +9585,7 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                     const is_ty_name = isContainerIn(sf149.items, tname) or
                         genericBodyOf(sf149.items, tname) != null or
                         builtinTyMembers(tname, &tprobe) or
-                        isTypeValuedRecv(sf149.items, doc, text, tname, 0);
+                        isTypeValuedRecv(sf149.items, doc, text, tname, 0, ps);
                     if (is_ty_name)
                         tyCtorFallback(&list, &seen, text, path, ps - 1, off, decls.items);
                 }

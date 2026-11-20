@@ -176,11 +176,13 @@ pub const stat = fn (alloc: Allocator, path: []const u8) ?Stat {
                 _ = FindClose(h);
                 alloc.free(alloc.ctx, fd, FD_BUF);
                 tag fd: null;
+                alloc.free(alloc.ctx, z.ptr, z.len + 1);
                 return s;
             }
             alloc.free(alloc.ctx, fd, FD_BUF);
             tag fd: null;
         }
+        alloc.free(alloc.ctx, z.ptr, z.len + 1);   // zpath 的 NUL 后缀也在分配里
     }
     return null;
 };
@@ -190,7 +192,9 @@ pub const stat = fn (alloc: Allocator, path: []const u8) ?Stat {
 pub const exists = fn (alloc: Allocator, path: []const u8) bool {
     let zp = zpath(alloc, path);
     if (zp) z {
-        return GetFileAttributesA(z.ptr) != 0xFFFFFFFF;
+        let r = GetFileAttributesA(z.ptr) != 0xFFFFFFFF;
+        alloc.free(alloc.ctx, z.ptr, z.len + 1);
+        return r;
     }
     return false;
 };
@@ -199,7 +203,9 @@ pub const exists = fn (alloc: Allocator, path: []const u8) bool {
 pub const createDir = fn (alloc: Allocator, path: []const u8) bool {
     let zp = zpath(alloc, path);
     if (zp) z {
-        return CreateDirectoryA(z.ptr, 0) != 0;
+        let r = CreateDirectoryA(z.ptr, 0) != 0;
+        alloc.free(alloc.ctx, z.ptr, z.len + 1);
+        return r;
     }
     return false;
 };
@@ -208,7 +214,9 @@ pub const createDir = fn (alloc: Allocator, path: []const u8) bool {
 pub const removeFile = fn (alloc: Allocator, path: []const u8) bool {
     let zp = zpath(alloc, path);
     if (zp) z {
-        return DeleteFileA(z.ptr) != 0;
+        let r = DeleteFileA(z.ptr) != 0;
+        alloc.free(alloc.ctx, z.ptr, z.len + 1);
+        return r;
     }
     return false;
 };
@@ -217,7 +225,9 @@ pub const removeFile = fn (alloc: Allocator, path: []const u8) bool {
 pub const removeDir = fn (alloc: Allocator, path: []const u8) bool {
     let zp = zpath(alloc, path);
     if (zp) z {
-        return RemoveDirectoryA(z.ptr) != 0;
+        let r = RemoveDirectoryA(z.ptr) != 0;
+        alloc.free(alloc.ctx, z.ptr, z.len + 1);
+        return r;
     }
     return false;
 };

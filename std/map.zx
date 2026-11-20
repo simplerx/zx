@@ -28,8 +28,7 @@ pub const fnv1a = fn (s: []const u8) u64 {
     return h;
 };
 
-pub const HashMap = fn (V: type) type {
-    return struct {
+pub const HashMap = struct (V: type) {
         keys: *[]const u8,      // 每格一个切片；空不空看 hashes
         hashes: *u64,           // 每格一个哈希：0 = 空槽（FNV 结果为 0 时存 1）
         vals: *V,
@@ -211,5 +210,4 @@ pub const HashMap = fn (V: type) type {
             }
             return false;
         };
-    };
 };

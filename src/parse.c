@@ -226,6 +226,91 @@ static Node *parse_vec_type(P *p, int line, int col) {
     return n;
 }
 
+/* struct 的成员体（字段、方法、声明）。吃掉到 `}` 为止的全部成员
+ * 并 expect 掉右括号——普通 struct 与 §190 泛型 struct 的体共用这一个
+ * 循环，避免两份拷贝漂移。（union 的成员节点形状不同，另有循环。） */
+static Node *parse_struct_members(P *p, Node *n) {
+    expect(p, TOK_LBRACE);
+    while (!at(p, TOK_RBRACE) && !at(p, TOK_EOF_)) {
+        /* 成员默认私有（只在声明它的文件里可见），`pub` 才对外——
+         * 和顶层声明同一套规则。 */
+        bool mem_pub = false;
+        if (at(p, TOK_KW_PUB)) { advance(p); mem_pub = true; }
+        /* 方法只有一种写法：`const name = fn (…) R { … };`（v0.24）。
+         * 解析成带名字的 NK_FN——方法表吃的一直是这个形状，语义层
+         * 不用为"两种写法"分叉。 */
+        if (at(p, TOK_KW_CONST) && peek(p, 1)->kind == TOK_IDENT &&
+            peek(p, 2)->kind == TOK_ASSIGN && peek(p, 3)->kind == TOK_KW_FN) {
+            advance(p);                      /* const */
+            const char *mname = take_ident(p);
+            advance(p);                      /* '=' */
+            Node *f = parse_fn(p, true);
+            f->name = mname;
+            f->is_pub = mem_pub;
+            expect(p, TOK_SEMI);
+            push(n, f);
+            continue;
+        }
+        if (at(p, TOK_KW_CONST) || at(p, TOK_KW_LET) || at(p, TOK_KW_VAR)) {
+            Node *d = parse_decl(p);
+            d->is_pub = mem_pub;
+            push(n, d);
+            continue;
+        }
+        if (at(p, TOK_KW_FN)) {
+            Node *f = parse_fn(p, false);
+            f->is_pub = mem_pub;
+            push(n, f);
+            continue;
+        }
+        /* 位置取字段名，不取 `struct` 关键字：字段相关的诊断（重名、
+         * 默认值类型不对、递归包含）都该指在那一行那一列上。 */
+        int fline = cur(p)->line, fcol = cur(p)->col;
+        const char *fname = take_ident(p);
+        expect(p, TOK_COLON);
+        Node *ty = parse_type(p);
+        Node *f = node_new(NK_PARAM, fline, fcol);
+        f->name = fname;
+        f->a = ty;
+        f->is_pub = mem_pub;
+        if (accept(p, TOK_ASSIGN)) f->b = parse_expr(p);
+        accept(p, TOK_COMMA);
+        push(n, f);
+    }
+    expect(p, TOK_RBRACE);
+    return n;
+}
+
+/* §190 泛型 struct 糖：`struct (T: type, N: usize) { 字段 }` 脱糖成
+ * `fn (T: type, N: usize) type { return struct { 字段 }; }`——与手写
+ * 泛型函数完全同一个 AST，sema/backend 的 specialize 机制零分叉。
+ * 判定条件：`(` 后面是「IDENT ':'」（参数），区别于旧的 `struct(packed)`。 */
+static Node *parse_generic_struct(P *p, Token *t) {
+    Node *fn = node_new(NK_FN, t->line, t->col);
+    expect(p, TOK_LPAREN);
+    if (!at(p, TOK_RPAREN)) {
+        for (;;) {
+            Node *pm = node_new(NK_PARAM, cur(p)->line, cur(p)->col);
+            pm->name = take_ident(p);
+            expect(p, TOK_COLON);
+            pm->a = parse_type(p);
+            push(fn, pm);
+            if (!accept(p, TOK_COMMA)) break;
+            if (at(p, TOK_RPAREN)) break;    /* 尾逗号：struct(T: type,) */
+        }
+    }
+    expect(p, TOK_RPAREN);
+    fn->a = type_ident("type", t->line, t->col);   /* 返回 type：类型构造函数 */
+    Node *st = node_new(NK_STRUCT_TYPE, cur(p)->line, cur(p)->col);
+    parse_struct_members(p, st);
+    Node *ret = node_new(NK_RETURN, st->line, st->col);
+    ret->a = st;
+    Node *blk = node_new(NK_BLOCK, st->line, st->col);
+    push(blk, ret);
+    fn->b = blk;
+    return fn;
+}
+
 static Node *parse_type_primary(P *p) {
     Token *t = cur(p);
     switch (t->kind) {
@@ -321,61 +406,19 @@ static Node *parse_type_primary(P *p) {
     case TOK_KW_STRUCT: {
         advance(p);
         Node *n = node_new(NK_STRUCT_TYPE, t->line, t->col);
-        if (accept(p, TOK_LPAREN)) {
+        if (at(p, TOK_LPAREN)) {
+            /* §190：`struct (T: type, N: usize) { … }` 泛型糖（参数表）。
+             * 旧的 `struct(packed)` 是「IDENT 后直接 `)`」，不冲突。 */
+            if (peek(p, 1)->kind == TOK_IDENT && peek(p, 2)->kind == TOK_COLON) {
+                return parse_generic_struct(p, t);
+            }
+            accept(p, TOK_LPAREN);
             const char *mode = take_ident(p);
             if (strcmp(mode, "packed") == 0) n->flag = true;
             expect(p, TOK_RPAREN);
         }
         /* body: fields, methods, decls */
-        expect(p, TOK_LBRACE);
-        while (!at(p, TOK_RBRACE) && !at(p, TOK_EOF_)) {
-            /* 成员默认私有（只在声明它的文件里可见），`pub` 才对外——
-             * 和顶层声明同一套规则。 */
-            bool mem_pub = false;
-            if (at(p, TOK_KW_PUB)) { advance(p); mem_pub = true; }
-            /* 方法只有一种写法：`const name = fn (…) R { … };`（v0.24）。
-             * 解析成带名字的 NK_FN——方法表吃的一直是这个形状，语义层
-             * 不用为"两种写法"分叉。 */
-            if (at(p, TOK_KW_CONST) && peek(p, 1)->kind == TOK_IDENT &&
-                peek(p, 2)->kind == TOK_ASSIGN && peek(p, 3)->kind == TOK_KW_FN) {
-                advance(p);                      /* const */
-                const char *mname = take_ident(p);
-                advance(p);                      /* '=' */
-                Node *f = parse_fn(p, true);
-                f->name = mname;
-                f->is_pub = mem_pub;
-                expect(p, TOK_SEMI);
-                push(n, f);
-                continue;
-            }
-            if (at(p, TOK_KW_CONST) || at(p, TOK_KW_LET) || at(p, TOK_KW_VAR)) {
-                Node *d = parse_decl(p);
-                d->is_pub = mem_pub;
-                push(n, d);
-                continue;
-            }
-            if (at(p, TOK_KW_FN)) {
-                Node *f = parse_fn(p, false);
-                f->is_pub = mem_pub;
-                push(n, f);
-                continue;
-            }
-            /* 位置取字段名，不取 `struct` 关键字：字段相关的诊断（重名、
-             * 默认值类型不对、递归包含）都该指在那一行那一列上。 */
-            int fline = cur(p)->line, fcol = cur(p)->col;
-            const char *fname = take_ident(p);
-            expect(p, TOK_COLON);
-            Node *ty = parse_type(p);
-            Node *f = node_new(NK_PARAM, fline, fcol);
-            f->name = fname;
-            f->a = ty;
-            f->is_pub = mem_pub;
-            if (accept(p, TOK_ASSIGN)) f->b = parse_expr(p);
-            accept(p, TOK_COMMA);
-            push(n, f);
-        }
-        expect(p, TOK_RBRACE);
-        return n;
+        return parse_struct_members(p, n);
     }
 
     case TOK_KW_UNION: {
@@ -2160,6 +2203,7 @@ static const char *nk_name(NodeKind k) {
     case NK_SLICE_TYPE: return "sliceT";
     case NK_TUPLE_TYPE: return "tupleT";
     case NK_STRUCT_TYPE: return "struct";
+    case NK_REPEAT_TYPE: return "repeatT";   /* [T; N]：对拍名与 bootstrap 一致 */
     case NK_UNION_TYPE: return "union";
     case NK_ENUM_TYPE: return "enum";
     case NK_OPT_TYPE: return "opt";

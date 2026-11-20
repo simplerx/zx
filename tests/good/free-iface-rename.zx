@@ -1,0 +1,21 @@
+// §191：std.free(a, s) 改写成 a.deinit(s) 时，.ctx 表达式是调用点现场的
+// 克隆——克隆体必须保留标识符叶子的 sym。本用例的局部变量名（pool）与
+// pool 模块前缀/运行期符号撞车，被 local_cname 改名（行_列后缀）；克隆体
+// 一旦丢 sym，后端就发裸名，C 编译器报 use of undeclared（B1001）。
+const std = @mod("std");
+
+pub const main = fn () u8 {
+    var pool = std.pool.Pool.init(std.heap.page).?;
+    defer pool.deinit();
+    var pp = std.heapAlloc(pool.allocator(), i32, 10);
+    std.free(pool.allocator(), pp);
+    _ = pp;
+    // 字段链实参同样走 deinit 变换的克隆：ptr/len 两份都要保留 sym
+    var w = Wrapper{ .p = std.heapAlloc(std.heap.page, u8, 8) };
+    std.free(std.heap.page, w.p);
+    return 0;
+};
+
+const Wrapper = struct {
+    p: *[8]u8,
+};
