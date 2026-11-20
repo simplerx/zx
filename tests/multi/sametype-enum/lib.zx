@@ -1,0 +1,7 @@
+// §197：lib 侧同名 pub enum。裸变体 B 的隐式 tag=1。
+// 这里刻意都用「无显式值」的裸变体：A=0、B=1、C=2。
+pub const E = enum { A, B, C };
+
+pub const isB = fn (e: E) bool {
+    return e == E.B;
+};

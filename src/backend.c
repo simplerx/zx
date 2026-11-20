@@ -5336,8 +5336,13 @@ static void ex(Buf *b, Node *n) {
              * sema 一直是这么判的（结构体走普通字段查找），后端以前无条件
              * 发 `layout_size`，于是 `h.size` 静默变成 `sizeof(h)`——
              * 编译过、答案是 8。两边必须用同一条规则判。 */
-            bool shadowed = (bt->kind == TY_STRUCT || bt->kind == TY_UNION) &&
-                            ty_field(bt, n->name) != NULL;
+            /* §197：裸指针 *S 没有 .size/.len 内建——穿透一层查 S 的字段，
+             * 命中就走普通字段访问（下面 TY_PTR 分支发 p->size）。与
+             * check_field / ct_field 同口径：elem 有同名字段即字段优先。 */
+            Type *probe = bt;
+            if (probe && probe->kind == TY_PTR && !probe->has_len) probe = probe->elem;
+            bool shadowed = (probe->kind == TY_STRUCT || probe->kind == TY_UNION) &&
+                            ty_field(probe, n->name) != NULL;
             bool is_len = !shadowed && !strcmp(n->name, "len");
             bool is_size = !shadowed && !strcmp(n->name, "size");
             if (is_size) {
@@ -5699,6 +5704,24 @@ static void ex(Buf *b, Node *n) {
     case NK_BIN: {
         const char *op = cop(n->op);
         if (!op) { ex(b, n->a); return; }
+        /* §197：`opt == null` / `null == opt` 的运行时判定。非扁平 `?T` 在 C
+         * 里是 `{payload, tag}` struct，不能整体 `== 0`（B1001）；语义是判 tag
+         * （tag=true 有值）。扁平 `?*T` 是指针，走通用 `p == 0` 即可。
+         * 用 `((expr).tag)`——C 对调用结果取字段只求值一次。 */
+        if (n->op == TOK_EQ || n->op == TOK_NE) {
+            Node *opt = NULL;
+            Type *ot = NULL;
+            if (n->a->ty && n->a->ty->kind == TY_OPT &&
+                n->b && n->b->kind == NK_NULL) { opt = n->a; ot = n->a->ty; }
+            else if (n->b->ty && n->b->ty->kind == TY_OPT &&
+                     n->a && n->a->kind == NK_NULL) { opt = n->b; ot = n->b->ty; }
+            if (opt && ot && !ty_opt_flat(ot)) {
+                buf_puts(b, n->op == TOK_EQ ? "(!(" : "((");
+                ex(b, opt);
+                buf_puts(b, n->op == TOK_EQ ? ").tag)" : ").tag)");
+                return;
+            }
+        }
         /* §162：向量比较。C 里 `a < b` 本来就给出逐分量的有符号整数向量
          * （0 / -1），但目标类型是 sema 算出来的掩码类型，写显式 cast 比
          * 让 C 的隐式转换去猜清楚。算术（+ - * /）不需要这层，直接逐分量。 */
@@ -7351,6 +7374,20 @@ static void val_init(Buf *b, Value *v, Type *t) {
     }
     case V_PTR:
         if (v->base) {
+            /* §197：字符串字面量的 .ptr 折成 V_PTR(base=V_STR)。它是静态
+             * 只读数据地址，是编译期常量指针——必须发裸指针 `((uint8_t*)s)`，
+             * 不能递归 val_init(base) 那样会按切片形状发 `{ptr, len}`（元素
+             * 类型是裸指针时就形状不匹配）。off 是子串偏移，按字节加。 */
+            if (v->base->kind == V_STR) {
+                Buf s; buf_init(&s);
+                cstr(&s, v->base->sval ? v->base->sval : "", v->base->slen);
+                if (v->off)
+                    buf_printf(b, "((uint8_t*)%s + %llu)", s.data,
+                               (unsigned long long)v->off);
+                else
+                    buf_printf(b, "((uint8_t*)%s)", s.data);
+                return;
+            }
             val_init(b, v->base, t && t->kind == TY_PTR ? t->elem : t);
             return;
         }
@@ -7382,8 +7419,11 @@ static bool is_const_init(Node *n) {
         if (!n->name) return false;
         /* 同 ex()：聚合体自己的同名字段优先，那不是编译期常量 */
         Type *bt = n->a ? n->a->ty : NULL;
-        if (bt && (bt->kind == TY_STRUCT || bt->kind == TY_UNION) &&
-            ty_field(bt, n->name))
+        /* §197：裸指针穿透一层查字段——`p.size` 若是 S 的字段就不是常量 */
+        Type *probe = bt;
+        if (probe && probe->kind == TY_PTR && !probe->has_len) probe = probe->elem;
+        if (probe && (probe->kind == TY_STRUCT || probe->kind == TY_UNION) &&
+            ty_field(probe, n->name))
             return false;
         /* §154：切片自己存了 len，.len 和 .size 都是运行期值；
          * 只有长度写在类型里（*[N]T / 元组 / 聚合）才是 C 常量表达式。 */
@@ -7402,7 +7442,14 @@ static bool is_const_init(Node *n) {
 static bool is_view_expr(Node *n) {
     if (!n) return false;
     switch (n->kind) {
-    case NK_SLICE: case NK_UN: case NK_CAST: case NK_IDENT: case NK_FIELD:
+    case NK_SLICE: case NK_UN: case NK_CAST: case NK_IDENT:
+        return true;
+    case NK_FIELD:
+        /* §197：字符串字面量的 .ptr 指向静态只读数据，是货真价实的编译期
+         * 地址常量——不是"指向已有可变对象的视图"，物化不会断别名。放行
+         * 它走 val_init 静态初始化（生成 `((uint8_t*)"...")`）。 */
+        if (n->name && !strcmp(n->name, "ptr") && n->a && n->a->kind == NK_STR)
+            return false;
         return true;
     /* 指针算术的结果仍是视图：物化就成了"另拷一份数据" */
     case NK_BIN:

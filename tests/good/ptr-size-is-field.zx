@@ -1,0 +1,22 @@
+// §197：裸指针没有 `.size` 内建——`p.size` 命中 elem 的同名字段就走字段。
+//
+// 修前：类型检查按字段走（*S.size → S.size，类型 i32），但常量折叠与代码
+// 生成的 `shadowed` 只检测 TY_STRUCT/TY_UNION、没穿透 TY_PTR，于是 p.size
+// 被折成/发射成"指针自身字节数 8"——静默给出错误答案（直接=77，
+// 经指针=8），且 const 场景会被误判成编译期常量。
+// 修后：ct_field / ex / is_const_init 三处穿透一层 TY_PTR 查字段，与
+// check_field 同口径；无同名字段的裸指针 .size 仍报 "has no count"。
+// expect-exit: 0
+// expect-output
+// direct=77 via_ptr=77 sum=154
+const std = @mod("std");
+
+const S = struct { size: i32, tag: i32 };
+
+const main = fn () u8 {
+    var s: S = .{ .size = 77, .tag = 1 };
+    let p: *S = &s;
+    std.println("direct={} via_ptr={} sum={}", s.size, p.size, s.size + p.size);
+    if (p.size != 77) { return 1; }
+    return 0;
+};

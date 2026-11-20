@@ -1,0 +1,40 @@
+// §197：optional 与 null 的相等比较——`opt == null` / `null == opt` 判空。
+//
+// 非扁平 ?T 在 C 里是 {payload, tag} struct，不能整体 == 0（B1001）；
+// 发射成 !x.tag / x.tag（tag=true 表示有值）。扁平 ?*T 是指针，走 p==0。
+// 编译期能算出值的比较在 check 阶段直接折成 bool 常量（R1 要求）。
+const std = @mod("std");
+
+const SOME: ?i32 = 42;
+const NONE: ?i32 = null;
+const ZERO: ?i32 = 0;
+
+const main = fn () u8 {
+    // 编译期折叠（const）
+    if (SOME == null) { return 1; }
+    if (!(NONE == null)) { return 2; }
+    if (ZERO == null) { return 3; }
+    if (!(null != SOME)) { return 4; }
+    if (!(null == NONE)) { return 5; }
+
+    // 运行期（var，发射 .tag 判定）
+    var x: ?i32 = null;
+    var y: ?i32 = 42;
+    if (!(x == null) || x != null) { return 6; }
+    if (y == null || !(y != null)) { return 7; }
+    if (!(null == x) || null != x) { return 8; }
+    if (null == y || !(null != y)) { return 9; }
+
+    // 扁平 ?*T 仍按 0 指针比较
+    var p: ?*i32 = null;
+    if (p != null) { return 10; }
+    var v: i32 = 5;
+    p = &v;
+    if (p == null) { return 11; }
+
+    std.println("opt-null ok");
+    return 0;
+};
+
+// expect-output
+// opt-null ok

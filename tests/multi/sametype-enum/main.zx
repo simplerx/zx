@@ -1,0 +1,19 @@
+// §197：同名 pub enum 跨文件必须视为同一个类型——main 与 lib 各自声明的
+// E（裸变体 A=0/B=1/C=2）可互相传值，且不得误报 E0402。
+// 修前：named_ty_verify 对第二份声明的裸变体读 m->ival（merge 分支不填，
+// 保持 0），B/C 的隐式 tag 1/2 与 0 不等 → 整份文件误报 duplicate type。
+const std = @mod("std");
+const m = @mod("lib.zx");
+
+pub const E = enum { A, B, C };
+
+const main = fn () u8 {
+    let mine: E = E.B;
+    if (!m.isB(mine)) { return 1; }
+    if (!m.isB(m.E.B)) { return 2; }
+    std.println("enum ok");
+    return 0;
+};
+
+// expect-output
+// enum ok

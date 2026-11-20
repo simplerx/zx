@@ -1,0 +1,5 @@
+// expect: has no count
+// §197：裸指针 *T 没有 .size 内建（数量只在 *[N]T / []T 上）；
+// 只有 elem 自己有 size 字段时 p.size 才是字段访问（见 ptr-size-is-field.zx）。
+const head = fn (p: *i32) usize { return p.size; };
+const main = fn () void {};

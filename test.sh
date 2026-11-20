@@ -1553,6 +1553,20 @@ else
     grep -E '^mat|^q2m|^m2q' "$TPFX.s159.dev" | head -20; fail=1
 fi
 
+# §197：字符串字面量 .ptr 是编译期常量——静态初始化成裸指针，不走 g_late。
+# 曾经 is_view_expr 把它当视图 → `static uint8_t *P = {0}` + 运行期赋值；
+# val_init 曾把它物化成 `{ptr, len}` 切片形状（与裸指针元素类型不符）。
+$ZXC tests/good/string-ptr-const.zx --emit-c > "$TPFX.s197.c" 2>/dev/null
+if grep -qF 'static uint8_t * P = ((uint8_t*)"hello");' "$TPFX.s197.c" \
+   && grep -qF 'static uint8_t * A[2] = { ((uint8_t*)"aa"), ((uint8_t*)"bb") };' "$TPFX.s197.c" \
+   && ! grep -qE '^[[:space:]]+P = ' "$TPFX.s197.c"; then
+    printf "  ok   §197 字符串 .ptr 静态初始化（非 g_late 运行期赋值）\n"
+else
+    printf "  FAIL §197 字符串 .ptr 编译期常量发射形状\n"
+    grep -nE 'static uint8_t \* P|static uint8_t \* A|\* P =' "$TPFX.s197.c" | head -12
+    fail=1
+fi
+
 # §192：@shim 通道已删除（写它报 E0211，见 tests/bad/shim-removed.zx）；
 # 本块的「--emit-c 末尾贴 shim / C 前端通过」两项检查随之移除。
 

@@ -5784,6 +5784,35 @@ static Type *check_binary(Node *n, Type *expect) {
          * 例外：两侧都能在编译期算出来的，折叠阶段会把整个比较换成常量，
          * 永远到不了 C。`@typeName(f.ty) == "u64"` 就是这种写法——字符串
          * 常量的比较由 val_bin 直接给出结果（V_STR 分支）。 */
+        /* §197：`opt == null` / `null == opt` —— optional 与 null 的相等比较。
+         * 语义是"判空"（非扁平看 tag、扁平 ?*T 看 0 指针），只放这一对，
+         * `opt == 42` / `opt == other` 仍按下面的规则拒绝。null 侧定型成
+         * optional 类型，供后端识别并发 `.tag` 判定（扁平 ?*T 走通用发射）。 */
+        {
+            Node *on = NULL; Type *ot = NULL; Node *nn = NULL;
+            if (a->kind == TY_OPT && n->b && n->b->kind == NK_NULL) {
+                on = n->a; ot = a; nn = n->b;
+            } else if (b->kind == TY_OPT && n->a && n->a->kind == NK_NULL) {
+                on = n->b; ot = b; nn = n->a;
+            }
+            if (on) {
+                nn->ty = ot;                 /* null 侧定型为 optional */
+                /* 两侧都能编译期算出时直接折成 bool 常量——有值的 ?T 载荷是
+                 * V_INT/V_STR，空值是 V_NULL，不依赖 val_bin 的 V_NULL 规则
+                 * （error 的 null 也走 V_NULL，那里按 65535 整数比，不动它）。 */
+                Value *vo = n->ct ? n->ct : ct_eval_probe(on);
+                if (vo && vo->kind != V_UNDEF) {
+                    bool is_null = (vo->kind == V_NULL);
+                    bool r = (n->op == TOK_EQ) ? is_null : !is_null;
+                    n->kind = NK_BOOL;
+                    n->ival = r ? 1 : 0;
+                    n->ct = val_bool(r);
+                    n->ty = ty_bool();
+                    return n->ty;
+                }
+                return type_of(n, ty_bool());
+            }
+        }
         /* 非扁平可选值（`?u64` / `?struct`）在 C 里是 struct，语言层面也没有
          * `==`，只能 `if (o) v` / `orelse` 取出来再比。这条必须放在下面的
          * 折叠豁免**之前**：`std.str.indexOf(..) == 2` 的两侧都能被
@@ -9166,7 +9195,7 @@ static bool named_ty_fields_ok(Node *body, Type *t1, Node *first) {
     }
     return true;
 mismatch:
-    diag_note(NULL, first->line, first->col,
+    diag_note(first->mod, first->line, first->col,
               "type '%s' first declared here", first->name ? first->name : "?");
     err_at(body->line, body->col,
            "duplicate type '%s': this declaration has a different shape "
@@ -9183,15 +9212,25 @@ static bool named_ty_verify(Node *body, Type *t1, Node *first) {
             if (body->items[i]->kind == NK_PAIR) cnt++;
         if (cnt != t1->nfields) goto mismatch;
         int k = 0;
+        uint64_t expect = 0;   /* §197：隐式变体值按顺序重算，不读 m->ival */
         for (int i = 0; i < body->nitems; i++) {
             Node *m = body->items[i];
             if (m->kind != NK_PAIR) continue;
             Field *f = &t1->fields[k++];
             if (!m->name || strcmp(m->name, f->name)) goto mismatch;
+            uint64_t got;
             if (m->a) {
                 IntV v = ev_int(m->a);
-                if (!v.ok || v.v != f->tag) goto mismatch;
-            } else if (m->ival != f->tag) goto mismatch;
+                if (!v.ok) goto mismatch;
+                got = v.v;
+            } else {
+                /* §178 merge 分支不填 m->ival（保持 0），第二份同名 enum
+                 * 声明的裸变体 B/C 全被误判成 tag=0 → E0402。按序重算即可，
+                 * 对第一份/第二份声明都成立。 */
+                got = expect;
+            }
+            if (got != f->tag) goto mismatch;
+            expect = got + 1;
         }
         Type *bt = body->a ? resolve_type(body->a) : ty_int(32, false);
         if (strcmp(ty_str(bt), ty_str(t1->elem))) goto mismatch;
@@ -9207,7 +9246,7 @@ static bool named_ty_verify(Node *body, Type *t1, Node *first) {
     }
     return named_ty_fields_ok(body, t1, first);
 mismatch:
-    diag_note(NULL, first->line, first->col,
+    diag_note(first->mod, first->line, first->col,
               "type '%s' first declared here", first->name ? first->name : "?");
     err_at(body->line, body->col,
            "duplicate type '%s': this declaration has a different shape "
@@ -11949,8 +11988,15 @@ static Value *ct_field(Node *n) {
      * 这条规则必须和 check_field / 后端 ex() 完全一致，否则
      * 常量折叠和运行期会给出两个不同的答案。 */
     Type *at = n->a ? n->a->ty : NULL;
-    bool shadowed = at && n->name && (at->kind == TY_STRUCT || at->kind == TY_UNION) &&
-                    ty_field(at, n->name) != NULL;
+    /* §197：裸指针也没有 `.size`/`.len` 内建——穿透一层 TY_PTR 查构件字段。
+     * check_field 对 `*S` 早就是这样：elem 有同名字段就走字段，否则报
+     * "has no count"。折叠这里必须同口径，否则 `p.size` 会被折成"指针
+     * 自身字节数 8"，而类型检查/后端都当它是 S.size 字段（值 77）。 */
+    Type *probe = at;
+    if (probe && probe->kind == TY_PTR && !probe->has_len) probe = probe->elem;
+    bool shadowed = probe && n->name &&
+                    (probe->kind == TY_STRUCT || probe->kind == TY_UNION) &&
+                    ty_field(probe, n->name) != NULL;
     if (!shadowed && n->name && (!strcmp(n->name, "len") || !strcmp(n->name, "size"))) {
         bool is_len = !strcmp(n->name, "len");
         Type *t = n->a ? n->a->ty : NULL;

@@ -1,0 +1,24 @@
+// §197：字符串字面量的 .ptr 是编译期常量。
+//
+// 修前："abc".ptr 折成 V_PTR(base=V_STR)，但后端两处误判：
+//  1) is_view_expr 把它当别名视图 → 全局 const 走 g_late 运行期赋值，
+//     `static uint8_t *P = {0}` + main 开头 `P = ((uint8_t*)"abc")`，
+//     不是编译期常量；
+//  2) val_init 对 V_PTR(base=V_STR) 递归成切片形状 `{ptr, len}`——
+//     元素类型是裸指针时就形状不匹配（C 靠容错才没崩，语义是错的）。
+// 修后：.ptr 走 val_init 静态物化成 `((uint8_t*)"...")`，全局/数组元素/
+// 结构体字段都静态初始化，zx_init 里不再有它的赋值。
+// expect-exit: 0
+// expect-output
+// P=104 A0=97 A1=98 G=120 L=5
+const std = @mod("std");
+
+const P: *const u8 = "hello".ptr;
+const A: *const [2]*const u8 = &.{ "aa".ptr, "bb".ptr };
+const S = struct { p: *const u8 };
+const G: S = .{ .p = "xy".ptr };
+
+const main = fn () u8 {
+    std.println("P={} A0={} A1={} G={} L={}", P[0], A[0][0], A[1][0], G.p[0], "hello".len);
+    return 0;
+};
