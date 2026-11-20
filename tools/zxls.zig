@@ -6437,7 +6437,10 @@ fn resolveCalleeRet(text: []const u8, doc: *const Document, callee0: []const u8,
         return null;
     }
     if (findDeclStmt(text, callee)) |stmt| {
-        const sig = sigOfStmt(stmt);
+        // §193：函数别名（`const alloc = std.heapAlloc;`）沿别名链追签名，
+        // 返回类型照常做实参替换（`var s = alloc(al, i32, 10)` 的 inlay
+        // 出 `: *[10]i32`，用户 2026-11-20 截图：类型丢失）。
+        const sig = sigOfStmtIn(text, stmt, 0);
         if (sig.is_fn and sig.ret.len > 0) return if (args) |at| substRetByArgs(sig, at) else sig.ret;
     }
     return null;

@@ -5578,6 +5578,8 @@ def alias_probe():
             'pub const main = fn () u8 {\n'
             '    const al = std.heap.page;\n'
             '    var s: *[1]i32 = hp(\n'
+            '    var t = ha(al, i32, 2);\n'
+            '    defer std.free(al, t);\n'
             '    defer std.free(al, s);\n'
             '    return 0;\n'
             '}\n')
@@ -5628,6 +5630,11 @@ def alias_probe():
         out["hover"] = ((((r or {}).get("contents") or {}).get("value")) or "")
         r = ask(4, "textDocument/signatureHelp", 24)
         out["sig"] = (r or {}).get("signatures")
+        snd({"jsonrpc": "2.0", "id": 5, "method": "textDocument/inlayHint",
+             "params": {"textDocument": {"uri": doc},
+                        "range": {"start": {"line": 0, "character": 0},
+                                  "end": {"line": 14, "character": 0}}}})
+        out["inlay"] = ask(5, "textDocument/inlayHint", 0) or []
         snd({"jsonrpc": "2.0", "id": 9, "method": "shutdown", "params": None})
         snd({"jsonrpc": "2.0", "method": "exit", "params": None})
     finally:
@@ -5653,6 +5660,8 @@ check("signatureHelp.alias",
       bool(_asg) and _asg[0].get("label") == "hp(alloc: Allocator, T: type, n: usize) *[n]T"
       and len(_asg[0].get("parameters") or []) == 3,
       str(_asg)[:200])
+_ahint = [h.get("label") for h in (_ap["inlay"] or []) if h.get("kind") == 1]
+check("inlayHint.type.alias", ": *[2]i32" in _ahint, str(_ahint))
 
 # ---------------------------------------------------------------------------
 if fails:
