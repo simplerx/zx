@@ -3257,14 +3257,24 @@ static bool pff_has(Symbol *ps, const char *fname) {
  * 烙到实参载体字段账——调用方读回 `t1[0].name` 才能拿到槽并释放，否则
  * 分配槽无人接管、终扫误报 E0513（假阳性）。fname 用持久副本（ft_set
  * 只存指针），同一 key 覆盖写更新 slot（与 aesc 换账同口径）。 */
-typedef struct { Symbol *psym; const char *key; int slot; } ParamFieldStore;
+typedef struct {
+    Symbol *psym;         /* 被写入的形参容器符号 */
+    const char *key;      /* 点路径 key（如 "0.name"） */
+    int slot;             /* 写入的槽（本体内新分配 或 透传的抽象形参槽） */
+    Symbol *src_param;    /* §195：非 NULL = 透传自另一形参的抽象槽——
+                           * 调用点把「那个形参对应的实参」自身的槽烙到
+                           * 容器实参字段账（不 clone，所有权本在调用方）；
+                           * NULL = 本体内新分配，照旧 clone 实例。 */
+} ParamFieldStore;
 static ParamFieldStore *g_pfs;
 static int g_npfs, g_cpfs;
 
-static void pfs_add(Symbol *ps, const char *key, int slot) {
+static void pfs_add_ex(Symbol *ps, const char *key, int slot, Symbol *src_param) {
     for (int i = 0; i < g_npfs; i++)
         if (g_pfs[i].psym == ps && !strcmp(g_pfs[i].key, key)) {
-            g_pfs[i].slot = slot; return;    /* 覆盖写：换账 */
+            g_pfs[i].slot = slot;
+            g_pfs[i].src_param = src_param;   /* 覆盖写：换账 */
+            return;
         }
     if (g_npfs == g_cpfs) {
         int nc = g_cpfs ? g_cpfs * 2 : 16;
@@ -3275,7 +3285,11 @@ static void pfs_add(Symbol *ps, const char *key, int slot) {
     g_pfs[g_npfs].psym = ps;
     g_pfs[g_npfs].key = strdup(key);
     g_pfs[g_npfs].slot = slot;
+    g_pfs[g_npfs].src_param = src_param;
     g_npfs++;
+}
+static void pfs_add(Symbol *ps, const char *key, int slot) {
+    pfs_add_ex(ps, key, slot, NULL);
 }
 
 /* §180：「形参被解引用」事实账。deps 拓扑下被调体先查、抽象槽共用，
@@ -3794,19 +3808,34 @@ static FieldTag **ft_arg_ftags(Node *arg) {
     return arg ? (FieldTag **)&arg->ftags : NULL;
 }
 
-/* §194：调用点镜像形参 store 事实——被调体往形参容器字段写入的新分配，
- * 每次调用都实例化一份（tag_clone_site），烙到实参载体的字段账对应路径；
- * 调用方读回该字段（t1[0].name）就拿到新槽、释放有着落。与 pff（体内
- * free → 调用点标 FREED）方向相反、机制对称。母槽派生实例后 ninst>0
- * 终扫自动退役。 */
-static void pfs_mirror_arg(Symbol *ps, Node *arg, Node *call) {
+/* §194/195：调用点镜像形参 store 事实——被调体往形参容器字段写入的指针，
+ * 烙到实参载体的字段账对应路径；调用方读回该字段（t1[0].name）就拿到槽、
+ * 释放有着落。与 pff（体内 free → 调用点标 FREED）方向相反、机制对称。
+ * ① 本体内新分配 → tag_clone_site 实例化（每次调用一份），母槽 ninst>0
+ *    终扫退役；② §195 透传的抽象形参槽 → 把「来源形参对应的实参」自身的
+ *    槽烙进容器实参字段账（不 clone，所有权本在调用方）。 */
+static void pfs_mirror_arg(Symbol *ps, Node *arg, Node *call, Node *fn) {
     if (!ps || !arg) return;
     for (int i = 0; i < g_npfs; i++) {
         if (g_pfs[i].psym != ps) continue;
-        TagSlot *src = tag_slot(g_pfs[i].slot);
-        if (!src || src->abstract) continue;
-        int nid = tag_clone_site(src, call, src->state == TST_FREED);
-        if (!nid) continue;
+        int nid;
+        if (g_pfs[i].src_param && fn) {
+            /* §195：找来源形参在被调函数形参表中的下标，取调用点同位置
+             * 实参自身的槽（它不是本体内新分配，不能 clone）。 */
+            int src_idx = -1;
+            for (int j = 0; j < fn->nitems; j++)
+                if (fn->items[j]->sym == g_pfs[i].src_param) { src_idx = j; break; }
+            if (src_idx < 0 || src_idx >= call->nitems) continue;
+            int atid, ast;
+            tag_of_expr(call->items[src_idx], &atid, &ast);
+            if (!atid || ast != TC_LIVE) continue;
+            nid = atid;
+        } else {
+            TagSlot *src = tag_slot(g_pfs[i].slot);
+            if (!src || src->abstract) continue;
+            nid = tag_clone_site(src, call, src->state == TST_FREED);
+            if (!nid) continue;
+        }
         FieldTag **dst = ft_arg_ftags(arg);
         if (dst) {
             char *pk = ft_path_dup(NULL, g_pfs[i].key);
@@ -4535,7 +4564,7 @@ static void fn_stamp_ret_flow(Node *fn) {
         for (int j = 0; j < g_npfs; j++) {
             if (g_pfs[j].psym != ps) continue;
             TagSlot *ts = tag_slot(g_pfs[j].slot);
-            if (ts && !ts->ret_fn) ts->ret_fn = fn;
+            if (ts && !ts->abstract && !ts->ret_fn) ts->ret_fn = fn;
         }
     }
 }
@@ -5441,15 +5470,27 @@ static Type *check_assign(Node *n) {
                     char *pk = ft_path_dup(NULL, key);
                     if (pk) ft_set((FieldTag **)&bs->ftags, pk, ftid);
                     ft_mirror(bs, key, ftid, 0);
-                    /* §194：往形参容器的字段存入新分配 → 记 pfs 事实账，
+                    /* §194/195：往形参容器的字段存入指针 → 记 pfs 事实账，
                      * 调用点按形实对位镜像到实参载体（见 tag_call_flow）。
-                     * 只记出生在本函数体内的分配（def_fn == 当前函数）——
-                     * 透传进来的槽所有权本就在调用方，不该被重复实例化。 */
+                     * 两类来源分开处理：
+                     * ① 本体内新分配（def_fn == 当前函数）→ clone 实例；
+                     * ② §195 透传的抽象形参槽（如 `t[0].name = p`，p 是
+                     *    另一形参）→ 调用点把 p 对应实参自身的槽烙到容器
+                     *    实参字段账，不 clone（所有权本在调用方）。 */
                     if (bs->kind == SK_PARAM) {
                         TagSlot *sts = tag_slot(ftid);
-                        if (sts && !sts->abstract && sts->def_fn &&
-                            g_cur_fn_name && !strcmp(sts->def_fn, g_cur_fn_name))
+                        if (sts && sts->abstract) {
+                            /* 透传的抽象形参槽：调用点烙来源实参自身的槽。 */
+                            Symbol *src = pslot_sym_find(ftid);
+                            if (src && src != bs) pfs_add_ex(bs, key, ftid, src);
+                        } else if (sts && g_cur_fn_name &&
+                                   ((sts->def_fn && !strcmp(sts->def_fn, g_cur_fn_name)) ||
+                                    (sts->own_fn && !strcmp(sts->own_fn, g_cur_fn_name)))) {
+                            /* 本体内新分配（def_fn）或本体内调用工厂派生的实例槽
+                             * （own_fn）——所有权已随调用流到本函数，调用点
+                             * 可安全再 clone（母槽 ninst>0 终扫退役）。 */
                             pfs_add(bs, key, ftid);
+                        }
                     }
                 } else {
                     FieldTag *inft = ftags_of_expr(n->b);
@@ -7625,7 +7666,7 @@ static void tag_call_flow(Node *n) {
                 /* §194：形参 store 事实镜像——被调体往形参字段写入的
                  * 新分配实例化烙到实参载体，必须在 pff free 对账之前：
                  * 先有账，之后调用方读回/释放才有着落。 */
-                pfs_mirror_arg(ps, n->items[i], n);
+                pfs_mirror_arg(ps, n->items[i], n, fn);
                 FieldTag *fs = ftags_of_expr(n->items[i]);
                 for (; fs; fs = fs->next)
                     if (fs->slot > 0 && pff_has(ps, fs->name))

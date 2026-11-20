@@ -1,0 +1,45 @@
+// §195：形参容器字段被 store 指针的两种「非本体内新分配」来源。
+//
+// 修前 pfs 事实账只记 def_fn==当前函数的分配，透传的抽象形参槽与
+// 本体内工厂调用派生的实例槽都不记账——调用方读回 t[0].name 拿不到
+// 槽、free 无处落，终扫误报 E0513 假阳性（截图：let p=heapAlloc 那行）。
+// 修后：① 透传形参槽 → 调用点烙来源实参自身的槽（不 clone，所有权在
+// 调用方）；② 工厂实例槽（own_fn==当前函数）→ 调用点 clone。
+// 真泄漏（不释放字段）仍报 E0513，双重释放仍报 E0509。
+// expect-exit: 0
+// expect-output
+// ok
+const std = @mod("std");
+
+const T1 = struct { name: *[1]i32 };
+
+// ① 透传：p 是另一个形参，被调体把它 store 进容器形参字段
+const store_alias = fn(t: *[1]T1, p: *[1]i32) void {
+    t[0].name = p;
+};
+
+// ② 工厂：被调体内调工厂，把返回的新分配 store 进容器形参字段
+const mk = fn(al: Allocator) *[1]i32 {
+    return std.heapAlloc(al, i32, 1);
+};
+const store_factory = fn(t: *[1]T1, al: Allocator) void {
+    t[0].name = mk(al);
+};
+
+const main = fn () u8 {
+    const al = std.heap.page;
+
+    let t0: *[1]T1 = std.heapAlloc(al, T1, 1);
+    defer std.free(al, t0[0..1]);
+    let p0: *[1]i32 = std.heapAlloc(al, i32, 1);
+    store_alias(t0, p0);
+    defer std.free(al, t0[0].name[0..1]);
+
+    let t1: *[1]T1 = std.heapAlloc(al, T1, 1);
+    defer std.free(al, t1[0..1]);
+    store_factory(t1, al);
+    defer std.free(al, t1[0].name[0..1]);
+
+    std.println("ok");
+    return 0;
+};
