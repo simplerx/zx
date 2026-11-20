@@ -1210,8 +1210,62 @@ static void wrap_slice_len(Buf *b, Buf *len, Node *n, const char *total_c) {
     buf_putc(b, ')');
 }
 
+/* §199：字段基址链里是否藏着"不可取地址的右值"（.? / 调用结果）。
+ * `x.?.field` 的 x.? 是 zx_unwrap_...() 返回的临时结构体，C 里对它的字段
+ * 取地址是非法的（B1001）。检测到就把整个字段物化到临时数组取 [0]。 */
+static bool rvalue_base(Node *n) {
+    if (!n) return false;
+    switch (n->kind) {
+    case NK_UNWRAP: case NK_CALL: case NK_ORELSE: case NK_TRY:
+    case NK_STRUCT_LIT: case NK_ANON_STRUCT: case NK_TUPLE:
+    case NK_ARRAY_LIT: case NK_INT: case NK_STR: case NK_BOOL:
+        return true;
+    case NK_FIELD: {
+        /* unwrap / 调用结果取字段：字段落在 rvalue 载荷上，需物化。
+         * 指针（->field）/ optional 直接字段（.payload）/ 数组下标 的结果
+         * 落在别处存储里，是合法左值，不物化（否则赋值写到临时拷贝丢值）。 */
+        if (n->a && (n->a->kind == NK_UNWRAP || n->a->kind == NK_CALL))
+            return true;
+        Type *bt = n->a ? n->a->ty : NULL;
+        if (bt && (bt->kind == TY_PTR || bt->kind == TY_SLICE)) return false;
+        return rvalue_base(n->a);
+    }
+    case NK_INDEX: {
+        /* `ptr()[i]` / `slice[i]` 的基址虽然是 call，但索引结果落在指针
+         * 指向的存储里，是合法左值——不能当 rvalue 物化（否则赋值写到
+         * 临时拷贝，静默丢值，array-module 的 set() 踩到）。只有基址本身
+         * 是数组值（TY_PTR has_len / TY_TUPLE 且非指针结果）才可能因基址
+         * 是 rvalue 而整体是 rvalue；这里保守返回 false。 */
+        Type *bt = n->a ? n->a->ty : NULL;
+        if (bt && (bt->kind == TY_PTR || bt->kind == TY_SLICE)) return false;
+        return rvalue_base(n->a);
+    }
+    default:
+        return false;
+    }
+}
+
+/* §199：把右值物化成临时数组的第 0 个元素，得到一个块作用域内的合法左值。
+ * `(T[]){ e }[0]` 对函数返回值 / unwrap / 字面量都成立（any_addr 同款手法）。 */
+static void rvalue_lvalue(Buf *b, Node *n) {
+    Type *t = n->ty ? n->ty : ty_i32();
+    ensure_type(t);
+    buf_puts(b, "(");
+    ctype(b, t);
+    buf_puts(b, "[]){ ");
+    ex(b, n);
+    buf_puts(b, " }[0]");
+}
+
 /* ---- 可写位置（左值） ---- */
 static void lvalue(Buf *b, Node *n) {
+    /* §199：对右值（.? / 调用结果 / 字面量）或其字段取地址——先物化整个值
+     * 到临时数组再取 [0]。作为函数实参（调用期间有效）安全。显式左值
+     * （IDENT / &local / 数组下标）不碰。 */
+    if ((n->kind == NK_FIELD && rvalue_base(n->a)) || rvalue_base(n)) {
+        rvalue_lvalue(b, n);
+        return;
+    }
     switch (n->kind) {
     case NK_IDENT:
         /* §151：`&self` / 赋值左侧也要遵守同样的 ABI 透明规则。按指针传的
@@ -7605,6 +7659,37 @@ static void gen_global(Node *d, bool exported) {
                 is_view_expr(d->b);
     bool has_fn = d->b->ct && val_has_fn(d->b->ct);
     if (d->b->ct && !view && !has_fn) {
+        /* §199：`const G: []const T = &.{ ... }` 的编译期值是 V_PTR(base=V_AGG)。
+         * val_init 会把 V_AGG 发成元素序列 `{ e0, e1, ... }`，可目标是 slice
+         * （C 里是 `{ T *ptr; size_t len; }`）——于是得到 `ZxSlice_T G = { 1, 2, 3 }`
+         * 被 C 拒（B1002）。正确做法：先发一份静态 backing 数组，再发 {ptr,len}。 */
+        if (t->kind == TY_SLICE && d->b->ct->kind == V_PTR &&
+            d->b->ct->base && d->b->ct->base->kind == V_AGG) {
+            Value *arr = d->b->ct->base;
+            Type *et = t->elem;
+            if (arr->nitems > 0) {
+                char *lit = ignored_cname();
+                Buf a; buf_init(&a);
+                buf_puts(&a, st);
+                ctype(&a, et);
+                buf_printf(&a, " %s[%d] = { ", lit, arr->nitems);
+                for (int i = 0; i < arr->nitems; i++) {
+                    if (i) buf_puts(&a, ", ");
+                    val_init(&a, arr->items[i], et);
+                }
+                buf_puts(&a, " };");
+                bline(&g_bglobals, "%s", a.data);
+
+                Buf s; buf_init(&s);
+                buf_printf(&s, "%s%s %s = { (", st, cty(t), cn);
+                ctype(&s, et);
+                buf_printf(&s, "*)%s, %d };", lit, arr->nitems);
+                bline(&g_bglobals, "%s", s.data);
+            } else {
+                bline(&g_bglobals, "%s%s %s = {0};", st, cty(t), cn);
+            }
+            return;
+        }
         Buf s; buf_init(&s);
         val_init(&s, d->b->ct, t);
         bline(&g_bglobals, "%s%s %s = %s;", st, cty(t), cn, s.data);

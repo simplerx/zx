@@ -1,0 +1,15 @@
+// §199：全局 []const T = &.{...} 必须生成正确的 C（静态 backing 数组 + {ptr,len}）
+const std = @mod("std");
+
+const P = struct { a: i32, b: i32 };
+const G_I: []const i32 = &.{ 3, 5, 7 };
+const G_P: []const P = &.{ .{ .a = 1, .b = 2 }, .{ .a = 3, .b = 4 } };
+const G_S: []const []const u8 = &.{ "aa", "bbb" };
+const G_E: []const i32 = &.{};
+
+// expect-output: 10 7 5 9798 0
+const main = fn () i32 {
+    std.println("{} {} {} {}{} {}", G_I[0] + G_I[2], G_P[1].a + G_P[1].b,
+                G_S[0].len + G_S[1].len, G_S[0][0], G_S[1][0], G_E.len);
+    return 0;
+};

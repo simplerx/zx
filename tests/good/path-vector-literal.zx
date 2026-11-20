@@ -1,0 +1,15 @@
+// §199：带命名空间前缀的向量字面量 schema.V4{1,2,3,4} 要能解析为字面量类型。
+// 修前 parse.c/bootstrap 只认裸别名（NK.id），带路径报 E0201。
+const std = @mod("std");
+const schema = struct {
+    const V4 = @Vec(i32, 4);
+};
+const ns = struct { const inner = schema; };
+
+// expect-output: 5 4 7
+const main = fn () i32 {
+    let v = schema.V4{ 1, 2, 3, 4 };
+    let w = ns.inner.V4{ 7, 0, 0, 0, };   // 三级路径 + 尾逗号
+    std.println("{} {} {}", v[0] + v[3], v.len, w[0]);
+    return 0;
+};

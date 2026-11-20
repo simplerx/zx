@@ -5423,6 +5423,32 @@ static bool addr_frame(Node *o) {
     }
 }
 
+/* §199：聚合值里藏着的栈帧来源。return 逃逸检查原先只看返回类型形状
+ * （want 是 TY_PTR/TY_SLICE），于是 `return S{ .s = &.{} }` —— 把匿名
+ * slice 裹进结构体带走——整只漏过，生成悬垂 C。这里下钻聚合字面量的
+ * 字段值，任何一个字段是指向栈帧的指针就算逃逸。纯值结构体（字段全是
+ * 标量/常量）不会被误伤。 */
+static bool frame_in_agg(Node *e, int depth) {
+    if (!e || depth > 12) return false;
+    switch (e->kind) {
+    case NK_STRUCT_LIT: case NK_ANON_STRUCT: case NK_TUPLE:
+        for (int i = 0; i < e->nitems; i++) {
+            Node *v = e->items[i];
+            if (v && v->kind == NK_PAIR) v = v->a;
+            /* 字段值本身就指向当前栈帧（&.{} / &local / stackAlloc） */
+            if (v && expr_frame(v)) return true;
+            if (frame_in_agg(v, depth + 1)) return true;
+        }
+        return false;
+    case NK_PAIR:
+        return frame_in_agg(e->a, depth + 1);
+    default:
+        /* 普通字段 / 标识符 / 下标不在这里判——它们由 want 形状那条
+         * expr_frame 路径负责；这里只补"聚合字面量内部藏着栈帧来源"。 */
+        return false;
+    }
+}
+
 static Type *check_assign(Node *n) {
     /* `_ = expr;` —— 显式丢弃（M26）：求值右值（拿副作用），不落存储。
      * 只认普通 `=`；复合赋值没有丢弃语义。 */
@@ -8438,9 +8464,13 @@ static Type *check_expr_raw(Node *n, Type *expect) {
         /* §135：句柄失效在 get 处已报 E0510 / E0511，这里不再重复判——
          * 同一条语句报两个码只会把真正的修法埋掉。 */
         /* 编译期就知道是空的：`.?` 在这里必然 abort，和除零同一处置（§7.R10）——
-         * 能定就在编译期报，不要留到运行期。 */
+         * 能定就在编译期报，不要留到运行期。
+         * §199：只有**确定为空**（V_NULL）才报 E0506。V_UNDEF 是"算不出/未代入"
+         * （编译期参数值没绑上、undefined 字面量等），不能证明值为 null——把它
+         * 算作 null 会把"有值但暂时没代入"的编译期 optional 参数误判成必然 abort。
+         * 放行后交给后端 trap，才是正确行为。 */
         Value *cv = ct_eval_probe(n->a);
-        if (cv && (cv->kind == V_NULL || cv->kind == V_UNDEF))
+        if (cv && cv->kind == V_NULL)
             return BAD_CODE("E0506", n, "`.?` on a value that is `null` at compile time -- "
                                         "it would abort every time");
         /* §170：COND 载体判空后按 LIVE 使用（判空担保非空、非空即已分配） */
@@ -10289,6 +10319,9 @@ static void check_stmt(Node *n) {
         {
             bool esc = (want->kind == TY_PTR || want->kind == TY_SLICE) &&
                        expr_frame(n->a);
+            /* §199：聚合返回值里藏的栈帧来源（S{ .s = &.{} }） */
+            if (!esc && want->kind != TY_PTR && want->kind != TY_SLICE)
+                esc = frame_in_agg(n->a, 0);
             if (!esc) {
                 int id, st;
                 tag_of_expr(n->a, &id, &st);

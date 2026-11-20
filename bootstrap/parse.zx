@@ -1437,35 +1437,30 @@ pub const Parser = struct {
                                 }
                                 try self.expect(lex.Kind.rbrace);
                                 base = n;
-                            } else if (base.kind == NK.id) {
-                                // §162：向量字面量写在别名上
-                                // （`const V4 = @Vec(f32, 4); V4{1, 2}`）。`{` 后面不是
-                                // `.name =` 就是位置列表，按"把 N 个值当成一个向量"的
-                                // 转换收下。只认裸别名，与 C 前端同步。
-                                var bn: []const u8 = base.name orelse "";
-                                if (bn.len > 0) {
-                                    handled = true;
-                                    let lb = self.advance();
-                                    let tup = self.new_at(NK.tuple, lb);
-                                    var go2 = true;
-                                    while (go2) {
-                                        let el = try self.parse_expr();
-                                        self.push_item(tup, el);
-                                        if (!self.accept(lex.Kind.comma)) {
-                                            go2 = false;
-                                        }
-                                        if (self.at(lex.Kind.rbrace)) { go2 = false; }  // 尾逗号
+                            } else if (base.kind == NK.id || base.kind == NK.field ||
+                                       base.kind == NK.call || base.kind == NK.t_ident) {
+                                // §162/§199：向量字面量写在类型名上。`{` 后面不是
+                                // `.name =` 就是位置列表，按"把 N 个值当成一个向量"
+                                // 的转换收下。带命名空间前缀（schema.V4{...}）也收：
+                                // 类型位保留完整 base（不再只取末段名新建 t_ident），
+                                // 与 C 前端同步。
+                                handled = true;
+                                let lb = self.advance();
+                                let tup = self.new_at(NK.tuple, lb);
+                                var go2 = true;
+                                while (go2) {
+                                    let el = try self.parse_expr();
+                                    self.push_item(tup, el);
+                                    if (!self.accept(lex.Kind.comma)) {
+                                        go2 = false;
                                     }
-                                    try self.expect(lex.Kind.rbrace);
-                                    let tv = self.new(NK.t_ident);
-                                    tv.line = base.line;
-                                    tv.col = base.col;
-                                    tv.name = bn;
-                                    let cv = self.new_at(NK.cast, lb);
-                                    cv.a = tv;
-                                    cv.b = tup;
-                                    base = cv;
+                                    if (self.at(lex.Kind.rbrace)) { go2 = false; }  // 尾逗号
                                 }
+                                try self.expect(lex.Kind.rbrace);
+                                let cv = self.new_at(NK.cast, lb);
+                                cv.a = base;  // 完整类型表达式（含路径）
+                                cv.b = tup;
+                                base = cv;
                             }
                         }
                         if (!handled) {
@@ -1589,7 +1584,12 @@ pub const Parser = struct {
                 _ = self.advance();
                 n.b = try self.parse_block();
                 // 捕获名兼作收割标签：块内 `err: value;` 交出兜底值（§171）
-                if (n.b) n.b.?.label = n.name;
+                // §199：用局部指针赋值——?. 解包后直接改字段在新自举链上
+                // 未生效（AST 丢 label），显式取出指针再写。
+                if (n.b) blk {
+                    let bp: *Node = blk;
+                    bp.label = n.name;
+                }
                 return n;
             }
             let n = self.new_at(NK.try_, t);

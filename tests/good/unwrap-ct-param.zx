@@ -1,0 +1,17 @@
+// §199：编译期（泛型/ct_bind）optional 参数有值时 .? 不得被静态判 null（E0506）
+const std = @mod("std");
+
+// x 是编译期绑定的值参数，.? 在实例化时应该拿到实参载荷，而不是 V_UNDEF
+const Pick = fn (x: ?i32) i32 { return x.?; };
+// 间接：先贴标签再解包
+const Via = fn (x: ?i32) i32 { let y: ?i32 = x; return y.?; };
+
+const A = Pick(42);
+const B = Pick(0);
+const C = Via(7);
+
+// expect-output: 42 0 7
+const main = fn () i32 {
+    std.println("{} {} {}", A, B, C);
+    return 0;
+};

@@ -1,0 +1,23 @@
+// §199：对 .? 结果或其字段取地址不再触发 B1001 codegen bug。
+// 后端把右值物化成临时数组第 0 元素（(T[]){ e }[0]），得到合法左值，
+// 用户无需再先绑局部变量。
+const std = @mod("std");
+
+const Comp = struct { bytes: []const u8 };
+const List = struct {
+    items: []const Comp,
+    const get = fn (self: *List, i: usize) ?Comp { return self.items[i]; };
+};
+const first = fn (b: *const []const u8) u8 { return b[0][0]; };
+const val = fn (c: *const Comp) u8 { return c.bytes[0]; };
+
+// expect-output: 97 120 98
+const main = fn () i32 {
+    const data: []const Comp = &.{ .{ .bytes = "abc" }, .{ .bytes = "xyz" } };
+    var l = List{ .items = data };
+    std.println("{} {} {}",
+                first(&l.get(0).?.bytes),     // &.? 字段取地址（原 B1001）
+                val(&l.get(1).?),             // &.? 本体取地址
+                l.get(0).?.bytes[1]);         // 链式字段按值读（回归）
+    return 0;
+};

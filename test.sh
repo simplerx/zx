@@ -1580,6 +1580,19 @@ else
     fail=1
 fi
 
+# §199 codegen：全局 []const T = &.{...} 必须发成"静态 backing 数组 +
+# {ptr,len} slice"，不能把元素直接塞进 slice 结构体（修前 B1002）。
+$ZXC tests/good/global-slice-literal.zx --emit-c > "$TPFX.s199.c" 2>/dev/null
+if grep -qE 'static int32_t _ignored_[0-9]+\[3\] = \{ 3, 5, 7 \};' "$TPFX.s199.c" \
+   && grep -qE 'static ZxSlice_i32 G_I = \{ \(int32_t\*\)_ignored_[0-9]+, 3 \};' "$TPFX.s199.c" \
+   && grep -qE 'static ZxSlice_ZxS[0-9]+ G_P = \{ \(ZxS[0-9]+\*\)_ignored_[0-9]+, 2 \};' "$TPFX.s199.c"; then
+    printf "  ok   §199 全局 slice 字面量发成 backing 数组 + {ptr,len}\n"
+else
+    printf "  FAIL §199 全局 slice 字面量 C 形状不对（应为 backing 数组 + {ptr,len}）\n"
+    grep -nE 'static .* G_[IPS]' "$TPFX.s199.c" | head -12
+    fail=1
+fi
+
 # §192：@shim 通道已删除（写它报 E0211，见 tests/bad/shim-removed.zx）；
 # 本块的「--emit-c 末尾贴 shim / C 前端通过」两项检查随之移除。
 

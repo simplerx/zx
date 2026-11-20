@@ -920,13 +920,15 @@ static Node *parse_postfix(P *p, Node *base) {
                 base = n;
                 continue;
             }
-            /* §162：向量字面量写在别名上（`const V4 = @Vec(f32, 4); V4{1, 2}`）。
-             * 位置列表在结构体字面量里没有意义（那边一定是 `.name =`），所以
-             * `{` 后面不是字段名就是向量字面量：按"把 N 个值当成一个向量"的
-             * 转换收下，个数与元素类型由 sema 核对。写错结构体的人也会在那里
-             * 收到"要写 .field = value"的提示。只认裸别名——`v.V4{…}` 留着
-             * 走原来的报错，不值当为它放宽点路径。 */
-            if (base->kind == NK_IDENT && base->name) {
+            /* §162/§199：向量字面量写在类型名上（`const V4 = @Vec(f32, 4);
+             * V4{1, 2}`）。位置列表在结构体字面量里没有意义（那边一定是
+             * `.name =`），所以 `{` 后面不是字段名就是向量字面量：按"把 N 个
+             * 值当成一个向量"的转换收下，个数与元素类型由 sema 核对。
+             * §199：带命名空间前缀（`schema.V4{1,2}`）也收下——类型位保留
+             * 完整 base 节点（NK_FIELD/NK_CALL），不能再只取末段名字新建
+             * NK_TYPE_IDENT（那样 lookup("V4") 找不到路径里的类型）。 */
+            if (base->kind == NK_IDENT || base->kind == NK_FIELD ||
+                base->kind == NK_CALL || base->kind == NK_TYPE_IDENT) {
                 Token *lb = advance(p);
                 Node *tup = node_new(NK_TUPLE, lb->line, lb->col);
                 for (;;) {
@@ -935,10 +937,8 @@ static Node *parse_postfix(P *p, Node *base) {
                     if (at(p, TOK_RBRACE)) break;    /* 尾逗号 */
                 }
                 expect(p, TOK_RBRACE);
-                Node *tv = node_new(NK_TYPE_IDENT, base->line, base->col);
-                tv->name = base->name;
                 Node *cv = node_new(NK_CAST, lb->line, lb->col);
-                cv->a = tv;
+                cv->a = base;                        /* 完整类型表达式（含路径） */
                 cv->b = tup;
                 base = cv;
                 continue;
