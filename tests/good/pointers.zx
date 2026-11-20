@@ -3,7 +3,7 @@ const std = @mod("std");
 
 // 编译期：视图上的算术照样折叠（R1 要求 const 必须算得出来）
 const tail = "hello"[1..];              // 视图 "ello"
-const t0 = tail.0;                      // 'e'  ← 视图里的第 0 个
+const t0 = tail[0];                      // 'e'  ← 视图里的第 0 个
 const nums = &.{ 10, 20, 30 };
 const mid = nums[0..].ptr + 1;          // 视图偏移 +1 个元素
 const midVal = mid.0;                   // 20

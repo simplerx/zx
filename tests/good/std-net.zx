@@ -23,7 +23,7 @@ pub const main = fn () u8 {
                 if (cli.write(ping[0..4]) != 4) { return 2; }
                 var ibuf = std.stackAlloc(u8, 8);
                 if (srv.read(ibuf[0..4]) != 4) { return 3; }
-                std.println("tcp={}{}{}{}", ibuf.0, ibuf.1, ibuf.2, ibuf.3);
+                std.println("tcp={}{}{}{}", ibuf[0], ibuf[1], ibuf[2], ibuf[3]);
                 srv.close();
             } else { return 4; }
             cli.close();
@@ -39,7 +39,7 @@ pub const main = fn () u8 {
         var ip: u32 = 0;
         var port: u16 = 0;
         let n = udp.recvFrom(dbuf[0..4], &ip, &port);
-        std.println("udp={} {}{}{}{}", n, dbuf.0, dbuf.1, dbuf.2, dbuf.3);
+        std.println("udp={} {}{}{}{}", n, dbuf[0], dbuf[1], dbuf[2], dbuf[3]);
         udp.close();
     } else { return 8; }
 

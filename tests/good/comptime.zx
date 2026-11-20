@@ -18,12 +18,12 @@ const table = build: {
 };
 
 // 编译期断言：@error 只在真的执行到的时候才报
-const checked = if (table.2 != 3) @error("table[2] should be 3") else 0;
+const checked = if (table[2] != 3) @error("table[2] should be 3") else 0;
 
 const main = fn () u8 {
     var _: *[N]i32 = undefined;             // 长度 14
     var _: *[FIVE + M]i32 = undefined;      // 长度 8
-    let c = table.2;                         // 3
+    let c = table[2];                         // 3
     let d = table.size;                      // 4
     let e = add(FIVE, 1);                    // 6
     std.println("{} {} {}", c, d, e);

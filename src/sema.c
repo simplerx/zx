@@ -6257,12 +6257,12 @@ static Type *check_field(Node *n) {
     case TY_PTR: {
         Type *e = bt->elem;
         if (!n->name) {
-            if (bt->has_len) {          /* .N 是编译期下标 */
-                if (n->ival >= bt->len)
-                    return BAD(n, "index %llu out of range for `%s`",
-                               (unsigned long long)n->ival, ty_str(bt));
-                return type_of(n, e);
-            }
+            if (bt->has_len)
+                /* §193：数组下标只认 `[i]`——`.N` 与元组/向量分量拼法混淆
+                 *（用户 2026-11-20），数组指针上的点下标删除。 */
+                return BAD(n, "array `.N` indexing was removed: write `e[%llu]` "
+                              "-- dot-index stays only for tuples and vectors",
+                           (unsigned long long)n->ival);
             if (n->ival != 0)
                 return BAD(n, "a bare pointer only has `.0` (dereference); use [] for indexing");
             /* §118 续：statics 的 ptr（b==NULL、type_val=容器、ival=成员下标）
@@ -6326,8 +6326,11 @@ static Type *check_field(Node *n) {
     case TY_SLICE:
         if (n->name && !strcmp(n->name, "ptr"))
             return type_of(n, ty_ptr(bt->elem, bt->is_const, false, 0));
-        if (!n->name && n->ival == 0) return type_of(n, bt->elem);
-        return BAD(n, "a slice only has .ptr / .len / .0");
+        if (!n->name)
+            /* §193：切片同数组，下标只认 `[i]`（`.0` 与元组分量混淆）。 */
+            return BAD(n, "slice `.N` indexing was removed: write `s[i]` "
+                          "-- dot-index stays only for tuples and vectors");
+        return BAD(n, "a slice only has .ptr / .len");
 
     case TY_TUPLE: {
         if (!n->name) {

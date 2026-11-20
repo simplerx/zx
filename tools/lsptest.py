@@ -5559,6 +5559,101 @@ check("completion.nest.fnArgNested", {"x", "y"} <= _nn, str(sorted(_nn)))
 _hlabels = [h["label"] for h in (_nres.get("inlay") or []) if h.get("kind") == 1]
 check("inlayHint.type.heapAlloc", ": *[10]u8" in _hlabels, str(_hlabels))
 
+# §193 —— 函数别名（`const alloc = std.heapAlloc;`）的编辑器四件套：
+# 调用骨架 / hover 签名 / signatureHelp 与真身同一口径，链式别名
+#（hp → ha → alloc）沿别名链追到 std_builtin_docs。编译器语义已由
+# tests/good/builtin-alias.zx 守门；这里守门 LSP 侧（用户 2026-11-20：
+# 别名在编辑器里还是"变量"——没签名、没骨架、没参数提示）。独立进程探针。
+def alias_probe():
+    d = os.path.join(TESTDIR, "alias")
+    shutil.rmtree(d, ignore_errors=True)
+    os.makedirs(d)
+    doc = "file:///" + os.path.join(d, "main.zx").replace("\\", "/")
+    body = ('const std = @mod("std");\n'
+            '\n'
+            'const alloc = std.heapAlloc;\n'
+            'const ha = alloc;\n'
+            'const hp = ha;\n'
+            '\n'
+            'pub const main = fn () u8 {\n'
+            '    const al = std.heap.page;\n'
+            '    var s: *[1]i32 = hp(\n'
+            '    defer std.free(al, s);\n'
+            '    return 0;\n'
+            '}\n')
+    out = {"items": None, "hover": "", "sig": None}
+    try:
+        p4 = subprocess.Popen([ZXLS_BIN], stdin=subprocess.PIPE,
+                              stdout=subprocess.PIPE, cwd=d)
+        snd = lambda o: (p4.stdin.write(
+            ("Content-Length: %d\r\n\r\n" % len(json.dumps(o).encode())).encode()
+            + json.dumps(o).encode()), p4.stdin.flush())
+        def rcv():
+            hdr = b""
+            while not hdr.endswith(b"\r\n\r\n"):
+                c = p4.stdout.read(1)
+                if not c:
+                    return None
+                hdr += c
+            ln = int([l for l in hdr.split(b"\r\n")
+                      if l.lower().startswith(b"content-length")][0].split(b":")[1])
+            return json.loads(p4.stdout.read(ln))
+        snd({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+             "params": {"capabilities": {}, "rootUri": "file:///" + d.replace("\\", "/")}})
+        while True:
+            m = rcv()
+            if m is None or m.get("id") == 1:
+                break
+        snd({"jsonrpc": "2.0", "method": "initialized", "params": {}})
+        snd({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": {"uri": doc, "languageId": "zx", "version": 1,
+                             "text": body}}})
+        import time as _t
+
+        def ask(rid, method, col):
+            snd({"jsonrpc": "2.0", "id": rid, "method": method,
+                 "params": {"textDocument": {"uri": doc},
+                            "position": {"line": 8, "character": col}}})
+            deadline = _t.time() + 30
+            while _t.time() < deadline:
+                m = rcv()
+                if m is None:
+                    return None
+                if m.get("id") == rid:
+                    return m.get("result")
+
+        r = ask(2, "textDocument/completion", 22)
+        out["items"] = r.get("items", r) if isinstance(r, dict) else r
+        r = ask(3, "textDocument/hover", 22)
+        out["hover"] = ((((r or {}).get("contents") or {}).get("value")) or "")
+        r = ask(4, "textDocument/signatureHelp", 24)
+        out["sig"] = (r or {}).get("signatures")
+        snd({"jsonrpc": "2.0", "id": 9, "method": "shutdown", "params": None})
+        snd({"jsonrpc": "2.0", "method": "exit", "params": None})
+    finally:
+        try:
+            p4.kill()
+        except Exception:
+            pass
+        shutil.rmtree(d, ignore_errors=True)
+    return out
+
+_ap = alias_probe()
+_ait = _ap["items"] or []
+_ahp = [i for i in _ait if i.get("label") == "hp(...)"]
+check("completion.alias.callSnippet",
+      bool(_ahp) and _ahp[0].get("kind") == 15
+      and _ahp[0].get("insertText") == "hp(${1:alloc}, ${2:T}, ${3:n})$0",
+      str(_ahp))
+check("hover.alias.signature",
+      "hp(alloc: Allocator, T: type, n: usize) *[n]T" in _ap["hover"],
+      _ap["hover"][:200])
+_asg = _ap["sig"] or []
+check("signatureHelp.alias",
+      bool(_asg) and _asg[0].get("label") == "hp(alloc: Allocator, T: type, n: usize) *[n]T"
+      and len(_asg[0].get("parameters") or []) == 3,
+      str(_asg)[:200])
+
 # ---------------------------------------------------------------------------
 if fails:
     print(f"SMOKE FAILED: {len(fails)} -> {fails}"); sys.exit(1)

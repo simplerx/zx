@@ -1,0 +1,8 @@
+// expect: E0211
+// §193：数组/切片下标只认 [i]——`.N` 点下标删除（与元组/向量分量混淆）。
+const std = @mod("std");
+const main = fn () void {
+    let a: *[2]i32 = undefined;
+    let x = a.0;
+    _ = x;
+};

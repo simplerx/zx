@@ -24,20 +24,20 @@ const main = fn () u8 {
     let t1: *[1]T1 = std.heapAlloc(al, T1, 1);
     defer std.free(al, t1[0..1]);
     t1[0].name = std.heapAlloc(al, i32, 1);
-    let p = t1.0.name;
+    let p = t1[0].name;
     defer std.free(al, p[0..1]);
     std.println("ok");
 
     // ② 嵌套字段全点形式
     let t2: *[1]Outer = std.heapAlloc(al, Outer, 1);
-    t2.0.sub.v = std.heapAlloc(al, i32, 1);
-    let q = t2.0.sub.v;
+    t2[0].sub.v = std.heapAlloc(al, i32, 1);
+    let q = t2[0].sub.v;
     defer std.free(al, q[0..1]);
     defer std.free(al, t2);
 
     // ③ 成员接收指针后经它深写（T2.pt 链）
     let t3: *[1]T1 = std.heapAlloc(al, T1, 1);
-    t3.0.name = std.heapAlloc(al, i32, 1);
+    t3[0].name = std.heapAlloc(al, i32, 1);
     let r = t3[0].name;
     defer std.free(al, r[0..1]);
     defer std.free(al, t3[0..1]);

@@ -1,4 +1,4 @@
 pub const read = fn (p: []u8) void {
-    var x = p.0;
+    var x = p[0];
     _ = x;
 };

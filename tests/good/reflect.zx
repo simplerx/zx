@@ -45,7 +45,7 @@ const Slots = fn (T: type, cap: usize) type {
         pub const firstField = fn () []const u8 {
             const info = @type(T);
             if (info.fieldCount == 0) { return "<none>"; }
-            const n: []const u8 = info.fields.0.name;
+            const n: []const u8 = info.fields[0].name;
             return n;
         };
     };
@@ -65,9 +65,9 @@ pub const main = fn () u8 {
 
     // 编译期绑定：类型值没有运行期存储
     const info = @type(Point);
-    const t: type = info.fields.0.ty;
+    const t: type = info.fields[0].ty;
     _ = t;
-    const name: []const u8 = info.fields.0.name;
+    const name: []const u8 = info.fields[0].name;
     std.println("last={} first={}", info.fields[1].name, name);
     return 0;
 };

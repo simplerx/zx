@@ -8,12 +8,12 @@ pub const probe = fn () void {
     println("println-ok {}", 7);
 
     var stack = stackAlloc(u8, 4);
-    stack.0 = 65;
-    println("stack={}", stack.0);
+    stack[0] = 65;
+    println("stack={}", stack[0]);
 
     let a = heap.page;                       // heap 本身也是种进来的裸名
     var fixed = heapAlloc(a, i32, 3);
-    fixed.1 = 9;
+    fixed[1] = 9;
     println("fixed={}", fixed[1]);
     a.free(a.ctx, (*u8)fixed, 3 * @type(i32).size);
 

@@ -13,7 +13,7 @@ const std = @mod("std");
 const main = fn () u8 {
     let a = std.heap.page;
     var fixed = std.heapAlloc(a, i32, 3);
-    fixed.0 = 1; fixed.1 = 2; fixed.2 = 3;
+    fixed[0] = 1; fixed[1] = 2; fixed[2] = 3;
     const N = fixed.len;                  // 编译期常量
     const SZ = fixed.size;                // 编译期常量（3 × 4）
     std.println("fixed: {} {}", N, SZ);

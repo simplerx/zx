@@ -39,12 +39,13 @@ static const ErrDoc g_errs[] = {
 
     /* ---- 类型 ---- */
     { "E0211", "removed spelling (old builtin or removed syntax)",
-      "1.6.2 also removed `@shim` (compile C via `zxc include` + `extern \"C\" fn` "
-      "+ @link) and `struct(packed)` (plain or `extern struct` only). Older "
-      "removals: write conversions as `(T)value`; reflection is the single "
-      "`@type(x)` (`.size` / `.align` / `.name` / `.fields`); vector math lives "
-      "in `std.simd`; `zxc explain E0211` lists which names went away and what "
-      "to write instead" },
+      "1.6.2 removed `@shim` (compile C via `zxc include` + `extern \"C\" fn` "
+      "+ @link), `struct(packed)` (plain or `extern struct` only) and array/"
+      "slice `.N` dot-indexing (write `a[i]`; dot-index stays only for tuples "
+      "and vectors). Older removals: write conversions as `(T)value`; "
+      "reflection is the single `@type(x)` (`.size` / `.align` / `.name` / "
+      "`.fields`); vector math lives in `std.simd`; `zxc explain E0211` lists "
+      "which names went away and what to write instead" },
 
     { "E0300", "type error (uncategorized)",
       "compare the expression's type at the caret with the expected type" },

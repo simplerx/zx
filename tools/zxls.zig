@@ -298,6 +298,97 @@ fn stdBuiltinDoc(path: []const u8) ?StdBuiltin {
     return null;
 }
 
+/// §193：把 std_builtin_docs 的签名串解析成 FnSig。
+/// 形参按**顶层**逗号切（跟踪 ()/[]/{} 嵌套——`free` 的
+/// `s: ([]T | *[n]T)` 里逗号不切）；返回类型取匹配 `)` 之后到
+/// ` — ` 说明文之前。解析不了（无括号的类型/命名空间条目）返回 null。
+fn parseBuiltinSig(sig_text: []const u8) ?FnSig {
+    const lp = std.mem.indexOfScalar(u8, sig_text, '(') orelse return null;
+    var d2: usize = 0;
+    var rp: ?usize = null;
+    var k2 = lp;
+    while (k2 < sig_text.len) : (k2 += 1) {
+        if (sig_text[k2] == '(') d2 += 1;
+        if (sig_text[k2] == ')') {
+            d2 -= 1;
+            if (d2 == 0) {
+                rp = k2;
+                break;
+            }
+        }
+    }
+    const rpp = rp orelse return null;
+    var rest = std.mem.trim(u8, sig_text[rpp + 1 ..], " \t");
+    if (std.mem.indexOf(u8, rest, " — ")) |dd| rest = std.mem.trim(u8, rest[0..dd], " \t");
+    var params: std.ArrayList([]const u8) = .empty;
+    const inner = sig_text[lp + 1 .. rpp];
+    var depth: usize = 0;
+    var seg: usize = 0;
+    var k: usize = 0;
+    while (k < inner.len) : (k += 1) {
+        switch (inner[k]) {
+            '(', '[', '{' => depth += 1,
+            ')', ']', '}' => {
+                if (depth > 0) depth -= 1;
+            },
+            ',' => {
+                if (depth == 0) {
+                    params.append(gpa, std.mem.trim(u8, inner[seg..k], " \t")) catch return null;
+                    seg = k + 1;
+                }
+            },
+            else => {},
+        }
+    }
+    const last = std.mem.trim(u8, inner[seg..], " \t");
+    if (last.len > 0) params.append(gpa, last) catch return null;
+    return .{ .name = "", .params = params.items, .ret = rest, .is_fn = true };
+}
+
+/// §193：函数别名的签名解析（用户 2026-11-20：`const alloc =
+/// std.heapAlloc;` 在编辑器里还是"变量"——没有签名 hover、没有
+/// signatureHelp、没有调用骨架）。sigOfStmt 只看单条声明文本，别名
+/// 声明的初值是路径/标识符，解析不出 fn——这里沿别名链追到真身：
+/// 1. `std.<member>`（无括号无空格的裸路径）：查 std_builtin_docs；
+/// 2. 裸标识符：findDeclStmt 找本文件声明，递归（深度 4 防环）。
+/// 追不到原样返回 sigOfStmt 结果。name 沿用别名自己的（hover/骨架
+/// 都显示 `alloc(...)` 而不是真身名）。
+fn sigOfStmtIn(text: []const u8, stmt: []const u8, depth: u8) FnSig {
+    var sig = sigOfStmt(stmt);
+    if (sig.is_fn or depth >= 4) return sig;
+    const init = declInitOf(stmt) orelse return sig;
+    const it = trimSl(init);
+    if (std.mem.startsWith(u8, it, "std.") and
+        std.mem.indexOfScalar(u8, it, '(') == null and
+        std.mem.indexOfScalar(u8, it, ' ') == null)
+    {
+        if (stdBuiltinDoc(it)) |bt| {
+            if (!bt.ns) {
+                if (parseBuiltinSig(bt.sig)) |ps| {
+                    sig.params = ps.params;
+                    sig.ret = ps.ret;
+                    sig.is_fn = true;
+                }
+            }
+        }
+        return sig;
+    }
+    if (it.len > 0 and std.mem.indexOfScalar(u8, it, '(') == null and
+        std.mem.indexOfScalar(u8, it, ' ') == null and
+        std.mem.indexOfScalar(u8, it, '.') == null)
+    {
+        if (findDeclStmt(text, it)) |t2| {
+            const inner = sigOfStmtIn(text, t2, depth + 1);
+            if (inner.is_fn) {
+                sig.params = inner.params;
+                sig.ret = inner.ret;
+                sig.is_fn = true;
+            }
+        }
+    }
+    return sig;
+}
+
 /// 1.2.2 反射只剩一个 @type：Type/Field 描述符仍只在编译期存在，
 /// 不许进 std. 补全列表（去污染）。
 fn isCtBuiltin(name: []const u8) bool {
@@ -1089,7 +1180,7 @@ fn markContainerFns(src: []const u8, decls: *std.ArrayList(Decl)) void {
     for (decls.items) |*d| {
         if (d.is_fn or d.kind != .value) continue;
         const stmt = findDeclStmt(src, d.name) orelse continue;
-        if (sigOfStmt(stmt).is_fn) d.is_fn = true;
+        if (sigOfStmtIn(src, stmt, 0).is_fn) d.is_fn = true;
     }
 }
 
@@ -1099,7 +1190,7 @@ fn markContainerFnsIn(body: []const u8, src: []const u8, decls: *std.ArrayList(D
     for (decls.items) |*d| {
         if (d.is_fn or d.kind != .value) continue;
         const stmt = findMemberStmt(body, d.name) orelse findDeclStmt(src, d.name) orelse continue;
-        if (sigOfStmt(stmt).is_fn) d.is_fn = true;
+        if (sigOfStmtIn(src, stmt, 0).is_fn) d.is_fn = true;
     }
 }
 
@@ -7025,7 +7116,7 @@ fn aliasContainerHover(files: []const []const u8, doc: *const Document,
 
 fn hoverMarkdownForDecl(text: []const u8, name: []const u8, doc: ?*const Document) ?[]const u8 {
     const stmt = findDeclStmt(text, name) orelse return null;
-    const sig = sigOfStmt(stmt);
+    const sig = sigOfStmtIn(text, stmt, 0);
     var b: std.ArrayList(u8) = .empty;
     b.appendSlice(gpa, "```zx\n") catch return null;
     if (sig.is_fn) {
@@ -7881,7 +7972,7 @@ fn signatureHelpAt(doc: *const Document, line: u32, character: u32) ?[]const u8 
             }
         }
     } else if (findDeclStmt(text, callee)) |stmt| {
-        const sig = sigOfStmt(stmt);
+        const sig = sigOfStmtIn(text, stmt, 0);
         if (sig.is_fn) {
             built.appendSlice(gpa, callee) catch {};
             appendSigTail(&built, sig);
@@ -8160,7 +8251,7 @@ fn memberCtorSnippet(list: *Json, seen: *std.StringHashMapUnmanaged(void),
 fn addCallSnippet(list: *Json, seen: *std.StringHashMapUnmanaged(void),
                   text: []const u8, name: []const u8) void {
     const stmt = findDeclStmt(text, name) orelse return;
-    const sig = sigOfStmt(stmt);
+    const sig = sigOfStmtIn(text, stmt, 0);
     if (!sig.is_fn) return;
     var ins: std.ArrayList(u8) = .empty;
     defer ins.deinit(gpa);
@@ -8302,7 +8393,7 @@ fn addExprSnippets(list: *Json, seen: *std.StringHashMapUnmanaged(void),
         // 是 .value（is_fn 只标裸 fn NAME(），那条给 extern 绑定用）。
         var is_fn_decl = false;
         if (findDeclStmt(text, d.name)) |st| {
-            const sd = sigOfStmt(st);
+            const sd = sigOfStmtIn(text, st, 0);
             if (sd.is_fn) {
                 addCallSnippet(list, seen, text, d.name);
                 // §157：类型构造函数（`return struct {…}`）再给一条实例构造

@@ -29,7 +29,7 @@
  * 解析期脱糖成返回 struct 的泛型函数，双端 C/bootstrap 对齐）、deinit
  * 变换克隆丢 sym 修复（§191，std.free 改写后 .ctx 标识符悬垂 → B1001）、
  * std/fs.zx zpath 五处泄漏修复、std 容器全部迁移到糖语法。 */
-#define ZXC_VERSION "1.6.2"
+#define ZXC_VERSION "1.6.3"
 
 /* ---------- diagnostics ---------- */
 
