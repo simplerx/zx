@@ -5619,10 +5619,10 @@ def alias_probe():
                              "text": body}}})
         import time as _t
 
-        def ask(rid, method, col):
+        def ask(rid, method, col, line=8):
             snd({"jsonrpc": "2.0", "id": rid, "method": method,
                  "params": {"textDocument": {"uri": doc},
-                            "position": {"line": 8, "character": col}}})
+                            "position": {"line": line, "character": col}}})
             deadline = _t.time() + 30
             while _t.time() < deadline:
                 m = rcv()
@@ -5642,6 +5642,15 @@ def alias_probe():
                         "range": {"start": {"line": 0, "character": 0},
                                   "end": {"line": 14, "character": 0}}}})
         out["inlay"] = ask(5, "textDocument/inlayHint", 0) or []
+        # §193 补丁三：实参位降噪。line9 = `    var t = ha(al, i32, 2);`
+        # col 18 → ap=1（T: type）→ 只出类型名；col 23 → ap=2（n: usize）
+        # → 只出值名 + 字面量关键字；语句位（空行）关键字全量。
+        r = ask(6, "textDocument/completion", 18, line=9)
+        out["argty"] = r.get("items", r) if isinstance(r, dict) else r
+        r = ask(7, "textDocument/completion", 23, line=9)
+        out["argval"] = r.get("items", r) if isinstance(r, dict) else r
+        r = ask(8, "textDocument/completion", 0, line=5)
+        out["stmt"] = r.get("items", r) if isinstance(r, dict) else r
         snd({"jsonrpc": "2.0", "id": 9, "method": "shutdown", "params": None})
         snd({"jsonrpc": "2.0", "method": "exit", "params": None})
     finally:
@@ -5669,6 +5678,17 @@ check("signatureHelp.alias",
       str(_asg)[:200])
 _ahint = [h.get("label") for h in (_ap["inlay"] or []) if h.get("kind") == 1]
 check("inlayHint.type.alias", ": *[2]i32" in _ahint, str(_ahint))
+
+_aty = {i.get("label") for i in (_ap["argty"] or [])}
+check("completion.argctx.types",
+      "i32" in _aty and "al" not in _aty and "const" not in _aty, str(sorted(_aty))[:200])
+_aval = {i.get("label") for i in (_ap["argval"] or [])}
+check("completion.argctx.values",
+      "al" in _aval and "null" in _aval
+      and "i32" not in _aval and "const" not in _aval, str(sorted(_aval))[:200])
+_astm = {i.get("label") for i in (_ap["stmt"] or [])}
+check("completion.stmt.keywords",
+      "const" in _astm and "al" in _astm, str(sorted(_astm))[:200])
 
 # ---------------------------------------------------------------------------
 if fails:

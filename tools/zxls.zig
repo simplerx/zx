@@ -8521,7 +8521,142 @@ fn scanTagNames(text: []const u8, list: *Json, seen: *std.StringHashMapUnmanaged
     }
 }
 
-fn addIdents(list: *Json, seen: *std.StringHashMapUnmanaged(void), doc_text: []const u8, prefix: []const u8) void {
+/// §193 补丁三：名字是否是类型名——原始类型（i32/u8/…，词面识别）或
+/// 声明 RHS 是类型定义（struct / enum / union / error / @Vec）。
+/// 实参位按形参类型过滤用。
+fn declIsTypeName(text: []const u8, name: []const u8) bool {
+    const prims = [_][]const u8{
+        "bool", "char", "void", "i8", "u8", "i16", "u16", "i32", "u32",
+        "i64",  "u64",  "isize", "usize", "f32", "f64",
+    };
+    for (prims) |w| {
+        if (std.mem.eql(u8, name, w)) return true;
+    }
+    if (name.len == 0) return false;
+    const stmt = findDeclStmt(text, name) orelse return false;
+    const init = declInitOf(stmt) orelse return false;
+    const heads = [_][]const u8{ "struct", "enum", "union", "error", "@Vec" };
+    for (heads) |h| {
+        if (std.mem.startsWith(u8, init, h)) return true;
+    }
+    return false;
+}
+
+/// 实参位还合法的关键字：字面量与后缀运算词（其余是语句级，不出）。
+fn argLegalKeyword(kw: []const u8) bool {
+    const ok = [_][]const u8{ "null", "undefined", "orelse", "try" };
+    for (ok) |w| {
+        if (std.mem.eql(u8, kw, w)) return true;
+    }
+    return false;
+}
+
+const ArgCtx = struct { callee: []const u8, ap: usize };
+
+/// 光标是否在某个未闭合的 `(` 内（调用实参上下文）。与 signatureHelpAt
+/// 同口径：跳过字符串、跟踪嵌套括号、跨行允许但见 `;` 即出。
+/// 返回调用名（允许点路径）与 activeParameter 下标。
+fn callArgCtx(text: []const u8, off: usize) ?ArgCtx {
+    var i = off;
+    var depth: usize = 0;
+    var in_str = false;
+    var lp: ?usize = null;
+    var nl_run: u8 = 0;
+    while (i > 0) {
+        i -= 1;
+        const ch = text[i];
+        if (in_str) {
+            if (ch == '"' and (i == 0 or text[i - 1] != '\\')) in_str = false;
+            continue;
+        }
+        switch (ch) {
+            '"' => in_str = true,
+            ')' => depth += 1,
+            '(' => {
+                if (depth == 0) {
+                    lp = i;
+                    break;
+                }
+                depth -= 1;
+            },
+            ';' => return null, // 语句已终结：不在实参位
+            '\n' => {
+                nl_run += 1;
+                if (nl_run >= 16) return null;
+            },
+            else => nl_run = 0,
+        }
+    }
+    const lpp = lp orelse return null;
+    var e = lpp;
+    while (e > 0 and (text[e - 1] == ' ' or text[e - 1] == '\t')) e -= 1;
+    var s2 = e;
+    while (s2 > 0 and (isIdentChar(text[s2 - 1]) or text[s2 - 1] == '.')) s2 -= 1;
+    if (s2 == e) return null;
+    // activeParameter：'(' 到光标之间顶层逗号数
+    var ap: usize = 0;
+    depth = 0;
+    in_str = false;
+    var q = lpp + 1;
+    while (q < off) : (q += 1) {
+        const c = text[q];
+        if (in_str) {
+            if (c == '\\') {
+                q += 1;
+                continue;
+            }
+            if (c == '"') in_str = false;
+            continue;
+        }
+        if (c == '"') {
+            in_str = true;
+        } else if (c == '(' or c == '[' or c == '{') {
+            depth += 1;
+        } else if (c == ')' or c == ']' or c == '}') {
+            if (depth > 0) depth -= 1;
+        } else if (c == ',' and depth == 0) {
+            ap += 1;
+        }
+    }
+    return .{ .callee = text[s2..e], .ap = ap };
+}
+
+/// 调用点的形参签名：裸名走 sigOfStmtIn（别名链），`std.x.y` / 模块绑定
+/// 路径查 std_builtin_docs / 模块文件。取不到返回 null（保守按值实参）。
+fn calleeSigOf(doc: *const Document, text: []const u8, callee: []const u8) ?FnSig {
+    if (callee.len == 0) return null;
+    if (std.mem.indexOfScalar(u8, callee, '.') != null) {
+        if (stdBuiltinDoc(callee)) |bt| {
+            if (!bt.ns) {
+                if (parseBuiltinSig(bt.sig)) |ps| return ps;
+            }
+        }
+        const dot = std.mem.lastIndexOfScalar(u8, callee, '.') orelse return null;
+        const bind = callee[0..dot];
+        const member = callee[dot + 1 ..];
+        var mm: ?[]const u8 = moduleOfBinding(text, bind);
+        if (mm == null and std.mem.eql(u8, bind, "std")) mm = "std";
+        if (mm) |mod| {
+            if (resolveModuleFile(doc, mod)) |p| {
+                if (readFileSmall(p)) |t| {
+                    if (findDeclStmt(t, member)) |stmt| {
+                        const sig = sigOfStmt(stmt);
+                        if (sig.is_fn) return sig;
+                    }
+                }
+            }
+        }
+        return null;
+    }
+    const cst = findDeclStmt(text, callee) orelse return null;
+    const sig = sigOfStmtIn(text, cst, 0);
+    return if (sig.is_fn) sig else null;
+}
+
+/// only_types/skip_types：调用实参位（§193 补丁三）——形参是 `type` 时
+/// 只列类型名（值名全收）；否则把类型定义名滤掉。
+fn addIdents(list: *Json, seen: *std.StringHashMapUnmanaged(void), doc_text: []const u8,
+             prefix: []const u8, only_types: bool, skip_types: bool) void {
     // 当前文件标识符（tier 1）；关键字不算标识符
     var local: std.StringHashMapUnmanaged(void) = .empty;
     defer local.deinit(gpa);
@@ -8529,6 +8664,9 @@ fn addIdents(list: *Json, seen: *std.StringHashMapUnmanaged(void), doc_text: []c
     var it = local.keyIterator();
     while (it.next()) |k| {
         if (isKeywordWord(k.*)) continue;
+        const isty = declIsTypeName(doc_text, k.*);
+        if (only_types and !isty) continue;
+        if (!only_types and skip_types and isty) continue;
         if (prefix.len == 0 or std.mem.startsWith(u8, k.*, prefix))
             addItem(list, seen, k.*, 6, "当前文件", 1);
     }
@@ -10197,24 +10335,55 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
             }
         }
     } else {
-        // 额外模板先占位：main / println / test 常与工作区标识符同名，
-        // 放到 addIdents 之后会被 seen 去重挡掉。空前缀（Ctrl+Space）时
-        // 不列，避免抢走同名标识符的补全。
-        for (snippets) |sn| {
-            if (isKeywordWord(sn.label)) continue;
-            if (prefix.len > 0 and std.mem.startsWith(u8, sn.label, prefix))
-                addSnippet(&list, &seen, sn);
+        // §193 补丁三（用户 2026-11-20 截图：alloc(std.heap.page, i32, )
+        // 里弹 T1/T2/const/continue/defer）：调用实参上下文降噪。
+        // 光标在未闭合 `(` 内时：
+        //   - 语句级模板、模块导入占位一律不出；
+        //   - 关键字只留实参位合法的字面量/后缀词（null/undefined/orelse/try）；
+        //   - 形参类型沿别名链取（calleeSigOf）：形参是 `type` 时只列类型名，
+        //     否则把类型名滤掉（std.heapAlloc 第 2 参是 type → 出 i32/T1…；
+        //     第 3 参是 usize → 不再混进 T1/T2）。
+        const actx = callArgCtx(text, off);
+        var wants_type = false;
+        if (actx) |ac| {
+            if (calleeSigOf(doc, text, ac.callee)) |sig| {
+                if (ac.ap < sig.params.len) {
+                    const p = sig.params[ac.ap];
+                    if (std.mem.indexOfScalar(u8, p, ':')) |c| {
+                        wants_type = std.mem.eql(u8, trimSl(p[c + 1 ..]), "type");
+                    }
+                }
+            }
         }
-        // 当前文件标识符 + 关键字 + 工作区标识符（分层排序）
-        // 模块导入项（不创造隐式名字，只插入绑定语句）
-        addImportModules(&list, &seen, text, off, doc_dir, prefix);
+        if (actx == null) {
+            // 额外模板先占位：main / println / test 常与工作区标识符同名，
+            // 放到 addIdents 之后会被 seen 去重挡掉。空前缀（Ctrl+Space）时
+            // 不列，避免抢走同名标识符的补全。
+            for (snippets) |sn| {
+                if (isKeywordWord(sn.label)) continue;
+                if (prefix.len > 0 and std.mem.startsWith(u8, sn.label, prefix))
+                    addSnippet(&list, &seen, sn);
+            }
+            // 模块导入项（不创造隐式名字，只插入绑定语句）——实参位不出
+            addImportModules(&list, &seen, text, off, doc_dir, prefix);
+        }
         // KEEP - 自定义类型实例 / 函数调用骨架（当前文件声明）。
         // 必须在 addIdents 之前：容器拿到 `Name{...}` 构造骨架后会把裸名
         // 占进 seen，裸标识符项就不再重复弹（用户 2026-11-08：只要骨架那条）。
-        addExprSnippets(&list, &seen, doc, text, prefix);
-        addIdents(&list, &seen, text, prefix);
+        // type 形参位不出值骨架（骨架是造值，这里要的是类型名）。
+        if (actx == null or !wants_type) {
+            addExprSnippets(&list, &seen, doc, text, prefix);
+        }
+        // 当前文件标识符（实参位按形参类型过滤类型名/值名）
+        addIdents(&list, &seen, text, prefix, actx != null and wants_type, actx != null and !wants_type);
         for (keywords) |kw| {
             if (prefix.len == 0 or std.mem.startsWith(u8, kw, prefix)) {
+                if (actx != null) {
+                    // type 形参位连字面量关键字都不出（挑的是类型名）
+                    if (!wants_type and argLegalKeyword(kw))
+                        addItem(&list, &seen, kw, 14, "关键字", 2);
+                    continue;
+                }
                 // 关键字里有骨架的走 snippet（写 `if` + Tab 展开），
                 // 其余仍是普通关键字补全。
                 if (snippetFor(kw)) |sn| {
