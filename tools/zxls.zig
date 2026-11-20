@@ -1002,19 +1002,26 @@ fn genericBodyOf(files: []const []const u8, base: []const u8) ?[]const u8 {
     // §190 泛型 struct 糖：`const X = struct (T: type, …) { … }` 直接是
     // 类型构造函数的体（参数表判据与解析器一致：`(` 后是 IDENT ':'，
     // 排除旧 `struct(packed)`）。命中即返回 struct 体，不再往 `= fn` 里找。
+    // 模式不带 `(`：用户风格 `struct(T: type, …)` 括号前没有空格
+    //（2026-11-20 用户截图：泛型类型的构造骨架整条消失，只剩调用骨架），
+    // 匹配到后再跳空白验 `(` 与参数表形状。
     {
         var sp: std.ArrayList(u8) = .empty;
         defer sp.deinit(gpa);
         sp.appendSlice(gpa, "const ") catch return null;
         sp.appendSlice(gpa, base) catch return null;
-        sp.appendSlice(gpa, " = struct (") catch return null;
+        sp.appendSlice(gpa, " = struct") catch return null;
         for (files) |ftext| {
             var idx: usize = 0;
             while (std.mem.indexOfPos(u8, ftext, idx, sp.items)) |hit| {
                 idx = hit + 1;
                 if (hit > 0 and isIdentChar(ftext[hit - 1])) continue;
-                // `(` 后必须是「IDENT ':'」才是参数表；`packed` / 空参不算糖
+                // `struct` 后先跳空白，必须是 `(`——普通容器 `struct {` 不进糖
                 var q = hit + sp.items.len;
+                while (q < ftext.len and (ftext[q] == ' ' or ftext[q] == '\t')) q += 1;
+                if (q >= ftext.len or ftext[q] != '(') continue;
+                // `(` 后必须是「IDENT ':'」才是参数表；`packed` / 空参不算糖
+                q += 1;
                 while (q < ftext.len and (ftext[q] == ' ' or ftext[q] == '\t')) q += 1;
                 if (q >= ftext.len or !isIdentChar(ftext[q])) continue;
                 var q2 = q;

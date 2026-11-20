@@ -5381,6 +5381,80 @@ else:
     print("     inlayHint: %.3f s, %d 条提示, %d 行" % (dt, nh, n))
 
 # ---------------------------------------------------------------------------
+# §190 泛型类型的构造骨架（2026-11-20 用户截图：裸名补全只有「调用骨架」，
+# 「构造泛型实例」整条消失——根因 genericBodyOf 糖模式硬编码 " = struct ("，
+# 用户风格 struct(T: type, …) 括号前没有空格匹配不上）。独立进程探针。
+def gctor_probe():
+    d = os.path.join(TESTDIR, "gctor")
+    shutil.rmtree(d, ignore_errors=True)
+    os.makedirs(d)
+    doc = "file:///" + os.path.join(d, "main.zx").replace("\\", "/")
+    body = ('const Person = struct(T: type, n: u32){\n'
+            '    age: T,\n'
+            '    name: []const u8,\n'
+            '};\n\n'
+            'pub const main = fn () u8 {\n'
+            '    return Per\n'
+            '};\n')
+    try:
+        p3 = subprocess.Popen([ZXLS_BIN], stdin=subprocess.PIPE,
+                              stdout=subprocess.PIPE, cwd=d)
+        snd = lambda o: (p3.stdin.write(
+            ("Content-Length: %d\r\n\r\n" % len(json.dumps(o).encode())).encode()
+            + json.dumps(o).encode()), p3.stdin.flush())
+        def rcv():
+            hdr = b""
+            while not hdr.endswith(b"\r\n\r\n"):
+                c = p3.stdout.read(1)
+                if not c:
+                    return None
+                hdr += c
+            ln = int([l for l in hdr.split(b"\r\n")
+                      if l.lower().startswith(b"content-length")][0].split(b":")[1])
+            return json.loads(p3.stdout.read(ln))
+        snd({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+             "params": {"capabilities": {}, "rootUri": "file:///" + d.replace("\\", "/")}})
+        while True:
+            m = rcv()
+            if m is None or m.get("id") == 1:
+                break
+        snd({"jsonrpc": "2.0", "method": "initialized", "params": {}})
+        snd({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": {"uri": doc, "languageId": "zx", "version": 1,
+                             "text": body}}})
+        off = body.index("return Per") + len("return Per")
+        _gline = body.count("\n", 0, off)
+        _gcol = off - (body.rfind("\n", 0, off) + 1)
+        snd({"jsonrpc": "2.0", "id": 2, "method": "textDocument/completion",
+             "params": {"textDocument": {"uri": doc},
+                        "position": {"line": _gline, "character": _gcol}}})
+        items = None
+        import time as _t
+        deadline = _t.time() + 30
+        while _t.time() < deadline:
+            m = rcv()
+            if m is None:
+                break
+            if m.get("id") == 2:
+                r = m.get("result") or {}
+                items = r.get("items", r if isinstance(r, list) else [])
+                break
+        return items
+    finally:
+        try:
+            p3.kill()
+        except Exception:
+            pass
+        shutil.rmtree(d, ignore_errors=True)
+
+_gitems = gctor_probe()
+_glabels = {i.get("label") for i in _gitems} if _gitems else set()
+_gdet = {i.get("label"): i.get("detail") for i in _gitems} if _gitems else {}
+check("completion.gctor.ctor",
+      "Person(...){...}" in _glabels
+      and _gdet.get("Person(...){...}") == "构造泛型实例", str(sorted(_glabels)))
+check("completion.gctor.call", "Person(...)" in _glabels, str(sorted(_glabels)))
+
 # ---------------------------------------------------------------------------
 if fails:
     print(f"SMOKE FAILED: {len(fails)} -> {fails}"); sys.exit(1)
