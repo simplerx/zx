@@ -1,0 +1,35 @@
+// §194：跨函数成员写入（形参容器 store 新分配）的调用点镜像。
+//
+// 修前：被调体 `t[0].name = heapAlloc(...)` 往形参容器写入新分配，只记在
+// 形参的字段账上；调用点只镜像 free 事实（pff），不镜像 store 事实——
+// 调用方读回 `t1[0].name` 拿不到分配槽、free 有着落不了，终扫误报 E0513
+// 假阳性。修后：形参 store 事实（pfs）在调用点实例化烙到实参载体字段账，
+// 调用方读回即可释放。真泄漏/双重释放仍分别报 E0513/E0509。
+// expect-exit: 0
+// expect-output
+// ok
+const std = @mod("std");
+
+const T1 = struct {
+    name: *[1]i32,
+};
+
+// 被调函数经形参容器写入一份新分配（不返回、不 free）
+const fill = fn (t: *[1]T1, al: Allocator) void {
+    t[0].name = std.heapAlloc(al, i32, 1);
+};
+
+const main = fn () u8 {
+    const al = std.heap.page;
+    let t1: *[1]T1 = std.heapAlloc(al, T1, 1);
+    defer std.free(al, t1[0..1]);
+
+    fill(t1, al);
+    // 调用方读回被调函数写入的指针并释放——修前这里让 fill 内的分配
+    // 槽无人接管，误报 E0513。
+    let p = t1[0].name;
+    defer std.free(al, p[0..1]);
+
+    std.println("ok");
+    return 0;
+};
