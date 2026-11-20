@@ -1,0 +1,52 @@
+// §192：实例转移不跟丢成员的指针标签（转移溯源镜像）。
+//
+// 字段账随 DECL/ASG 子树拷到新载体后，载体记下来源表达式（Symbol.ft_src）；
+// 新载体上的字段写入沿溯源链镜像回源账本——`let mid = t2[0].pt` 之后写
+// `mid.name`，t2 的 "0.pt.name" 同步落账，之后无论沿 mid 还是沿 t2[0].pt
+// 读回释放都能对上账。修前：经新实例写、沿旧路径读会拿错标签（前缀回退
+// 错抓容器分配），报出莫须有的 E0509/E0512。
+// expect-exit: 0
+// expect-output
+// ok
+const std = @mod("std");
+
+const T1 = struct {
+    name: *i32,
+};
+
+const T2 = struct {
+    pt: *T1,
+};
+
+const main = fn () u8 {
+    const al = std.heap.page;
+    let t2: *[1]T2 = std.heapAlloc(al, T2, 1);
+    defer std.free(al, t2);
+
+    // 转移前深写、经新实例读回释放
+    t2[0].pt = std.heapAlloc(al, T1, 1);
+    t2[0].pt.name = std.heapAlloc(al, i32, 1);
+    let mid = t2[0].pt;
+    let p = mid.name;
+    defer std.free(al, p[0..1]);
+    defer std.free(al, mid[0..1]);
+    std.println("ok");
+
+    // 转移后经新实例深写、沿旧路径读回释放（镜像回写源账本）
+    t2[0].pt = std.heapAlloc(al, T1, 1);
+    let mid2 = t2[0].pt;
+    mid2.name = std.heapAlloc(al, i32, 1);
+    let q = t2[0].pt.name;
+    defer std.free(al, q[0..1]);
+    defer std.free(al, mid2[0..1]);
+
+    // var 赋值转移同口径
+    t2[0].pt = std.heapAlloc(al, T1, 1);
+    var mid3: *T1 = undefined;
+    mid3 = t2[0].pt;
+    mid3.name = std.heapAlloc(al, i32, 1);
+    let s = mid3.name;
+    defer std.free(al, s[0..1]);
+    defer std.free(al, mid3[0..1]);
+    return 0;
+};

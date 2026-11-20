@@ -35,7 +35,7 @@ mkdir -p bin .zc-cache/local .zc-cache/global
 "$ZIG" cc -std=c11 -Wall -Wextra -O1 -o bin/zxc.exe \
     src/zxc.c src/ty.c src/val.c src/lex.c src/parse.c src/sema.c src/backend.c src/main.c \
     src/fe.c src/astload.c src/errors.c src/cbind.c src/csrc.c src/clib.c src/fetch.c
-rm -f bin/zxc.pdb
+rm -f bin/zxc.pdb 2>/dev/null || true
 echo "built bin/zxc.exe"
 
 # 自举阶段 4：zxc 用**自己的 Zx 前端**编 zxfe——闭环。阶段 3 的 --fe=c
@@ -63,10 +63,10 @@ echo "built bin/zxfe.exe"
 # 编译器与前端已经更新，zxls 下次再编。其它失败要把日志打出来，别静默。
 ZXLS_LOG=".zc-cache/zxls-build.log"
 if "$ZIG" build-exe tools/zxls.zig -O ReleaseSafe -femit-bin=bin/zxls.exe > "$ZXLS_LOG" 2>&1; then
-    rm -f bin/zxls.pdb
+    rm -f bin/zxls.pdb 2>/dev/null || true
     echo "built bin/zxls.exe"
 else
-    rm -f bin/zxls.pdb
+    rm -f bin/zxls.pdb 2>/dev/null || true
     if grep -qi "permission denied" "$ZXLS_LOG"; then
         echo "skip bin/zxls.exe（被编辑器占用：退出 Zed 后重跑，或先改名再编）"
     else

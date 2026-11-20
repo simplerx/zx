@@ -1,0 +1,6 @@
+// §192：@shim C 通道已删除——写了直接 E0211，指引走工程通道
+// （zxc include + extern "C" fn + @link）。
+// expect: @shim was removed
+@shim("impl.c");
+
+pub const main = fn () u8 { return 0; };

@@ -45,7 +45,7 @@ typedef enum {
     NK_PTR_TYPE,        /* *[N]elem / *elem — a=elem, b=len (NULL→none), flag=is_const */
     NK_SLICE_TYPE,      /* []elem — flag = is_const */
     NK_TUPLE_TYPE,      /* { T, ... } */
-    NK_STRUCT_TYPE,     /* flag: 0=plain,1=packed,2=c */
+    NK_STRUCT_TYPE,     /* flag: unused (packed 修饰符已删除，§192) */
     NK_UNION_TYPE,      /* tagged if any member is tuple-typed */
     NK_ENUM_TYPE,       /* a = backing type */
     NK_OPT_TYPE,        /* ?elem */

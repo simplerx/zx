@@ -1,0 +1,10 @@
+// §192：struct(packed) 已删除——曾经「接受但忽略」（后端不读 flag，
+// 字段一直是 C 对齐），现在解析层直接拒绝。extern 结构上的同名修饰符
+// 一并失效；恢复成普通 struct 后文件其余部分照常检查。
+// expect: struct(packed) was removed
+const P = struct(packed) { a: u8, b: i32 };
+
+pub const main = fn () u8 {
+    var p = P{ .a = 1, .b = 2 };
+    return p.a;
+};

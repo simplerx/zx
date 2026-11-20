@@ -1,0 +1,27 @@
+// §192：转移后经新实例覆盖写，被顶掉的旧分配要能报出来。
+//
+// 溯源镜像把 `mid.name = ...` 的清除也同步回源账本（t2 的
+// "0.pt.name" 槽清零）——第一次分配的槽没人认领，终扫报 E0513。
+// 修前这次覆盖写对源账本不可见，泄漏静默。
+const std = @mod("std");
+
+const T1 = struct {
+    name: *i32,
+};
+
+const T2 = struct {
+    pt: *T1,
+};
+
+const main = fn () void {
+    const al = std.heap.page;
+    let t2: *[1]T2 = std.heapAlloc(al, T2, 1);
+    defer std.free(al, t2);
+    t2[0].pt = std.heapAlloc(al, T1, 1);
+    t2[0].pt.name = std.heapAlloc(al, i32, 1);
+    let mid = t2[0].pt;
+    mid.name = std.heapAlloc(al, i32, 1);
+    defer std.free(al, mid[0..1]);
+    defer std.free(al, mid.name[0..1]);
+};
+// expect: error[E0513]: memory allocated at line

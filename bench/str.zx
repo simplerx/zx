@@ -5,6 +5,8 @@ const std = @mod("std");
 const main = fn () u8 {
     let al = std.heap.page;
     var sb = std.array.List(u8).init(al);
+    // §189 后账本管得严：退出前把 List 自己的缓冲还掉（E0513）。
+    defer sb.deinit();
 
     for (0..20000) i {
         if (std.format(al, "{}", (i64)(i32)i)) s {

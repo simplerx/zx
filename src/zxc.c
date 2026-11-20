@@ -19,26 +19,8 @@ void zx_add_link_lib(const char *name) {
     g_link_libs[g_nlink_libs++] = strdup(name);
 }
 
-/* ---------- C shim（@shim） ----------
- * 与 @link 同一套路：语义阶段填表，driver 消费。去重按完整路径——
- * std/simd.zx 与用户自己的模块各登记一次同一份 .c 只编一遍。 */
-static const char *g_c_shims[ZXC_MAX_C_SHIMS];
-static int g_nc_shims = 0;
-
-int zx_add_c_shim(const char *path) {
-    if (!path || !*path) return 0;
-    for (int i = 0; i < g_nc_shims; i++)
-        if (!strcmp(g_c_shims[i], path)) return 1;
-    if (g_nc_shims >= ZXC_MAX_C_SHIMS) return 0;
-    g_c_shims[g_nc_shims++] = strdup(path);
-    return 1;
-}
-
-int zx_c_shim_count(void) { return g_nc_shims; }
-
-const char *zx_c_shim(int i) {
-    return (i >= 0 && i < g_nc_shims) ? g_c_shims[i] : NULL;
-}
+/* §192：C shim（@shim）通道已删除——语义层对 @shim 报 E0211，
+ * driver 不再登记/编译任何 shim TU。 */
 
 /* 超过这个数就不再打印（继续计数）：一个语法错能连出几十条级联报错，
  * 把终端刷满反而看不见第一个错——第一个错通常就是根因。 */
@@ -56,10 +38,6 @@ static const DiagRule g_rules[] = {
     /* 已删除的旧语法要先于笼统的模块规则命中（§144：module -> @mod）。
      * g_rules 是 strstr 顺序匹配，含 module 字样的旧拼写提示必须优先。 */
     { "was removed:",                     "E0211" },
-
-    /* C shim 打不开（编译不过另走 B1004）：和"模块解析失败"是同类，
-     * 但 help 完全不同——一个是 @mod 路径，一个是 @shim 路径。 */
-    { "C shim",                           "E0602" },
 
     /* 模块 */
     { "standard library",                 "E0601" },
@@ -172,6 +150,7 @@ static const DiagRule g_rules[] = {
     /* 名字、声明、可见性 */
     { "unused",                           "E0410" },
     { "discarded",                        "E0411" },
+    { "cannot capture",                   "E0406" },
     { "unknown identifier",               "E0401" },
     { "unknown type",                     "E0401" },
     { "not found",                        "E0401" },

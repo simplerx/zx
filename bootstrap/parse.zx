@@ -928,8 +928,14 @@ pub const Parser = struct {
             }
             let n = self.new_at(NK.struct_, t);
             if (self.accept(lex.Kind.lparen)) {
+                // 其余 struct(…) 是已删除的修饰符写法（§192）：packed 曾经
+                // 被收下但后端从不读它——「接受但忽略」比报错更危险。
                 let mode = try self.take_ident();
-                if (std.str.eq(mode, "packed")) { n.flag = true; }
+                if (std.str.eq(mode, "packed")) {
+                    self.record("E0211", "struct(packed) was removed -- it was accepted but never implemented (the backend ignored it, fields stayed C-aligned); write a plain struct, or `extern struct` to mirror a C layout");
+                } else {
+                    self.record("E0202", "unknown struct modifier -- only the generic parameter list `struct (T: type, ...)` uses parentheses");
+                }
                 try self.expect(lex.Kind.rparen);
             }
             // 体：字段、方法、声明
@@ -1801,8 +1807,11 @@ pub const Parser = struct {
             }
             // §162：@Vec(T, N) 是类型，值位置也常见（`const V4 = @Vec(f32, 4);`
             // 这种别名、泛型实参）。类型位置与值位置同一套解析。
+            // 重打标签时把内建名清掉——C 端构造的是无名 vec 节点，
+            // dump 对拍按字节比，名字留着就差一截（§192 对拍收口）。
             if (std.str.eq(nm, "Vec")) {
                 n.kind = NK.vec;
+                n.name = null;
                 try self.expect(lex.Kind.lparen);
                 n.a = try self.parse_type();
                 try self.expect(lex.Kind.comma);

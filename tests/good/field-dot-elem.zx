@@ -1,0 +1,45 @@
+// §192：数组指针 `.N` 点形式与 ptr[N] 同一本账。
+//
+// 修前：`.N` 数字分量在字段账路径折叠里只认元组基址，指针基址一律
+// 截断——`t.0.name = heapAlloc` 后经 `t.0.name` 读回释放仍报 E0513
+// 假阳性（`t[0].name` 拼法则正常）。修后两种拼法互通：
+// ft_path_key 收数字分量（数组指针）、tag_of_expr 元素读查同一 aesc、
+// 元素存储走同一 patch-10；裸指针 `.0` 是纯解引用，路径透明穿过。
+// expect-exit: 0
+// expect-output
+// ok
+const std = @mod("std");
+
+const T1 = struct {
+    name: *i32,
+};
+
+const Inner = struct { v: *i32 };
+const Outer = struct { sub: Inner, pad: i32 };
+
+const main = fn () u8 {
+    const al = std.heap.page;
+
+    // ① 单层字段：写经 `[0]`、读回释放经 `.0`（两种拼法同一本账）
+    let t1: *[1]T1 = std.heapAlloc(al, T1, 1);
+    defer std.free(al, t1[0..1]);
+    t1[0].name = std.heapAlloc(al, i32, 1);
+    let p = t1.0.name;
+    defer std.free(al, p[0..1]);
+    std.println("ok");
+
+    // ② 嵌套字段全点形式
+    let t2: *[1]Outer = std.heapAlloc(al, Outer, 1);
+    t2.0.sub.v = std.heapAlloc(al, i32, 1);
+    let q = t2.0.sub.v;
+    defer std.free(al, q[0..1]);
+    defer std.free(al, t2);
+
+    // ③ 成员接收指针后经它深写（T2.pt 链）
+    let t3: *[1]T1 = std.heapAlloc(al, T1, 1);
+    t3.0.name = std.heapAlloc(al, i32, 1);
+    let r = t3[0].name;
+    defer std.free(al, r[0..1]);
+    defer std.free(al, t3[0..1]);
+    return 0;
+};

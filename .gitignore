@@ -1,9 +1,14 @@
-# 构建产物
-bin/
+# 构建产物。bin/ 下只白名单三个运行所需 exe（克隆即用：zxc 驱动 /
+# zxfe 前端 / zxls 语言服务器，std/ 已入库，拉下来 zxc init 直接可用）；
+# 其余产物与备份（*-bak*.exe 等）仍不入库。
+bin/*
 *.o
-*.exe
 *.pdb
 *.tmp
+*.exe
+!bin/zxc.exe
+!bin/zxfe.exe
+!bin/zxls.exe
 
 # 工具链（zig cc，不入库）
 .toolchain/

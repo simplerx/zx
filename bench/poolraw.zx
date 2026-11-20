@@ -2,6 +2,11 @@
 // （std.heap.page）。裸 malloc 的 free 需要尺寸，所以多一条尺寸环。
 const std = @mod("std");
 
+// 环形分配刻意向后延迟 RING 个迭代才 free（tag 账本按「同迭代进出」
+// 建模，跨迭代持有必然报 E0516）。这是裸分配器的对照基准，手动管理
+// 内存是它的本意——按模块关账本。
+tag.close;
+
 const RING: usize = 1024;
 
 const main = fn () u8 {

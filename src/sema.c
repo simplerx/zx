@@ -132,6 +132,8 @@ struct Symbol {
     bool        broken;    /* 解析失败的绑定（module 加载失败）：成员访问一律闭嘴 */
     bool        ct_bind;   /* 泛型的编译期实参：没有 C 变量，值直接内联 */
     bool        in_fn;     /* 声明在函数体里：它的槽位在当前栈帧上 */
+    int         fn_d;      /* 声明时的函数嵌套深度（in_fn 局部用，§192 闭包检查：
+                            * 更浅深度 = 外层函数的栈槽，嵌套函数读到就是捕获） */
     bool        fn_local;  /* hoist 时确认是函数块内的绑定：块内先声明后使用要报 */
     bool        is_top;    /* 文件顶层声明：后端把它发成 C 全局变量，初始值镜像归它管 */
     bool        used;      /* 被读过或写过一次；没碰过的局部绑定要报（M66） */
@@ -142,6 +144,9 @@ struct Symbol {
     int         tag_state; /* §170 载体状态 TC_*（0 NONE / 1 LIVE / 2 FREED /
                             * 3 COND / 4 UNKNOWN） */
     FieldTag   *ftags;     /* §173：结构体值载体携带的字段账本（FieldTag 链） */
+    Node       *ft_src;    /* §192：转移溯源——字段账随 DECL/ASG 从这个表达式
+                            * 子树拷来；新载体上的字段写入沿它镜像回源账本，
+                            * 两个实例读写同一存储位置口径一致（跟丢防护） */
     bool        ptr_taint; /* §187：整数符号带指针出处污点（E0525 用） */
     const char *cname;     /* 后端用的 C 名字（模块内名字带前缀） */
     int         decl_line; /* 声明位置（D2 note 用；0 = 没记） */
@@ -1969,10 +1974,8 @@ static Type *resolve_struct_body(Node *n, Type *agg, bool is_union) {
      * 只允许"数据"——方法、静态成员、字段默认值都不进布局，一律拒绝。 */
     bool ext = n->is_extern;
     if (ext) {
-        if (n->flag)
-            err_at(n->line, n->col,
-                   "extern struct does not support (packed); C structs follow "
-                   "the platform's natural layout");
+        /* packed 已整体删除（§192）：struct(packed) 在解析层就报 E0211，
+         * 这里不再可能有带 flag 的 struct 进来。 */
         if (is_union && n->op == 1)
             err_at(n->line, n->col,
                    "extern union cannot be union(enum) -- tagged unions are a "
@@ -3040,6 +3043,33 @@ static void ft_clear_prefix(FieldTag *list, const char *key) {
     }
 }
 
+/* §192：转移溯源镜像。字段账随 DECL/ASG 从源表达式子树拷到新载体后，
+ * 载体记下来源（Symbol.ft_src）；载体上的字段写入/清除沿溯源链镜像回
+ * 源账本（let mid = t2[0].pt 之后写 mid.name，t2 的 "0.pt.name" 同步
+ * 落账），两个实例读同一存储位置口径一致——实例怎么转移都不跟丢。
+ * slot>0 写入（先清子树再落账），slot==0 只清。深度 8 防环。 */
+static bool ft_path_key(Node *e, char *buf, size_t cap, Node **base_out);
+static char *ft_path_dup(const char *prefix, const char *leaf);
+static void ft_mirror(Symbol *s, const char *key, int slot, int depth) {
+    if (!s || !s->ft_src || !key || !key[0] || depth > 8) return;
+    char path[128];
+    Node *fb = NULL;
+    if (!ft_path_key(s->ft_src, path, sizeof path, &fb)) path[0] = 0;
+    if (!fb || fb->kind != NK_IDENT || !fb->sym) return;
+    Symbol *b2 = fb->sym;
+    char full[160];
+    if (path[0]) snprintf(full, sizeof full, "%s.%s", path, key);
+    else snprintf(full, sizeof full, "%s", key);
+    if (slot > 0) {
+        ft_clear_prefix((FieldTag *)b2->ftags, full);
+        char *pk = ft_path_dup(path[0] ? path : NULL, key);
+        if (pk) ft_set((FieldTag **)&b2->ftags, pk, slot);
+    } else {
+        ft_clear_prefix((FieldTag *)b2->ftags, full);
+    }
+    ft_mirror(b2, full, slot, depth + 1);
+}
+
 /* 合并两条 return 路径的字段表；同名字段槽不一致 = 状态不一致，丢弃。 */
 static FieldTag *ft_merge(FieldTag *a, FieldTag *b) {
     FieldTag *out = NULL;
@@ -3071,19 +3101,24 @@ static bool ft_path_key(Node *e, char *buf, size_t cap, Node **base_out) {
     int np = 0;
     Node *fb = e;
     /* §174：元组字段访问被改写成 NK_FIELD（name=NULL、ival=下标）——
-     * 基址类型是元组的数字分量按 "N" 进点路径；基址是指针的同形状节点
-     * 是方法接收者补的解引用（(*p)），路径在此截断（保守漏报）。
-     * §175：常索引数组/切片元素 arr[1] 同样按下标分量进路径（下标
-     * 必须是整型字面量；运行期索引在此截断，写入处另报 E0521）。 */
+     * 基址类型是元组的数字分量按 "N" 进点路径；§192：基址是**数组指针**
+     * 的 .N（等价 ptr[N]）同样按下标分量进路径（与 NK_INDEX 常索引同
+     * 一本账，两种拼法互通）；基址是裸指针的 .0 是纯解引用（身份不变），
+     * 路径透明穿过（等价自动穿透的字段访问）；运行期索引在此截断，
+     * 写入处另报 E0521。 */
     while (fb && np < 8 &&
            (fb->kind == NK_FIELD &&
             (fb->name || (fb->ival >= 0 && fb->a && fb->a->ty &&
-                          fb->a->ty->kind == TY_TUPLE)) ||
+                          (fb->a->ty->kind == TY_TUPLE ||
+                           fb->a->ty->kind == TY_PTR))) ||
             (fb->kind == NK_INDEX && fb->b && fb->b->kind == NK_INT &&
              fb->a))) {
         if (fb->kind == NK_FIELD) {
             if (fb->name) {
                 names[np] = fb->name;
+            } else if (fb->a->ty->kind == TY_PTR && !fb->a->ty->has_len) {
+                fb = fb->a;                 /* 裸指针 .0：透明穿过 */
+                continue;
             } else {
                 snprintf(idxbuf[np], sizeof idxbuf[np], "%d", (int)fb->ival);
                 names[np] = idxbuf[np];
@@ -3332,6 +3367,13 @@ static int aesc_const_index(Node *ix) {
     return -1;
 }
 
+/* §192：数组指针的 `.N` 点形式常索引元素访问（与 ptr[N] 等价）。
+ * 裸指针的 .0 是纯解引用，不算元素访问。 */
+static bool ft_num_elem(Node *e) {
+    return e && e->kind == NK_FIELD && !e->name && e->ival >= 0 &&
+           e->a && e->a->ty && e->a->ty->kind == TY_PTR && e->a->ty->has_len;
+}
+
 /* §187：表达式是否带「指针出处」污点——值（或经变量）源自指针→整数
  * 转换。算术运算不洗源（污点只进不出）；赋值重绑按右值重算。 */
 static int expr_taint(Node *e) {
@@ -3551,13 +3593,17 @@ static void tag_of_expr(Node *e, int *id, int *state) {
         return;
     }
     /* §173 补丁十（收紧版）：常索引读精确元素账——`let q = xs[0];`
-     * 标签精确跟出（槽共享）、`free(xs[0])` 记得上账。运行期索引：
-     * 数组存过贴标指针就报 E0521（无法指认元素，标签绝不静默丢失；
-     * 续链语句的值读出由调用方预先占座豁免）。只继承 LIVE：FREED
-     * 继承会在"另一臂没存过"的分支场景里假报 E0512。 */
-    if (e->kind == NK_INDEX && e->a && e->a->kind == NK_IDENT &&
+     * 标签精确跟出（槽共享）、`free(xs[0])` 记得上账。§192：数组指针的
+     * `.N` 点形式与 ptr[N] 同一本账（同一 aesc 群，两种拼法互通）。
+     * 运行期索引：数组存过贴标指针就报 E0521（无法指认元素，标签绝不
+     * 静默丢失；续链语句的值读出由调用方预先占座豁免）。只继承 LIVE：
+     * FREED 继承会在"另一臂没存过"的分支场景里假报 E0512。 */
+    if (((e->kind == NK_INDEX && e->a) ||
+         (e->kind == NK_FIELD && !e->name && e->ival >= 0 && e->a &&
+          e->a->ty && e->a->ty->kind == TY_PTR && e->a->ty->has_len)) &&
+        e->a->kind == NK_IDENT &&
         e->a->sym && e->a->sym->kind != SK_CONST) {
-        int ix = aesc_const_index(e->b);
+        int ix = e->kind == NK_INDEX ? aesc_const_index(e->b) : (int)e->ival;
         int aid = ix >= 0 ? aesc_find(e->a->sym, ix) : 0;
         if (ix < 0 && (aesc_any(e->a->sym) || agt_any(e->a->sym)) &&
             tag_diag_once(e->line, e->col))
@@ -3609,9 +3655,11 @@ static void tag_of_expr(Node *e, int *id, int *state) {
         return;
     }
     /* §174：(*p) 解引用（方法接收者自动补的 name=NULL NK_FIELD，基址
-     * 是指针）：贴标指针经解引用身份不变。 */
+     * 是指针）：贴标指针经解引用身份不变。§192：数组指针（has_len）的
+     * `.N` 是元素访问不是解引用——上面已按 aesc 精确账处理，这里不吞
+     * （否则整容器分配的标签会错落到元素头上）。 */
     if (e->kind == NK_FIELD && !e->name && e->a && e->a->ty &&
-        e->a->ty->kind == TY_PTR) {
+        e->a->ty->kind == TY_PTR && !e->a->ty->has_len) {
         tag_of_expr(e->a, id, state);
         return;
     }
@@ -5297,7 +5345,11 @@ static Type *check_assign(Node *n) {
                     fs2 = ft_subtree((FieldTag *)fb2->sym->ftags, key2);
             }
             n->a->sym->ftags = fs2 ? ft_clone(fs2) : NULL;
-        } else if (n->a->kind == NK_FIELD && n->a->a) {
+            /* §192：转移溯源——来源表达式挂到载体上，之后的字段写入
+             * 经 ft_mirror 回写源账本 */
+            n->a->sym->ft_src = n->b;
+        } else if (n->a->kind == NK_FIELD && n->a->a &&
+                   !ft_num_elem(n->a)) {
             /* §173 补丁八：字段赋值（含嵌套 s.inner.name = q）——目标
              * 字段链折成点路径；右值是结构体值时把它的字段账拍平进
              * 前缀（s.inner = structval → "inner.name"→槽）。
@@ -5312,15 +5364,20 @@ static Type *check_assign(Node *n) {
                 tag_of_expr(n->b, &ftid, &ftst);
                 Symbol *bs = fb->sym;
                 ft_clear_prefix((FieldTag *)bs->ftags, key);
+                ft_mirror(bs, key, 0, 0);
                 if (ftid && (ftst == TC_LIVE || ftst == TC_FREED)) {
                     char *pk = ft_path_dup(NULL, key);
                     if (pk) ft_set((FieldTag **)&bs->ftags, pk, ftid);
+                    ft_mirror(bs, key, ftid, 0);
                 } else {
                     FieldTag *inft = ftags_of_expr(n->b);
                     for (FieldTag *g = inft; g; g = g->next) {
                         if (g->slot <= 0) continue;
                         char *pk = ft_path_dup(key, g->name);
-                        if (pk) ft_set((FieldTag **)&bs->ftags, pk, g->slot);
+                        if (pk) {
+                            ft_set((FieldTag **)&bs->ftags, pk, g->slot);
+                            ft_mirror(bs, pk, g->slot, 0);
+                        }
                     }
                 }
             } else if (fb && fb->kind == NK_INDEX &&
@@ -5346,11 +5403,13 @@ static Type *check_assign(Node *n) {
                     }
                 }
             }
-        } else if (n->a->kind == NK_INDEX && n->a->a) {
+        } else if ((n->a->kind == NK_INDEX || ft_num_elem(n->a)) &&
+                   n->a->a) {
             /* §173 补丁十：贴标指针进数组/元组元素认**常索引**精确账。
              * §185：运行期索引不再一律断线——基址能解析到数组基变量
              * （含别名切片）时槽进该数组的标签群（存入即登记）；解析
-             * 不了才保守记 pending（续链/终结接管，终扫 E0521）。 */
+             * 不了才保守记 pending（续链/终结接管，终扫 E0521）。
+             * §192：数组指针的 `.N` 点形式与 ptr[N] 同走这里。 */
             Symbol *dbs = (n->a->a->kind == NK_IDENT)
                           ? (n->a->a->sym && n->a->a->sym->kind != SK_CONST
                              ? n->a->a->sym : NULL)
@@ -5359,7 +5418,8 @@ static Type *check_assign(Node *n) {
                 int ftid, ftst;
                 tag_of_expr(n->b, &ftid, &ftst);
                 if (ftid) {
-                    int ix = aesc_const_index(n->a->b);
+                    int ix = n->a->kind == NK_INDEX
+                             ? aesc_const_index(n->a->b) : (int)n->a->ival;
                     TagSlot *ts = tag_slot(ftid);
                     if (ix < 0) {
                         /* §185：运行期索引写入 → 槽进群。群成员由注解
@@ -7053,6 +7113,16 @@ static Type *check_call(Node *n, Type *expect) {
         /* 只认编译器种进去的内建符号：模块自己声明同名函数时
          * lookup 拿到的是 SK_FN（builtin == BI_NONE），不会被改道。 */
         Symbol *s = lookup(n->a->name);
+        /* §192 函数别名：`const alloc = std.heapAlloc;` —— const 的
+         * 别名路径（sym_link）会把内建符号的 kind/builtin 抄过来，
+         * 之后与裸名内建同一条分派。顶层声明的初值在调用点可能还没
+         * 解析（fn 体先于后面的顶层 decl 检查）：初值是 FIELD 且还没
+         * 解析过的，先 ensure 走一遍 sym_link。函数内的前向引用不进
+         * 这里（fn_local 由 E0401 管，不能被抢跑解析）。 */
+        if (s && s->kind == SK_CONST && s->state == 0 && !s->fn_local &&
+            s->decl && s->decl->kind == NK_DECL && s->decl->b &&
+            s->decl->b->kind == NK_FIELD)
+            ensure(s);
         if (s && s->kind == SK_NS &&
             (s->builtin == BI_PRINT || s->builtin == BI_PRINTLN ||
              s->builtin == BI_FORMAT || s->builtin == BI_STACKALLOC ||
@@ -7917,38 +7987,16 @@ static Type *check_builtin(Node *n, Type *expect) {
     }
 
     if (!strcmp(nm, "shim")) {
-        /* @shim("impl.c")：把一份 C 源文件编进程序。
-         * 它既不是 include 也不是新类型——就是一份**自包含的 C 翻译单元**，
-         * 用与 zx 相同的 cc/flags 编成 .o 后一起链接（见 build_program）。
-         * 路径相对**声明它的那份 .zx** 解析，库才能把自己的 shim 放在同目录
-         * 一起发布（std/simd.zx → std/xxx.c）。
-         *
-         * 为什么不做成"把 C 文本 include 进生成的 C"：那样 shim 会看得见
-         * zx 的内部布局和辅助函数，一次 typedef 改名就连累别人的 C；独立
-         * TU 只依赖它自己 include 的 C 头，边界干净，报错也直接指到那份
-         * .c 的真实行号（B1004），不需要行列映射。 */
-        if (n->nitems < 1)
-            return BAD(n, "@shim needs a file name: @shim(\"impl.c\")");
-        Value *sv = arg_ct(n->items[0], NULL);
-        if (!sv || sv->kind != V_STR)
-            return BAD(n, "@shim: the file name must be a string literal");
-        char *dir  = path_dup_dir(g_srcpath);
-        char *full = path_join(dir, sv->sval);
-        free(dir);
-        FILE *probe = fopen(full, "rb");
-        if (!probe) {
-            err_at(n->line, n->col,
-                   "@shim: cannot open C shim \"%s\" (resolved to %s)",
-                   sv->sval, full);
-            free(full);
-            return ty_invalid();
-        }
-        fclose(probe);
-        int added = zx_add_c_shim(full);
-        free(full);
-        if (!added)
-            return BAD(n, "@shim: too many C shims (limit %d)", ZXC_MAX_C_SHIMS);
-        return type_of(n, ty_void());
+        /* §192：@shim 通道已删除。它曾经把一份自包含 C TU 编成独立 .o
+         * 一起链接；现在要走工程通道——`zxc include` 把 C 库放进
+         * vendor/，函数用 `extern "C" fn name(…) Ret;` 声明，库用
+         * @link交给链接器。解析层双前端都还认识这个名字，语义层
+         * 统一在这里给人话。 */
+        (void)arg_ct(n->items[0], NULL);
+        return BAD_CODE("E0211", n, "@shim was removed: compile C through the "
+                        "project instead (`zxc include <lib>` binds it into "
+                        "vendor/; declare functions with `extern \"C\" fn "
+                        "name(...) Ret;`; libraries with @link)");
     }
 
     if (!strcmp(nm, "memcpy") || !strcmp(nm, "memmove") || !strcmp(nm, "memset")) {
@@ -8109,6 +8157,20 @@ static Type *check_expr_raw(Node *n, Type *expect) {
                       "declaration of '%s' above this use", n->name);
             return BAD_CODE("E0401", n, "'%s' is used before its declaration "
                             "in this block", n->name);
+        }
+        /* §192：闭包不支持。嵌套函数体里解析到**外层函数的**栈槽
+         * （fn_d 更浅）——以前 sema 放行，后端发一个谁也不认识的 C 名，
+         * 最后被包装成 B1001「编译器 bug」。在这里给人话。fn 值绑定
+         * （`const F = fn …`）不是栈槽：嵌套函数之间的兄弟引用合法，
+         * 不算捕获。 */
+        if (s->fn_d > 0 && s->fn_d < g_fn_depth &&
+            !(s->decl && s->decl->kind == NK_DECL && s->decl->b &&
+              s->decl->b->kind == NK_FN)) {
+            diag_help("Zx has no closures: pass the value as a parameter of "
+                      "the inner function instead");
+            return BAD_CODE("E0406", n, "'%s' is a local of the enclosing "
+                            "function; nested functions cannot capture "
+                            "outer variables", n->name);
         }
         if (getenv("ZX_PROBE") && (!strcmp(n->name, "myidx") || !strcmp(n->name, "idx") || !strcmp(n->name, "dims3"))) fprintf(stderr, "[probe] USE %s sym=%p tracked=%d@%d:%d\n", n->name, (void*)s, (int)(s->locals_next != 0), n->line, n->col);
         s->used = true;      /* 求值路径就是"用到了"：读、写、取地址都算 */
@@ -8842,6 +8904,7 @@ static void hoist(Scope *sc, Node *blk) {
                      * g_fn_depth 那时已>0＜误把模块顶层声明当成局部。 */
                     if (!sc->is_module) local_track(s, id->line, id->col);
                     s->fn_local = (!sc->is_module && g_fn_depth > 0);
+                    s->fn_d = s->fn_local ? g_fn_depth : 0;  /* §192 闭包检查 */
                 }
             } else if (it->name) {
                 int kind = it->op == 2 ? SK_VAR : it->op == 1 ? SK_LET : SK_CONST;
@@ -8864,6 +8927,7 @@ static void hoist(Scope *sc, Node *blk) {
                 判文件作用域要看 sc->is_module，否则模块顶层的 extern var 会被误判成局部。 */
                 s->in_fn = (!sc->is_module && g_fn_depth > 0);
                 s->fn_local = s->in_fn;
+                s->fn_d = s->in_fn ? g_fn_depth : 0;   /* §192 闭包检查 */
                 s->is_top = file_scope; /* 只有文件根作用域才是真全局；comptime 块内的局部槽位不算 */
                 it->sym = s;
                 if (!sc->is_module) local_track(s, it->line, it->col);
@@ -9719,6 +9783,10 @@ static Type *check_fn_body(Node *fn) {
 
     Scope sc;
     scope_push(&sc);
+    /* §192 闭包检查：深度要先于形参绑定抬上去——形参和体内局部
+     * 同属本帧（fn_d 相等），外层函数的形参/局部更浅（fn_d 更小），
+     * 嵌套函数体里解析到更浅的栈槽就是捕获。 */
+    g_fn_depth++;
     for (int i = 0; i < fn->nitems; i++) {
         Node *pm = fn->items[i];
         if (!pm->name) continue;
@@ -9733,6 +9801,7 @@ static Type *check_fn_body(Node *fn) {
         s->ty = pm->ty;
         s->state = 2;
         s->in_fn = true;      /* 形参槽位也在被调方的栈帧上：&pm 不可返回 */
+        s->fn_d  = g_fn_depth;/* §192：本帧深度（与体内局部一致） */
         /* §151：函数类型上的 self 被升级成 `const Self *`，而形参节点的
          * ty 仍是 `Self`。给符号打标记，后端发射时补 `(*self)`。 */
         Type *w0 = (ft && ft->kind == TY_FN && ft->nparams > 0) ? ft->params[0] : NULL;
@@ -9775,7 +9844,6 @@ static Type *check_fn_body(Node *fn) {
     bool  save_defer = g_in_defer;      /* 进了函数体：defer 上下文不再适用 */
     g_ret = ret;
     g_in_defer = false;
-    g_fn_depth++;
     Label *fl = label_push(NULL, false);
     fl->is_fn = true;
 
@@ -9875,6 +9943,8 @@ static void check_stmt(Node *n) {
                     fs = ft_subtree((FieldTag *)fb2->sym->ftags, key2);
             }
             if (fs) n->sym->ftags = ft_clone(fs);
+            /* §192：转移溯源——来源表达式挂到载体上（同 ASG 重绑口径） */
+            n->sym->ft_src = n->b;
         }
         return;
 

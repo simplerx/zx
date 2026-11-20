@@ -38,11 +38,13 @@ static const ErrDoc g_errs[] = {
       "usually a statement at top level, a declaration inside an expression, or an unterminated switch arm" },
 
     /* ---- 类型 ---- */
-    { "E0211", "builtin removed (`@Vec` is the only vector builtin now)",
-      "write conversions as `(T)value`; reflection is the single `@type(x)` "
-      "(`.size` / `.align` / `.name` / `.fields`); vector math lives in "
-      "`std.simd` (select / any / all / dot / cross / Quat); "
-      "`zxc explain E0211` lists which names went away and what to write instead" },
+    { "E0211", "removed spelling (old builtin or removed syntax)",
+      "1.6.2 also removed `@shim` (compile C via `zxc include` + `extern \"C\" fn` "
+      "+ @link) and `struct(packed)` (plain or `extern struct` only). Older "
+      "removals: write conversions as `(T)value`; reflection is the single "
+      "`@type(x)` (`.size` / `.align` / `.name` / `.fields`); vector math lives "
+      "in `std.simd`; `zxc explain E0211` lists which names went away and what "
+      "to write instead" },
 
     { "E0300", "type error (uncategorized)",
       "compare the expression's type at the caret with the expected type" },
@@ -88,6 +90,9 @@ static const ErrDoc g_errs[] = {
       "`continue` belongs in a loop, `return` in a function, no `return` inside "
       "`defer`, and `defer err` only in a function that returns `!T`; loops have "
       "no `else` branch -- write that code after the loop" },
+    { "E0406", "nested function captures an outer local (no closures)",
+      "Zx has no closures: a nested function sees only its own parameters and "
+      "locals; pass the outer value in as a parameter instead" },
     { "E0410", "unused local variable, parameter or binding",
       "rename unused ones to `_x` or `_`; otherwise delete them until needed" },
     { "E0411", "return value discarded without `_`",
@@ -157,9 +162,6 @@ static const ErrDoc g_errs[] = {
     /* ---- 模块 ---- */
     { "E0601", "module resolution failed",
       "check the path/spelling of `@mod(\"name\")`; break circular deps; `std` must resolve next to the compiler" },
-
-    { "E0602", "a @shim C file cannot be opened",
-      "the path is resolved relative to the .zx that writes @shim(...); keep the .c next to that file" },
 
     /* ---- 泛型 ---- */
     { "E0701", "generic instantiation failed",

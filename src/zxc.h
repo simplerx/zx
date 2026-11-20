@@ -29,7 +29,7 @@
  * 解析期脱糖成返回 struct 的泛型函数，双端 C/bootstrap 对齐）、deinit
  * 变换克隆丢 sym 修复（§191，std.free 改写后 .ctx 标识符悬垂 → B1001）、
  * std/fs.zx zpath 五处泄漏修复、std 容器全部迁移到糖语法。 */
-#define ZXC_VERSION "1.6.1"
+#define ZXC_VERSION "1.6.2"
 
 /* ---------- diagnostics ---------- */
 
@@ -83,16 +83,7 @@ extern char *g_link_libs[ZXC_MAX_LINK_LIBS];
 extern int   g_nlink_libs;
 void zx_add_link_lib(const char *name);
 
-/* ---------- C shim（@shim） ----------
- *
- * `@shim("impl.c")` 把一份 C 源文件编进程序：语义阶段登记路径（按解析后
- * 的完整路径去重），build_program 用同一套 cc/flags 把它编成 .o 一起链接。
- * 记的是**用户那份文件的路径**——不复制、不改名、不生成包装文件，C 编译器
- * 报错时给的行号就是真实行号，不需要任何映射表。 */
-#define ZXC_MAX_C_SHIMS 16
-int zx_add_c_shim(const char *path);   /* 0 = 表满（重复登记算成功） */
-int zx_c_shim_count(void);
-const char *zx_c_shim(int i);
+/* §192：C shim（@shim）通道已删除。 */
 
 /* ---------- growable byte buffer ---------- */
 

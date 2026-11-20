@@ -333,12 +333,14 @@ static Node *parse_type_primary(P *p) {
                 base = app;
             }
             /* 点路径：std.HashMap / std.TypeInfo 这类"模块里的类型"，
-             * 和泛型实参交错（std.HashMap(i32).Entry 也要能写） */
+             * 和泛型实参交错（std.HashMap(i32).Entry 也要能写）。
+             * 位置记**成员名**（与 parse_postfix 的值路径同口径；
+             * 旧代码记到 take_ident 之后的 token 上，对拍差一截列号）。 */
             if (!at(p, TOK_DOT)) break;
-            Token *dot = advance(p);
-            (void)dot;
+            advance(p);
+            Token *idt = cur(p);
             const char *nm = take_ident(p);
-            Node *f = node_new(NK_FIELD, cur(p)->line, cur(p)->col);
+            Node *f = node_new(NK_FIELD, idt->line, idt->col);
             f->a = base;
             f->name = nm;
             base = f;
@@ -408,14 +410,28 @@ static Node *parse_type_primary(P *p) {
         Node *n = node_new(NK_STRUCT_TYPE, t->line, t->col);
         if (at(p, TOK_LPAREN)) {
             /* §190：`struct (T: type, N: usize) { … }` 泛型糖（参数表）。
-             * 旧的 `struct(packed)` 是「IDENT 后直接 `)`」，不冲突。 */
+             * `(` 后是「IDENT ':'」就是参数表，走糖分支。 */
             if (peek(p, 1)->kind == TOK_IDENT && peek(p, 2)->kind == TOK_COLON) {
                 return parse_generic_struct(p, t);
             }
+            /* 其余 `struct(…)` 是已删除的修饰符写法（§192）。packed 曾经
+             * 被解析器收下但后端从不读它——字段布局一直是 C 对齐，
+             * 「接受但忽略」比报错更危险，现在明确拒绝。 */
             accept(p, TOK_LPAREN);
+            Token *mode_t = cur(p);
             const char *mode = take_ident(p);
-            if (strcmp(mode, "packed") == 0) n->flag = true;
+            if (strcmp(mode, "packed") == 0) {
+                diag_code_at("E0211", mode_t->line, mode_t->col,
+                             "struct(packed) was removed -- it was accepted but never "
+                             "implemented (the backend ignored it, fields stayed "
+                             "C-aligned); write a plain struct, or `extern struct` "
+                             "to mirror a C layout");
+            } else {
+                perr(p, "unknown struct modifier `%s` -- only the generic "
+                        "parameter list `struct (T: type, …)` uses parentheses", mode);
+            }
             expect(p, TOK_RPAREN);
+            /* 恢复：继续按普通 struct 收体，文件后面的错误照常检查 */
         }
         /* body: fields, methods, decls */
         return parse_struct_members(p, n);
@@ -495,7 +511,8 @@ static Node *parse_type_primary(P *p) {
             if (at(p, TOK_KW_PUB)) { advance(p); mem_pub = true; }
             /* 方法只有一种写法：`const name = fn (…) R { … };`（v0.24）。
              * 解析成带名字的 NK_FN——方法表吃的一直是这个形状，语义层
-             * 不用为"两种写法"分叉。 */
+             * 不用为"两种写法"分叉。is_pub 漏设曾是 C/自举前端的一个
+             * 对拍差异（enum 体里的 pub 方法丢了 pub 标记，§192 收口）。 */
             if (at(p, TOK_KW_CONST) && peek(p, 1)->kind == TOK_IDENT &&
                 peek(p, 2)->kind == TOK_ASSIGN && peek(p, 3)->kind == TOK_KW_FN) {
                 advance(p);                      /* const */
@@ -503,6 +520,7 @@ static Node *parse_type_primary(P *p) {
                 advance(p);                      /* '=' */
                 Node *f = parse_fn(p, true);
                 f->name = mname;
+                f->is_pub = mem_pub;
                 expect(p, TOK_SEMI);
                 push(n, f);
                 continue;

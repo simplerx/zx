@@ -1,0 +1,13 @@
+// §192：闭包不支持——嵌套函数体里读外层函数的局部（var/let/const/形参）
+// 以前能过语义检查、到 C 端报 B1001「编译器 bug」，现在语义层直接拒绝。
+// 嵌套函数之间的兄弟引用（函数值不是栈槽）合法，不在此列。
+// expect: nested functions cannot capture outer variables
+const outer = fn (n: u8) u8 {
+    var x: u8 = 10;
+    let y: u8 = 20;
+    const z: u8 = 30;
+    const F = fn () u8 { return x + y + z + n; };
+    return F();
+};
+
+pub const main = fn () u8 { return outer(1); };

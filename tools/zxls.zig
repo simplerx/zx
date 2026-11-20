@@ -5,7 +5,8 @@
 //     解析 stderr 的 `path:line:col: error[CODE]: msg` 行 → publishDiagnostics。
 //     直接复用自举前端（zxfe），诊断与编译器 100% 同源。
 //   - 补全：
-//       `@` 前缀      → 顶层内建（@type/@memcpy/@shim/@trap/… 共九个）
+//       `@` 前缀      → 顶层内建（@type/@memcpy/@link/@trap/… 值内建九个；
+//                        §192 起 @shim 已删除，不再出现在补全里）
 //       `X.`          → std 内建命名空间 / module 绑定的顶层 pub 声明 /
 //                       容器（struct/union/enum）的成员与方法（含实例推断：
 //                       `let v = Obj.init(...)` 后 `v.` 出 Obj 的成员）
@@ -169,7 +170,6 @@ const snippets = [_]Snip{
     .{ .label = "let", .body = "let ${1:name} = $0;", .detail = "代码片段 let" },
     .{ .label = "var", .body = "var ${1:name} = $0;", .detail = "代码片段 var" },
     .{ .label = "mod", .body = "@mod(\"${1:std}\")", .detail = "代码片段 @mod" },
-    .{ .label = "shim", .body = "@shim(\"${1:impl.c}\");", .detail = "代码片段 @shim" },
     .{ .label = "defer", .body = "defer $0;", .detail = "代码片段 defer" },
     .{ .label = "defererr", .body = "defer err {`n    $0`n};", .detail = "代码片段 defer err（错误路径延迟执行，err 绑错误码）" },
     .{ .label = "try", .body = "try $0", .detail = "代码片段 try" },
@@ -336,8 +336,6 @@ const builtin_docs = [_]BuiltinDoc{
        .snip = "memset(${1:dest}, ${2:fill}, ${3:count})$0" },
     .{ .name = "link", .detail = "@link(\"lib\") 链接外部库",
        .snip = "link(\"${1:lib}\");" },
-    .{ .name = "shim", .detail = "@shim(\"impl.c\") 把一份 C 源文件编进程序（自包含 TU，路径相对本文件）",
-       .snip = "shim(\"${1:impl.c}\");" },
     .{ .name = "trap", .detail = "@trap() 触发断点/中止",
        .snip = "trap()$0" },
     .{ .name = "error", .detail = "@error(msg) 编译期报错",
@@ -348,7 +346,7 @@ const builtin_docs = [_]BuiltinDoc{
 
 const toplevel_builtins = [_][]const u8{
     "type",   "memcpy",  "memmove", "memset",
-    "link",   "shim",    "trap",    "error",
+    "link",   "trap",    "error",
     "Vec",
 };
 
@@ -1540,6 +1538,23 @@ fn isPurePath(e0: []const u8) bool {
     return seg_len > 0;
 }
 
+/// `*[N]T` / `*T` / `[]T` / `[N]T` → `T`（元素类型）；其余形状原样返回。
+/// 指针解引用初值（`t1.0`）与指针标注声明（`var t1: *[1]T1`）的元素推断共用。
+fn ptrSliceElemTy(t0: []const u8) []const u8 {
+    const t = trimSl(t0);
+    if (t.len < 2) return t;
+    var i: usize = 0;
+    if (t[i] == '*') i += 1;
+    if (i < t.len and t[i] == '[') {
+        while (i < t.len and t[i] != ']') i += 1;
+        if (i >= t.len) return t;
+        i += 1;
+    } else if (i == 0) {
+        return t; // 既非指针也非切片
+    }
+    return trimSl(t[i..]);
+}
+
 /// 成员访问的接收者起点：从 `.` 往回扫，标识符字符和 `.` 都算，成对的
 /// `( … )` 整段也算——`HashMap(i32).init` 的接收者是 `HashMap(i32)`，
 /// 泛型实例上的方法/关联常量也该能跳（用户 2026-11-11：类型和函数跳不过去）。
@@ -1698,6 +1713,43 @@ fn containerOfBinding(files: []const []const u8, doc: *const Document,
             std.mem.indexOfScalar(u8, t, '.') != null)
         {
             if (resolveContainerPathD(files, doc, text, t, depth + 1)) |pc| return pc;
+        } else if (!std.mem.eql(u8, t, "type") and isPurePath(t)) {
+            // 单名声明类型（`var pt: T1 = t1.0;`）：T1 是泛型实例化别名
+            // （`const T1 = Person(i32, 4);`）时按名字找容器体落空——先认
+            // 容器声明本体，再沿 containerOfBinding 把别名展开到被调容器
+            //（用户 2026-11-20 截图：解引用出来的值 pt. 一项都不出）。
+            if (findContainerBody(files, t)) |h| return .{
+                .body = h.body,
+                .src = containerSrcOf(files, t) orelse text,
+                .name = t,
+                .is_enum = h.is_enum,
+            };
+            if (genericBodyOf(files, t)) |gb| return .{
+                .body = gb,
+                .src = containerSrcOf(files, t) orelse text,
+                .name = t,
+                .is_enum = false,
+            };
+            if (containerOfBinding(files, doc, text, t, depth + 1, limit)) |pc| return pc;
+        } else if (t.len > 0 and (t[0] == '*' or t[0] == '[')) {
+            // 指针/切片标注的元素类型：`var t1: *[1]T1 = std.heapAlloc(…)`。
+            // 切片的成员走 sliceRecvTy（更早的分支），这里落空即 null。
+            const elem = ptrSliceElemTy(t);
+            if (isPurePath(elem) and !std.mem.eql(u8, elem, "type")) {
+                if (findContainerBody(files, elem)) |h| return .{
+                    .body = h.body,
+                    .src = containerSrcOf(files, elem) orelse text,
+                    .name = elem,
+                    .is_enum = h.is_enum,
+                };
+                if (genericBodyOf(files, elem)) |gb| return .{
+                    .body = gb,
+                    .src = containerSrcOf(files, elem) orelse text,
+                    .name = elem,
+                    .is_enum = false,
+                };
+                if (containerOfBinding(files, doc, text, elem, depth + 1, limit)) |pc| return pc;
+            }
         }
     }
     const init = trimSl(declInitOf(st) orelse "");
@@ -1707,6 +1759,33 @@ fn containerOfBinding(files: []const []const u8, doc: *const Document,
             // 退路：链的源头解析不到（`t` 的模块文件不在扫描集里）时按末段
             // 名字找容器——否则 `const P: type = t.P1.P2;` 的 P 连容器都没有。
             if (resolveContainerPathLoose(files, doc, text, init)) |pc| return pc;
+        }
+        // 泛型实例化别名 / 实例化初值：`const T1 = Person(i32, 4);` ——
+        // 成员表在被调容器里（糖容器/泛型 fn 体走 genericBodyOf，普通
+        // 容器按末段名）。放在 init 块**最后**：工厂方法
+        //（`let c = Parent.Child();`）先走 inferExprType 的返回类型，
+        // 那条推不出才到这里剥被调；无参工厂落空即 null，行为不变。
+        if (init[init.len - 1] == ')') {
+            if (std.mem.lastIndexOfScalar(u8, init, '(')) |lp0| {
+                const callee = trimSl(init[0..lp0]);
+                if (callee.len > 0 and isPurePath(callee)) {
+                    if (resolveContainerPathD(files, doc, text, callee, depth + 1)) |pc| return pc;
+                    if (genericBodyOf(files, callee)) |gb| return .{
+                        .body = gb,
+                        .src = containerSrcOf(files, callee) orelse text,
+                        .name = callee,
+                        .is_enum = false,
+                    };
+                    var lastc = callee;
+                    if (std.mem.lastIndexOfScalar(u8, callee, '.')) |dd| lastc = callee[dd + 1 ..];
+                    if (findContainerBody(files, lastc)) |h| return .{
+                        .body = h.body,
+                        .src = containerSrcOf(files, lastc) orelse text,
+                        .name = lastc,
+                        .is_enum = h.is_enum,
+                    };
+                }
+            }
         }
         if (literalPathOf(init)) |lp| {
             if (resolveContainerPathD(files, doc, text, lp, depth + 1)) |pc| return pc;
@@ -2057,6 +2136,19 @@ fn resolveContainerPathD(files: []const []const u8, doc: *const Document,
                     if (isPurePath(ai) and std.mem.indexOfScalar(u8, ai, '.') != null and
                         !std.mem.eql(u8, ai, path))
                     {
+                        if (containerOfBinding(files, doc, text, segs[0], depth + 1, 0)) |pc0| {
+                            hit = .{ .body = pc0.body, .is_enum = pc0.is_enum };
+                            src = pc0.src;
+                            name = pc0.name;
+                            at = 1;
+                        }
+                    } else if (ai.len > 1 and ai[ai.len - 1] == ')' and
+                        !std.mem.eql(u8, ai, path))
+                    {
+                        // 泛型实例化别名：`const T1 = Person(i32, 4);` ——
+                        // 剥实参取被调容器（用户 2026-11-20：别名后的
+                        // `var pt: T1 = t1.0;` 再 `pt.` 全链路按名字找 T1
+                        // 都落空）。containerOfBinding 内部有实例化剥被调。
                         if (containerOfBinding(files, doc, text, segs[0], depth + 1, 0)) |pc0| {
                             hit = .{ .body = pc0.body, .is_enum = pc0.is_enum };
                             src = pc0.src;
@@ -5410,6 +5502,25 @@ fn inferExprType(text: []const u8, doc: *const Document, expr: []const u8, depth
             const base = e[0..dot];
             const member = e[dot + 1 ..];
             if (base.len == 0 or member.len == 0) return null;
+            // 位置解引用 `t1.0`（成员名纯数字不是字段）：指针/定长数组的
+            // 元素类型 = 基址类型剥 `*`/`[N]` 前缀（用户 2026-11-20 截图：
+            // `var pq = t1.0;` 的行内提示与 hover 全空）。
+            {
+                var mem_num = true;
+                for (member) |mc| {
+                    if (mc < '0' or mc > '9') {
+                        mem_num = false;
+                        break;
+                    }
+                }
+                if (mem_num) {
+                    if (inferExprType(text, doc, base, depth + 1)) |bt2| {
+                        const el = ptrSliceElemTy(trimSl(bt2));
+                        if (el.len > 0 and !std.mem.eql(u8, el, trimSl(bt2))) return el;
+                    }
+                    return null;
+                }
+            }
             var sf = scanFiles(doc, text);
             defer sf.deinit(gpa);
             // base 是模块绑定（std / const t = @mod(…)）：成员是容器/类型
@@ -8577,7 +8688,7 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
     } else if (ps > 0 and text[ps - 1] == '@') {
         // `@cSh`：内建名输到一半。identBefore 不吃 '@'，前缀里自然没有它，
         // 上面两条都不命中——旧行为是掉进全局标识符分支，用户看到一条同名
-        // 变量而不是内建列表（§160 打 @shim 时必现）。判法与下面 dotted
+        // 变量而不是内建列表。判法与下面 dotted
         // 同口径：看前缀起点前面那个字符。
         is_at_ctx = true;
     }
@@ -9402,6 +9513,78 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                                     mem_txt = ctxt;
                                     markContainerFns(ctxt, &decls);
                                     owner = ty;
+                                }
+                            }
+                        }
+                    }
+                    // KEEP — 显式标注类型 / 指针解引用初值（用户 2026-11-20
+                    // 截图）：`var t1: *[1]T1 = std.heapAlloc(…);` 之后
+                    // `var pt: T1 = t1.0;` / `var pq = t1.0;`，`pt.` 一项都不
+                    // 出——init 是解引用表达式 inferContainer 推不出；标注类型
+                    // T1 是泛型实例化别名（`const T1 = Person(i32, 4);`），单名、
+                    // 不是容器声明的形态。这里兜：元素类型 = 标注剥 `*`/`[N]`
+                    // 前缀，或解引用初值的基址声明类型剥前缀；别名再沿
+                    // containerOfBinding 展开到被调容器体。
+                    if (!handled) {
+                        if (findDeclStmtBefore(text, container, ps)) |sdz| {
+                            var elemty: ?[]const u8 = null;
+                            if (declTyOf(sdz)) |dtz| {
+                                const tz = trimSl(dtz);
+                                if (tz.len > 0 and (tz[0] == '*' or tz[0] == '[')) {
+                                    elemty = ptrSliceElemTy(tz);
+                                } else if (isPurePath(tz) and !std.mem.eql(u8, tz, "type")) {
+                                    elemty = tz;
+                                }
+                            }
+                            if (elemty == null) {
+                                if (declInitOf(sdz)) |inz| {
+                                    // `t1.0` / `arr.3` 解引用初值：基址声明类型的元素
+                                    const ez = trimSl(inz);
+                                    if (std.mem.lastIndexOfScalar(u8, ez, '.')) |dz| {
+                                        const lsz = ez[dz + 1 ..];
+                                        var num = lsz.len > 0;
+                                        for (lsz) |nc| {
+                                            if (nc < '0' or nc > '9') {
+                                                num = false;
+                                                break;
+                                            }
+                                        }
+                                        if (num and isPurePath(ez[0..dz])) {
+                                            if (findDeclStmtBefore(text, ez[0..dz], ps)) |sbz| {
+                                                if (declTyOf(sbz)) |dtz2| {
+                                                    const tz2 = trimSl(dtz2);
+                                                    if (tz2.len > 0 and (tz2[0] == '*' or tz2[0] == '['))
+                                                        elemty = ptrSliceElemTy(tz2);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if (elemty) |tyz| {
+                                if (isPurePath(tyz) and !std.mem.eql(u8, tyz, "type")) {
+                                    if (containerMembersAny(files.items, tyz, &decls)) |ctxtz| {
+                                        handled = decls.items.len > 0;
+                                        if (handled) {
+                                            recv_kind = if (recv_type) .ty else .instance;
+                                            mem_txt = ctxtz;
+                                            markContainerFns(ctxtz, &decls);
+                                            owner = tyz;
+                                        }
+                                    }
+                                    if (!handled) {
+                                        if (containerOfBinding(files.items, doc, text, tyz, 0, ps)) |pcz| {
+                                            extractBraceMembers(pcz.body, pcz.is_enum, &decls);
+                                            handled = decls.items.len > 0;
+                                            if (handled) {
+                                                recv_kind = if (recv_type) .ty else .instance;
+                                                mem_txt = pcz.src;
+                                                mem_body_fix = pcz.body;
+                                                markContainerFnsIn(pcz.body, pcz.src, &decls);
+                                                owner = pcz.name;
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }

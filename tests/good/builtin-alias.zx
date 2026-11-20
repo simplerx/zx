@@ -1,0 +1,30 @@
+// builtin-alias.zx —— §192：内建函数的 const 别名。
+//
+// `const alloc = std.heapAlloc;` —— const 的别名路径（sym_link）把内建
+// 符号的 kind/builtin 抄过来，调用与裸名内建同一条分派：标签建槽
+// （E0513/E0512）、区域合并、§177 free 变换全部照常。顶层声明在函数体
+// 之后才解析初值也没关系（调用点先 ensure 走一遍 sym_link）。
+// expect-exit: 0
+// expect-output
+// alias ok
+// local pr ok
+const std = @mod("std");
+
+const alloc = std.heapAlloc;
+const pr = std.println;
+
+const run = fn () u8 {
+    var t1 = alloc(std.heap.page, u8, 4);
+    t1.0 = 7;
+    let v = t1.0;
+    std.free(std.heap.page, t1);
+    return v;
+};
+
+pub const main = fn () u8 {
+    if (run() == 7) { pr("alias ok"); }
+    // 函数内的局部别名同一条路
+    const local = std.println;
+    local("local pr ok");
+    return 0;
+};

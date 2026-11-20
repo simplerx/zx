@@ -4791,19 +4791,12 @@ check("completion.simd.mat4.mulSignature",
       and "mul(self: Mat4, o: Mat4) Mat4" in (_g167_mul[0].get("detail") or ""),
       str(_g167_mul)[:260])
 
-# §160：`@shim` 要出现在 `@` 补全里；写到一半（`@sh`）同样要走这条路。
-# 旧行为：identBefore 不吃 '@'，`@sh` 的前缀是 `sh`，`off-1` 也不是 '@'
-# ——两条判据都不命中，掉进全局标识符分支，用户看到一条同名变量。
-# 2026-11-18 起内建全部带 snippet（kind=15），@shim 的骨架带 `;`（顶层声明）。
-_g160_shim = g157_comp("var p8 = @sh", 5212)
-check("completion.shim.partialAtIsBuiltin",
-      len(_g160_shim) == 1
-      and _g160_shim[0].get("label") == "shim"
-      and _g160_shim[0].get("kind") == 15
-      and _g160_shim[0].get("insertTextFormat") == 2
-      and _g160_shim[0].get("insertText") == 'shim("${1:impl.c}");'
-      and "@shim(" in (_g160_shim[0].get("detail") or ""),
-      str(_g160_shim)[:260])
+# §192：@shim 通道已删除——`@sh` 打到一半不再出补全（与 §165 的
+# `@se` / `@an` 同款守门：删除的内建不进 `@` 列表）。
+_g192_shim = g157_comp("var p8 = @sh", 5212)
+check("completion.shim.removed",
+      len(_g192_shim) == 0,
+      str(_g192_shim)[:200])
 
 # §162：`@Vec(T, N)` 是类型内建，也要进 `@` 补全（写到一半 `@Ve` 同样走
 # 这条路）。类型内建的实参是类型，不在值位置当函数看——一样带 snippet。

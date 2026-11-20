@@ -125,7 +125,7 @@ if ( cd "$pdir" && "$ZXCW" init demo > "$TPFX.cli.init" 2>&1 ); then
         > "$pdir/demo/vendor/ext.zx"
     printf 'const std = @mod("std");\nconst ext = @mod("ext");\n\nconst main = fn () i32 {\n    ext.hi();\n    return 0;\n};\n' \
         > "$pdir/demo/src/main.zx"
-    rm -f "$pdir/demo/src/bad.zx"
+    rm -f "$pdir/demo/src/bad.zx" 2>/dev/null || true
     if ( cd "$pdir/demo" && "$ZXCW" run > "$TPFX.cli.r" 2>&1 ) && grep -q "vendor ok" "$TPFX.cli.r"; then
         printf "  ok   vendor/ 里的模块能被 @mod(\"ext\") 找到\n"
     else
@@ -542,7 +542,8 @@ if mkdir -p "$FSRV/flib-1.0/include" "$FSRV/flib-1.0/src" "$FSRV/fgit.git/includ
     else
         printf "  ok   本地篡改被 tree hash 检出且不静默覆盖\n"
     fi
-    rm -rf "$FDEMO/vendor/flib"
+    # 沙箱 rm 可能静默失败：用 mv 把库挪走等效模拟缺库
+    mv "$FDEMO/vendor/flib" "$FDEMO/vendor/flib.gone" 2>/dev/null || true
     if ( cd "$FDEMO" && ZX_ALLOW_LOCAL_FETCH=1 "$ZXCW" fetch flib > "$TPFX.cli.fres" 2>&1 ) \
        && [ -f "$FDEMO/vendor/flib/src/add.c" ] \
        && grep -q "restored flib" "$TPFX.cli.fres"; then
@@ -550,6 +551,7 @@ if mkdir -p "$FSRV/flib-1.0/include" "$FSRV/flib-1.0/src" "$FSRV/fgit.git/includ
     else
         printf "  FAIL 缺库恢复\n"; cat "$TPFX.cli.fres" 2>/dev/null; fail=1
     fi
+    rm -rf "$FDEMO/vendor/flib.gone" 2>/dev/null || true
     # 锁里的 sha256 被改：重拉必须复现锁，不一致就拒绝（安全锚点在锁里）
     sed -i "s/^sha256 = [0-9a-f]\{64\}/sha256 = 0000000000000000000000000000000000000000000000000000000000000000/" "$FDEMO/zx.lock"
     if ( cd "$FDEMO" && ZX_ALLOW_LOCAL_FETCH=1 "$ZXCW" fetch fmini --force > "$TPFX.cli.fsha" 2>&1 ) \
@@ -1551,59 +1553,27 @@ else
     grep -E '^mat|^q2m|^m2q' "$TPFX.s159.dev" | head -20; fail=1
 fi
 
-# §160：C shim 通道（@shim）。真实构建里 shim 是**独立 TU**（用真实路径编，
-# 报错指回那份 .c 的行号）；--emit-c 要自洽就把它贴在末尾；两处 @shim 指向
-# 同一份 .c 只编一遍。shim 编不过报 B1004（不是"编译器 bug"），缺文件报 E0602。
-$ZXC tests/good/shim.zx --emit-c > "$TPFX.s160.c" 2>/dev/null
-n160=$(grep -cF 'C shim: tests/good/shim_impl.c' "$TPFX.s160.c")
-if [ "$n160" = "1" ] && grep -qF 'zx_shim_vec_ok(void)' "$TPFX.s160.c"; then
-    printf "  ok   §160 @shim 按路径去重并贴在 --emit-c 末尾\n"
-else
-    printf "  FAIL §160 --emit-c 里 shim 出现 %s 次\n" "$n160"; fail=1
+# §192：@shim 通道已删除（写它报 E0211，见 tests/bad/shim-removed.zx）；
+# 本块的「--emit-c 末尾贴 shim / C 前端通过」两项检查随之移除。
+
+# §192：自举对拍（C 前端 vs Zx 前端）纳入回归。两套解析器对同一输入的
+# AST dump（含位置）必须逐字节一致——曾经 17 处差异不在任何测试里
+# （2026-11-20 评测揪出：类型点路径列号错位、@Vec dump 形状、enum 体
+# pub 方法丢 pub 标记）。astdump.exe 不入 git 白名单：先编一份再对拍。
+if [ ! -x bin/astdump.exe ]; then
+    if $ZXC bootstrap/astdump.zx -o bin/astdump.exe > "$TPFX.astdump.log" 2>&1; then
+        printf "  ok   构建 astdump（对拍工具）\n"
+    else
+        printf "  FAIL astdump 构建失败\n"; cat "$TPFX.astdump.log"; fail=1
+    fi
 fi
-
-if $ZXC tests/good/shim.zx --check --fe=c > "$TPFX.s160c.log" 2>&1; then
-    printf "  ok   §160 shim 在 C 前端通过\n"
+printf "\n== 自举对拍（C 前端 vs Zx 前端，AST 含位置逐字节一致）\n"
+ndiff=$(sh bootstrap/diff_ast.sh 2>/dev/null | grep -c "^DIFF\|^REJECT-ONLY-ONE" || true)
+if [ "$ndiff" = "0" ]; then
+    printf "  ok   双前端对拍 0 差异\n"
 else
-    printf "  FAIL §160 shim 在 C 前端失败\n"
-    head -12 "$TPFX.s160c.log"; fail=1
-fi
-
-# 坏 shim：报 B1004，行列来自那份 .c（第 2 行），并且不把责任推给编译器
-mkdir -p "$TPFX.shim" 2>/dev/null || true
-cat > "$TPFX.shim/bad.zx" <<'ZXEOF'
-@shim("bad.c");
-
-pub const main = fn () u8 { return 0; };
-ZXEOF
-cat > "$TPFX.shim/bad.c" <<'CEOF'
-int zx_bad_helper(void) { return 1; }
-int zx_bad(void) { return not_a_symbol; }
-CEOF
-if $ZXC "$TPFX.shim/bad.zx" -o "$TPFX.shim/bad.exe" > "$TPFX.s160bad.log" 2>&1; then
-    printf "  FAIL §160 坏 shim 居然编过了\n"; fail=1
-elif grep -q "error\[B1004\]" "$TPFX.s160bad.log" \
-     && grep -q "bad.c:2" "$TPFX.s160bad.log" \
-     && ! grep -q "compiler bug" "$TPFX.s160bad.log"; then
-    printf "  ok   §160 shim 编不过时报 B1004 并指回 .c 的行号\n"
-else
-    printf "  FAIL §160 坏 shim 的诊断不对\n"
-    head -8 "$TPFX.s160bad.log"; fail=1
-fi
-
-# 缺文件：E0602（自己一个码，不复用 @mod 的 E0601，help 不是同一件事）
-cat > "$TPFX.shim/miss.zx" <<'ZXEOF'
-@shim("nope.c");
-
-pub const main = fn () u8 { return 0; };
-ZXEOF
-if $ZXC "$TPFX.shim/miss.zx" -o "$TPFX.shim/miss.exe" > "$TPFX.s160miss.log" 2>&1; then
-    printf "  FAIL §160 缺失的 shim 居然编过了\n"; fail=1
-elif grep -q "error\[E0602\]" "$TPFX.s160miss.log"; then
-    printf "  ok   §160 缺失的 shim 报 E0602\n"
-else
-    printf "  FAIL §160 缺失的 shim 没报 E0602\n"
-    head -6 "$TPFX.s160miss.log"; fail=1
+    printf "  FAIL 双前端对拍 %s 处差异（sh bootstrap/diff_ast.sh 看明细）\n" "$ndiff"
+    fail=1
 fi
 
 # 用例会在仓库根留下自己的临时文件：io_fmt.zx 写 io_fmt.tmp，stdfs.zx 建
