@@ -3049,6 +3049,13 @@ static void ft_clear_prefix(FieldTag *list, const char *key) {
  * 落账），两个实例读同一存储位置口径一致——实例怎么转移都不跟丢。
  * slot>0 写入（先清子树再落账），slot==0 只清。深度 8 防环。 */
 static bool ft_path_key(Node *e, char *buf, size_t cap, Node **base_out);
+/* §196：deref_tail 非 NULL 时带回「路径末端是否为裸指针穿透」（如
+ * `t1[0].name.0` 的 `.0`）——末端穿透 = 写的是字段指向的存储内容，
+ * 字段身份不变，ASSIGN 不得清该路径的字段账（否则 `t1[0].name.0 = 10`
+ * 会把 "0.name" 的槽账抹掉，之后 free(t1[0].name[0..1]) 解析不到槽、
+ * 误报 E0513）。路径中间的穿透（`t1[0].name.0.f` 的 `.0`）不影响判定。 */
+static bool ft_path_key_d(Node *e, char *buf, size_t cap, Node **base_out,
+                          bool *deref_tail);
 static char *ft_path_dup(const char *prefix, const char *leaf);
 static void ft_mirror(Symbol *s, const char *key, int slot, int depth) {
     if (!s || !s->ft_src || !key || !key[0] || depth > 8) return;
@@ -3095,10 +3102,16 @@ static int ft_state_of(int slot) {
  * （s.inner.name 的 .name），沿 ->a 收集外层字段名，拼成
  * "inner.name"；最深基址（IDENT/字面量/调用）经 base_out 带回。
  * 返回 false = 不是纯字段链（深度超限/中途出现其他节点）。 */
-static bool ft_path_key(Node *e, char *buf, size_t cap, Node **base_out) {
+static bool ft_path_key_d(Node *e, char *buf, size_t cap, Node **base_out,
+                          bool *deref_tail) {
     const char *names[8];
     char idxbuf[8][16];
     int np = 0;
+    bool deref_head = false;   /* §196：首步（最外层）是否为裸指针穿透——
+                                * 循环从最外层向内折，穿透发生在 np==0 时
+                                * 即「末端穿透」（`t1[0].name.0` 的 `.0` 是
+                                * 路径之外最后一层）；路径中间的穿透
+                                * （`t1[0].name.0.f`，此时 np>0）不影响。 */
     Node *fb = e;
     /* §174：元组字段访问被改写成 NK_FIELD（name=NULL、ival=下标）——
      * 基址类型是元组的数字分量按 "N" 进点路径；§192：基址是**数组指针**
@@ -3118,6 +3131,7 @@ static bool ft_path_key(Node *e, char *buf, size_t cap, Node **base_out) {
                 names[np] = fb->name;
             } else if (fb->a->ty->kind == TY_PTR && !fb->a->ty->has_len) {
                 fb = fb->a;                 /* 裸指针 .0：透明穿过 */
+                if (np == 0) deref_head = true;   /* §196：首步穿透 */
                 continue;
             } else {
                 snprintf(idxbuf[np], sizeof idxbuf[np], "%d", (int)fb->ival);
@@ -3135,6 +3149,7 @@ static bool ft_path_key(Node *e, char *buf, size_t cap, Node **base_out) {
         if (base_out) *base_out = fb;   /* §175：截断点带回（运行期索引判定用） */
         return false;
     }
+    if (deref_tail) *deref_tail = deref_head;   /* §196：末端穿透 */
     /* names[0] 是最内层（叶子字段名），names[np-1] 是最外层——倒着拼 */
     size_t off = 0;
     for (int i = np - 1; i >= 0; i--) {
@@ -3147,6 +3162,11 @@ static bool ft_path_key(Node *e, char *buf, size_t cap, Node **base_out) {
     buf[off] = 0;
     *base_out = fb;
     return true;
+}
+
+/* §196：四参兼容包装（不关心末端穿透的调用点）。 */
+static bool ft_path_key(Node *e, char *buf, size_t cap, Node **base_out) {
+    return ft_path_key_d(e, buf, cap, base_out, NULL);
 }
 
 /* 点路径 key 的持久化副本（插账用——ft_set 只存指针）。 */
@@ -5459,8 +5479,10 @@ static Type *check_assign(Node *n) {
              * 放行、对基址是指针的（解引用）自行拒绝。 */
             char key[128];
             Node *fb = NULL;
-            if (ft_path_key(n->a, key, sizeof key, &fb) &&
-                fb->kind == NK_IDENT && fb->sym) {
+            bool dtail = false;   /* §196：末端裸指针穿透（内容写） */
+            {
+            if (ft_path_key_d(n->a, key, sizeof key, &fb, &dtail) &&
+                fb->kind == NK_IDENT && fb->sym && !dtail) {
                 int ftid, ftst;
                 tag_of_expr(n->b, &ftid, &ftst);
                 Symbol *bs = fb->sym;
@@ -5525,6 +5547,7 @@ static Type *check_assign(Node *n) {
                         ts->arr_esc = true;
                     }
                 }
+            }
             }
         } else if ((n->a->kind == NK_INDEX || ft_num_elem(n->a)) &&
                    n->a->a) {

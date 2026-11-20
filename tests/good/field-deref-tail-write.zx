@@ -1,0 +1,28 @@
+// §196：裸指针字段的 `.0` 解引用写（内容写）不得清字段账。
+//
+// 修前：`t1[0].name.0 = 10` 的 LHS 经 ft_path_key 折出 key="0.name"
+// （裸指针 `.0` 透明穿过、不进路径），ASSIGN 一律先 ft_clear_prefix——
+// 把 "0.name" 的分配槽账抹掉，而 RHS 是常量（无 tag）无人重设；
+// 之后 free(t1[0].name[0..1]) 解析不到槽，line 21 的分配误报 E0513。
+// 修后：ft_path_key_d 带回「首步（最外层）穿透」标志——末端穿透 =
+// 写的是字段指向的存储内容、字段身份不变，ASSIGN 跳过账本操作。
+// 真换字段身份（t1[0].name = q）仍清旧账（覆盖泄漏照报）。
+// expect-exit: 0
+// expect-output
+// p:10
+const std = @mod("std");
+
+const T1 = struct {
+    name: *i32,
+};
+
+const main = fn () !u8 {
+    let t1 = std.heapAlloc(std.heap.page, T1, 1);
+    defer std.free(std.heap.page, t1);
+    t1[0].name = std.heapAlloc(std.heap.page, i32, 1);
+    t1[0].name.0 = 10;
+    defer std.free(std.heap.page, t1[0].name[0..1]);
+    let t2 = t1;
+    std.println("p:{}", t2[0].name.0);
+    return 0;
+};
