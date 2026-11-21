@@ -2358,6 +2358,126 @@ static void fmt_args(Buf *b, Node *n, int first) {
     buf_puts(b, " }");
 }
 
+/* §211：CRT 无缓冲诊断写 + 崩溃自动打点。
+ * 背景：stderr 走 stdio 全缓冲，abort()/SIGSEGV 不走退出清理，重定向时
+ * 诊断打点整段丢失；用户靠 CRT _write(2,...) 才定位到悬垂指针崩溃。
+ * 这里把所有运行时诊断统一到 zx_diagf（vsnprintf 到栈缓冲再一次
+ * _write/write 到 fd 2），并装崩溃处理器：崩溃瞬间把信号/异常码 +
+ * zx 位置影子变量无缓冲打出来。位置影子由 zx_loc() 在语句边界更新，
+ * 报的是 zx 文件:行，不是 C 行号。
+ * Windows 只能靠生成 C 里的 _WIN32（zig cc / mingw 提供 _write）；
+ * POSIX 用 write(2)。两个平台都不经过 stdio 缓冲。 */
+static void emit_diag_runtime(void) {
+    bline(&g_bproto, "void zx_diag_raw(const char *s, size_t n);");
+    bline(&g_bproto, "void zx_diagf(const char *fmt, ...);");
+    bline(&g_bproto, "void zx_diag_flush(void);");
+    bline(&g_bproto, "void zx_abort_reported(void);");
+    bline(&g_bproto, "void zx_loc(const char *file, int line, int col);");
+    bline(&g_bproto, "void zx_crash_init(void);");
+    buf_puts(g_out,
+        "#include <stdarg.h>\n"
+        "#include <signal.h>\n"
+        "#if defined(_WIN32)\n"
+        "#include <io.h>\n"
+        "#else\n"
+        "#include <unistd.h>\n"
+        "#endif\n\n"
+        "/* fd 2 low-level write: bypasses stdio buffering entirely. */\n"
+        "void zx_diag_raw(const char *s, size_t n) {\n"
+        "#if defined(_WIN32)\n"
+        "    if (n) (void)_write(2, s, (unsigned)n);\n"
+        "#else\n"
+        "    if (n) (void)write(2, s, n);\n"
+        "#endif\n"
+        "}\n\n"
+        "/* Diagnostics must appear before stdout's buffered reports. */\n"
+        "void zx_diag_flush(void) { fflush(stdout); fflush(stderr); }\n\n"
+        "void zx_diagf(const char *fmt, ...) {\n"
+        "    char b[2048];\n"
+        "    va_list ap; va_start(ap, fmt);\n"
+        "    int n = vsnprintf(b, sizeof b, fmt, ap);\n"
+        "    va_end(ap);\n"
+        "    if (n < 0) return;\n"
+        "    if ((size_t)n >= sizeof b) n = (int)sizeof b - 1;\n"
+        "    zx_diag_raw(b, (size_t)n);\n"
+        "}\n\n"
+        "/* zx source position shadow, updated at statement boundaries. */\n"
+        "static const char *zx_loc_file = \"?\";\n"
+        "static int zx_loc_line = 0, zx_loc_col = 0;\n"
+        "static volatile int zx_reported;   /* 显式诊断已打点 → 崩溃 handler 不重复报 */\n"
+        "void zx_loc(const char *file, int line, int col) {\n"
+        "    zx_loc_file = file; zx_loc_line = line; zx_loc_col = col;\n"
+        "}\n"
+        "void zx_abort_reported(void) {\n"
+        "    zx_reported = 1;\n"
+        "    fflush(stdout);   /* fatal: 冲掉退出清理带不走的 stdout 缓冲 */\n"
+        "    abort();\n"
+        "}\n\n");
+    /* 崩溃处理器：POSIX sigaction 全信号；Windows SetUnhandledExceptionFilter。
+     * 全部只用 zx_diag_raw（async-signal-safe 的 write）输出，不碰 malloc/stdio。 */
+    buf_puts(g_out,
+        "static void zx_crash_report(const char *tag) {\n"
+        "    zx_diag_raw(\"zx: fatal \", 10);\n"
+        "    zx_diag_raw(tag, strlen(tag));\n"
+        "    zx_diag_raw(\" at \", 4);\n"
+        "    zx_diag_raw(zx_loc_file, strlen(zx_loc_file));\n"
+        "    zx_diag_raw(\":\", 1);\n"
+        "    char ln[24]; int m = snprintf(ln, sizeof ln, \"%d:%d\", zx_loc_line, zx_loc_col);\n"
+        "    if (m > 0) zx_diag_raw(ln, (size_t)m < sizeof ln ? (size_t)m : sizeof ln - 1);\n"
+        "    zx_diag_raw(\"\\n\", 1);\n"
+        "}\n\n");
+    /* 信号处理器两平台都装：abort()/除零走 CRT 的 signal，不走 SEH。
+     * Windows 再额外挂 SEH filter 兜住真正的访问违例（SIGSEGV 在 mingw
+     * CRT 下未必映射到 SEH）。两路都只调 zx_diag_raw，可重入、无缓冲。 */
+    buf_puts(g_out,
+        "static void zx_crash_signal(int sig) {\n"
+        "    const char *nm = \"signal\";\n"
+        "    switch (sig) {\n"
+        "    case SIGSEGV: nm = \"SIGSEGV (invalid memory access)\"; break;\n"
+        "#ifndef _WIN32\n"
+        "    case SIGBUS:  nm = \"SIGBUS (bad memory alignment)\"; break;\n"
+        "#endif\n"
+        "    case SIGFPE:  nm = \"SIGFPE (floating point / divide by zero)\"; break;\n"
+        "    case SIGILL:  nm = \"SIGILL (illegal instruction)\"; break;\n"
+        "    case SIGABRT: nm = \"SIGABRT (abort)\"; break;\n"
+        "    default: break;\n"
+        "    }\n"
+        "    if (!zx_reported) zx_crash_report(nm);\n"
+        "    signal(sig, SIG_DFL); raise(sig);   /* keep the real exit status */\n"
+        "}\n\n"
+        "#if defined(_WIN32)\n"
+        "/* MinGW / zig cc windows-gnu: EXCEPTION_POINTERS via windows.h is heavy;\n"
+        " * declare the two records we read (ExceptionCode / ExceptionAddress). */\n"
+        "typedef struct { unsigned long ExceptionCode; unsigned long ExceptionFlags;\n"
+        "                 struct _ZX_ER *ExceptionRecord; void *ExceptionAddress;\n"
+        "                 unsigned long NumberParameters; unsigned long long ExceptionInformation[15];\n"
+        "} _ZX_ER;\n"
+        "typedef struct { _ZX_ER *ExceptionRecord; void *ContextRecord; } _ZX_EP;\n"
+        "typedef long (__stdcall *ZX_SEH_FN)(_ZX_EP *);\n"
+        "extern void *SetUnhandledExceptionFilter(ZX_SEH_FN);\n"
+        "static long __stdcall zx_seh_filter(void *arg) {\n"
+        "    _ZX_EP *ep = (_ZX_EP *)arg;\n"
+        "    char b[64];\n"
+        "    unsigned long code = (ep && ep->ExceptionRecord) ? ep->ExceptionRecord->ExceptionCode : 0;\n"
+        "    int m = snprintf(b, sizeof b, \"seh exception 0x%lx\", (unsigned long)code);\n"
+        "    if (!zx_reported) zx_crash_report(m > 0 ? b : \"seh exception\");\n"
+        "    return 1;  /* EXCEPTION_EXECUTE_HANDLER: terminate */\n"
+        "}\n"
+        "#endif\n\n"
+        "void zx_crash_init(void) {\n"
+        "    signal(SIGSEGV, zx_crash_signal);\n"
+        "#ifndef _WIN32\n"
+        "    signal(SIGBUS,  zx_crash_signal);\n"
+        "#endif\n"
+        "    signal(SIGFPE,  zx_crash_signal);\n"
+        "    signal(SIGILL,  zx_crash_signal);\n"
+        "    signal(SIGABRT, zx_crash_signal);\n"
+        "#if defined(_WIN32)\n"
+        "    (void)SetUnhandledExceptionFilter((ZX_SEH_FN)zx_seh_filter);\n"
+        "#endif\n"
+        "}\n\n");
+}
+
 /* std.file：就是几个 fopen 包装。它们是普通函数调用——sema 给的符号上
  * 挂着 C 名字，所以调用点不需要任何特判。 */
 /* std.heapAlloc 的运行时一端：穿过分配器的 alloc 函数指针。
@@ -2380,7 +2500,7 @@ static void emit_heapalloc_runtime(void) {
     buf_printf(g_out,
         "static void *zx_heapalloc(%s al, %s n) {\n"
         "    %s r = al.alloc(al.ctx, n);\n"
-        "    if (!r) { fputs(\"zx: out of memory\\n\", stderr); abort(); }\n"
+        "    if (!r) { zx_diagf(\"zx: out of memory\\n\"); zx_abort_reported(); }\n"
         "    return r;\n"
         "}\n\n",
         an.data, un.data, mt.data);
@@ -2738,13 +2858,11 @@ static void emit_debug_runtime(void) {
         "void zx_debug_panic(ZxSlice_u8 msg, ZxSlice_u8 file, int32_t line, int32_t col, ZxSlice_u8 fn) {\n"
         /* 刷 panic 之前先把 stdout 冲下去：被重定向时 stdout 是全缓冲，
          * abort() 不走退出清理，诊断前的报告本来会丢。即便是控制台的行缓冲也一样。 */
-        "    fflush(stdout);\n"
-        "    fprintf(stderr, \"panic: %.*s\\n  at %.*s:%d:%d in %.*s\\n\",\n"
+        "    zx_diagf(\"panic: %.*s\\n  at %.*s:%d:%d in %.*s\\n\",\n"
         "            (int)msg.len, (const char *)msg.ptr,\n"
         "            (int)file.len, (const char *)file.ptr, line, col,\n"
         "            (int)fn.len, (const char *)fn.ptr);\n"
-        "    fflush(stderr);\n"
-        "    abort();\n"
+        "    zx_abort_reported();\n"
         "}\n\n"
         "void zx_debug_assert(bool cond, ZxSlice_u8 msg, ZxSlice_u8 file, int32_t line, int32_t col, ZxSlice_u8 fn) {\n"
         "#ifndef ZX_RELEASE\n"
@@ -2761,13 +2879,13 @@ static void emit_debug_runtime(void) {
     buf_printf(g_out,
         "void zx_debug_printtrace(void) {\n"
         "    ZxCap *c = (ZxCap *)zx_cap_current();\n"
-        "    if (c->n == 0) { fprintf(stderr, \"zx trace: no captured errors\\n\"); return; }\n"
-        "    fprintf(stderr, \"zx trace (oldest first):\\n\");\n"
+        "    if (c->n == 0) { zx_diagf(\"zx trace: no captured errors\\n\"); return; }\n"
+        "    zx_diagf(\"zx trace (oldest first):\\n\");\n"
         "    for (int i = 0; i < c->n; i++) {\n"
         "        ZxCapRec *r = &c->recs[(c->start + i) %% ZX_CAP_MAX];\n"
         "        const char *nm = (r->code == 65535) ? \"null\"\n"
         "                       : ((r->code > 0 && r->code <= %d) ? zx_err_names[r->code] : \"?\");\n"
-        "        fprintf(stderr, \"  %%s at %%s:%%u:%%u in %%s\\n\",\n"
+        "        zx_diagf(\"  %%s at %%s:%%u:%%u in %%s\\n\",\n"
         "                nm, r->file, r->line, r->col, r->fn);\n"
         "    }\n"
         "}\n\n", ne);
@@ -4275,9 +4393,8 @@ static void emit_fmt_runtime(void) {
     g_ind = 0;
     buf_puts(g_out,
         "static void zx_fmt_fail(const char *msg) {\n"
-        "    fflush(stdout);\n"
-        "    fprintf(stderr, \"zx: format error: %s\\n\", msg);\n"
-        "    abort();\n"
+        "    zx_diagf(\"zx: format error: %s\\n\", msg);\n"
+        "    zx_abort_reported();\n"
         "}\n\n"
         "static void zx_put_bin(ZxSink *out, unsigned long long v) {\n"
         "    char b[65];\n"
@@ -5089,19 +5206,19 @@ static void emit_unwrap_runtime(void) {
             Buf pt; buf_init(&pt); ctype(&pt, t);   /* ?*T：参数类型就是指针本身 */
             buf_printf(g_out,
                 "static %s zx_unwrap_%s(%s o, const char *w) {\n"
-                "    if (!o) { fflush(stdout); fprintf(stderr, \"zx: unwrap of a null optional at %%s\\n\", w); abort(); }\n"
+                "    if (!o) { zx_diagf(\"zx: unwrap of a null optional at %%s\\n\", w); zx_abort_reported(); }\n"
                 "    return o;\n"
                 "}\n\n", ct.data, nm.data, pt.data);
         } else if (t->kind == TY_OPT) {
             buf_printf(g_out,
                 "static %s zx_unwrap_%s(%s o, const char *w) {\n"
-                "    if (!o.tag) { fflush(stdout); fprintf(stderr, \"zx: unwrap of a null optional at %%s\\n\", w); abort(); }\n"
+                "    if (!o.tag) { zx_diagf(\"zx: unwrap of a null optional at %%s\\n\", w); zx_abort_reported(); }\n"
                 "    return o.payload;\n"
                 "}\n\n", ct.data, nm.data, nm.data);
         } else {
             buf_printf(g_out,
                 "static %s zx_unwrap_%s(%s o, const char *w) {\n"
-                "    if (o.tag) { fflush(stdout); fprintf(stderr, \"zx: unwrap of error %%u at %%s\\n\", (unsigned)o.tag, w); abort(); }\n"
+                "    if (o.tag) { zx_diagf(\"zx: unwrap of error %%u at %%s\\n\", (unsigned)o.tag, w); zx_abort_reported(); }\n"
                 "    return o.payload;\n"
                 "}\n\n", ct.data, nm.data, nm.data);
         }
@@ -5129,10 +5246,9 @@ static void emit_bounds_runtime(void) {
         "    (void)n; (void)loc; return i;\n"
         "#else\n"
         "    if (i >= n) {\n"
-        "        fflush(stdout);\n"
-        "        fprintf(stderr, \"zx: index %llu is out of bounds (len %llu) at %s\\n\",\n"
+        "        zx_diagf(\"zx: index %llu is out of bounds (len %llu) at %s\\n\",\n"
         "                (unsigned long long)i, (unsigned long long)n, loc);\n"
-        "        abort();\n"
+        "        zx_abort_reported();\n"
         "    }\n"
         "    return i;\n"
         "#endif\n"
@@ -5142,10 +5258,9 @@ static void emit_bounds_runtime(void) {
         "    (void)n; (void)loc; return (size_t)i;\n"
         "#else\n"
         "    if (i < 0 || (unsigned long long)i >= n) {\n"
-        "        fflush(stdout);\n"
-        "        fprintf(stderr, \"zx: index %lld is out of bounds (len %llu) at %s\\n\",\n"
+        "        zx_diagf(\"zx: index %lld is out of bounds (len %llu) at %s\\n\",\n"
         "                i, (unsigned long long)n, loc);\n"
-        "        abort();\n"
+        "        zx_abort_reported();\n"
         "    }\n"
         "    return (size_t)i;\n"
         "#endif\n"
@@ -5157,10 +5272,9 @@ static void emit_bounds_runtime(void) {
         "    /* hi < lo 时长度是负的；参数收 long long，报出来的就是负数，\n"
         "     * 不再是 2^64-2 这种重解释出来的巨大值 */\n"
         "    if (len < 0 || (unsigned long long)len > total) {\n"
-        "        fflush(stdout);\n"
-        "        fprintf(stderr, \"zx: slice is out of bounds (len %lld > total %llu) at %s\\n\",\n"
+        "        zx_diagf(\"zx: slice is out of bounds (len %lld > total %llu) at %s\\n\",\n"
         "                len, (unsigned long long)total, loc);\n"
-        "        abort();\n"
+        "        zx_abort_reported();\n"
         "    }\n"
         "    return len;\n"
         "#endif\n"
@@ -5179,9 +5293,8 @@ static void emit_f2i_runtime(void) {
         "    (void)lo; (void)hi;\n"
         "#else\n"
         "    if (!(v >= lo && v < hi)) {\n"
-        "        fflush(stdout);\n"
-        "        fprintf(stderr, \"zx: float-to-int cast is out of range (%g)\\n\", v);\n"
-        "        abort();\n"
+        "        zx_diagf(\"zx: float-to-int cast is out of range (%g)\\n\", v);\n"
+        "        zx_abort_reported();\n"
         "    }\n"
         "#endif\n"
         "    return (int64_t)v;\n"
@@ -5193,9 +5306,8 @@ static void emit_f2i_runtime(void) {
         "    (void)hi;\n"
         "#else\n"
         "    if (!(v >= 0.0 && v < hi)) {\n"
-        "        fflush(stdout);\n"
-        "        fprintf(stderr, \"zx: float-to-int cast is out of range (%g)\\n\", v);\n"
-        "        abort();\n"
+        "        zx_diagf(\"zx: float-to-int cast is out of range (%g)\\n\", v);\n"
+        "        zx_abort_reported();\n"
         "    }\n"
         "#endif\n"
         "    return (uint64_t)v;\n"
@@ -5209,9 +5321,8 @@ static void emit_f2i_runtime(void) {
         "    (void)lo; (void)hi; (void)sign;\n"
         "#else\n"
         "    if (!(v >= lo && v < hi)) {\n"
-        "        fflush(stdout);\n"
-        "        fprintf(stderr, \"zx: float-to-int cast is out of range (%g)\\n\", v);\n"
-        "        abort();\n"
+        "        zx_diagf(\"zx: float-to-int cast is out of range (%g)\\n\", v);\n"
+        "        zx_abort_reported();\n"
         "    }\n"
         "#endif\n"
         "    if (sign) return (unsigned __int128)(__int128)v;\n"
@@ -5223,9 +5334,8 @@ static void emit_div_runtime(void) {
     bline(&g_bproto, "static void zx_div0(void);");
     buf_puts(g_out,
         "static void zx_div0(void) {\n"
-        "    fflush(stdout);\n"
-        "    fprintf(stderr, \"zx: division by zero\\n\");\n"
-        "    abort();\n"
+        "    zx_diagf(\"zx: division by zero\\n\");\n"
+        "    zx_abort_reported();\n"
         "}\n\n");
     static const struct { int bits; bool sgn; } all[] = {
         {8, false}, {16, false}, {32, false}, {64, false}, {128, false},
@@ -6527,6 +6637,15 @@ static void gen_switch(Node *n, const char *slot, Type *slot_ty);
 static void gen_stmt(Node *n) {
     if (!n) return;
     bmap_note(g_out, n);
+    /* §211: 语句边界刷新 zx 位置影子——崩溃处理器据此报 zx 文件:行。
+     * 只在函数体内（g_in_fn）且有源码行时更新，避免合成节点污染位置。 */
+    if (g_in_fn && n->line > 0) {
+        Buf zf; buf_init(&zf);
+        const char *mp = g_cur_mod_path ? g_cur_mod_path : "?";
+        cstr(&zf, mp, (int)strlen(mp));
+        line("zx_loc(%s, %d, %d);", zf.data, n->line, n->col);
+        buf_free(&zf);
+    }
 
     switch (n->kind) {
     case NK_DECL:
@@ -7580,6 +7699,7 @@ static void gen_fn(Node *fn, const char *name, bool is_main, bool exported) {
     else line("static %s {", sig.data);
     g_ind++;
     if (is_main) {
+        line("zx_crash_init();");   /* §211: 崩溃自动打点，在任何用户代码前装好 */
         for (int i = 0; i < g_ninit; i++) line("%s();", g_initname[i]);
         if (g_need_proc) {
             line("zx_proc_argc = zx_argc;");
@@ -8305,6 +8425,8 @@ int backend_emit_split(Node *root, Buf *header, Buf *rt, BUnit *units, int maxun
     buf_init(&g_bbody);
     g_out = &g_bbody;
     g_ind = 0;
+
+    emit_diag_runtime();   /* §211: 无缓冲诊断 + 崩溃打点，所有程序都带 */
 
     if (g_need_pad || g_need_fmt) {
         /* 宽度/填充助手（M26）：printf 旗标覆盖不了的填充形态走这里。

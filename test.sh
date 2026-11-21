@@ -1718,6 +1718,39 @@ else
 fi
 rm -rf "$P208"
 
+# §211：运行时诊断走 CRT 无缓冲写 + 崩溃自动打点（报 zx 位置，不是 C 行号）。
+# 守三件事：显式 panic 只有一条诊断（崩溃 handler 不重复报）；裸 @trap 的
+# 崩溃 handler 打点含 zx 文件:行；崩溃退出码仍是 abort 的 3。
+printf "\n== §211 CRT 无缓冲诊断 + 崩溃自动打点\n"
+$ZXC tests/good/debug-alloc-abort.zx -o "$TPFX.d211.exe" > /dev/null 2>&1 || true
+"$TPFX.d211.exe" leak > "$TPFX.d211.panic" 2>&1 || true
+if grep -q 'panic: \[debug_alloc\] memory leak' "$TPFX.d211.panic" \
+   && grep -q 'at .*debug_alloc.zx:249:28' "$TPFX.d211.panic" \
+   && ! grep -q 'zx: fatal' "$TPFX.d211.panic"; then
+    printf "  ok   显式 panic 单条诊断，无重复崩溃报告\n"
+else
+    printf "  FAIL §211 显式 panic 打点\n"; sed -n '1,10p' "$TPFX.d211.panic"; fail=1
+fi
+cat > "$TPFX.c211.zx" <<'ZXEOF'
+const main = fn () i32 {
+    let a: i32 = 1;
+    let b: i32 = 2;
+    let c = a + b;
+    if (c == 3) {
+        @trap();
+    }
+    return 0;
+};
+ZXEOF
+$ZXC "$TPFX.c211.zx" -o "$TPFX.c211.exe" > /dev/null 2>&1 || true
+"$TPFX.c211.exe" > "$TPFX.c211.run" 2>&1 || true
+if grep -q 'zx: fatal SIGABRT' "$TPFX.c211.run" \
+   && grep -q 'c211.zx:6:9' "$TPFX.c211.run"; then
+    printf "  ok   崩溃 handler 打点含 zx 文件:行（非 C 行号）\n"
+else
+    printf "  FAIL §211 崩溃打点位置\n"; cat "$TPFX.c211.run"; fail=1
+fi
+
 # 用例会在仓库根留下自己的临时文件：io_fmt.zx 写 io_fmt.tmp，stdfs.zx 建
 # fs_t_dir / fs_t_dir2。跑完统一带走——测试不该往工作区里堆东西。
 rm -rf io_fmt.tmp fs_t_dir fs_t_dir2 2>/dev/null || true
