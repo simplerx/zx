@@ -91,8 +91,11 @@ else
     printf "  FAIL zxc -v\n"; fail=1
 fi
 if $ZXC --help > "$TPFX.cli.h" 2>&1 && grep -q "usage" "$TPFX.cli.h" \
-   && $ZXC build -h 2>&1 | grep -q "zxc build"; then
-    printf "  ok   zxc -h / zxc build -h\n"
+   && grep -q "list built-in platform targets" "$TPFX.cli.h" \
+   && $ZXC build -h 2>&1 | grep -q "zxc build" \
+   && $ZXC targets -h 2>&1 | grep -q '"targets"' \
+   && $ZXC targets -h 2>&1 | grep -q 'macos-aarch64'; then
+    printf "  ok   zxc -h / zxc build -h / zxc targets -h\n"
 else
     printf "  FAIL zxc -h\n"; fail=1
 fi
@@ -104,6 +107,15 @@ if ( cd "$pdir" && "$ZXCW" init demo > "$TPFX.cli.init" 2>&1 ); then
         printf "  ok   init 生成 vendor/\n"
     else
         printf "  FAIL init 没有生成 vendor/\n"; fail=1
+    fi
+    # init 的 README 必须讲多平台用法，且与 `zxc targets -h` 对得上
+    if grep -q '"targets"' "$pdir/demo/README.md" \
+       && grep -q 'zxc targets' "$pdir/demo/README.md" \
+       && grep -q 'macos-aarch64' "$pdir/demo/README.md" \
+       && grep -q 'linux-x86_64' "$pdir/demo/README.md"; then
+        printf "  ok   init 的 README 与 zxc targets -h 对齐\n"
+    else
+        printf "  FAIL init 的 README 缺少/不匹配多平台用法\n"; fail=1
     fi
     if ( cd "$pdir/demo" && "$ZXCW" check > "$TPFX.cli.c1" 2>&1 ); then
         printf "  ok   init 出来的工程 check 通过\n"
