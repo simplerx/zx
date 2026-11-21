@@ -6179,18 +6179,22 @@ static void ex(Buf *b, Node *n) {
         if (ty_is_array_ptr(t)) t = NULL;   /* 数组字面量按元素写 */
         Buf nm; buf_init(&nm);
         if (n->kind == NK_ARRAY_LIT) {
-            Type *at = n->ty;              /* *[N]T */
-            Type *arr = at->elem;          /* [N]T */
+            Type *at = n->ty;
+            /* §205：`.{…}` 值形式 at=[N]T，发 ((ZxArr){ .v = {…} })（无 &）；
+             * `&.{…}` 指针形式 at=*[N]T，发 &((ZxArr){ .v = {…} })。 */
+            bool is_val = n->flag && at && at->kind == TY_ARRAY;
+            Type *arr = is_val ? at : at->elem;
             Type *et = (arr && arr->kind == TY_ARRAY) ? arr->elem : arr;
-            /* §201：&.{…} 是 [N]T 数组值的地址，发 &((ZxArr){ .v = {…} }) */
             ensure_type(arr);
             Buf nm; buf_init(&nm); tn(&nm, arr);
-            buf_printf(b, "(&((%s){ .v = { ", nm.data);
+            if (is_val) buf_printf(b, "((%s){ .v = { ", nm.data);
+            else        buf_printf(b, "(&((%s){ .v = { ", nm.data);
             for (int i = 0; i < n->nitems; i++) {
                 if (i) buf_puts(b, ", ");
                 coerce(b, n->items[i], et);
             }
-            buf_puts(b, " } }))");
+            if (is_val) buf_puts(b, " } })");
+            else        buf_puts(b, " } }))");
             return;
         }
         if (!t) { buf_puts(b, "(0)"); return; }

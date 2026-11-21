@@ -1,0 +1,43 @@
+// §205：`.{…}` 位置形式是 [N]T 数组值；`&.{…}` 是 *[N]T 数组指针。
+// 值形式：直接下标取元素、内建 .len/.size/.ptr、可隐式转切片。
+// 指针形式：[0] 取整个数组（元素就是 [N]T），可隐式转切片。
+// expect-output
+// show=2 323
+// ok 323 233 3 8 45
+// expect-exit: 0
+const std = @mod("std");
+
+const show = fn (s: []const i32) void {
+    std.println("show={} {}", s.len, s[0]);
+};
+
+pub const main = fn () u8 {
+    let parr = &.{ 323, 23, 45, };
+    let arr = .{ 323, 233 };
+
+    // parr: *[N]T —— [0] 取数组，再下标取元素
+    if (parr[0][0] != 323) { return 1; }
+    if (parr[0].len != 3) { return 2; }
+
+    // arr: [N]T —— 直接下标 / 内建
+    if (arr[0] != 323) { return 3; }
+    if (arr[1] != 233) { return 4; }
+    if (arr.len != 2) { return 5; }
+    if (arr.size != (@type(i32).size * 2)) { return 6; }
+    if (arr.ptr[1] != 233) { return 7; }
+
+    // 值 → []const T 切片形参
+    show(arr);
+
+    // 显式类型注解下 .{…} 也按 [N]T 推断
+    let typed: [3]i32 = .{ 7, 8, 9 };
+    if (typed[2] != 9) { return 8; }
+
+    // 编译期折叠：.{…} 值可直接下标
+    const ct = .{ 10, 20, 30 };
+    if (ct[1] != 20) { return 9; }
+    if (ct.len != 3) { return 10; }
+
+    std.println("ok {} {} {} {} {}", arr[0], arr[1], parr[0].len, arr.size, parr[0][2]);
+    return 0;
+};

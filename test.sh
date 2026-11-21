@@ -1214,7 +1214,8 @@ if $ZXC tests/good/array-pointer-index.zx --emit-c > "$TPFX.api.c" 2>/dev/null \
 else
     printf "  FAIL ptr[i] 没生成界检查\n"; fail=1
 fi
-# §146：位置式 .{...} 与解构 .{a,b} 两套前端都要给 E0211 迁移提示。
+# §205：.{…} 位置形式已是 [N]T 数组值；removed-dot-tuple 现在守的是数组 .N
+# 点下标的 E0211。解构 .{a,b} 仍是 E0211。两套前端都给迁移提示。
 # runner 只跑默认前端（zxfe），这里补一条 --fe=c 的对拍。
 for dt in removed-dot-tuple removed-dot-pattern; do
     $ZXC "tests/bad/$dt.zx" --check --fe=c > "$TPFX.$dt.c.log" 2>&1 || true

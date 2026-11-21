@@ -1,7 +1,8 @@
-// expect: `.{...}` tuple spelling was removed: write `{...}` for a tuple
+// expect: array `.N` indexing was removed: write `a[i]`
 // expect-code: E0211
-// §146：元组字面量只有 {} 一种写法。位置式 .{...} 已删除，旧写法要给
-// 明确的迁移提示，不能只报 unknown identifier。
+// §205：`.{…}` 位置形式现在是 [N]T 数组值（文件名 removed-dot-tuple 是历史遗留）。
+// 数组值不再有 `.N` 点下标——写 `a[i]`；tuple / vector 的 .N 仍保留。
+// 这条守门：数组值的点下标依旧被 E0211 拒绝并给迁移提示。
 const main = fn () u8 {
     let t = .{ 1, 2 };
     return (u8)t.0;

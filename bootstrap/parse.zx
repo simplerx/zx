@@ -1518,12 +1518,14 @@ pub const Parser = struct {
             return n;
         }
 
-        if (!array_lit) {
-            self.record("E0211", "`.{...}` tuple spelling was removed: write `{...}` for a tuple, or `&.{...}` for an array");
-        }
-        // 位置钉在 `.{` 这个 token 上（C 版 node_new(NK_TUPLE, t)）：
+        // §205：`.{…}` 位置形式 = [N]T 数组值（flag=true）；
+        // `&.{…}` 仍由 parse_unary 包成 NK.array_lit（flag=false → *[N]T）。
+        // 位置钉在 `.{` 这个 token 上（C 版 node_new(..., t)）：
         // 用 new() 会取当前 token——那是第一个元素，字面量套字面量时位置就岔了。
-        let n = self.new_at(NK.tuple, t);
+        var nk = NK.tuple;
+        if (!array_lit) { nk = NK.array_lit; }
+        let n = self.new_at(nk, t);
+        if (!array_lit) { n.flag = true; }
         if (!self.at(lex.Kind.rbrace)) {
             var go = true;
             while (go) {

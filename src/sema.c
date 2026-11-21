@@ -5989,6 +5989,7 @@ static Type *check_array_lit(Node *n, Node **items, int nitems, Type *expect) {
             elem = expect->elem;
             if (elem->kind == TY_ARRAY) elem = elem->elem;
         } else if (expect->kind == TY_SLICE) elem = expect->elem;
+        else if (expect->kind == TY_ARRAY) elem = expect->elem;  /* §205：.{…} 值形式 */
     }
     for (int i = 0; i < nitems; i++) {
         Type *it = check_expr(items[i], elem);
@@ -6004,12 +6005,17 @@ static Type *check_array_lit(Node *n, Node **items, int nitems, Type *expect) {
         }
     }
     if (!elem) {
-        if (!expect || expect->kind != TY_PTR)
+        bool have_expect = expect && (expect->kind == TY_PTR ||
+                                      expect->kind == TY_ARRAY ||
+                                      expect->kind == TY_SLICE);
+        if (!have_expect)
             return BAD(n, "cannot infer the element type of an empty array literal; write the target type");
         elem = ty_invalid();     /* 空数组：靠期待类型 */
     }
     for (int i = 0; i < nitems; i++)
         coerce_node(items[i], items[i]->ty, elem, "array element");
+    /* §205：`.{…}` 位置形式是 [N]T 数组值；`&.{…}` 是 *[N]T 指针。 */
+    if (n->flag) return type_of(n, ty_array(elem, (uint64_t)nitems));
     return type_of(n, ty_ptr(ty_array(elem, (uint64_t)nitems), false, true,
                              (uint64_t)nitems));
 }
@@ -12251,7 +12257,18 @@ static Value *ct_struct_lit(Node *n) {
 
 static Value *ct_array_lit(Node *n) {
     Type *pt = n->ty;
-    if (!pt || pt->kind != TY_PTR) return NULL;
+    if (!pt) return NULL;
+    /* §205：`.{…}` 值形式 → 直接是 V_AGG（数组值本身） */
+    if (n->flag && pt->kind == TY_ARRAY) {
+        Value *arr = val_agg(pt, n->nitems);
+        for (int i = 0; i < n->nitems; i++) {
+            arr->items[i] = ct_eval(n->items[i]);
+            if (!arr->items[i]) return NULL;
+        }
+        return arr;
+    }
+    /* `&.{…}` 指针形式 → V_PTR(base=V_AGG) */
+    if (pt->kind != TY_PTR) return NULL;
     Value *arr = val_agg(ty_ptr(pt->elem, true, true, pt->len), n->nitems);
     for (int i = 0; i < n->nitems; i++) {
         arr->items[i] = ct_eval(n->items[i]);

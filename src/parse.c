@@ -997,13 +997,11 @@ static Node *parse_dot_brace(P *p, bool array_lit) {
         return n;
     }
 
-    if (!array_lit) {
-        if (g_spec_depth > 0) longjmp(g_spec, 1);
-        diag_code_at("E0211", t->line, t->col,
-                     "`.{...}` tuple spelling was removed: write `{...}` for a tuple, "
-                     "or `&.{...}` for an array");
-    }
-    Node *n = node_new(NK_TUPLE, t->line, t->col);
+    if (!array_lit && g_spec_depth > 0) longjmp(g_spec, 1);
+    /* §205：`.{…}` 位置形式 = [N]T 数组值（flag=true）；
+     * `&.{…}` 仍由 parse_unary 包成 NK_ARRAY_LIT（flag=false → *[N]T）。 */
+    Node *n = node_new(array_lit ? NK_TUPLE : NK_ARRAY_LIT, t->line, t->col);
+    if (!array_lit) n->flag = true;
     if (!at(p, TOK_RBRACE)) {
         for (;;) {
             push(n, parse_expr(p));
