@@ -135,7 +135,7 @@ const keywords = [_][]const u8{
     "const",  "let",    "var",  "fn",     "type",   "null",     "undefined",
     "if",     "else",   "while", "for",  "inline", "switch", "continue", "return",
     "defer",  "struct", "union", "enum", "error",  "pub",    "extern",   "orelse",
-    "try",
+    "try",    "break",
 };
 
 const Snip = struct { label: []const u8, body: []const u8, detail: []const u8 };
@@ -177,6 +177,7 @@ const snippets = [_]Snip{
     .{ .label = "tag", .body = "tag.${1:name};\n${2:var} ${3:p} = tag.${1:name} : $0;", .detail = "代码片段 tag 贴标分配（§170）" },
     .{ .label = "return", .body = "return $0;", .detail = "代码片段 return" },
     .{ .label = "continue", .body = "continue;", .detail = "代码片段 continue" },
+    .{ .label = "break", .body = "break $0;", .detail = "代码片段 break（最近外循环的收割，可带值）" },
     .{ .label = "orelse", .body = "orelse $0", .detail = "代码片段 orelse" },
     .{ .label = "main", .body = "pub const main = fn () !i32 {\n    $0\n    return 0;\n};", .detail = "代码片段 main" },
     .{ .label = "println", .body = "std.println(\"{}\", $0);", .detail = "代码片段 println" },
@@ -431,13 +432,15 @@ const builtin_docs = [_]BuiltinDoc{
        .snip = "trap()$0" },
     .{ .name = "error", .detail = "@error(msg) 编译期报错",
        .snip = "error(\"${1:msg}\")$0" },
+    .{ .name = "panic", .detail = "@panic(msg?) 运行时带 zx 位置中止（无缓冲诊断，可不带消息）",
+       .snip = "panic(\"${1:message}\")$0" },
     .{ .name = "Vec", .detail = "@Vec(T, N) 向量类型：N 个 T 的向量值（N 只能是 1/2/4/8/16/32/64），`(@Vec(T, N))x` 把标量铺满各分量，`@Vec(T, N){a, b, …}` 是字面量",
        .snip = "Vec(${1:T}, ${2:N})$0" },
 };
 
 const toplevel_builtins = [_][]const u8{
     "type",   "memcpy",  "memmove", "memset",
-    "link",   "trap",    "error",
+    "link",   "trap",    "error",   "panic",
     "Vec",
 };
 

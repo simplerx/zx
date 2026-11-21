@@ -8262,6 +8262,16 @@ static Type *check_builtin(Node *n, Type *expect) {
 
     if (!strcmp(nm, "trap")) return type_of(n, ty_noreturn());
 
+    if (!strcmp(nm, "panic")) {
+        /* §213：@panic(msg?) —— 运行时带 Zx 位置中止（走 CRT 无缓冲
+         * 诊断，不重复 crash report）。msg 必须是字符串字面量：后端要
+         * 把它直接嵌进生成 C，跟 @error 的口径一致。 */
+        if (n->nitems > 1) return BAD(n, "@panic takes at most one message");
+        if (n->nitems == 1 && (!n->items[0] || n->items[0]->kind != NK_STR))
+            return BAD(n, "@panic: the message must be a string literal");
+        return type_of(n, ty_noreturn());
+    }
+
     if (!strcmp(nm, "tag")) {
         /* §178：@tag(p) —— 取指针携带的标签（一等 tag 值，与 tag.x 同型）。
          * 指针进数组（运行期索引）等断链的地方**之前**先取出来存住，
@@ -10433,10 +10443,17 @@ static void check_stmt(Node *n) {
     }
 
     case NK_YIELD: {
-        if (g_in_defer) { err_at(n->line, n->col, "`defer` cannot yield"); return; }
-        Label *l = label_find(n->label);
+        /* §213：label == NULL 是 `break`（脱糖成"最近外循环的收割"）。
+         * 走 loop-only 查找：带标签的块/臂不吃 break，只认循环帧。 */
+        bool is_break = n->label == NULL;
+        if (g_in_defer) {
+            err_at(n->line, n->col, is_break ? "`defer` cannot break" : "`defer` cannot yield");
+            return;
+        }
+        Label *l = is_break ? label_find_loop(NULL) : label_find(n->label);
         if (!l) {
-            err_at(n->line, n->col, "no enclosing scope labeled '%s'", n->label);
+            if (is_break) err_at(n->line, n->col, "`break` requires an enclosing loop");
+            else err_at(n->line, n->col, "no enclosing scope labeled '%s'", n->label);
             if (n->a) check_expr(n->a, NULL);
             return;
         }
@@ -11457,7 +11474,27 @@ static int if_const(Node *n) {
  * 保守口径：嵌套的同名标签作用域理论上会"截住"同名收割（标签内层遮蔽
  *   外层，spec §8.5），这里仍当出口算——漏报一条死代码比把活代码判死安全。 */
 static bool stmt_yields_label(Node *s, const char *label) {
-    if (!s || !label) return false;
+    if (!s) return false;
+    /* §213：label == NULL 是 break —— 只认最近的一层循环。递归时遇到
+     * 内层循环必须停：那里的 break 收的是内层，不是我们在查的这层。 */
+    if (!label) {
+        switch (s->kind) {
+        case NK_YIELD:
+            return s->label == NULL;
+        case NK_BLOCK:
+            for (int i = 0; i < s->nitems; i++)
+                if (stmt_yields_label(s->items[i], NULL)) return true;
+            return false;
+        case NK_IF:
+            return stmt_yields_label(s->b, NULL) || stmt_yields_label(s->c, NULL);
+        case NK_SWITCH:
+            for (int i = 0; i < s->nitems; i++)
+                if (stmt_yields_label(s->items[i]->a, NULL)) return true;
+            return false;
+        default:
+            return false;   /* 嵌套 while/for 截住 break */
+        }
+    }
     switch (s->kind) {
     case NK_YIELD:
         return s->label && !strcmp(s->label, label);
@@ -11492,7 +11529,7 @@ static bool while_never_exits(Node *n) {
     }
     /* 条件恒真还不算"永不退出"：体里可以收割循环自己的标签
      * （`n: {}` / `n: v;` 会 goto 循环末尾），那是正常出口。 */
-    if (n->label && n->b && stmt_yields_label(n->b, n->label)) return false;
+    if (stmt_yields_label(n->b, n->label) || stmt_yields_label(n->b, NULL)) return false;
     return true;
 }
 
@@ -12653,6 +12690,18 @@ static Value *ct_eval(Node *n) {
             }
             g_ct_stuck = true;
             return NULL;
+        } else if (!strcmp(nm, "panic")) {
+            /* @panic 是运行时中止：只有真正执行编译期代码时才"到达"，
+             * 与 @trap 同口径。普通函数体里的折叠不该把它变成 E0507——
+             * 那会让 `if (可折叠条件) @panic(...)` 的运行时用例编译不过。
+             * 常量初始化器折不动它，自然会报 E0501。 */
+            if (!g_ct_exec) return NULL;
+            if (!n->flag) {
+                n->flag = true;
+                err_at(n->line, n->col, "@panic reached at compile time");
+            }
+            g_ct_stuck = true;
+            return NULL;
         }
         break;
     }
@@ -12698,8 +12747,10 @@ static Value *ct_eval(Node *n) {
     case NK_SWITCH: {
         CtFlow f = ct_run(n);
         if (f.kind == CT_YIELD) {
-            /* 循环自己的标签收了这次收割才拿得到值，否则继续往外冒 */
-            if (n->label && f.label && !strcmp(n->label, f.label)) v = f.val;
+            /* 循环自己的标签收了这次收割才拿得到值，否则继续往外冒；
+             * §213：`break` 脱糖成 label=NULL 的收割，最近循环无条件收。 */
+            if ((!n->label && !f.label) ||
+                (n->label && f.label && !strcmp(n->label, f.label))) v = f.val;
             else g_ct_flow = f;
             break;
         }

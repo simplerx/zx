@@ -1,0 +1,5 @@
+// expect: `break` requires an enclosing loop
+const main = fn () i32 {
+    break;
+    return 0;
+};

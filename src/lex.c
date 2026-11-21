@@ -34,6 +34,7 @@ static const KwEntry g_keywords[] = {
     {"inline", TOK_KW_INLINE},
     {"switch", TOK_KW_SWITCH}, {"continue", TOK_KW_CONTINUE},
     {"return", TOK_KW_RETURN}, {"defer", TOK_KW_DEFER},
+    {"break", TOK_KW_BREAK},
     {"struct", TOK_KW_STRUCT}, {"union", TOK_KW_UNION},
     {"enum", TOK_KW_ENUM},     {"error", TOK_KW_ERROR},
     {"pub", TOK_KW_PUB},       {"extern", TOK_KW_EXTERN},

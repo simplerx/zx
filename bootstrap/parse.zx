@@ -58,6 +58,7 @@ pub const kname = fn (k: lex.Kind) []const u8 {
         .kw_extern: "'extern'";
         .kw_orelse: "'orelse'";
         .kw_try: "'try'";
+        .kw_break: "'break'";
         .lparen: "'('";
         .rparen: "')'";
         .lbracket: "'['";
@@ -666,7 +667,8 @@ pub const Parser = struct {
                        k == lex.Kind.kw_pub || k == lex.Kind.kw_defer ||
                        k == lex.Kind.kw_return || k == lex.Kind.kw_continue ||
                        k == lex.Kind.kw_if || k == lex.Kind.kw_while ||
-                       k == lex.Kind.kw_for || k == lex.Kind.kw_switch) {
+                       k == lex.Kind.kw_for || k == lex.Kind.kw_switch ||
+                       k == lex.Kind.kw_break) {
                 if (depth == 1) { return true; }
             }
             j = j + 1;
@@ -1967,6 +1969,7 @@ pub const Parser = struct {
     pub const starts_stmt_kw = fn (self: *Parser, k: lex.Kind) bool {
         return k == lex.Kind.kw_if || k == lex.Kind.kw_while || k == lex.Kind.kw_for ||
                k == lex.Kind.kw_switch || k == lex.Kind.kw_return || k == lex.Kind.kw_continue ||
+               k == lex.Kind.kw_break ||
                k == lex.Kind.kw_defer ||
                k == lex.Kind.kw_const || k == lex.Kind.kw_let ||
                k == lex.Kind.kw_var;
@@ -1975,7 +1978,7 @@ pub const Parser = struct {
     // 单条语句就能当 if 臂的关键字（M19 语法糖）。
     pub const arm_stmt_only = fn (self: *Parser, k: lex.Kind) bool {
         return k == lex.Kind.kw_return || k == lex.Kind.kw_continue ||
-               k == lex.Kind.kw_defer;
+               k == lex.Kind.kw_defer || k == lex.Kind.kw_break;
     };
 
     // 能开始一个值、且不是二元运算符的 token。
@@ -2554,6 +2557,17 @@ pub const Parser = struct {
         if (t.kind == lex.Kind.kw_return) {
             _ = self.advance();
             let n = self.new_at(NK.return_, t);
+            if (!self.at(lex.Kind.semi)) {
+                n.a = try self.parse_expr();
+            }
+            try self.expect(lex.Kind.semi);
+            return n;
+        }
+
+        // §213：break = 最近外循环的收割（label 留 NULL，sema/后端绑循环帧）
+        if (t.kind == lex.Kind.kw_break) {
+            _ = self.advance();
+            let n = self.new_at(NK.yield, t);
             if (!self.at(lex.Kind.semi)) {
                 n.a = try self.parse_expr();
             }

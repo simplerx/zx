@@ -404,6 +404,18 @@ check("completion.snippet.semicolon",
           if i["label"] in ("if", "ifelse", "fn", "struct", "switch", "while", "for")),
       str([i["label"] for i in all_snips])[:200])
 
+# 3r §213：@ 内建补全必须含 panic（带调用骨架）
+off = MAIN.index("@mod") + 1     # 光标在 '@' 之后、标识符之前
+send({"jsonrpc": "2.0", "id": 9001, "method": "textDocument/completion", "params": {
+    "textDocument": {"uri": uri}, "position": pos(MAIN, off)}})
+r, _ = recv_id("completion.atBuiltins", 9001)
+at_items = r["result"]["items"] if r and r.get("result") else []
+at_map = {i["label"]: i for i in at_items}
+check("completion.at.panic",
+      "panic" in at_map and at_map["panic"].get("insertTextFormat") == 2
+      and at_map["panic"].get("insertText") == 'panic("${1:message}")$0',
+      str(at_map.get("panic"))[:200])
+
 # 3q2 自定义类型骨架：`type` / `uniontag` / `enumtag` / `new`
 #     用户 2026-11-08 追加：写自定义类型也要能 Tab 展开完整声明。
 #     展开后是能直接编译的 `const Name = struct { … };` 整条声明；

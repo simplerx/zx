@@ -25,7 +25,7 @@ pub const Kind = enum {
     kw_null, kw_undefined, kw_if, kw_else, kw_while, kw_for,
     kw_struct, kw_union, kw_enum, kw_error, kw_pub, kw_extern,
     kw_inline, kw_switch, kw_continue, kw_return, kw_defer,
-    kw_orelse, kw_try,
+    kw_orelse, kw_try, kw_break,
     lparen, rparen, lbracket, rbracket, lbrace, rbrace,
     comma, semi, colon, at, dot, dot_brace, dotdot, arrow,
     plus, minus, star, slash, percent, caret, tilde, bang, question,
@@ -67,6 +67,7 @@ pub const spell = fn (k: Kind) []const u8 {
         .kw_extern: "KW_EXTERN";
         .kw_orelse: "KW_ORELSE";
         .kw_try: "KW_TRY";
+        .kw_break: "KW_BREAK";
         .lparen: "LPAREN";
         .rparen: "RPAREN";
         .lbracket: "LBRACKET";
@@ -144,6 +145,7 @@ const keyword = fn (s: []const u8) ?Kind {
     if (std.str.eq(s, "extern")) { return Kind.kw_extern; }
     if (std.str.eq(s, "orelse")) { return Kind.kw_orelse; }
     if (std.str.eq(s, "try")) { return Kind.kw_try; }
+    if (std.str.eq(s, "break")) { return Kind.kw_break; }
     return null;
 };
 

@@ -134,6 +134,7 @@ void   buf_free(Buf *b);
     X(KW_EXTERN,  "'extern'")                                                  \
     X(KW_ORELSE,  "'orelse'")                                                  \
     X(KW_TRY,     "'try'")                                                     \
+    X(KW_BREAK,   "'break'")                                                   \
     /* punctuation & operators */                                              \
     X(LPAREN,   "'('")    X(RPAREN,   "')'")                                   \
     X(LBRACKET, "'['")    X(RBRACKET, "']'")                                   \

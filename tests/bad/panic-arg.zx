@@ -1,0 +1,5 @@
+// expect: message must be a string literal
+const main = fn () i32 {
+    @panic(42);
+    return 0;
+};

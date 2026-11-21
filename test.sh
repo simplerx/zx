@@ -1751,6 +1751,58 @@ else
     printf "  FAIL §211 崩溃打点位置\n"; cat "$TPFX.c211.run"; fail=1
 fi
 
+# §213：break = 最近外循环的收割糖（空值/带值/无标签循环）；
+# @panic 走 CRT 无缓冲单条诊断，报 zx 位置，crash handler 不补 fatal。
+printf "\n== §213 break 收割糖 + @panic 内建\n"
+if $ZXC tests/good/break-loop.zx -o "$TPFX.c213break.exe" > /dev/null 2>&1 \
+   && "$TPFX.c213break.exe" > "$TPFX.c213break.run" 2>&1; then
+    printf "  ok   break 空/带值收割最近外循环\n"
+else
+    printf "  FAIL §213 break 收割\n"
+    cat "$TPFX.c213break.run" 2>/dev/null || true
+    fail=1
+fi
+cat > "$TPFX.c213.zx" <<'ZXEOF'
+const main = fn () i32 {
+    let a: i32 = 1;
+    let b: i32 = 2;
+    let c = a + b;
+    if (c == 3) {
+        @panic("boom");
+    }
+    return 0;
+};
+ZXEOF
+$ZXC "$TPFX.c213.zx" -o "$TPFX.c213.exe" > /dev/null 2>&1 || true
+"$TPFX.c213.exe" > "$TPFX.c213.run" 2>&1 || true
+if grep -q 'panic: boom' "$TPFX.c213.run" \
+   && grep -q 'c213.zx:6:9' "$TPFX.c213.run" \
+   && ! grep -q 'zx: fatal' "$TPFX.c213.run"; then
+    printf "  ok   @panic 单条无缓冲诊断，带 zx 位置\n"
+else
+    printf "  FAIL §213 @panic 打点\n"; cat "$TPFX.c213.run"; fail=1
+fi
+cat > "$TPFX.c213b.zx" <<'ZXEOF'
+const main = fn () i32 {
+    let a: i32 = 1;
+    let b: i32 = 2;
+    let c = a + b;
+    if (c == 3) {
+        @panic();
+    }
+    return 0;
+};
+ZXEOF
+$ZXC "$TPFX.c213b.zx" -o "$TPFX.c213b.exe" > /dev/null 2>&1 || true
+"$TPFX.c213b.exe" > "$TPFX.c213b.run" 2>&1 || true
+if grep -q '^panic$' "$TPFX.c213b.run" \
+   && grep -q 'c213b.zx:6:9' "$TPFX.c213b.run" \
+   && ! grep -q 'zx: fatal' "$TPFX.c213b.run"; then
+    printf "  ok   @panic() 无消息也带位置\n"
+else
+    printf "  FAIL §213 @panic() 无消息\n"; cat "$TPFX.c213b.run"; fail=1
+fi
+
 # 用例会在仓库根留下自己的临时文件：io_fmt.zx 写 io_fmt.tmp，stdfs.zx 建
 # fs_t_dir / fs_t_dir2。跑完统一带走——测试不该往工作区里堆东西。
 rm -rf io_fmt.tmp fs_t_dir fs_t_dir2 2>/dev/null || true

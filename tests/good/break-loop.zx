@@ -1,0 +1,31 @@
+// §213：break = 最近外循环的收割糖（带值 / 空值 / 无标签循环 / for）
+const main = fn () i32 {
+    var i: i32 = 0;
+    var inner: i32 = 0;
+    let total = loop: while (true) {
+        i = i + 1;
+        while (true) {
+            inner = inner + 1;
+            if (inner % 2 == 0) { break; }
+        }
+        if (i == 3) { break i * 10; }
+    };
+    if (total != 30) { return 1; }
+    if (i != 3) { return 2; }
+    if (inner != 6) { return 3; }
+
+    var k: i32 = 0;
+    while (true) {
+        k = k + 1;
+        if (k == 4) { break; }
+    }
+    if (k != 4) { return 4; }
+
+    var sum: u64 = 0;
+    for (0..10) n {
+        sum = sum + n;
+        if (n == 3) { break; }
+    }
+    if (sum != 6) { return 5; }
+    return 0;
+};

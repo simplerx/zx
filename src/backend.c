@@ -1676,8 +1676,21 @@ static void ex_builtin(Buf *b, Node *n) {
         buf_puts(b, "0");
         return;
     }
-    if (!strcmp(nm, "trap") || !strcmp(nm, "panic")) {
-        buf_puts(b, "abort()");
+    if (!strcmp(nm, "panic")) {
+        /* §213：带 Zx 位置的运行时中止。msg 是编译期字面量，直接嵌 C 串；
+         * 走 zx_panic 而不是裸 abort：无缓冲打点 + 单条诊断，crash handler
+         * 不会再补一条 fatal。无消息时也带位置，绝不静默 abort。 */
+        Buf m; buf_init(&m);
+        if (n->nitems == 1) cstr(&m, n->items[0]->str, n->items[0]->str_len);
+        else buf_puts(&m, "\"\"");
+        const char *mp = g_cur_mod_path ? g_cur_mod_path : "?";
+        Buf f; buf_init(&f); cstr(&f, mp, (int)strlen(mp));
+        buf_printf(b, "zx_panic(%s, %s, %d, %d)", m.data, f.data, n->line, n->col);
+        buf_free(&m); buf_free(&f);
+        return;
+    }
+    if (!strcmp(nm, "trap")) {
+        buf_puts(b, "abort()");   /* 裸 trap：留给 crash handler 打点 */
         return;
     }
     if (!strcmp(nm, "link")) {
@@ -2372,6 +2385,7 @@ static void emit_diag_runtime(void) {
     bline(&g_bproto, "void zx_diagf(const char *fmt, ...);");
     bline(&g_bproto, "void zx_diag_flush(void);");
     bline(&g_bproto, "void zx_abort_reported(void);");
+    bline(&g_bproto, "void zx_panic(const char *msg, const char *file, int line, int col);");
     bline(&g_bproto, "void zx_loc(const char *file, int line, int col);");
     bline(&g_bproto, "void zx_crash_init(void);");
     buf_puts(g_out,
@@ -2412,6 +2426,12 @@ static void emit_diag_runtime(void) {
         "    zx_reported = 1;\n"
         "    fflush(stdout);   /* fatal: 冲掉退出清理带不走的 stdout 缓冲 */\n"
         "    abort();\n"
+        "}\n\n"
+        "/* @panic: one deterministic diagnostic at the zx source position. */\n"
+        "void zx_panic(const char *msg, const char *file, int line, int col) {\n"
+        "    if (msg && *msg) zx_diagf(\"panic: %s\\n  at %s:%d:%d\\n\", msg, file, line, col);\n"
+        "    else             zx_diagf(\"panic\\n  at %s:%d:%d\\n\", file, line, col);\n"
+        "    zx_abort_reported();\n"
         "}\n\n");
     /* 崩溃处理器：POSIX sigaction 全信号；Windows SetUnhandledExceptionFilter。
      * 全部只用 zx_diag_raw（async-signal-safe 的 write）输出，不碰 malloc/stdio。 */
@@ -6740,7 +6760,9 @@ static void gen_stmt(Node *n) {
     }
 
     case NK_YIELD: {
-        CLab *l = lab_find(n->label);
+        /* §213：label=NULL 的收割是 `break`——绑到最近外循环的 CLab
+         * （lab_find_loop(NULL) 连无标签循环都有帧，见 gen_loop_value）。 */
+        CLab *l = n->label ? lab_find(n->label) : lab_find_loop(NULL);
         /* 没人接的收割不是合法程序：语义层本该拦住，走到这里说明标签作用域
          * 漏建了（M25 的 bug ② 就是这么发生的）。宁可报内部错误，也不要
          * 静默丢一条赋值——那会生成"能跑、答案错"的程序。 */

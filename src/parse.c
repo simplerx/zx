@@ -150,6 +150,7 @@ static bool brace_is_block(P *p, size_t i) {
         case TOK_KW_PUB:
         case TOK_KW_DEFER: case TOK_KW_RETURN: case TOK_KW_CONTINUE:
         case TOK_KW_IF: case TOK_KW_WHILE: case TOK_KW_FOR: case TOK_KW_SWITCH:
+        case TOK_KW_BREAK:
             if (depth == 1) return true;
             break;
         default: break;
@@ -1457,6 +1458,7 @@ static bool starts_stmt_kw(TokKind k) {
     case TOK_KW_IF: case TOK_KW_WHILE: case TOK_KW_FOR:
     case TOK_KW_SWITCH: case TOK_KW_RETURN: case TOK_KW_CONTINUE:
     case TOK_KW_DEFER: case TOK_KW_CONST: case TOK_KW_LET: case TOK_KW_VAR:
+    case TOK_KW_BREAK:
         return true;
     default: return false;
     }
@@ -1466,7 +1468,8 @@ static bool starts_stmt_kw(TokKind k) {
  *   if (c) return x;      if (o) v return v;      if (c) defer f();
  * 它们不像 if/while/for 那样会引出"第二个分支体 vs 兄弟语句"的歧义。 */
 static bool arm_stmt_only(TokKind k) {
-    return k == TOK_KW_RETURN || k == TOK_KW_CONTINUE || k == TOK_KW_DEFER;
+    return k == TOK_KW_RETURN || k == TOK_KW_CONTINUE || k == TOK_KW_DEFER ||
+           k == TOK_KW_BREAK;
 }
 
 /* 能开始一个表达式、且不是二元运算符的 token。
@@ -1855,6 +1858,20 @@ static Node *parse_yield(P *p) {
     return n;
 }
 
+/* §213：break 是"最近一层外循环的收割"的糖。
+ *   break v;  →  最近循环的空标签收割 v
+ *   break;    →  最近循环的空收割（值 {}）
+ * label 留 NULL；sema / backend 各自用 label_find_loop(NULL) /
+ * lab_find_loop(NULL) 绑到最近循环，无标签循环也能用。 */
+static Node *parse_break(P *p) {
+    Token *t = cur(p);
+    advance(p);
+    Node *n = node_new(NK_YIELD, t->line, t->col);
+    if (!at(p, TOK_SEMI)) n->a = parse_expr(p);
+    expect(p, TOK_SEMI);
+    return n;
+}
+
 /* extern "C" { … } 块内的一项。`extern` 语义由块本身带来，所以这里
  * 不吃 extern 关键字：fn → extern fn、var → extern var、
  * const Name = struct/union → extern struct/union。其余给出诊断。
@@ -1999,6 +2016,8 @@ static Node *parse_stmt(P *p) {
         expect(p, TOK_SEMI);
         return n;
     }
+
+    case TOK_KW_BREAK: return parse_break(p);
 
     case TOK_KW_CONTINUE: {
         advance(p);

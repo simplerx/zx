@@ -1,0 +1,4 @@
+// §213：@panic 是合法运行时内建，类型 noreturn；本用例只定义不调用
+const blow = fn () noreturn { @panic("boom"); };
+const bare = fn () noreturn { @panic(); };
+const main = fn () i32 { return 0; };
