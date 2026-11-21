@@ -31,7 +31,7 @@ const main = fn () u8 {
     let same = ((*i32)xs) == &xs[0];
 
     std.println("trunc={} widen={} f={} back={} ptr={} reread={} len={} same={}",
-                trunc, widen, (i32)f, back, q[0], reread_bits, sl.len, same);
+                trunc, widen, (i32)f, back, q[0], reread_bits, sl[0].len, same);
     _ = reread;
     return 0;
 };

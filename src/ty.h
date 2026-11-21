@@ -31,8 +31,9 @@ typedef enum {
     TY_COMPTIME_FLOAT,
     TY_NULL,               /* null 字面量：期望类型为 ?T 时定型，否则是 bool */
     TY_UNDEF,              /* undefined：只表示"要空间不要值"，能匹配任何类型 */
-    TY_PTR,                /* *T / *[N]T / *const T */
+    TY_PTR,                /* *T / *[N]T / *const T；*[N]T 的 elem 就是 TY_ARRAY */
     TY_SLICE,              /* []T / []const T  → {ptr, len} 16 字节 */
+    TY_ARRAY,              /* [N]T 数组值类型：占 N×size(T) 栈内存，内建 .ptr/.len（§201） */
     TY_TUPLE,              /* {T1, T2, …} 值类型，内联 */
     TY_STRUCT,
     TY_UNION,
@@ -77,7 +78,8 @@ struct Type {
     bool        is_signed;  /* TY_INT：有符号 */
 
     bool        is_const;   /* TY_PTR / TY_SLICE：只读视图 */
-    bool        has_len;    /* TY_PTR：数量写在类型里（*[N]T） */
+    bool        has_len;    /* TY_PTR：历史遗留形状（字符串字面量 *[N]const u8）。
+                             * §201 后普通 *[N]T 一律 false，长度看 elem=TY_ARRAY。 */
     bool        is_fldptr;  /* TY_PTR：字段值指针（§118 @type(左值) 描述符的
                              * fields[i].ptr）。发码/判左值跟普通指针两样，
                              * 但 ty_eq 不看它——存进 *T 变量、传参都合法。 */
@@ -135,6 +137,8 @@ Type *ty_undef(void);
 Type *ty_int(int bits, bool is_signed);
 Type *ty_float(int bits);
 Type *ty_ptr(Type *elem, bool is_const, bool has_len, uint64_t len);
+Type *ty_array(Type *elem, uint64_t len);   /* §201：[N]T 数组值类型 */
+bool  ty_is_array_ptr(Type *t);             /* §201：普通 TY_PTR，elem 就是 [N]T */
 Type *ty_slice(Type *elem, bool is_const);
 Type *ty_vec(Type *elem, uint64_t n);
 Type *ty_tuple(Type **items, int n);

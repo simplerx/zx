@@ -6,12 +6,12 @@ const LONG = "012345678901234567890123456789012345678901234567890123456789012345
 
 const Node = struct { value: i32, next: ?*Node };
 
-var pool: *[128]u8 = undefined;
+var pool: [128]u8 = undefined;
 var used: usize = 0;
 
 const bump = fn (_: ?*u8, n: usize) ?*u8 {
     if (used + n > pool.len) { return null; }
-    let p = pool[0..].ptr + used;
+    let p = pool.ptr + used;
     used = used + n;
     return p;
 };

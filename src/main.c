@@ -168,7 +168,10 @@ typedef struct {
     int  rc;
 } CCJob;
 
-static CCJob g_jobs[65];   /* 64 单元 + zxrt（§192：C shim 通道已删除） */
+/* §203：单元数不再硬编码。按 sema_module_count() 动态分配，
+ * 容量 = 模块单元数 + 1（zxrt）。旧定长 [65] 在第 65 个模块时静默截断。 */
+static CCJob *g_jobs;
+static int    g_jobs_cap;
 
 /* ---------------- 后端诊断的翻译 ----------------
  *
@@ -627,8 +630,18 @@ static int build_program(Node *root, const char *out, const char *cachedir, OutK
     Buf header, rt;
     buf_init(&header);
     buf_init(&rt);
-    BUnit units[64];
-    int n = backend_emit_split(root, &header, &rt, units, 64);
+    int nmods = sema_module_count();
+    if (nmods <= 0) nmods = 1;
+    BUnit *units = calloc((size_t)nmods, sizeof(BUnit));
+    int n = backend_emit_split(root, &header, &rt, units, nmods);
+    if (n < 0) { free(units); return 1; }
+
+    /* 编译作业数 = n 个模块单元 + 1 个 zxrt；按需扩容。 */
+    int need_jobs = n + 1;
+    if (need_jobs > g_jobs_cap) {
+        g_jobs_cap = need_jobs;
+        g_jobs = realloc(g_jobs, sizeof(CCJob) * (size_t)g_jobs_cap);
+    }
 
     char hpath[2048];
     snprintf(hpath, sizeof hpath, "%s.h", stem);
@@ -693,7 +706,7 @@ static int build_program(Node *root, const char *out, const char *cachedir, OutK
 
         if (stale(opath, cpath, hpath)) {
             if (getenv("ZX_VERBOSE")) fprintf(stderr, "  cc %s\n", cpath);
-            if (njobs >= (int)(sizeof g_jobs / sizeof g_jobs[0])) {
+            if (njobs >= g_jobs_cap) {
                 fprintf(stderr, "zxc: too many units\n");
                 return 1;
             }

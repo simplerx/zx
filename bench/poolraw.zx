@@ -18,9 +18,9 @@ const main = fn () u8 {
     var i: usize = 0;
     while (i < 10000000) {
         if (i >= RING) {
-            let old = ring[r];
+            let old = ring[0][r];
             if (old) ob {
-                g.free(g.ctx, ob, sizes[r]);
+                g.free(g.ctx, ob, sizes[0][r]);
             } else { return 1; }
         }
         var size: usize = 16;
@@ -31,8 +31,8 @@ const main = fn () u8 {
             bv.0 = 7;
             sink = sink + (u64)(i64)bv.0;
         } else { return 1; }
-        ring[r] = b;
-        sizes[r] = size;
+        ring[0][r] = b;
+        sizes[0][r] = size;
         r = (r + 1) & (RING - 1);
         i = i + 1;
     }

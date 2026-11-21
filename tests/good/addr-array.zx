@@ -1,20 +1,24 @@
-// `*[N]T` 只是"带长度的指针"（8 字节），不是数组：Zx 没有数组变量,数组变量可以用元组模拟。
-// `&xs` 取的是**指针变量的地址**（得 `**T`），不存在"数组的地址"——
-// 这正是删掉数组变量、与 C 的数组/指针歧义划清界限的设计意图。
+// §201：`[N]T` 是真正的数组值，`*[N]T` 只是指向数组的普通指针。
+// `p[0]` 取出的整个数组（不是元素），元素要写 `p[0][i]`；`&xs` 取的是
+// 指针变量自己的地址（`**[...]T`），不是"数组的地址"。
 const std = @mod("std");
 
 const main = fn () u8 {
     var xs: *[4]i32 = &.{ 1, 2, 3, 4 };
     var p = &xs;
-    p[0][2] = 9;
+    p[0][0][2] = 9;             // p -> *xs -> 数组 -> 元素
     if (@type(*[4]i32).size != 8) { return 1; }
-    if (xs[2] != 9) { return 2; }
+    if (xs[0][2] != 9) { return 2; }
 
-    // stackAlloc 拿到的也是指针，同样能取地址
+    // stackAlloc 拿到的也是 *[N]T 指针
     var ys = std.stackAlloc(i32, 3);
     var q = &ys;
-    q[0][1] = 5;
-    if (ys[1] != 5) { return 3; }
-    std.println("ok {} {}", xs.len, ys.len);
+    q[0][0][1] = 5;
+    if (ys[0][1] != 5) { return 3; }
+    std.println("ok {} {}", xs[0].len, ys[0].len);
     return 0;
 };
+
+// expect-output
+// ok 4 3
+// expect-exit: 0

@@ -6,7 +6,7 @@ var need: bool = true;
 const main = fn () u8 {
     let p = ok: if (need) {
         var b = tag.buf : std.heapAlloc(std.heap.page, i32, 4);
-        b[0] = 5;
+        b[0][0] = 5;
         ok: b;
     } else {
         ok: null;
@@ -15,7 +15,7 @@ const main = fn () u8 {
         std.println("empty");
     } else {
         let q = p.?;
-        std.println("v={d}", q[0]);
+        std.println("v={d}", q[0][0]);
         defer std.heap.page.free(std.heap.page.ctx, (*u8)q, 16);
     }
     return 0;

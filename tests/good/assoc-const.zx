@@ -24,8 +24,8 @@ const main = fn () u8 {
     if (c.bump() != 8) { return 3; }
     // 常量当编译期数组长度用
     var xs: *[O.K]i32 = &.{ 0, 0, 0, 0, 0, 0, 0 };
-    xs[6] = 1;
-    if (xs.len != 7) { return 4; }
+    xs[0][6] = 1;
+    if (xs[0].len != 7) { return 4; }
     // 嵌套类型成员：构造 + 类型标注
     let f = O.Inner{ .z = 5 };
     var g: O.Inner = .{ .z = 6 };

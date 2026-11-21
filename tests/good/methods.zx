@@ -61,14 +61,14 @@ const List = fn (T: type, cap: usize) type {
 
         const push = fn (self: *Self, v: T) bool {
             if (self.len == cap) { return false; }
-            self.buf[self.len] = v;
+            self.buf[0][self.len] = v;
             self.len = self.len + 1;
             return true;
         };
 
         const get = fn (self: Self, i: usize) ?T {
             if (i >= self.len) { return null; }
-            return self.buf[i];
+            return self.buf[0][i];
         };
     };
 };

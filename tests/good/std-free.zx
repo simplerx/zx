@@ -4,7 +4,7 @@ const std = @mod("std");
 
 pub const main = fn () i32 {
     var p = std.heapAlloc(std.heap.page, i32, 10);
-    p[0] = 42;
+    p[0][0] = 42;
     std.free(std.heap.page, p);
 
     var s = std.heapSlice(std.heap.page, u8, 100);

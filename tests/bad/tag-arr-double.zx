@@ -8,8 +8,8 @@ pub const main = fn () i32 {
     var xs = std.stackAlloc(*u8, 4);
     let p = (*u8)std.heapAlloc(std.heap.page, u8, 10);
     let i = 0;
-    xs[i] = p;
-    tag _ : p = xs[i];
-    tag _ : p = xs[i];
+    xs[0][i] = p;
+    tag _ : p = xs[0][i];
+    tag _ : p = xs[0][i];
     return 0;
 };

@@ -8,11 +8,11 @@ const c1 = str[1];               // 'e'
 const hlen = head.len;           // 2
 
 const arr: *const [3]i32 = &.{10, 20, 30};
-const alen = arr.len;            // 3
-const asize = arr.size;          // 12
-const a0 = arr[0];                // 10
-const mid = arr[1..];            // []const i32，长度 2，指向 arr[1]
-const m0 = mid[0];                // 20
+const alen = arr[0].len;         // 3（*[N]T 是普通指针，先 [0] 取数组）
+const asize = arr[0].size;       // 12
+const a0 = arr[0][0];            // 10
+const mid = arr[0][1..];         // []const i32，长度 2，指向 arr[0][1]
+const m0 = mid[0];               // 20
 const mlen = mid.len;            // 2
 
 const tup = {1, "two", 3.0};

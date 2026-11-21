@@ -15,7 +15,7 @@ pub const Ring = struct (T: type, N: usize) {
     pub const cap = fn (self: *Self) usize { return N; };
     pub const push = fn (self: *Self, v: T) bool {
         if (self.count >= N) { return false; }
-        (self.data + self.count).0 = v;
+        self.data[0][self.count] = v;
         self.count = self.count + 1;
         return true;
     };

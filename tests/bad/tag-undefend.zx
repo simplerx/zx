@@ -8,13 +8,13 @@ var drop: bool = false;
 
 const main = fn () u8 {
     var p = tag.buf : std.heapAlloc(std.heap.page, i32, 4);
-    p[0] = 9;
+    p[0][0] = 9;
     let r = ok: if (drop) {
         std.heap.page.free(std.heap.page.ctx, (*u8)p, 16);
         ok: p;              // free 后传出非空载体：违反"free 臂传 null"约定
     } else {
         ok: p;
     };
-    std.println("v={d}", r[0]);   // 链式诊断：E0512
+    std.println("v={d}", r[0][0]);   // 链式诊断：E0512
     return 0;
 };

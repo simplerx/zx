@@ -5,7 +5,7 @@ const std = @mod("std");
 
 const make = fn () *i32 {
     var p = std.heapAlloc(std.heap.page, i32, 4);
-    p[0] = 1;
+    p[0][0] = 1;
     return p;
 };
 

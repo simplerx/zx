@@ -1,0 +1,21 @@
+// §204：std.simd 里对外的 extern f32 libm 函数公开（sqrtf/sinf/cosf/acosf），
+// 内部实现辅助函数保持私有。从模块外访问四个公开符号，确认没有 E0404。
+// 内部辅助（xyz/dot3/...）仍私有，负例见 tests/bad/simd-internal-private.zx。
+// expect-exit: 0
+// expect-output
+// ok 3 0 1 0
+const std = @mod("std");
+const simd = std.simd;
+
+pub const main = fn () u8 {
+    let r = simd.sqrtf(9.0);
+    let s = simd.sinf(0.0);
+    let c = simd.cosf(0.0);
+    let a = simd.acosf(1.0);
+    if (r != 3.0) { return 1; }
+    if (s != 0.0) { return 2; }
+    if (c != 1.0) { return 3; }
+    if (a != 0.0) { return 4; }
+    std.println("ok {} {} {} {}", r, s, c, a);
+    return 0;
+};

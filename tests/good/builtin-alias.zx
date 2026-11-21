@@ -15,8 +15,8 @@ const pr = std.println;
 
 const run = fn () u8 {
     var t1 = alloc(std.heap.page, u8, 4);
-    t1[0] = 7;
-    let v = t1[0];
+    t1[0][0] = 7;
+    let v = t1[0][0];
     std.free(std.heap.page, t1);
     return v;
 };

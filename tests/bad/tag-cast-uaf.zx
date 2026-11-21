@@ -9,6 +9,6 @@ pub const main = fn () i32 {
     let n = (u64)p;
     let r = (*u8)n;
     std.heap.page.free(std.heap.page.ctx, r, 10);
-    p[0] = 1;
+    p[0][0] = 1;
     return 0;
 };

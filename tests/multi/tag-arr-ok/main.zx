@@ -7,12 +7,12 @@ pub const main = fn () i32 {
     let i = 1;
     let p = (*u8)std.heapAlloc(std.heap.page, u8, 10);
     let q = (*u8)std.heapAlloc(std.heap.page, u8, 10);
-    xs[0] = p;
-    xs[i] = q;
-    let a = xs[0];
+    xs[0][0] = p;
+    xs[0][i] = q;
+    let a = xs[0][0];
     a[0] = 1;
     std.heap.page.free(std.heap.page.ctx, a, 10);
-    tag b : q = xs[i];
+    tag b : q = xs[0][i];
     std.heap.page.free(std.heap.page.ctx, b, 10);
     tag xs : null;
     return 0;

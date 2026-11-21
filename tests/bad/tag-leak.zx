@@ -4,6 +4,6 @@
 const std = @mod("std");
 const main = fn () u8 {
     var p = tag.buf : std.heapAlloc(std.heap.page, i32, 4);
-    p[0] = 1;
+    p[0][0] = 1;
     return 0;
 };

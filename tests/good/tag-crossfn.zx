@@ -5,7 +5,7 @@ const std = @mod("std");
 
 const make = fn () *[4]i32 {
     var p = std.heapAlloc(std.heap.page, i32, 4);   // 工厂体内自动建槽（*[4]i32 带长度）
-    p[0] = 20;
+    p[0][0] = 20;
     return p;                        // 返回流：tag 随返回值转移
 };
 
@@ -25,8 +25,8 @@ const main = fn () u8 {
     std.heap.page.deinit(s);         // deinit(slice)
 
     var st = std.stackAlloc(i32, 2); // 栈分配：自动建槽，作用域退出自动回收
-    st[0] = 3;
-    std.println("st={d}", st[0]);
+    st[0][0] = 3;
+    std.println("st={d}", st[0][0]);
     return 0;
 };
 

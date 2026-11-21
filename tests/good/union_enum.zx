@@ -57,7 +57,7 @@ const main = fn () u8 {
     let xs: *[3]Shape = &.{ c, r, l };
     var total: f64 = 0.0;
     for (0..3) i {
-        total = total + (xs + i).0.value();
+        total = total + xs[0][i].value();
     }
     std.println("total={}", total);
     return 0;

@@ -1046,6 +1046,41 @@ else
     printf "  FAIL 模块文件干扰了局部绑定\n"; cat "$TPFX.modbindshadow"; fail=1
 fi
 
+# 2.56b §203：模块数超过旧定长 64 时不得静默截断。
+#     过去 backend_emit_split 有 `if (nmods > maxunits) nmods = maxunits`，
+#     第 65 个模块被丢掉：sema 检查过、头文件也声明了原型，却不发 .c，
+#     链接报 undeclared。这里造 1 入口 + 64 模块，逐个调用，验证和 = 64。
+printf "\n== 超过 64 个模块不得挤掉最后一个（§203）\n"
+MP="$TPFX.many"
+if mkdir -p "$MP/src"; then
+    printf '{"name":"many","version":"0.1.0","main":"src/main.zx","out":"many"}\n' > "$MP/zx.json"
+    {
+        printf 'const std = @mod("std");\n'
+        i=1; while [ $i -le 64 ]; do
+            printf 'const m%02d = @mod("m%02d");\n' $i $i
+            i=$((i+1))
+        done
+        printf 'pub const main = fn () u8 {\n    var s: u64 = 0;\n'
+        i=1; while [ $i -le 64 ]; do
+            printf '    s = s + m%02d.f();\n' $i
+            i=$((i+1))
+        done
+        printf '    if (s != 64) { return 1; }\n    std.println("sum={}", s);\n    return 0;\n};\n'
+    } > "$MP/src/main.zx"
+    i=1; while [ $i -le 64 ]; do
+        printf 'pub const f = fn () u64 { return 1; };\n' > "$MP/src/m$(printf '%02d' $i).zx"
+        i=$((i+1))
+    done
+    ( cd "$MP" && "$ZXCW" run > "$TPFX.manyrun" 2>&1 )
+    if grep -q "^sum=64$" "$TPFX.manyrun"; then
+        printf "  ok   65 个模块全部发射，和 = 64\n"
+    else
+        printf "  FAIL 第 65 个模块被挤掉\n"; tail -15 "$TPFX.manyrun"; fail=1
+    fi
+else
+    printf "  FAIL 无法创建 65 模块测试目录\n"; fail=1
+fi
+
 # 2.57 实参个数不匹配只报 E0303，不得假报形参 unknown identifier。
 #     用户 2026-11-08 截图踩中：ct_call 克隆执行函数体时只绑
 #     min(形参,实参) 个形参，push() 零参调用把 push 体里的 a、b 全部
@@ -1557,8 +1592,11 @@ fi
 # 曾经 is_view_expr 把它当视图 → `static uint8_t *P = {0}` + 运行期赋值；
 # val_init 曾把它物化成 `{ptr, len}` 切片形状（与裸指针元素类型不符）。
 $ZXC tests/good/string-ptr-const.zx --emit-c > "$TPFX.s197.c" 2>/dev/null
+# §201 后全局 [N]T 也走 `struct { T v[N]; }`，不再是裸 C 数组；A 是指向
+# 静态 backing 的指针，backing 里装两个字符串首字节指针。
 if grep -qF 'static uint8_t * P = ((uint8_t*)"hello");' "$TPFX.s197.c" \
-   && grep -qF 'static uint8_t * A[2] = { ((uint8_t*)"aa"), ((uint8_t*)"bb") };' "$TPFX.s197.c" \
+   && grep -qF '((uint8_t*)"aa"), ((uint8_t*)"bb")' "$TPFX.s197.c" \
+   && grep -qF 'static ZxArr_apu8_2 * A = &' "$TPFX.s197.c" \
    && ! grep -qE '^[[:space:]]+P = ' "$TPFX.s197.c"; then
     printf "  ok   §197 字符串 .ptr 静态初始化（非 g_late 运行期赋值）\n"
 else
@@ -1600,12 +1638,12 @@ fi
 # AST dump（含位置）必须逐字节一致——曾经 17 处差异不在任何测试里
 # （2026-11-20 评测揪出：类型点路径列号错位、@Vec dump 形状、enum 体
 # pub 方法丢 pub 标记）。astdump.exe 不入 git 白名单：先编一份再对拍。
-if [ ! -x bin/astdump.exe ]; then
-    if $ZXC bootstrap/astdump.zx -o bin/astdump.exe > "$TPFX.astdump.log" 2>&1; then
-        printf "  ok   构建 astdump（对拍工具）\n"
-    else
-        printf "  FAIL astdump 构建失败\n"; cat "$TPFX.astdump.log"; fail=1
-    fi
+# 必须每次重建：astdump 自己内嵌一份 zx 前端，zxc 升级后旧 exe 解析不了
+# `[N]T` 这类新语法，对拍会刷出几十处假差异（2026-11-21 §201 迁移踩到）。
+if $ZXC bootstrap/astdump.zx -o bin/astdump.exe > "$TPFX.astdump.log" 2>&1; then
+    printf "  ok   构建 astdump（对拍工具）\n"
+else
+    printf "  FAIL astdump 构建失败\n"; cat "$TPFX.astdump.log"; fail=1
 fi
 printf "\n== 自举对拍（C 前端 vs Zx 前端，AST 含位置逐字节一致）\n"
 ndiff=$(sh bootstrap/diff_ast.sh 2>/dev/null | grep -c "^DIFF\|^REJECT-ONLY-ONE" || true)

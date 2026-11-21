@@ -3,7 +3,7 @@
 // expect-count: 2
 // §185：运行期索引混存多个贴标指针——两个槽都进该数组的标签群，
 // 没注解读取取出、没整容器终结则终扫逐槽报 E0513。注解读取
-// （tag v : tag.x = xs[i];）逐个取出、free(xs)/tag xs : null 批量
+// （tag v : tag.x = xs[0][i];）逐个取出、free(xs)/tag xs : null 批量
 // 终结的写法见 good/tag-rebind-chain 与 tag-arr 用例。
 const std = @mod("std");
 pub const main = fn () i32 {
@@ -12,7 +12,7 @@ pub const main = fn () i32 {
     let q = (*u8)std.heapAlloc(std.heap.page, u8, 10);
     let i = 0;
     let j = 1;
-    xs[i] = p;
-    xs[j] = q;
+    xs[0][i] = p;
+    xs[0][j] = q;
     return 0;
 };

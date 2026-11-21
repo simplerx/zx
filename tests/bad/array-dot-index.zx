@@ -1,8 +1,9 @@
-// expect: E0211
-// §193：数组/切片下标只认 [i]——`.N` 点下标删除（与元组/向量分量混淆）。
+// expect: E0300
+// §201：数组指针 `*[N]T` 的 `.0` 是解引用取整个数组；`.1` 等
+// 数字分量非法（元素要用 `p[0][i]`）。
 const std = @mod("std");
 const main = fn () void {
     let a: *[2]i32 = undefined;
-    let x = a.0;
+    let x = a.1;
     _ = x;
 };

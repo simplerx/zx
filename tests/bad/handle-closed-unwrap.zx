@@ -29,7 +29,7 @@ const Table = fn (cap: usize) type {
         };
 
         const getUnchecked = fn (self: *Self, h: Handle) ?*u8 {
-            return (*u8)&self.ptr[h.pos];
+            return (*u8)&self.ptr[0][h.pos];
         };
 
         pub const deinit = fn (self: *Self) usize {

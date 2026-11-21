@@ -27,7 +27,7 @@ const main = fn () u8 {
     // ① 生成测试文件：确定性内容
     var buf = std.stackAlloc(u8, NBYTES);
     var i: usize = 0;
-    while (i < (usize)NBYTES) { (buf + i).0 = (u8)((i * 31 + 7) % 251); i = i + 1; }
+    while (i < (usize)NBYTES) { buf[0][i] = (u8)((i * 31 + 7) % 251); i = i + 1; }
     if (!std.fs.writeAll(PATH, buf[0..NBYTES])) { return 1; }
 
     // ② 整块 roundtrip
@@ -36,7 +36,7 @@ const main = fn () u8 {
         if (s.len != (usize)NBYTES) { return 2; }
         var j: usize = 0;
         while (j < (usize)NBYTES) {
-            if (s[j] != (buf + j).0) { return 3; }
+            if (s[j] != buf[0][j]) { return 3; }
             j = j + 1;
         }
     } else { return 2; }
@@ -55,15 +55,15 @@ const main = fn () u8 {
         var k: usize = 0;
         while (k < 4) {
             let h = pl.spawn(work, 8);
-            if (h) hh { (hs + k).0 = hh; } else { return 4; }
+            if (h) hh { hs[0][k] = hh; } else { return 4; }
             k = k + 1;
         }
         let t2 = std.time.counter();
         var sums: *[4]usize = &.{ 0, 0, 0, 0 };
         var m: usize = 0;
         while (m < 4) {
-            let rv = pl.await((hs + m).0);
-            if (rv) v { (sums + m).0 = v; } else { return 5; }
+            let rv = pl.await(hs[0][m]);
+            if (rv) v { sums[0][m] = v; } else { return 5; }
             m = m + 1;
         }
         let t3 = std.time.counter();
@@ -72,7 +72,7 @@ const main = fn () u8 {
         // ⑤ 校验和全部一致
         var q: usize = 0;
         while (q < 4) {
-            if ((sums + q).0 != refv) { return 6; }
+            if (sums[0][q] != refv) { return 6; }
             q = q + 1;
         }
 

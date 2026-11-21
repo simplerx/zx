@@ -8,7 +8,7 @@ const release = fn (a: Allocator, p: *i32, bytes: usize) void {
 
 const main = fn () u8 {
     var p = tag.buf : std.heapAlloc(std.heap.page, i32, 4);
-    p[0] = 3;
+    p[0][0] = 3;
     release(std.heap.page, p, 16);
     std.println("released");
     return 0;

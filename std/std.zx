@@ -18,7 +18,7 @@ pub const str = @mod("str.zx");
 pub const map = @mod("map.zx");
 
 // 数组（array.zx）。两个类型：可增长列表 std.array.List(T)（原 ArrayList
-// 迁来），定长数组 std.array.Array(T, N)——内部 data 是 [T; N] 内联元组，
+// 迁来），定长数组 std.array.Array(T, N)——内部 data 是 [N]T 数组值，
 // 真正占 N*sizeof(T) 内存，可作为其他类型的成员；下标经 (*[N]T) 视图。
 // 不设 std.ArrayList / std.Array 别名——别名和真身分不清，类型只走真实路径。
 pub const array = @mod("array.zx");

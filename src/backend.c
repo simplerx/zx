@@ -210,8 +210,11 @@ static void tsuffix(Buf *b, Type *t) {
     case TY_FLOAT: buf_printf(b, "f%d", t->bits); break;
     case TY_PTR:
         buf_puts(b, "p");
-        tsuffix(b, t->elem);
-        if (t->has_len) buf_printf(b, "_%llu", (unsigned long long)t->len);
+        tsuffix(b, t->elem);       /* elem 已是 [N]T，后缀自带长度 */
+        break;
+    case TY_ARRAY:
+        buf_puts(b, "a"); tsuffix(b, t->elem);
+        buf_printf(b, "_%llu", (unsigned long long)t->len);
         break;
     case TY_SLICE: buf_puts(b, "s"); tsuffix(b, t->elem); break;
     case TY_OPT:   buf_puts(b, "o"); tsuffix(b, t->elem); break;
@@ -247,6 +250,7 @@ static void tn(Buf *b, Type *t) {
     case TY_SLICE: buf_puts(b, "ZxSlice_"); tsuffix(b, t->elem); break;
     case TY_OPT:   buf_puts(b, "ZxOpt_");   tsuffix(b, t->elem); break;
     case TY_ERR:   buf_puts(b, "ZxErr_");   tsuffix(b, t->elem); break;
+    case TY_ARRAY: buf_puts(b, "ZxArr_");   tsuffix(b, t);       break;  /* §201 */
     case TY_TUPLE: buf_puts(b, "ZxTup_");   tsuffix(b, t);       break;
     case TY_FN:    buf_puts(b, "ZxFn_");    tsuffix(b, t);       break;
     case TY_VEC:   buf_puts(b, "ZxVec_");   tsuffix(b, t);       break;
@@ -291,6 +295,7 @@ static void ensure_type(Type *t) {
     switch (t->kind) {
     case TY_SLICE: case TY_OPT: case TY_ERR: case TY_TUPLE:
     case TY_FN: case TY_STRUCT: case TY_UNION: case TY_ENUM: case TY_VEC:
+    case TY_ARRAY:                  /* §201 */
         break;
     default: return;
     }
@@ -373,6 +378,13 @@ static void ensure_type(Type *t) {
         buf_printf(g_out, "uint16_t tag; } %s;\n", n.data);
         break;
     }
+    case TY_ARRAY: {                /* §201：[N]T → struct { T v[N]; } */
+        ensure_type(t->elem);
+        buf_printf(g_out, "typedef struct { ");
+        ctype(g_out, t->elem);
+        buf_printf(g_out, " v[%llu]; } %s;\n", (unsigned long long)t->len, n.data);
+        break;
+    }
     case TY_TUPLE: {
         for (int k = 0; k < t->nfields; k++) ensure_type(t->fields[k].ty);
         buf_printf(g_out, "typedef struct { ");
@@ -447,17 +459,8 @@ static void ensure_type(Type *t) {
                 Field *f = &t->fields[k];
                 if (f->is_static) continue;
                 buf_puts(g_out, "    ");
-                /* extern 聚合体（FFI）里的定长数组字段必须内联展开成 C
-                 * 数组（`char name[64]`），按指针发布局就错了。普通 Zx
-                 * 结构体的 *[N]T 语义就是指针，照旧。 */
-                if (t->decl && t->decl->is_extern &&
-                    f->ty && f->ty->kind == TY_PTR && f->ty->has_len) {
-                    ctype(g_out, f->ty->elem);
-                    buf_putc(g_out, ' ');
-                    mname(g_out, f->name);
-                    buf_printf(g_out, "[%llu];\n", (unsigned long long)f->ty->len);
-                    continue;
-                }
+                /* §201：`[N]T` 的 C 表示是 ZxArr_… 结构体（里面就一个
+                 * `T v[N]`），布局与 C 原生数组成员一致，发码也统一走 .v。 */
                 ctype(g_out, f->ty);
                 buf_putc(g_out, ' ');
                 mname(g_out, f->name);
@@ -543,14 +546,6 @@ static void ensure_type(Type *t) {
                 Field *f = &t->fields[k];
                 if (f->is_static) continue;
                 buf_puts(g_out, "    ");
-                if (t->decl && t->decl->is_extern &&
-                    f->ty && f->ty->kind == TY_PTR && f->ty->has_len) {
-                    ctype(g_out, f->ty->elem);
-                    buf_putc(g_out, ' ');
-                    mname(g_out, f->name);
-                    buf_printf(g_out, "[%llu];\n", (unsigned long long)f->ty->len);
-                    continue;
-                }
                 ctype(g_out, f->ty);
                 buf_putc(g_out, ' ');
                 mname(g_out, f->name);
@@ -626,10 +621,10 @@ static void ctype(Buf *b, Type *t) {
     case TY_NULL:  buf_puts(b, "bool"); break;
     case TY_UNDEF: buf_puts(b, "char"); break;
     case TY_PTR:
-        ctype(b, t->elem);
+        ctype(b, t->elem);          /* elem 是 [N]T 的 typedef → "ZxA.. *" */
         buf_puts(b, " *");
         break;
-    case TY_SLICE: case TY_OPT: case TY_ERR: case TY_TUPLE:
+    case TY_SLICE: case TY_OPT: case TY_ERR: case TY_TUPLE: case TY_ARRAY:
     case TY_FN: case TY_STRUCT: case TY_UNION: case TY_ENUM: case TY_VEC: {
         if (t->kind == TY_OPT && ty_opt_flat(t)) {   /* ?*T：C 表示就是 T* */
             ctype(b, t->elem);
@@ -1176,7 +1171,11 @@ static void bounds_loc(Buf *b, Node *n) {
 /* `base[i]` 里的 i：能拿到长度就包一层 zx_bound */
 static void emit_index_checked(Buf *b, Node *n, Type *bt) {
     bool is_slice = bt && bt->kind == TY_SLICE;
-    bool is_arr   = (bt && bt->kind == TY_PTR && bt->has_len) ||
+    /* §201：`*[N]T` 的下标选的是第 i 个**数组**，类型里没有数组个数，
+     * 不能拿内层 N 去卡界。数组值 [N]T 与字符串字面量的 N 才是真长度。 */
+    bool is_arr   = (bt && bt->kind == TY_ARRAY) ||
+                    (bt && bt->kind == TY_PTR && bt->has_len &&
+                     !ty_is_array_ptr(bt)) ||          /* 字符串字面量 */
                     (bt && bt->kind == TY_VEC);   /* §162：分量数在类型里 */
     if ((!is_slice && !is_arr) || !simple_index_base(n->a)) {
         ex(b, n->b);
@@ -1241,7 +1240,7 @@ static bool rvalue_base(Node *n) {
         /* `ptr()[i]` / `slice[i]` 的基址虽然是 call，但索引结果落在指针
          * 指向的存储里，是合法左值——不能当 rvalue 物化（否则赋值写到
          * 临时拷贝，静默丢值，array-module 的 set() 踩到）。只有基址本身
-         * 是数组值（TY_PTR has_len / TY_TUPLE 且非指针结果）才可能因基址
+         * 是数组值（TY_ARRAY / TY_TUPLE 且非指针结果）才可能因基址
          * 是 rvalue 而整体是 rvalue；这里保守返回 false。 */
         Type *bt = n->a ? n->a->ty : NULL;
         if (bt && (bt->kind == TY_PTR || bt->kind == TY_SLICE)) return false;
@@ -1314,7 +1313,7 @@ static void lvalue(Buf *b, Node *n) {
                 buf_printf(b, "[%llu]", (unsigned long long)n->ival);
                 return;
             }
-            if (bt && bt->kind == TY_PTR && bt->has_len) {
+            if (ty_is_array_ptr(bt)) {
                 ex(b, n->a);
                 buf_printf(b, "[%llu]", (unsigned long long)n->ival);
                 return;
@@ -1325,11 +1324,6 @@ static void lvalue(Buf *b, Node *n) {
             return;
         }
         if (bt && bt->kind == TY_PTR) {
-            if (bt->has_len) {             /* 数组指针：元素是结构体时 .name 穿一层 */
-                ex(b, n->a);
-                buf_printf(b, "->%s", n->name);
-                return;
-            }
             if (bt->elem && (bt->elem->kind == TY_STRUCT || bt->elem->kind == TY_UNION)) {
                 Type *e = bt->elem;
                 ex(b, n->a);
@@ -1363,8 +1357,19 @@ static void lvalue(Buf *b, Node *n) {
     }
     case NK_INDEX: {
         Type *bt = n->a->ty;
-        ex(b, n->a);
-        if (bt && bt->kind == TY_SLICE) buf_puts(b, ".ptr");
+        /* §201：数组值 [N]T 在 C 里是 struct { T v[N]; }，下标取 v 字段。 */
+        if (bt && bt->kind == TY_ARRAY) {
+            buf_puts(b, "(");
+            ex(b, n->a);
+            buf_puts(b, ").v");
+        } else {
+            /* 括号包住基址：`.ptr` / `&x.v[0]` / `p+1` 这类表达式直接接
+             * `[i]` 会被 C 的优先级拆开（`&(t).v[0][0]` 错，应 `(&(t).v[0])[0]`）。 */
+            buf_puts(b, "(");
+            ex(b, n->a);
+            buf_puts(b, ")");
+            if (bt && bt->kind == TY_SLICE) buf_puts(b, ".ptr");
+        }
         buf_putc(b, '[');
         emit_index_checked(b, n, bt);
         buf_putc(b, ']');
@@ -1419,7 +1424,28 @@ static void coerce(Buf *b, Node *e, Type *to) {
 
     if (ty_eq(from, to)) { ex(b, e); return; }
 
-    /* 数组 → 切片（R7） */
+    /* §201：数组值 [N]T → 切片 / 裸指针：C 表示是 struct{ T v[N]; }，
+     * 首元素地址取 &e.v。 */
+    if (from->kind == TY_ARRAY && (to->kind == TY_SLICE || to->kind == TY_PTR)) {
+        if (to->kind == TY_SLICE) {
+            ensure_type(to);
+            Buf n; buf_init(&n); tn(&n, to);
+            buf_printf(b, "((%s){ ((", n.data);
+            ctype(b, to->elem);
+            buf_puts(b, "*)&(");
+            ex(b, e);
+            buf_printf(b, ").v[0]), %llu })", (unsigned long long)from->len);
+        } else {
+            buf_puts(b, "&(");
+            ex(b, e);
+            buf_puts(b, ").v[0]");
+        }
+        return;
+    }
+    /* 字符串字面量 → 切片（历史特例，C 基址本身就是首字节指针）。
+     * §201：不能只看 e->kind == NK_STR——`let p = "abc";` 之后实参是
+     * NK_IDENT，类型仍是 has_len 的历史形状，必须照包 {ptr,len}，否则
+     * 实参位置发出裸 uint8_t* 传给 ZxSlice_u8 形参触发 B1001。 */
     if (from->kind == TY_PTR && from->has_len && to->kind == TY_SLICE) {
         ensure_type(to);
         Buf n; buf_init(&n); tn(&n, to);
@@ -1430,30 +1456,48 @@ static void coerce(Buf *b, Node *e, Type *to) {
         buf_printf(b, "), %llu })", (unsigned long long)from->len);
         return;
     }
-    /* 数组 → 裸指针（R7）。has_len 只是类型里的编译期长度，C 表示仍是
-     * `Elem*`；目标元素类型不同时必须真发一次 C cast，否则 clang 报
-     * incompatible pointer types（§132 回收 SoA 列时踩到）。 */
-    if (from->kind == TY_PTR && from->has_len && to->kind == TY_PTR && !to->has_len) {
-        if (!ty_eq(from->elem, to->elem)) {
-            buf_puts(b, "((");
-            ctype(b, to);
-            buf_puts(b, ")(");
-            ex(b, e);
-            buf_puts(b, "))");
-            return;
-        }
-        buf_puts(b, "(");
+    /* 数组指针 *[N]T → 切片（R7）：首元素地址 = &e->v */
+    if (ty_is_array_ptr(from) && to->kind == TY_SLICE) {
+        ensure_type(to);
+        Buf n; buf_init(&n); tn(&n, to);
+        buf_printf(b, "((%s){ ((", n.data);
+        ctype(b, to->elem);
+        buf_puts(b, "*)&(");
         ex(b, e);
-        buf_puts(b, ")");
+        buf_puts(b, ")->v), ");
+        /* §201：普通 *[N]T 的 len 字段已停用（has_len=false），数组长度
+         * 写在 elem=[N]T 里。旧代码取 from->len 得到 0，切片全是空串。 */
+        buf_printf(b, "%llu })", (unsigned long long)from->elem->len);
         return;
     }
-    /* 裸指针 → 数组：显式断言 */
-    if (from->kind == TY_PTR && !from->has_len && to->kind == TY_PTR && to->has_len) {
-        buf_puts(b, "(");
+    /* 字符串字面量 → 裸指针：直接强转基址（同上，按类型形状识别，
+     * 不能只认 NK_STR——绑定后的标识符也是同一历史形状）。 */
+    if (from->kind == TY_PTR && from->has_len && to->kind == TY_PTR &&
+        !to->has_len) {
+        buf_puts(b, "((");
         ctype(b, to);
         buf_puts(b, ")(");
         ex(b, e);
-        buf_puts(b, ")");
+        buf_puts(b, "))");
+        return;
+    }
+    /* 数组指针 → 裸指针：取 &e->v */
+    if (ty_is_array_ptr(from) && to->kind == TY_PTR && !ty_is_array_ptr(to)) {
+        buf_puts(b, "((");
+        ctype(b, to);
+        buf_puts(b, ")&(");
+        ex(b, e);
+        buf_puts(b, ")->v)");
+        return;
+    }
+    /* 裸指针 → 数组指针：显式断言（C 里都是结构指针，强转即可） */
+    if (from->kind == TY_PTR && !ty_is_array_ptr(from) &&
+        to->kind == TY_PTR && ty_is_array_ptr(to)) {
+        buf_puts(b, "((");
+        ctype(b, to);
+        buf_puts(b, ")(");
+        ex(b, e);
+        buf_puts(b, "))");
         return;
     }
     /* 指针 / 切片之间换 const 或换元素类型（显式转换已由 sema 把关） */
@@ -1697,8 +1741,9 @@ static void fmt_spec(Buf *spec, Buf *args, Node *a, int verb, bool *need_bin, co
     if (verb == 's' || t->kind == TY_SLICE) {
         /* 字符串字面量是 *[N]const u8：长度在类型里，指针就是数据起点，
          * 不能去读切片的 .len/.ptr。 */
-        bool str_arr = t->kind == TY_PTR && t->has_len && t->elem &&
-                       t->elem->kind == TY_INT && t->elem->bits == 8;
+        Type *se = (t && t->elem && t->elem->kind == TY_ARRAY) ? t->elem->elem : t ? t->elem : NULL;
+        bool str_arr = t && t->kind == TY_PTR && t->has_len && se &&
+                       se->kind == TY_INT && se->bits == 8;
         if (str_arr) {
             if (pad) {
                 g_need_pad = true;
@@ -1975,8 +2020,9 @@ static bool any_has_desc(Type *t) {
 /* 字符串字面量 / *[N]u8：定长字节数组指针（用户 2026-11-09：字符串 =
  * zx 的数组 *[N]const u8）。打印/格式化要按字节序列处理，不能当指针。 */
 static bool str_ptr_ty(Type *t) {
-    return t && t->kind == TY_PTR && t->has_len && t->elem &&
-           t->elem->kind == TY_INT && t->elem->bits == 8 && !t->elem->is_signed;
+    if (!t || t->kind != TY_PTR || !t->has_len || !t->elem) return false;
+    Type *e = (t->elem->kind == TY_ARRAY) ? t->elem->elem : t->elem;
+    return e && e->kind == TY_INT && e->bits == 8 && !e->is_signed;
 }
 
 /* []u8 / []const u8：默认 {} 当字符串打（规格 §11.1） */
@@ -4557,12 +4603,16 @@ static void emit_any_runtime(void) {
  * 非可选的数组指针，没有失败路径可表达。 */
 static void ex_stackalloc(Buf *b, Node *n) {
     Type *et = (n->ty && n->ty->kind == TY_PTR) ? n->ty->elem : ty_u8();
+    /* §201：堆/栈分配返回 *[N]T，et 是 [N]T；第二参 N 是**元素**个数，
+     * 字节数要按元素类型算。拿 sizeof([N]T) 再乘 N 会变成 N² 字节。 */
+    Type *ut = (et && et->kind == TY_ARRAY) ? et->elem : et;
     Buf t; buf_init(&t); ctype(&t, et);
+    Buf u; buf_init(&u); ctype(&u, ut);
     buf_puts(b, "((");
     buf_puts(b, t.data);
     buf_puts(b, " *)(__builtin_alloca((size_t)(");
     coerce(b, n->items[1], ty_usize());
-    buf_printf(b, ") * sizeof(%s))))", t.data);
+    buf_printf(b, ") * sizeof(%s))))", u.data);
 }
 
 static bool g_need_heapalloc;   /* 用过 std.heapAlloc → 带上 zx_heapalloc */
@@ -4577,14 +4627,17 @@ static void ex_heapalloc(Buf *b, Node *n) {
                    t.data, n->reg_gid, (unsigned long long)n->reg_off);
         return;
     }
+    /* §201：同 ex_stackalloc——第二参是元素个数，字节数按元素类型算。 */
+    Type *ut = (et && et->kind == TY_ARRAY) ? et->elem : et;
     Buf t; buf_init(&t); ctype(&t, et);
+    Buf u; buf_init(&u); ctype(&u, ut);
     buf_puts(b, "((");
     buf_puts(b, t.data);
     buf_puts(b, " *)(zx_heapalloc(");
     ex(b, n->items[0]);          /* 分配器 */
     buf_puts(b, ", (uint64_t)(");
     coerce(b, n->items[2], ty_usize());
-    buf_printf(b, ") * sizeof(%s))))", t.data);
+    buf_printf(b, ") * sizeof(%s))))", u.data);
 }
 
 /* std.heapSlice(a, T, n) -> []T。n 只在函数实参里求值一次：
@@ -5401,19 +5454,24 @@ static void ex(Buf *b, Node *n) {
              * 命中就走普通字段访问（下面 TY_PTR 分支发 p->size）。与
              * check_field / ct_field 同口径：elem 有同名字段即字段优先。 */
             Type *probe = bt;
-            if (probe && probe->kind == TY_PTR && !probe->has_len) probe = probe->elem;
+            if (probe && probe->kind == TY_PTR && !probe->has_len &&
+                !ty_is_array_ptr(probe)) probe = probe->elem;
             bool shadowed = (probe->kind == TY_STRUCT || probe->kind == TY_UNION) &&
                             ty_field(probe, n->name) != NULL;
             bool is_len = !shadowed && !strcmp(n->name, "len");
             bool is_size = !shadowed && !strcmp(n->name, "size");
             if (is_size) {
-                if (bt->kind == TY_PTR && bt->has_len) {
-                    int es = ty_size(bt->elem);
-                    if (es >= 0) {
-                        buf_printf(b, "((size_t)%llu)",
-                                   (unsigned long long)es * bt->len);
-                        return;
-                    }
+                /* §201：数组值 [N]T 的大小已是 N×元素 */
+                if (bt->kind == TY_ARRAY) {
+                    int es = ty_size(bt);
+                    if (es >= 0) { buf_printf(b, "((size_t)%d)", es); return; }
+                }
+                /* §201：字符串字面量的 .size 按字节数折；普通 *[N]T 没有
+                 * .size 内建——它是普通指针，先 p[0] 取数组再问大小。 */
+                if (bt->kind == TY_PTR && bt->has_len && n->a &&
+                    n->a->kind == NK_STR) {
+                    buf_printf(b, "((size_t)%llu)", (unsigned long long)bt->len);
+                    return;
                 }
                 /* §154：[]T 的 .size 是运行期的 `len * sizeof(elem)`，不是
                  * 描述符自己的 16 字节。sema 的 ct_field 也是这么折的——
@@ -5431,7 +5489,14 @@ static void ex(Buf *b, Node *n) {
                 if (sz >= 0) { buf_printf(b, "((size_t)%d)", sz); return; }
             }
             if (is_len) {
-                if (bt->kind == TY_PTR && bt->has_len) {
+                /* §201：数组值 [N]T */
+                if (bt->kind == TY_ARRAY) {
+                    buf_printf(b, "((size_t)%llu)", (unsigned long long)bt->len);
+                    return;
+                }
+                /* 字符串字面量保留 .len；*[N]T 普通指针不再有这个内建。 */
+                if (bt->kind == TY_PTR && bt->has_len && n->a &&
+                    n->a->kind == NK_STR) {
                     buf_printf(b, "((size_t)%llu)", (unsigned long long)bt->len);
                     return;
                 }
@@ -5447,7 +5512,7 @@ static void ex(Buf *b, Node *n) {
             }
         }
         if (!n->name) {                    /* .N */
-            if (bt && bt->kind == TY_PTR && bt->has_len) {
+            if (ty_is_array_ptr(bt)) {
                 ex(b, n->a);
                 buf_printf(b, "[%llu]", (unsigned long long)n->ival);
                 return;
@@ -5478,10 +5543,11 @@ static void ex(Buf *b, Node *n) {
                 return;
             }
         }
-        /* 数组指针的 .ptr：地址就是首元素地址，直接发基址（字符串
-         * `"abc".ptr` 走这条）。长度用不着——.len 上面已经按常量发了。 */
+        /* §197：字符串字面量的 .ptr 是字面量语法糖，基址本身已经是首字节
+         * 指针（ex(NK_STR) 发 `((uint8_t*)"...")`）。§201：普通 *[N]T 没有
+         * .ptr 内建——p[0] / p.0 取出的整个数组才有 .ptr。 */
         if (bt && bt->kind == TY_PTR && bt->has_len && n->name &&
-            !strcmp(n->name, "ptr")) {
+            !strcmp(n->name, "ptr") && n->a && n->a->kind == NK_STR) {
             ex(b, n->a);
             return;
         }
@@ -5497,6 +5563,14 @@ static void ex(Buf *b, Node *n) {
                 buf_puts(b, !strcmp(n->name, "tag") ? " != 0" : "");
             else
                 buf_puts(b, !strcmp(n->name, "tag") ? ".tag" : ".payload");
+            return;
+        }
+        /* §201：数组值 [N]T 的 .ptr 取首元素地址。C 表示是 struct{ T v[N]; }，
+         * 必须取 &base.v[0]；&base.v 的类型是 T(*)[N]，不是 T*。 */
+        if (bt && bt->kind == TY_ARRAY && n->name && !strcmp(n->name, "ptr")) {
+            buf_puts(b, "&(");
+            ex(b, n->a);
+            buf_puts(b, ").v[0]");
             return;
         }
         if (bt && bt->kind == TY_PTR) {
@@ -5523,8 +5597,19 @@ static void ex(Buf *b, Node *n) {
 
     case NK_INDEX: {
         Type *bt = n->a->ty;
-        ex(b, n->a);
-        if (bt && bt->kind == TY_SLICE) buf_puts(b, ".ptr");
+        /* §201：数组值 [N]T → C struct { T v[N]; }，下标取 v 字段。 */
+        if (bt && bt->kind == TY_ARRAY) {
+            buf_puts(b, "(");
+            ex(b, n->a);
+            buf_puts(b, ").v");
+        } else {
+            /* 括号包住基址：`.ptr` / `&x.v[0]` / `p+1` 这类表达式直接接
+             * `[i]` 会被 C 的优先级拆开（`&(t).v[0][0]` 错，应 `(&(t).v[0])[0]`）。 */
+            buf_puts(b, "(");
+            ex(b, n->a);
+            buf_puts(b, ")");
+            if (bt && bt->kind == TY_SLICE) buf_puts(b, ".ptr");
+        }
         buf_putc(b, '[');
         emit_index_checked(b, n, bt);
         buf_putc(b, ']');
@@ -5536,17 +5621,22 @@ static void ex(Buf *b, Node *n) {
         Type *rt = n->ty;
         ensure_type(rt);
         Buf nm; buf_init(&nm); tn(&nm, rt);
-        /* 长度检查要总长度：切片取 .len，*[N]T 用类型里的 N，裸指针没有 */
+        /* 长度检查要总长度：切片取 .len，*[N]T / [N]T 用类型里的 N，裸指针没有 */
         Buf tot; buf_init(&tot);
         bool is_slice_base = bt && bt->kind == TY_SLICE;
+        bool is_arr_ptr = ty_is_array_ptr(bt);
+        bool is_arr_val = bt && bt->kind == TY_ARRAY;
         const char *total_c = NULL;
         if (is_slice_base) {
             Buf tb; buf_init(&tb);
             ex(&tb, n->a);
             buf_printf(&tot, "(%s).len", tb.data);
             total_c = tot.data;
-        } else if (bt && bt->kind == TY_PTR && bt->has_len) {
-            buf_printf(&tot, "%llu", (unsigned long long)bt->len);
+        }
+        uint64_t total = is_arr_ptr ? bt->elem->len
+                       : (is_arr_val || (bt && bt->has_len)) ? bt->len : 0;
+        if (!is_slice_base && total > 0) {
+            buf_printf(&tot, "%llu", (unsigned long long)total);
             total_c = tot.data;
         }
         bool can_chk = total_c && simple_bound_expr(n->b) && simple_bound_expr(n->c);
@@ -5559,14 +5649,28 @@ static void ex(Buf *b, Node *n) {
         } else {
             Buf lb; buf_init(&lb); if (n->b) ex(&lb, n->b); else buf_puts(&lb, "0");
             if (is_slice_base) buf_printf(&len, "%s - (%s)", tot.data, lb.data);
-            else buf_printf(&len, "%lld - (%s)",
-                            (long long)(bt && bt->has_len ? (int64_t)bt->len : 0), lb.data);
+            else buf_printf(&len, "%lld - (%s)", (long long)total, lb.data);
         }
 
         if (is_slice_base) {
             buf_printf(b, "((%s){ (", nm.data);
             ex(b, n->a);
             buf_printf(b, ").ptr + ");
+            if (n->b) ex(b, n->b); else buf_puts(b, "0");
+            buf_puts(b, ", ");
+            if (can_chk) wrap_slice_len(b, &len, n, total_c);
+            else         buf_puts(b, len.data);
+            buf_puts(b, " })");
+            return;
+        }
+        /* §201：数组值 / 数组指针切片都要先拿首元素地址，C 基址是
+         * struct{ T v[N]; }（或其指针），不能对整个数组做指针算术。 */
+        if (is_arr_ptr || is_arr_val) {
+            buf_printf(b, "((%s){ ((", nm.data);
+            ctype(b, rt->elem);
+            buf_puts(b, "*)&(");
+            ex(b, n->a);
+            buf_puts(b, is_arr_ptr ? ")->v) + " : ").v[0]) + ");
             if (n->b) ex(b, n->b); else buf_puts(b, "0");
             buf_puts(b, ", ");
             if (can_chk) wrap_slice_len(b, &len, n, total_c);
@@ -6072,18 +6176,21 @@ static void ex(Buf *b, Node *n) {
 
     case NK_TUPLE: case NK_ARRAY_LIT: {
         Type *t = n->ty;
-        if (t && t->kind == TY_PTR && t->has_len) t = NULL;   /* 数组字面量按元素写 */
+        if (ty_is_array_ptr(t)) t = NULL;   /* 数组字面量按元素写 */
         Buf nm; buf_init(&nm);
         if (n->kind == NK_ARRAY_LIT) {
-            Type *at = n->ty;
-            buf_puts(b, "((");
-            ctype(b, at->elem);
-            buf_printf(b, "[%d]){ ", n->nitems);
+            Type *at = n->ty;              /* *[N]T */
+            Type *arr = at->elem;          /* [N]T */
+            Type *et = (arr && arr->kind == TY_ARRAY) ? arr->elem : arr;
+            /* §201：&.{…} 是 [N]T 数组值的地址，发 &((ZxArr){ .v = {…} }) */
+            ensure_type(arr);
+            Buf nm; buf_init(&nm); tn(&nm, arr);
+            buf_printf(b, "(&((%s){ .v = { ", nm.data);
             for (int i = 0; i < n->nitems; i++) {
                 if (i) buf_puts(b, ", ");
-                coerce(b, n->items[i], at->elem);
+                coerce(b, n->items[i], et);
             }
-            buf_puts(b, " })");
+            buf_puts(b, " } }))");
             return;
         }
         if (!t) { buf_puts(b, "(0)"); return; }
@@ -6260,29 +6367,27 @@ static void gen_decl_inner(Node *d) {
 
     bool is_var = (d->op == 2);
 
-    if (t->kind == TY_PTR && t->has_len) {
+    if (ty_is_array_ptr(t)) {
         Node *init = d->b;
-        bool lit = init && (init->kind == NK_ARRAY_LIT ||
-                            (init->kind == NK_UN && init->op == TOK_AMP));
+        /* §201：*[N]T 的 elem 已是 [N]T；这里所有"元素/数组"口径都按它拆。 */
+        Type *arr = t->elem;
+        Type *elt = (arr && arr->kind == TY_ARRAY) ? arr->elem : arr;
+        bool lit = init && init->kind == NK_ARRAY_LIT;
         if (lit) {
-            /* `*[N]T` 只是"带长度的指针"（8 字节），变量本身是个指针槽。
-             * 字面量先落一个匿名 C 数组当存储，再让指针指向它——不能直接把
-             * 变量声明成 C 数组：那样 `&xs` 会变成 `int(*)[4]`，与"一切都
-             * 是指针"的模型不一致（用户 2026-11-10 确认的设计）。
-             * 存储仍在当前栈帧，逃逸检查（addr_frame）照旧成立。 */
+            /* 字面量先落一个匿名 [N]T 数组当存储，再让指针指向它。 */
             Buf litdecl; buf_init(&litdecl);
             if (!is_var) buf_puts(&litdecl, "const ");
-            ctype(&litdecl, t->elem);
-            buf_printf(&litdecl, " %s_lit[%llu]", cn, (unsigned long long)t->len);
-            buf_puts(&litdecl, " = { ");
+            ctype(&litdecl, arr);
+            buf_printf(&litdecl, " %s_lit", cn);
+            buf_puts(&litdecl, " = { .v = { ");
             for (int i = 0; i < init->nitems; i++) {
                 if (i) buf_puts(&litdecl, ", ");
-                coerce(&litdecl, init->items[i], t->elem);
+                coerce(&litdecl, init->items[i], elt);
             }
-            buf_puts(&litdecl, " };");
+            buf_puts(&litdecl, " } };");
             line("%s", litdecl.data);
-            line("%s%s *%s = %s_lit;", is_var ? "" : "const ",
-                 cty(t->elem), cn, cn);
+            line("%s%s *%s = &%s_lit;", is_var ? "" : "const ",
+                 cty(arr), cn, cn);
             return;
         }
         /* R9（v0.10 起）：数组指针 + undefined 不再隐式分配存储。
@@ -7201,8 +7306,9 @@ static void gen_local_fns(Node *n) {
 /* 跨模块可见的函数原型（不带 static），最后进共享头文件 */
 static Buf  g_bpub;
 /* 每个模块的延迟初始化函数名，main 里依次调用 */
-static char *g_initname[64];
-static int   g_ninit;
+static char **g_initname;           /* 动态：一个模块一个 init 函数（§203） */
+static int    g_init_cap;
+static int    g_ninit;
 
 static void gen_params(Buf *b, Node *fn, bool is_main) {
     /* 形参别叫 argc/argv：用户局部变量是**原名**发的，叫 `argv` 就跟 C 层形参重定义。
@@ -7447,7 +7553,8 @@ static void val_init(Buf *b, Value *v, Type *t) {
          * 容器了，所以下面取元素类型时不能靠 `t` 自己判断——否则
          * `&.{ "a", "b" }` 的每个元素都拿不到类型，字符串长度被丢掉。 */
         Type *arr_et = NULL;
-        if (t && t->kind == TY_PTR && t->has_len) { arr_et = t->elem; t = t->elem; }
+        if (t && t->kind == TY_ARRAY) arr_et = t->elem;
+        else if (ty_is_array_ptr(t)) { arr_et = t->elem->elem; t = t->elem; }
         buf_puts(b, "{ ");
         bool first = true;
         for (int i = 0; i < v->nitems; i++) {
@@ -7516,7 +7623,8 @@ static bool is_const_init(Node *n) {
         Type *bt = n->a ? n->a->ty : NULL;
         /* §197：裸指针穿透一层查字段——`p.size` 若是 S 的字段就不是常量 */
         Type *probe = bt;
-        if (probe && probe->kind == TY_PTR && !probe->has_len) probe = probe->elem;
+        if (probe && probe->kind == TY_PTR && !probe->has_len &&
+            !ty_is_array_ptr(probe)) probe = probe->elem;
         if (probe && (probe->kind == TY_STRUCT || probe->kind == TY_UNION) &&
             ty_field(probe, n->name))
             return false;
@@ -7624,15 +7732,8 @@ static void gen_global(Node *d, bool exported) {
         ensure_type(t);
         Buf e; buf_init(&e);
         buf_puts(&e, "extern ");
-        if (t->kind == TY_PTR && t->has_len) {
-            /* C 侧的全局数组：Zx 侧声明成 *[N]T，C 原型写成 elem name[]
-             *（数组符号的地址 == 首元素地址，链接没问题） */
-            ctype(&e, t->elem);
-            buf_printf(&e, " %s[];", d->name ? d->name : "_");
-        } else {
-            ctype(&e, t);
-            buf_printf(&e, " %s;", d->name ? d->name : "_");
-        }
+        ctype(&e, t);
+        buf_printf(&e, " %s;", d->name ? d->name : "_");
         buf_puts(&g_bpub, e.data);
         return;
     }
@@ -7665,59 +7766,35 @@ static void gen_global(Node *d, bool exported) {
     if (exported) {                     /* 别的单元要能链到：extern 声明进头文件 */
         Buf e; buf_init(&e);
         buf_puts(&e, "extern ");
-        if (t->kind == TY_PTR && t->has_len) {
-            ctype(&e, t->elem);
-            buf_printf(&e, " %s[];\n", cn);
-        } else {
-            ctype(&e, t);
-            buf_printf(&e, " %s;\n", cn);
-        }
+        ctype(&e, t);
+        buf_printf(&e, " %s;\n", cn);
         buf_puts(&g_bpub, e.data);
     }
 
-    /* 数组：常量字面量 / undefined / 编译期算出来的表 → 真正的 C 数组 */
-    if (t->kind == TY_PTR && t->has_len) {
+    /* §201：数组值 `[N]T` 的全局也用局部同一套 `struct { T v[N]; }` 表示。
+     * 以前这里图省事发裸 C 数组 `T g[N]`，于是 `.ptr` 的 `&g.v[0]`、下标的
+     * `(g).v[i]` 在全局上全都发不出合法的 C（B1001）；extern 声明早已走
+     * ctype() 的结构体名，这里必须一致。字符串字面量是 *[N]const u8 指针，
+     * 走下面普通标量分支，不会误物化成 T[N]。 */
+    if (t->kind == TY_ARRAY) {
         Node *init = d->b;
-        /* 视图（切片 / 指向已有对象的指针）：值就是一个地址。物化成静态数据会把
-         * 数据复制一份——之后写进去也看不见，所以按源码表达式求值。 */
-        bool view = init && init->ct && init->ct->kind == V_PTR && init->ct->base &&
-                    is_view_expr(init);
-        /* 字符串常量（const F = "v={}"）是*指针*，不是数组字面量：
-         * 走下面的普通标量声明 `uint8_t *F = (uint8_t*)"v={}"`。以前这里
-         * 把所有带 ct 的初始化器都物化成 `uint8_t F[N] = {…}`——字符串
-         * 进去就变成"用指针初始化 uint8_t"，C 直接拒。 */
-        bool str_const = str_ptr_ty(t) && init && init->kind == NK_STR;
-        if (init && init->ct && !view && !str_const) {
-            Buf s; buf_init(&s);
-            buf_puts(&s, st);
-            ctype(&s, t->elem);
-            buf_printf(&s, " %s[%llu] = ", cn, (unsigned long long)t->len);
-            val_init(&s, init->ct, t);
-            buf_puts(&s, ";");
-            bline(&g_bglobals, "%s", s.data);
-            return;
-        }
-        if (!view && (!init || init->kind == NK_UNDEF ||
-                      init->kind == NK_ARRAY_LIT ||
-                      (init->kind == NK_UN && init->op == TOK_AMP))) {
-            Buf s; buf_init(&s);
-            buf_puts(&s, st);
-            ctype(&s, t->elem);
-            buf_printf(&s, " %s[%llu]", cn, (unsigned long long)t->len);
-            if (init && init->kind != NK_UNDEF) {
-                buf_puts(&s, " = { ");
-                for (int i = 0; i < init->nitems; i++) {
-                    if (i) buf_puts(&s, ", ");
-                    coerce(&s, init->items[i], t->elem);
-                }
-                buf_puts(&s, " }");
-            }
-            buf_puts(&s, ";");
-            bline(&g_bglobals, "%s", s.data);
-            return;
-        }
         Buf s; buf_init(&s);
-        buf_printf(&s, "%s%s *%s = %s;", st, cty(t->elem), cn, cxs(init, t));
+        buf_puts(&s, st);
+        ensure_type(t);
+        ctype(&s, t);
+        buf_printf(&s, " %s", cn);
+        if (init && init->ct && init->kind != NK_UNDEF) {
+            buf_puts(&s, " = ");
+            val_init(&s, init->ct, t);
+        } else if (init && init->kind != NK_UNDEF && init->nitems) {
+            buf_puts(&s, " = { ");
+            for (int i = 0; i < init->nitems; i++) {
+                if (i) buf_puts(&s, ", ");
+                coerce(&s, init->items[i], t->elem);
+            }
+            buf_puts(&s, " }");
+        }
+        buf_puts(&s, ";");
         bline(&g_bglobals, "%s", s.data);
         return;
     }
@@ -7737,31 +7814,50 @@ static void gen_global(Node *d, bool exported) {
                 is_view_expr(d->b);
     bool has_fn = d->b->ct && val_has_fn(d->b->ct);
     if (d->b->ct && !view && !has_fn) {
-        /* §199：`const G: []const T = &.{ ... }` 的编译期值是 V_PTR(base=V_AGG)。
-         * val_init 会把 V_AGG 发成元素序列 `{ e0, e1, ... }`，可目标是 slice
-         * （C 里是 `{ T *ptr; size_t len; }`）——于是得到 `ZxSlice_T G = { 1, 2, 3 }`
-         * 被 C 拒（B1002）。正确做法：先发一份静态 backing 数组，再发 {ptr,len}。 */
-        if (t->kind == TY_SLICE && d->b->ct->kind == V_PTR &&
+        /* §199/§201：`const G: []const T = &.{ ... }` / `const G: *[N]T = &.{ ... }`
+         * 的编译期值是 V_PTR(base=V_AGG)。val_init 会把 V_AGG 发成元素序列
+         * `{ e0, e1, ... }`，可目标是 slice（`{ptr,len}`）或数组指针（一个地址）
+         * ——于是得到 `ZxSlice_T G = { 1, 2, 3 }` / `ZxArr_T *G = { 1, 2, 3 }`
+         * 被 C 拒（B1002）。正确做法：先发一份静态 backing，再发 {ptr,len} / &backing。 */
+        if ((t->kind == TY_SLICE || ty_is_array_ptr(t)) && d->b->ct->kind == V_PTR &&
             d->b->ct->base && d->b->ct->base->kind == V_AGG) {
             Value *arr = d->b->ct->base;
-            Type *et = t->elem;
+            bool arrptr = ty_is_array_ptr(t);
+            Type *et = arrptr ? t->elem->elem : t->elem;
             if (arr->nitems > 0) {
                 char *lit = ignored_cname();
                 Buf a; buf_init(&a);
                 buf_puts(&a, st);
-                ctype(&a, et);
-                buf_printf(&a, " %s[%d] = { ", lit, arr->nitems);
-                for (int i = 0; i < arr->nitems; i++) {
-                    if (i) buf_puts(&a, ", ");
-                    val_init(&a, arr->items[i], et);
+                if (arrptr) {
+                    /* 数组指针指向的是 [N]T，C 表示是 ZxArr_… 结构体，
+                     * backing 必须同类型，&backing 才能直接赋给 *ZxArr_… */
+                    ensure_type(t->elem);
+                    ctype(&a, t->elem);
+                    buf_printf(&a, " %s = { .v = { ", lit);
+                    for (int i = 0; i < arr->nitems; i++) {
+                        if (i) buf_puts(&a, ", ");
+                        val_init(&a, arr->items[i], et);
+                    }
+                    buf_puts(&a, " } };");
+                } else {
+                    ctype(&a, et);
+                    buf_printf(&a, " %s[%d] = { ", lit, arr->nitems);
+                    for (int i = 0; i < arr->nitems; i++) {
+                        if (i) buf_puts(&a, ", ");
+                        val_init(&a, arr->items[i], et);
+                    }
+                    buf_puts(&a, " };");
                 }
-                buf_puts(&a, " };");
                 bline(&g_bglobals, "%s", a.data);
 
                 Buf s; buf_init(&s);
-                buf_printf(&s, "%s%s %s = { (", st, cty(t), cn);
-                ctype(&s, et);
-                buf_printf(&s, "*)%s, %d };", lit, arr->nitems);
+                if (arrptr) {
+                    buf_printf(&s, "%s%s %s = &%s;", st, cty(t), cn, lit);
+                } else {
+                    buf_printf(&s, "%s%s %s = { (", st, cty(t), cn);
+                    ctype(&s, et);
+                    buf_printf(&s, "*)%s, %d };", lit, arr->nitems);
+                }
                 bline(&g_bglobals, "%s", s.data);
             } else {
                 bline(&g_bglobals, "%s%s %s = {0};", st, cty(t), cn);
@@ -7887,6 +7983,8 @@ static void buf_protos_from(Buf *bodies, Buf *protos) {
 /* 切开：header 收类型/运行时原型/数据，units 每项是一个模块的 .c 正文，
  * rt 收运行时函数体（main.c 把它落成独立的 _zxrt.c 单元，只编一次）。
  * 返回单元数。 */
+/* units 由调用方分配，容量必须 >= sema_module_count()。返回实际单元数。
+ * 不再静默截断：模块数与容量不符时是调用 bug，宁可报错也不丢模块。 */
 int backend_emit_split(Node *root, Buf *header, Buf *rt, BUnit *units, int maxunits) {
     buf_init(&g_btypes);
     /* 自动内联（decisions §138）：小函数在 -O0（dev 档）也展开。
@@ -7912,7 +8010,14 @@ int backend_emit_split(Node *root, Buf *header, Buf *rt, BUnit *units, int maxun
 
     int nmods = sema_module_count();
     if (nmods <= 0) nmods = 1;
-    if (nmods > maxunits) nmods = maxunits;
+    /* §203：过去这里 `if (nmods > maxunits) nmods = maxunits;` 静默丢掉
+     * 第 65 个及之后的模块——sema 已检查过它们、头文件也声明了它们的原型，
+     * 却没发 .c，链接时报 undeclared。容量不够是调用方的 bug，明确报错。 */
+    if (nmods > maxunits) {
+        fprintf(stderr, "zxc: internal: unit capacity %d < module count %d\n",
+                maxunits, nmods);
+        return -1;
+    }
     #define MOD_ROOT(mi) ((mi) == 0 ? root : sema_module_root(mi))
 
     g_need_proc = scan_proc_use(root);
@@ -7923,9 +8028,15 @@ int backend_emit_split(Node *root, Buf *header, Buf *rt, BUnit *units, int maxun
     for (int mi = 1; mi < nmods && !g_need_task; mi++)
         g_need_task = scan_task_use(MOD_ROOT(mi));
 
-    /* 初始化函数表：被依赖的先初始化（模块表里入口排在最前） */
+    /* 初始化函数表：被依赖的先初始化（模块表里入口排在最前）。
+     * §203：g_initname 原本是 [64] 定长，模块超过 64 时这里也跟着截断，
+     * 与 units 同为 bug 根因；改成按 nmods 动态扩容。 */
+    if (nmods > g_init_cap) {
+        g_init_cap = nmods;
+        g_initname = realloc(g_initname, sizeof(char *) * (size_t)g_init_cap);
+    }
     g_ninit = 0;
-    for (int mi = nmods - 1; mi >= 0 && g_ninit < 64; mi--) {
+    for (int mi = nmods - 1; mi >= 0; mi--) {
         char stem[64];
         unit_stem(mi, stem, sizeof stem);
         char *nm = malloc(96);
@@ -8199,8 +8310,11 @@ void backend_emit(Node *root, Buf *out) {
     Buf header, rt;
     buf_init(&header);
     buf_init(&rt);
-    BUnit units[64];
-    int n = backend_emit_split(root, &header, &rt, units, 64);
+    int nmods = sema_module_count();
+    if (nmods <= 0) nmods = 1;
+    BUnit *units = calloc((size_t)nmods, sizeof(BUnit));
+    int n = backend_emit_split(root, &header, &rt, units, nmods);
+    if (n < 0) return;
     buf_puts(out, header.data);
     if (rt.data && rt.len) {
         buf_puts(out, "\n/* ======== runtime ======== */\n");
@@ -8212,4 +8326,6 @@ void backend_emit(Node *root, Buf *out) {
         buf_puts(out, " ======== */\n");
         buf_puts(out, units[i].src.data);
     }
+    for (int i = 0; i < n; i++) { free(units[i].name); buf_free(&units[i].src); }
+    free(units);
 }

@@ -47,7 +47,7 @@ const bench_append = fn (seed: u64) u64 {
     while (round < 60_000) {
         var k: usize = 0;
         while (k < CH) {
-            chunk[k] = (i32)(round * CH + k);
+            chunk[0][k] = (i32)(round * CH + k);
             k = k + 1;
         }
         if (!al.append(chunk[0..])) { return 0; }

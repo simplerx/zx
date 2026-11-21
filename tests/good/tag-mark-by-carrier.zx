@@ -7,8 +7,8 @@ pub const main = fn () i32 {
     var xs = std.stackAlloc(*u8, 4);
     let p = (*u8)std.heapAlloc(std.heap.page, u8, 10);
     let q = (*u8)std.heapAlloc(std.heap.page, u8, 10);
-    xs[0] = p;
-    xs[1] = q;
+    xs[0][0] = p;
+    xs[0][1] = q;
     tag p : null;
     tag q : null;
     return 0;

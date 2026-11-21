@@ -604,13 +604,9 @@ static Node *parse_type_prefix(P *p) {
         advance(p);
         Node *n = node_new(NK_PTR_TYPE, t->line, t->col);
         if (accept(p, TOK_KW_CONST)) n->flag = true;      /* *const T */
-        /* `*[N]T` 是指向数组的指针；`*[]T` 是指向切片的指针。
-         * 两者的 `[` 后面长得一样，只有 `]` 紧跟着才说明数目为空。 */
-        if (at(p, TOK_LBRACKET) && peek(p, 1)->kind != TOK_RBRACKET) {
-            advance(p);
-            n->b = parse_expr(p);
-            expect(p, TOK_RBRACKET);
-        }
+        /* §201：指针后面一律是完整的类型。`*[N]T` 就是"指向 [N]T 的指针"，
+         * [N]T 由 parse_type 自己解析成数组值类型——不再把 [N] 单独吃掉当
+         * 指针的长度标记（那样 `*[3][3]i32` 会被误读成指向 3 个数组的指针）。 */
         n->a = parse_type(p);
         return n;
     }
@@ -626,11 +622,13 @@ static Node *parse_type_prefix(P *p) {
             n->a = parse_type(p);
             return n;
         }
+        /* §201：数组值类型写成 `[N]T`（长度在前，元素类型在后），取代旧的
+         * `[T; N]`。仍沿用 NK_REPEAT_TYPE 节点：字段约定 a=元素类型、b=长度
+         * 表达式不变，只是解析顺序调过来，避免自举前端 / zxls 的节点编号漂移。 */
         Node *n = node_new(NK_REPEAT_TYPE, t->line, t->col);
-        n->a = parse_type(p);
-        expect(p, TOK_SEMI);
         n->b = parse_expr(p);
         expect(p, TOK_RBRACKET);
+        n->a = parse_type(p);
         return n;
     }
 

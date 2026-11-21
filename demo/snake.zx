@@ -62,7 +62,7 @@ const Out = struct {
         var i: usize = 0;
         while (i < s.len) {
             if (self.n < FBUF) {
-                self.buf[self.n] = s[i];
+                self.buf[0][self.n] = s[i];
                 self.n = self.n + 1;
             }
             i = i + 1;
@@ -71,7 +71,7 @@ const Out = struct {
 
     const ch = fn (self: *Out, c: u8) void {
         if (self.n < FBUF) {
-            self.buf[self.n] = c;
+            self.buf[0][self.n] = c;
             self.n = self.n + 1;
         }
     };
@@ -131,7 +131,7 @@ const next_rand = fn (x0: u32) u32 {
 const on_snake = fn (g: *Game, c: i32) bool {
     var i: usize = 0;
     while (i < g.len) {
-        if (g.body[i] == c) { return true; }
+        if (g.body[0][i] == c) { return true; }
         i = i + 1;
     }
     return false;
@@ -156,9 +156,9 @@ const place_food = fn (g: *Game) void {
 
 const reset = fn (g: *Game) void {
     g.len = 3;
-    g.body[0] = (i32)((H / 2) * W + W / 2);
-    g.body[1] = (i32)((H / 2) * W + W / 2 - 1);
-    g.body[2] = (i32)((H / 2) * W + W / 2 - 2);
+    g.body[0][0] = (i32)((H / 2) * W + W / 2);
+    g.body[0][1] = (i32)((H / 2) * W + W / 2 - 1);
+    g.body[0][2] = (i32)((H / 2) * W + W / 2 - 2);
     g.dx = 1;
     g.dy = 0;
     g.score = 0;
@@ -170,7 +170,7 @@ const reset = fn (g: *Game) void {
 
 // 走一步。撞墙 / 撞自己就把 alive 置 false（由调用方渲染出局画面）。
 const step = fn (g: *Game) void {
-    let head = g.body[0];
+    let head = g.body[0][0];
     let hx = head % (i32)W;
     let hy = head / (i32)W;
     let nx = hx + g.dx;
@@ -187,7 +187,7 @@ const step = fn (g: *Game) void {
     if (!eat) { limit = g.len - 1; }
     var i: usize = 0;
     while (i < limit) {
-        if (g.body[i] == nh) { g.alive = false; return; }
+        if (g.body[0][i] == nh) { g.alive = false; return; }
         i = i + 1;
     }
 
@@ -195,10 +195,10 @@ const step = fn (g: *Game) void {
     var j: usize = g.len;
     if (!eat) { j = g.len - 1; }
     while (j > 0) {
-        g.body[j] = g.body[j - 1];
+        g.body[0][j] = g.body[0][j - 1];
         j = j - 1;
     }
-    g.body[0] = nh;
+    g.body[0][0] = nh;
 
     if (eat) {
         g.len = g.len + 1;
@@ -246,7 +246,7 @@ const draw = fn (o: *Out, g: *Game, best: usize) void {
         var x: usize = 0;
         while (x < W) {
             let c = (i32)(y * W + x);
-            if (c == g.body[0]) {
+            if (c == g.body[0][0]) {
                 set_color(o, &color, 3);
                 o.put("@@");
             } else if (on_snake(g, c)) {
@@ -371,7 +371,7 @@ const blocked = fn (g: *Game, x: i32, y: i32) bool {
 
 // 贪心：先横后竖朝食物走；两个方向都不通就随便挑一个通的。
 const bot_move = fn (g: *Game, rng: *u32) void {
-    let head = g.body[0];
+    let head = g.body[0][0];
     let hx = head % (i32)W;
     let hy = head / (i32)W;
     let fx = g.food % (i32)W;
@@ -414,11 +414,11 @@ const bot_move = fn (g: *Game, rng: *u32) void {
 const verify = fn (g: *Game) u8 {
     var i: usize = 0;
     while (i < g.len) {
-        let c = g.body[i];
+        let c = g.body[0][i];
         if (c < 0 || c >= (i32)TOTAL) { return 1; }          // 越界
         var j: usize = i + 1;
         while (j < g.len) {
-            if (g.body[j] == c) { return 2; }                // 身子自己重叠
+            if (g.body[0][j] == c) { return 2; }                // 身子自己重叠
             j = j + 1;
         }
         i = i + 1;

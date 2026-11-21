@@ -37,13 +37,13 @@ const Cmd = struct {
     const add = fn (self: *Cmd, s: []const u8) void {
         var i: usize = 0;
         while (i < s.len && self.n + 1 < BUFCAP) {
-            self.p[self.n] = s[i];
+            self.p[0][self.n] = s[i];
             self.n = self.n + 1;
             i = i + 1;
         }
     };
     const addc = fn (self: *Cmd, ch: u8) void {
-        if (self.n + 1 < BUFCAP) { self.p[self.n] = ch; self.n = self.n + 1; }
+        if (self.n + 1 < BUFCAP) { self.p[0][self.n] = ch; self.n = self.n + 1; }
     };
     // system() 走 cmd.exe：正斜杠路径它不认（`./bin/zxc.exe` 会被当成命令名），
     // 所以拼命令时统一转成反斜杠。
@@ -56,7 +56,7 @@ const Cmd = struct {
         }
     };
     const cstr = fn (self: *Cmd) *const u8 {
-        self.p[self.n] = 0;
+        self.p[0][self.n] = 0;
         return self.p;
     };
 };
@@ -69,9 +69,9 @@ const run = fn (cmd: *Cmd) i32 {
      * 对策：自己先包一层引号，让它剥掉的正好是我们多包的那层。 */
     if (cmd.n + 2 < BUFCAP) {
         var i = cmd.n;
-        while (i > 0) { cmd.p[i] = cmd.p[i - 1]; i = i - 1; }
+        while (i > 0) { cmd.p[0][i] = cmd.p[0][i - 1]; i = i - 1; }
         cmd.p[0] = '"';
-        cmd.p[cmd.n + 1] = '"';
+        cmd.p[0][cmd.n + 1] = '"';
         cmd.n = cmd.n + 2;
     }
     let dbg = std.process.getEnv("ZX_RUNNER_DEBUG");

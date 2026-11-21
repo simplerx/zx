@@ -1,46 +1,46 @@
-// repeat-type.zx —— [T; N] 重复元组：内联值类型（N 个 T，编译期展开）。
-// 断言语言面：类型出现在字段/var 声明、真实占内存、编译期下标 .N、
-// 运行期下标经 (*[N]T)(&tup) 视图、struct 成员的内存随结构体携带。
+// array-value.zx —— §201 [N]T 数组值：内联存储、下标取元素、内建 .ptr/.len/.size。
 const std = @mod("std");
 
 // struct 字段内联：8 个 i32（32B）+ u8（1B）→ 对齐 4 → 36B
 const Holder = struct {
-    buf: [i32; 8],
+    buf: [8]i32,
     tag: u8,
 };
 
 const sum8 = fn (a: *[8]i32) i32 {
     var s: i32 = 0;
     var i: usize = 0;
-    while (i < 8) { s = s + a[i]; i = i + 1; }
+    while (i < 8) { s = s + a[0][i]; i = i + 1; }
     return s;
 };
 
 pub const main = fn () u8 {
-    // 大小断言：[T;N] 是值类型，不是 8 字节指针
+    // 大小断言：[N]T 是值类型，不是 8 字节指针
     if (@type(Holder).size != 36) { return 1; }
 
     var h = Holder{ .buf = undefined, .tag = 7 };
-    let p = (*[8]i32)(&h.buf);
+    let p = &h.buf;                 // *[8]i32：指向整个数组
+    if (p[0].len != 8) { return 8; }
     var i: usize = 0;
-    while (i < 8) { p[i] = (i32)i * 2; i = i + 1; }
-    // 编译期下标读元组；运行期下标读视图——同一块内存
-    if (h.buf.3 != 6) { return 2; }
-    if (p[7] != 14) { return 3; }
+    while (i < 8) { p[0][i] = (i32)i * 2; i = i + 1; }
+    // 数组值下标 / 数组指针先 [0] 取数组再下标——同一块内存
+    if (h.buf[3] != 6) { return 2; }
+    if (p[0][7] != 14) { return 3; }
     if (h.tag != 7) { return 4; }
 
     // 局部 var 的类型标注位置
-    var t: [f64; 2] = undefined;
-    t.0 = 1.5;
-    let tp = (*[2]f64)(&t);
-    tp[1] = 2.5;
-    if (t.0 != 1.5) { return 5; }
-    if (tp[1] != 2.5) { return 6; }
+    var t: [2]f64 = undefined;
+    t[0] = 1.5;
+    let tp = &t;
+    tp[0][1] = 2.5;
+    if (t[0] != 1.5) { return 5; }
+    if (tp[0][1] != 2.5) { return 6; }
+    if (t.ptr[0] != 1.5) { return 9; }  // 数组值 .ptr 给首元素地址
 
-    // 视图直接喂自由函数
+    // 数组指针直接喂自由函数
     if (sum8(p) != 56) { return 7; }
 
-    std.println("ok {} {} {}", t.0, tp[1], @type(Holder).size);
+    std.println("ok {} {} {}", t[0], tp[0][1], @type(Holder).size);
     return 0;
 };
 

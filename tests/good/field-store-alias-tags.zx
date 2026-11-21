@@ -15,7 +15,7 @@ const T1 = struct { name: *[1]i32 };
 
 // ① 透传：p 是另一个形参，被调体把它 store 进容器形参字段
 const store_alias = fn(t: *[1]T1, p: *[1]i32) void {
-    t[0].name = p;
+    t[0][0].name = p;
 };
 
 // ② 工厂：被调体内调工厂，把返回的新分配 store 进容器形参字段
@@ -23,7 +23,7 @@ const mk = fn(al: Allocator) *[1]i32 {
     return std.heapAlloc(al, i32, 1);
 };
 const store_factory = fn(t: *[1]T1, al: Allocator) void {
-    t[0].name = mk(al);
+    t[0][0].name = mk(al);
 };
 
 const main = fn () u8 {
@@ -33,12 +33,12 @@ const main = fn () u8 {
     defer std.free(al, t0[0..1]);
     let p0: *[1]i32 = std.heapAlloc(al, i32, 1);
     store_alias(t0, p0);
-    defer std.free(al, t0[0].name[0..1]);
+    defer std.free(al, t0[0][0].name[0..1]);
 
     let t1: *[1]T1 = std.heapAlloc(al, T1, 1);
     defer std.free(al, t1[0..1]);
     store_factory(t1, al);
-    defer std.free(al, t1[0].name[0..1]);
+    defer std.free(al, t1[0][0].name[0..1]);
 
     std.println("ok");
     return 0;

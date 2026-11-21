@@ -21,7 +21,7 @@ const main = fn () u8 {
     std.println("{}", sumWeighted(s));
     let b: *const [3]i32 = &.{4, 5, 6};
     std.println("{}", dot3(buf, b));
-    std.println("{} {}", buf.len, buf.size);
+    std.println("{} {}", buf[0].len, buf[0].size);
     return 0;
 };
 

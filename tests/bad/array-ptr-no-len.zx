@@ -1,0 +1,4 @@
+// §201：*[N]T 是普通指针，没有 .len 内建；先 p[0] 取数组再问。
+// expect: has no member 'len'
+const head = fn (p: *[3]i32) usize { return p.len; };
+const main = fn () void {};

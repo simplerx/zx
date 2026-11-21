@@ -24,26 +24,26 @@ const main = fn () u8 {
     defer std.free(al, t2);
 
     // 转移前深写、经新实例读回释放
-    t2[0].pt = std.heapAlloc(al, T1, 1);
-    t2[0].pt.name = std.heapAlloc(al, i32, 1);
-    let mid = t2[0].pt;
+    t2[0][0].pt = std.heapAlloc(al, T1, 1);
+    t2[0][0].pt.name = std.heapAlloc(al, i32, 1);
+    let mid = t2[0][0].pt;
     let p = mid.name;
     defer std.free(al, p[0..1]);
     defer std.free(al, mid[0..1]);
     std.println("ok");
 
     // 转移后经新实例深写、沿旧路径读回释放（镜像回写源账本）
-    t2[0].pt = std.heapAlloc(al, T1, 1);
-    let mid2 = t2[0].pt;
+    t2[0][0].pt = std.heapAlloc(al, T1, 1);
+    let mid2 = t2[0][0].pt;
     mid2.name = std.heapAlloc(al, i32, 1);
-    let q = t2[0].pt.name;
+    let q = t2[0][0].pt.name;
     defer std.free(al, q[0..1]);
     defer std.free(al, mid2[0..1]);
 
     // var 赋值转移同口径
-    t2[0].pt = std.heapAlloc(al, T1, 1);
+    t2[0][0].pt = std.heapAlloc(al, T1, 1);
     var mid3: *T1 = undefined;
-    mid3 = t2[0].pt;
+    mid3 = t2[0][0].pt;
     mid3.name = std.heapAlloc(al, i32, 1);
     let s = mid3.name;
     defer std.free(al, s[0..1]);

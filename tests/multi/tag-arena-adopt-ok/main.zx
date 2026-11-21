@@ -5,7 +5,7 @@ const main = fn () u8 {
     var ar = std.arena.ArenaAllocator.init(std.heap.page);
     if (ar) a {
         let p = std.heapAlloc(std.heap.page, u8, 10);
-        p[0] = 9;
+        p[0][0] = 9;
         std.arena.ArenaAllocator.adopt(a, p, 10);
         std.arena.ArenaAllocator.deinit(a);
         return 0;

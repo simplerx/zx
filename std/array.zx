@@ -2,12 +2,12 @@
 //
 // 两个类型都不搞别名、只走这一条真实路径：
 //   std.array.List(T)    原 std.ArrayList(T) 迁来，可增长，吃 Allocator
-//   std.array.Array(T,N) C 风格定长数组：data 是 [T; N] 内联元组，
+//   std.array.Array(T,N) C 风格定长数组：data 是 [N]T 数组值，
 //                        真正占 N*sizeof(T) 内存，可作为其他类型的成员
 //
-// Array 弥补的正是"Zx 没有数组值类型"这块：`*[N]T` 是指针（8 字节），
-// 只能表达视图；`[T; N]` 展开成 N 个 T 的元组（TY_TUPLE），布局/发码
-// 复用元组机制，运行期下标经 `(*[N]T)(&self.data)` 视图完成。
+// §201 起 Zx 有真正的数组值类型 `[N]T`：占栈内存，内建 .ptr/.len/.size，
+// `data[i]` 直接取元素。`&data` 得 `*[N]T`——普通指针，指向整个数组，
+// `p[0]` / `p.0` 取出数组本身，`p + i` 按整个数组步进；它不再有内建成员。
 
 // ---- 可增长列表（原 ArrayList）----
 // `T` 是元素类型；容量不够时按倍数向分配器要内存、搬过去、释放旧的。
@@ -176,16 +176,15 @@ pub const List = struct (T: type) {
 };
 
 // ---- 定长数组（C 风格 T arr[N]，内联存储）----
-// T 元素类型，N 编译期常量长度。data 是 N 个 T 的重复元组 `[T; N]`——
-// 真正内联占 N*sizeof(T) 内存：作为其他类型的成员时内存随之携带，
-// 调用方不需要再给存储（这是它跟 `*[N]T` 视图容器的本质区别）。
-// 运行期下标用 *[N]T 视图：元组同型元素无 padding，起始地址就是
-// 第 0 个元素的地址，`(*[N]T)(&self.data)[i]` 与 C 的 arr[i] 同构。
+// T 元素类型，N 编译期常量长度。data 是数组值 `[N]T`——真正内联占
+// N*sizeof(T) 内存：作为其他类型的成员时内存随之携带，调用方不需要
+// 再给存储（这是它跟 `*[N]T` 指针的本质区别）。
+// 下标直接用 `data[i]`；需要首元素裸指针时用 `data.ptr`。
 // 方法一律收 `self: *Self`——按值收 self 时 &self.data 指向栈副本，
-// 写了也写不进真身。元组字段里的指针不进 tag 字段账（已知限制）。
+// 写了也写不进真身。数组字段里的指针不进 tag 字段账（已知限制）。
 pub const Array = struct (T: type, N: usize) {
     // 内联存储：N 个 T。零初始化请配合 zero()（一次 memset）或逐元素 set。
-    pub data: [T; N],
+    pub data: [N]T,
 
     // 编译期元信息（§117 编译期值槽）：长度与总字节数都能静态取。
     pub const count = N;
@@ -197,32 +196,32 @@ pub const Array = struct (T: type, N: usize) {
 
     // 数组指针视图：指向内联存储的起始地址，运行期下标全走它。
     pub const ptr = fn (self: *Self) *[N]T {
-        return (*[N]T)(&self.data);
+        return &self.data;
     };
 
     pub const len = fn (self: *Self) usize { return N; };
 
     // 切片视图：全长借用，元素就地（不拷贝）。
-    pub const items = fn (self: *Self) []T { return self.ptr()[0..]; };
+    pub const items = fn (self: *Self) []T { return self.data[0..]; };
 
     pub const at = fn (self: *Self, i: usize) ?*T {
         if (i >= N) { return null; }
-        return &self.ptr()[i];
+        return &self.data[i];
     };
 
     pub const get = fn (self: *Self, i: usize) ?T {
         if (i >= N) { return null; }
-        return self.ptr()[i];
+        return self.data[i];
     };
 
     pub const set = fn (self: *Self, i: usize, v: T) bool {
         if (i >= N) { return false; }
-        self.ptr()[i] = v;
+        self.data[i] = v;
         return true;
     };
 
-    pub const first = fn (self: *Self) T { return self.ptr()[0]; };
-    pub const last = fn (self: *Self) T { return self.ptr()[N - 1]; };
+    pub const first = fn (self: *Self) T { return self.data[0]; };
+    pub const last = fn (self: *Self) T { return self.data[N - 1]; };
 
     // 逐元素 fill：T 任意。这里不能用 @memset——它是**字节**语义
     //（sema.c：第三参是 byte count、第二参是填充字节值）：v 是元素值
@@ -232,7 +231,7 @@ pub const Array = struct (T: type, N: usize) {
     pub const fill = fn (self: *Self, v: T) void {
         var i: usize = 0;
         while (i < N) {
-            self.ptr()[i] = v;
+            self.data[i] = v;
             i = i + 1;
         }
     };
@@ -240,7 +239,7 @@ pub const Array = struct (T: type, N: usize) {
     // 清零特例：全零字节 = 零值对任意 T 成立（含指针字段 → null），
     // 一次内存原语完成。这才是 @memset 的正确用法。
     pub const zero = fn (self: *Self) void {
-        @memset((*u8)(&self.data), 0, N * @type(T).size);
+        @memset((*u8)(self.data.ptr), 0, N * @type(T).size);
     };
 
     pub const reverse = fn (self: *Self) void {
@@ -248,9 +247,9 @@ pub const Array = struct (T: type, N: usize) {
         var i: usize = 0;
         var j: usize = N - 1;
         while (i < j) {
-            let t = self.ptr()[i];
-            self.ptr()[i] = self.ptr()[j];
-            self.ptr()[j] = t;
+            let t = self.data[i];
+            self.data[i] = self.data[j];
+            self.data[j] = t;
             i = i + 1;
             j = j - 1;
         }
@@ -258,9 +257,9 @@ pub const Array = struct (T: type, N: usize) {
 
     pub const swap = fn (self: *Self, i: usize, j: usize) bool {
         if (i >= N || j >= N) { return false; }
-        let t = self.ptr()[i];
-        self.ptr()[i] = self.ptr()[j];
-        self.ptr()[j] = t;
+        let t = self.data[i];
+        self.data[i] = self.data[j];
+        self.data[j] = t;
         return true;
     };
 };

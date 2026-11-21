@@ -68,9 +68,9 @@ const main = fn () u8 {
 
     // §6.2 数组/切片
     var arr: *[4]i32 = &.{1, 2, 3, 4};
-    arr[0] = 10;
-    arr[2] = 30;
-    std.println("arr.len={} sum={}", arr.len, sum(arr[0..]));
+    arr[0][0] = 10;
+    arr[0][2] = 30;
+    std.println("arr[0].len={} sum={}", arr[0].len, sum(arr[0..]));
 
     // §6.4 结构体
     var p: Person = .{ .name = "ann" };
@@ -133,7 +133,7 @@ const main = fn () u8 {
 // expect-output
 // i=100
 // t.0=1 t.len=3
-// arr.len=4 sum=46
+// arr[0].len=4 sum=46
 // ann age=0
 // red 3 6
 // area=12.56636

@@ -35,8 +35,8 @@ pub const main = fn () i32 {
 
     // 编译期 N 的 heapAlloc 不受影响，仍返回 *[N]T。
     var fixed = std.heapAlloc(a, i32, 3);
-    fixed[1] = 7;
-    std.println("fixed = {}", fixed[1]);
+    fixed[0][1] = 7;
+    std.println("fixed = {}", fixed[0][1]);
     a.free(a.ctx, (*u8)fixed, 3 * @type(i32).size);
     std.println("done");
     return 0;

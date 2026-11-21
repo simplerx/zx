@@ -2,5 +2,5 @@
 // 长度在类型里、下标是编译期值：越界在编译期报，不再拖到运行时才 trap。
 const main = fn () void {
     var arr = &.{ 1, 2, 3 };
-    let x = arr[5];
+    let x = arr[0][5];
 };

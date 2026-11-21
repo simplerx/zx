@@ -131,7 +131,7 @@ pub const NK = enum {
     tag_apply,        // tag.name / tag.name : expr —— 追加在末尾（§170）
     try_capture,      // try expr err { ... } —— 追加在末尾（§171）
     tag_bind,         // §174 续链：tag v : tag.x = e; —— 追加在末尾
-    repeat_type,      // [T; N]：N 个 T 的内联元组（Rust 风格）—— 追加在末尾
+    repeat_type,      // [N]T：数组值类型（§201，节点编号沿用旧 repeat_type）
 };
 
 pub const Node = struct {
@@ -235,17 +235,17 @@ const put_u64 = fn (out: *std.array.List(u8), v: u64) void {
     var n: usize = 0;
     var x = v;
     if (x == 0) {
-        ds[0] = '0';
+        ds[0][0] = '0';
         n = 1;
     }
     while (x > 0) {
-        ds[n] = '0' + (u8)(x % 10);
+        ds[0][n] = '0' + (u8)(x % 10);
         n = n + 1;
         x = x / 10;
     }
     while (n > 0) {
         n = n - 1;
-        _ = out.push(ds[n]);
+        _ = out.push(ds[0][n]);
     }
 };
 
@@ -1101,20 +1101,14 @@ pub const Parser = struct {
             _ = self.advance();
             let n = self.new_at(NK.ptr, t);
             if (self.accept(lex.Kind.kw_const)) { n.flag = true; }
-            // `*[N]T` 指向数组；`*[]T` 指向切片。`[` 后紧跟 `]` 才是空。
-            if (self.at(lex.Kind.lbracket) && self.peek_tok(1).kind != lex.Kind.rbracket) {
-                _ = self.advance();
-                n.b = try self.parse_expr();
-                try self.expect(lex.Kind.rbracket);
-            }
+            // §201：指针后面一律是完整类型。`*[N]T` = 指向 [N]T 的指针。
             n.a = try self.parse_type();
             return n;
         }
 
         if (t.kind == lex.Kind.lbracket) {
             _ = self.advance();
-            // `[]T` 切片；`[T; N]` 重复元组（N 个 T 内联，sema 展开成元组）。
-            // `[` 后紧跟 `]` 才是空切片。
+            // `[]T` 切片；`[N]T` 数组值类型（§201，取代 [T; N]）。
             if (self.at(lex.Kind.rbracket)) {
                 _ = self.advance();
                 let n = self.new_at(NK.sliceT, t);
@@ -1123,10 +1117,9 @@ pub const Parser = struct {
                 return n;
             }
             let n = self.new_at(NK.repeat_type, t);
-            n.a = try self.parse_type();
-            try self.expect(lex.Kind.semi);
             n.b = try self.parse_expr();
             try self.expect(lex.Kind.rbracket);
+            n.a = try self.parse_type();
             return n;
         }
 

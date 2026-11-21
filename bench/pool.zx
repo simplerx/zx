@@ -18,7 +18,7 @@ const main = fn () u8 {
         while (i < 10000000) {
             // 先释放旧块（池的 free 不需要尺寸，块头里有）
             if (i >= RING) {
-                let old = ring[r];
+                let old = ring[0][r];
                 if (old) ob {
                     if (!pp.free(ob)) { return 1; }
                 } else { return 1; }
@@ -31,7 +31,7 @@ const main = fn () u8 {
                 bv.0 = 7;
                 sink = sink + (u64)(i64)bv.0;
             } else { return 1; }
-            ring[r] = b;
+            ring[0][r] = b;
             r = (r + 1) & (RING - 1);
             i = i + 1;
         }

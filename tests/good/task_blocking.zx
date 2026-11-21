@@ -45,7 +45,7 @@ const parTick = fn (_: usize) !usize {
 
 const writeBig = fn (tag: u8) !usize {
     var mem = std.heapAlloc(std.heap.page, u8, BIG);
-    mem[0] = tag;
+    mem[0][0] = tag;
     let data = mem[0..BIG];
     var written: usize = 0;
     if (std.io.openWrite(PATH)) h {

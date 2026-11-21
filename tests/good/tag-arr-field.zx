@@ -1,4 +1,4 @@
-// §175：数组常索引元素的嵌套字段 arr[1].name = allocp()——
+// §175：数组常索引元素的嵌套字段 arr[0][1].name = allocp()——
 // 字段路径接受 NK_INDEX 整型字面量分量，free 经 "1.name" 对账。
 const std = @mod("std");
 pub const P2 = struct { name: *u8 };
@@ -7,8 +7,8 @@ pub const allocp = fn () *u8 {
 };
 pub const main = fn () i32 {
     var arr = std.stackAlloc(P2, 4);
-    arr[0] = P2{ .name = (*u8)"x" };
-    arr[1].name = allocp();
-    std.heap.page.free(std.heap.page.ctx, arr[1].name, 10);
+    arr[0][0] = P2{ .name = (*u8)"x" };
+    arr[0][1].name = allocp();
+    std.heap.page.free(std.heap.page.ctx, arr[0][1].name, 10);
     return 0;
 };

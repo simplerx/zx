@@ -16,7 +16,7 @@ const T1 = struct {
 
 // 被调函数经形参容器写入一份新分配（不返回、不 free）
 const fill = fn (t: *[1]T1, al: Allocator) void {
-    t[0].name = std.heapAlloc(al, i32, 1);
+    t[0][0].name = std.heapAlloc(al, i32, 1);
 };
 
 const main = fn () u8 {
@@ -27,7 +27,7 @@ const main = fn () u8 {
     fill(t1, al);
     // 调用方读回被调函数写入的指针并释放——修前这里让 fill 内的分配
     // 槽无人接管，误报 E0513。
-    let p = t1[0].name;
+    let p = t1[0][0].name;
     defer std.free(al, p[0..1]);
 
     std.println("ok");

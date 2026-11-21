@@ -29,7 +29,7 @@ const IPPROTO_TCP: i32 = 6;
 const SOCKADDR_LEN: i32 = 16;
 
 // sockaddr_in 的 C 布局：u16 family / u16 port / u32 addr / 8 字节 sin_zero。
-// Zx 没有数组值类型（`*[N]T` 是指针），sin_zero 用一个 u64 占位，尺寸仍是 16。
+// §201 有数组值后可用 `[8]u8`，但这里沿用 u64 占位，尺寸仍是 16。
 const SockAddrIn = extern struct {
     family: u16,
     port: u16,

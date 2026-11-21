@@ -12,6 +12,6 @@ const mk = fn () *u8 {
 pub const main = fn () i32 {
     var xs = std.stackAlloc(*u8, 4);
     let i = 1;
-    xs[i] = mk();
+    xs[0][i] = mk();
     return 0;
 };

@@ -33,6 +33,9 @@ static bool same(const Type *a, const Type *b) {
     case TY_SLICE:
         return a->is_const == b->is_const && same(a->elem, b->elem);
 
+    case TY_ARRAY:                    /* §201：[N]T 身份只看元素 + 长度 */
+        return a->len == b->len && same(a->elem, b->elem);
+
     case TY_VEC:
         return a->len == b->len && same(a->elem, b->elem);
 
@@ -101,6 +104,19 @@ Type *ty_ptr(Type *elem, bool is_const, bool has_len, uint64_t len) {
     t->has_len = has_len;
     t->len = len;
     return intern(t);
+}
+
+Type *ty_array(Type *elem, uint64_t len) {
+    Type *t = ty_new(TY_ARRAY);
+    t->elem = elem;
+    t->len = len;
+    return intern(t);
+}
+
+/* §201：`*[N]T` 不是特殊指针类型，就是 elem 为 TY_ARRAY 的普通 TY_PTR。
+ * has_len 只给字符串字面量等历史形状使用，不再参与数组指针判定。 */
+bool ty_is_array_ptr(Type *t) {
+    return t && t->kind == TY_PTR && t->elem && t->elem->kind == TY_ARRAY;
 }
 
 Type *ty_vec(Type *elem, uint64_t n) {
@@ -456,16 +472,16 @@ static int align_up(int n, int a) {
     return (n + a - 1) / a * a;
 }
 
-/* extern 聚合体（FFI）里的定长数组字段在 C 里是内联数组：大小 = N × 元素，
- * 对齐 = 元素对齐。普通 Zx 结构体的 *[N]T 是指针（8 字节），不能用这条路。
- * 返回 false = 不是 extern 数组字段，按普通规则算。 */
+/* extern 聚合体（FFI）里的 `[N]T` 字段在 C 里是内联数组：大小 = N × 元素，
+ * 对齐 = 元素对齐。普通 Zx 结构体里的 `[N]T` 本身就是值类型，走同一套布局。
+ * 返回 false = 不是数组字段，按普通规则算。 */
 static bool ext_array_field(Type *agg, Type *ft, int *fs, int *fa) {
     if (!agg || !agg->decl || !agg->decl->is_extern) return false;
-    if (!ft || ft->kind != TY_PTR || !ft->has_len) return false;
-    int es = ty_size(ft->elem);
+    if (!ft || ft->kind != TY_ARRAY) return false;
+    int es = ty_size(ft);
     if (es < 0) return false;
-    *fs = es * (int)ft->len;
-    *fa = ty_align(ft->elem);
+    *fs = es;
+    *fa = ty_align(ft->elem ? ft->elem : ty_u8());
     return true;
 }
 
@@ -492,6 +508,7 @@ int ty_align(Type *t) {
     case TY_ENUM:  a = ty_align(t->elem ? t->elem : ty_i32()); break;
     case TY_PTR: case TY_FN: a = 8; break;
     case TY_SLICE: a = 8; break;
+    case TY_ARRAY: a = ty_align(t->elem ? t->elem : ty_u8()); break;  /* §201 */
     case TY_VEC: {
         /* 与 clang 的 vector_size 类型一致：对齐 = 大小（4 float = 16B，
          * 8 float = 32B）。结构体布局两边必须同一个数，否则字段会错位。 */
@@ -522,12 +539,7 @@ int ty_align(Type *t) {
         for (int i = 0; i < t->nfields; i++) {
             if (t->fields[i].is_static) continue;
             Type *ft = t->fields[i].ty;
-            int fa;
-            if (ft && ft->kind == TY_PTR && ft->has_len &&
-                t->decl && t->decl->is_extern)
-                fa = ty_align(ft->elem);        /* extern 内联数组按元素对齐 */
-            else
-                fa = ty_align(ft);
+            int fa = ty_align(ft);
             if (fa > a) a = fa;
         }
         break;
@@ -535,12 +547,7 @@ int ty_align(Type *t) {
     case TY_UNION: {
         for (int i = 0; i < t->nfields; i++) {
             Type *ft = t->fields[i].ty;
-            int fa;
-            if (ft && ft->kind == TY_PTR && ft->has_len &&
-                t->decl && t->decl->is_extern)
-                fa = ty_align(ft->elem);
-            else
-                fa = ty_align(ft);
+            int fa = ty_align(ft);
             if (fa > a) a = fa;
         }
         if (t->is_tagged && t->tag_ty) {
@@ -575,6 +582,11 @@ int ty_size(Type *t) {
     case TY_ENUM:  s = t->elem ? ty_size(t->elem) : 4; break;
     case TY_PTR: case TY_FN: s = 8; break;
     case TY_SLICE: s = 16; break;
+    case TY_ARRAY: {                  /* §201：[N]T 占 N×size(T)，不是指针 */
+        int es = ty_size(t->elem ? t->elem : ty_u8());
+        s = es < 0 ? -1 : es * (int)t->len;
+        break;
+    }
     case TY_VEC: {
         int es = ty_size(t->elem);
         s = es < 0 ? -1 : es * (int)t->len;
@@ -683,13 +695,22 @@ static void ty_print_into(Buf *b, Type *t, int depth) {
     case TY_PTR:
         buf_putc(b, '*');
         if (t->is_const) buf_puts(b, "const ");
-        if (t->has_len) buf_printf(b, "[%llu]", (unsigned long long)t->len);
+        /* §201：elem 已是 [N]T 时不要再用 has_len 拼一遍 */
+        if (t->has_len && !(t->elem && t->elem->kind == TY_ARRAY))
+            buf_printf(b, "[%llu]", (unsigned long long)t->len);
         ty_print_into(b, t->elem, depth + 1);
         return;
 
     case TY_SLICE:
         buf_puts(b, "[]");
         if (t->is_const) buf_puts(b, "const ");
+        ty_print_into(b, t->elem, depth + 1);
+        return;
+
+    case TY_ARRAY:                    /* §201：[N]T */
+        buf_putc(b, '[');
+        buf_printf(b, "%llu", (unsigned long long)t->len);
+        buf_putc(b, ']');
         ty_print_into(b, t->elem, depth + 1);
         return;
 
@@ -870,6 +891,7 @@ const char *ty_kind_name(TyKind k) {
     case TY_UNDEF: return "undefined";
     case TY_PTR: return "pointer";
     case TY_SLICE: return "slice";
+    case TY_ARRAY: return "array";
     case TY_TUPLE: return "tuple";
     case TY_STRUCT: return "struct";
     case TY_UNION: return "union";

@@ -18,8 +18,8 @@ extern fn free(p: *u8) void;
 
 const main = fn () void {
     let s = "hello from libc";
-    _ = puts(s.ptr);
-    std.println("strlen = {}", strlen(s.ptr));
+    _ = puts(s[0..].ptr);
+    std.println("strlen = {}", strlen(s[0..].ptr));
 
     // libc 的内存照样能当 Zx 的字节缓冲用
     let p = malloc(8);

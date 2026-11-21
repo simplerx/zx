@@ -4,7 +4,7 @@ const std = @mod("std");
 
 const main = fn () !i32 {
     var p = tag.h : std.heapAlloc(std.heap.page, i32, 10);
-    p[0] = 42;
+    p[0][0] = 42;
 
     var xs = std.heapSlice(std.heap.page, *[10]i32, 8);
     xs[0] = null;
@@ -14,7 +14,7 @@ const main = fn () !i32 {
     xs[k] = p;
 
     tag q : keep = xs[k];
-    if (q[0] != 42) { return 1; }
+    if (q[0][0] != 42) { return 1; }
     std.heap.page.deinit(q);
     std.heap.page.deinit(xs);
     return 0;

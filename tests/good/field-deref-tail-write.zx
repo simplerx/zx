@@ -19,10 +19,10 @@ const T1 = struct {
 const main = fn () !u8 {
     let t1 = std.heapAlloc(std.heap.page, T1, 1);
     defer std.free(std.heap.page, t1);
-    t1[0].name = std.heapAlloc(std.heap.page, i32, 1);
-    t1[0].name.0 = 10;
-    defer std.free(std.heap.page, t1[0].name[0..1]);
+    t1[0][0].name = std.heapAlloc(std.heap.page, i32, 1);
+    t1[0][0].name.0 = 10;
+    defer std.free(std.heap.page, t1[0][0].name[0..1]);
     let t2 = t1;
-    std.println("p:{}", t2[0].name.0);
+    std.println("p:{}", t2[0][0].name.0);
     return 0;
 };

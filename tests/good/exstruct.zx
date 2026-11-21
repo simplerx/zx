@@ -8,7 +8,7 @@ const SystemTime = extern struct {
 
 // 定长数组字段在 C 里内联展开（char data[16]，不是指针）
 const Buf8 = extern struct {
-    data: *[16]u8,
+    data: [16]u8,
     n: u32,
 };
 

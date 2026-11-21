@@ -1,0 +1,44 @@
+// §201 补丁：`x.?.field` 按值作实参不该被误判成当前栈帧逃逸；
+// 局部变量先存栈地址再改成全局地址后，stack_val 必须洗掉旧事实。
+const std = @mod("std");
+
+const Item = struct { v: i32 };
+const Box = struct { item: ?*Item };
+
+var g_cell: i32 = 7;
+var g_ptr: *i32 = &g_cell;
+
+const get = fn (b: *Box, i: usize) ?*Item {
+    if (i != 0) { return null; }
+    return b.item;
+};
+
+const read = fn (p: *Item) i32 { return p.v; };
+
+const rebind = fn () *i32 {
+    var local: i32 = 1;
+    var p: *i32 = &local;
+    p = g_ptr;
+    return p;
+};
+
+pub const main = fn () i32 {
+    var it = Item{ .v = 42 };
+    var b = Box{ .item = &it };
+
+    // 三种按值用法：unwrap 后整对象、unwrap 后字段、直接作实参
+    let p = get(&b, 0).?;
+    if (read(p) != 42) { return 1; }
+    if (read(get(&b, 0).?) != 42) { return 2; }
+    if (get(&b, 0).?.v != 42) { return 3; }
+
+    // 重新绑定成全局指针后 return 不再误报 E0503
+    if (rebind().0 != 7) { return 4; }
+
+    std.println("ok {}", read(get(&b, 0).?));
+    return 0;
+};
+
+// expect-output
+// ok 42
+// expect-exit: 0

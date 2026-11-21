@@ -29,11 +29,11 @@ const Table = fn (cap: usize) type {
         };
 
         const getUnchecked = fn (self: *Self, h: Handle) ?*u8 {
-            return (*u8)&self.ptr[h.pos];
+            return (*u8)&self.ptr[0][h.pos];
         };
 
         pub const free = fn (self: *Self, h: Handle) bool {
-            self.ptr[h.pos] = null;
+            self.ptr[0][h.pos] = null;
             return true;
         };
     };

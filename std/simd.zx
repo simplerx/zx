@@ -29,10 +29,10 @@
 extern "C" {
     // f32 的平方根 / 三角直接用 libm 的单精度符号：和 math.zx 的 f64 版本
     // 是两个符号，这里不做 f32→f64→f32 的往返（向量长度在热路径上）。
-    fn sqrtf(x: f32) f32;
-    fn sinf(x: f32) f32;
-    fn cosf(x: f32) f32;
-    fn acosf(x: f32) f32;
+    pub fn sqrtf(x: f32) f32;
+    pub fn sinf(x: f32) f32;
+    pub fn cosf(x: f32) f32;
+    pub fn acosf(x: f32) f32;
 }
 
 // 4 分量浮点向量（几何 / 颜色 / 任意 4 元组）。

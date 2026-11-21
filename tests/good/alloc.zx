@@ -7,29 +7,29 @@ const std = @mod("std");
 
 const total = fn (p: *[4]u64) u64 {
     var s: u64 = 0;
-    for (0..4) i { s = s + p[i]; }
+    for (0..4) i { s = s + p[0][i]; }
     return s;
 };
 
 const main = fn () u8 {
     // ① 栈分配：和普通局部数组一样用
     var sa = std.stackAlloc(u64, 4);
-    for (0..4) i { sa[i] = i + 1; }
-    std.println("stack {d} len={d}", total(sa), sa.len);
+    for (0..4) i { sa[0][i] = i + 1; }
+    std.println("stack {d} len={d}", total(sa), sa[0].len);
 
     // ② 堆分配：显式传分配器
     var ha = std.heapAlloc(std.heap.page, u64, 4);
-    for (0..4) i { ha[i] = (i + 1) * 10; }
-    std.println("heap {d} len={d}", total(ha), ha.len);
+    for (0..4) i { ha[0][i] = (i + 1) * 10; }
+    std.println("heap {d} len={d}", total(ha), ha[0].len);
 
     // ③ undefined：不分配，指针本身清零；.len 还是编译期常量
     var raw: *[4]u64 = undefined;
-    std.println("raw len={d} size={d}", raw.len, raw.size);
+    std.println("raw len={d} size={d}", raw[0].len, raw[0].size);
 
     // ④ 同一块存储可以经局部变量中转（只是不许 return 出去）
     var p: *[4]u64 = ha;
     p = sa;
-    std.println("relay {d}", p[2]);
+    std.println("relay {d}", p[0][2]);
 
     // ⑤ 逃逸检查放行的形态：返回形参所指物里的字段
     var box = Box{ .v = 42 };

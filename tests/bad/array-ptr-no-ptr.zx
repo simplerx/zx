@@ -1,0 +1,4 @@
+// §201：*[N]T 是普通指针，没有 .ptr 内建；先 p[0] 取数组再问。
+// expect: has no member 'ptr'
+const head = fn (p: *[3]i32) *i32 { return p.ptr; };
+const main = fn () void {};

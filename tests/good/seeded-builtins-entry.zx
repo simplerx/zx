@@ -8,8 +8,8 @@
 // fmt=7
 pub const main = fn () u8 {
     var st = stackAlloc(u8, 2);
-    st[0] = 88;
-    println("entry={}", st[0]);
+    st[0][0] = 88;
+    println("entry={}", st[0][0]);
 
     var out = format(heap.page, "fmt={}", 7);
     if (out) s {

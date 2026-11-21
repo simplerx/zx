@@ -4,12 +4,12 @@
 const std = @mod("std");
 
 // 自建 arena：容器要内存时向它要，一块都不碰 malloc。
-var pool: *[256]u8 = undefined;
+var pool: [256]u8 = undefined;
 var used: usize = 0;
 
 const bump = fn (_: ?*u8, n: usize) ?*u8 {
     if (used + n > pool.len) { return null; }
-    let p = pool[0..].ptr + used;
+    let p = pool.ptr + used;
     used = used + n;
     return p;
 };

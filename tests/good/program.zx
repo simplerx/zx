@@ -10,14 +10,14 @@ const Vec = struct {
 
 const push = fn (v: *Vec, x: i32) bool {
     if (v.len >= MAX) { return false; }
-    v.data[v.len] = x;
+    v.data[0][v.len] = x;
     v.len = v.len + 1;
     return true;
 };
 
 const get = fn (v: Vec, i: usize) ?i32 {
     if (i >= v.len) { return null; }
-    return v.data[i];
+    return v.data[0][i];
 };
 
 const sortUp = fn (v: *Vec) void {
@@ -25,10 +25,10 @@ const sortUp = fn (v: *Vec) void {
     while (i + 1 < v.len) {
         var j: usize = 0;
         while (j + 1 < v.len - i) {
-            if (v.data[j] > v.data[j + 1]) {
-                let t = v.data[j];
-                v.data[j] = v.data[j + 1];
-                v.data[j + 1] = t;
+            if (v.data[0][j] > v.data[0][j + 1]) {
+                let t = v.data[0][j];
+                v.data[0][j] = v.data[0][j + 1];
+                v.data[0][j + 1] = t;
             }
             j = j + 1;
         }

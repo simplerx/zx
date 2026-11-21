@@ -66,7 +66,7 @@ const main = fn () u8 {
     chain(3);
 
     // 值形态不受影响：`else` 前面没有分号，照旧是表达式臂
-    let pick = if (xs[0] > 0) 10 else 20;
+    let pick = if (xs[0][0] > 0) 10 else 20;
     std.println("pick {}", pick);
 
     std.println("tier {} {} {}", tier(50), tier(7), tier(1));

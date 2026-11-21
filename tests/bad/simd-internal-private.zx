@@ -1,0 +1,9 @@
+// §204：std.simd 的内部实现辅助函数必须保持私有；从模块外访问报 E0601。
+// expect: E0601
+const std = @mod("std");
+const simd = std.simd;
+
+pub const main = fn () u8 {
+    let v = simd.xyz(simd.V4{ 1.0, 2.0, 3.0, 4.0 });
+    return 0;
+};

@@ -4,7 +4,7 @@ const std = @mod("std");
 
 const main = fn () !i32 {
     var p = tag.h : std.heapAlloc(std.heap.page, u8, 10);
-    p[0] = 42;
+    p[0][0] = 42;
 
     var s = p[0..];              // 切片携带标签
     var w = ([]u8)s;             // 家族内 cast 身份不变

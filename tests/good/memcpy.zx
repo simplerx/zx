@@ -16,22 +16,23 @@ const main = fn () i32 {
     var src = &.{ 1, 2, 3, 4, 5, 6, 7, 8 };
     var dst: *[8]i32 = &.{ 0, 0, 0, 0, 0, 0, 0, 0 };
     @memcpy(dst, src, 8 * @type(i32).size);
-    std.println("{} {} {} {}", dst[0], dst[3], dst[6], dst[7]);
+    std.println("{} {} {} {}", dst[0][0], dst[0][3], dst[0][6], dst[0][7]);
 
     // ② @memmove：同 buffer 内重叠右移
     var buf: *[6]i32 = &.{ 1, 2, 3, 4, 5, 6 };
-    @memmove((buf + 2), (buf + 0), 4 * @type(i32).size);
-    std.println("{} {} {} {} {} {}", buf[0], buf[1], buf[2], buf[3], buf[4], buf[5]);
+    // §201：buf 是 *[6]i32，buf + 2 会按整个数组步进；元素地址要从 buf[0] 取。
+    @memmove(&buf[0][2], &buf[0][0], 4 * @type(i32).size);
+    std.println("{} {} {} {} {} {}", buf[0][0], buf[0][1], buf[0][2], buf[0][3], buf[0][4], buf[0][5]);
 
     // ③ @memset：清零
     @memset(buf, 0, 6 * @type(i32).size);
-    std.println("{} {}", buf[0], buf[5]);
+    std.println("{} {}", buf[0][0], buf[0][5]);
 
     // ④ 切片实参（自动取 .ptr）
     let s: []const i32 = src[0..];
     var d2: *[4]i32 = &.{ 0, 0, 0, 0 };
     @memcpy(d2, s, 4 * @type(i32).size);
-    std.println("{} {}", d2[1], d2[3]);
+    std.println("{} {}", d2[0][1], d2[0][3]);
 
     // ⑤ 容器内部也走它们：append 大批量
     var al = std.array.List(i32).init(std.heap.page);

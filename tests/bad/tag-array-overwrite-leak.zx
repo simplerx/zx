@@ -1,14 +1,15 @@
 // expect: is never freed
 // expect-code: E0513
 // expect-count: 1
-// §173 补丁十：常索引覆盖写入换账——xs[0] 原来装 p，被新分配覆盖后
+// §173 补丁十：常索引覆盖写入换账——xs[0][0] 原来装 p，被新分配覆盖后
 // p 再无载体，泄漏由终扫 E0513 指到 p 最后的归属处。
+// §201：xs 是 *[4]*u8，xs[0] 取整个数组，元素要写 xs[0][0]。
 const std = @mod("std");
 pub const main = fn () i32 {
     var xs = std.stackAlloc(*u8, 4);
     let p = (*u8)std.heapAlloc(std.heap.page, u8, 10);
-    xs[0] = p;
-    xs[0] = (*u8)std.heapAlloc(std.heap.page, u8, 10);
+    xs[0][0] = p;
+    xs[0][0] = (*u8)std.heapAlloc(std.heap.page, u8, 10);
     tag xs : null;
     return 0;
 };

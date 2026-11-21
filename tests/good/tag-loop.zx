@@ -4,8 +4,8 @@ const main = fn () u8 {
     var total: u64 = 0;
     for (0..3) i {
         var p = tag.buf : std.heapAlloc(std.heap.page, i32, 4);
-        p[0] = (i32)(i) + 1;
-        total = total + (u64)(p[0]);
+        p[0][0] = (i32)(i) + 1;
+        total = total + (u64)(p[0][0]);
         std.heap.page.free(std.heap.page.ctx, (*u8)p, 16);
     }
     std.println("total={d}", total);

@@ -21,7 +21,7 @@ const Table = fn (cap: usize) type {
             if (self.used >= cap) { return null; }
             let i = self.used;
             self.used = i + 1;
-            self.gens[i] = 1;
+            self.gens[0][i] = 1;
             return Handle{ .pos = i };
         };
 
@@ -32,11 +32,11 @@ const Table = fn (cap: usize) type {
 
         // 实际路径：纯地址。私有，用户手写 `t.getUnchecked(h)` 会被 E0404 挡住。
         const getUnchecked = fn (self: *Self, h: Handle) ?*u8 {
-            return (*u8)&self.ptr[h.pos];
+            return (*u8)&self.ptr[0][h.pos];
         };
 
         pub const free = fn (self: *Self, h: Handle) bool {
-            self.ptr[h.pos] = null;
+            self.ptr[0][h.pos] = null;
             return true;
         };
     };

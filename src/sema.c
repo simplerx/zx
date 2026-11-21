@@ -1538,17 +1538,30 @@ static bool can_coerce(Type *from, Type *to) {
     if (from->kind == TY_COMPTIME_FLOAT) return ty_is_float(to);
 
     if (from->kind == TY_PTR && to->kind == TY_PTR) {
-        if (from->has_len && to->has_len && from->len != to->len) return false;
-        if (!from->has_len && to->has_len) return false;    /* 反向要显式断言 */
+        /* §201：*[N]T 就是 elem 为 [N]T 的普通指针；→ *T 就是普通指针换 elem。 */
+        if (ty_is_array_ptr(from) && !ty_is_array_ptr(to) &&
+            ty_eq(from->elem->elem, to->elem))
+            return true;
+        /* 字符串字面量的历史形状（*[N]const u8）→ *const u8 */
+        if (from->has_len && !to->has_len)
+            return ty_eq(from->elem, to->elem) && (!from->is_const || to->is_const);
+        if (to->has_len && !from->has_len) return false;   /* 显式断言 */
         if (!ty_eq(from->elem, to->elem)) return false;
         if (from->is_const && !to->is_const) return false;
         return true;
     }
 
     if (from->kind == TY_PTR && to->kind == TY_SLICE) {
-        if (!from->has_len) return false;
-        if (!ty_eq(from->elem, to->elem)) return false;
+        /* 数组指针按 elem=[N]T 拆；字符串字面量仍走 has_len 的历史形状。 */
+        if (!ty_is_array_ptr(from) && !from->has_len) return false;
+        Type *fe = ty_is_array_ptr(from) ? from->elem->elem : from->elem;
+        if (!ty_eq(fe, to->elem)) return false;
         if (from->is_const && !to->is_const) return false;
+        return true;
+    }
+    /* §201：[N]T 数组值 → []T 切片（首元素视图） */
+    if (from->kind == TY_ARRAY && to->kind == TY_SLICE) {
+        if (!ty_eq(from->elem, to->elem)) return false;
         return true;
     }
 
@@ -1695,22 +1708,9 @@ static Type *resolve_type(Node *n) {
 
     case NK_PTR_TYPE: {
         Type *elem = resolve_type(n->a);
-        bool has_len = n->b != NULL;
-        uint64_t len = 0;
-        if (has_len) {
-            IntV v = ev_int(n->b);
-            /* 标识符压根不存在时不要落成「长度不是编译期整数」：真实原因是
-             * 拼写 / 大小写（`N: u64` 却写 `*[n]u64` 会踩中），那句提示把人
-             * 引到错误的修法上。 */
-            if (!v.ok && n->b->kind == NK_IDENT && !n->b->sym)
-                return BAD(n->b, "unknown identifier '%s' in array length -- check "
-                          "spelling/case; a generic value parameter like `N: u64` "
-                          "is a compile-time constant",
-                          n->b->name ? n->b->name : "?");
-            if (!v.ok || v.neg) { BAD(n->b, "array length must be a non-negative compile-time integer"); has_len = false; }
-            else len = v.v;
-        }
-        return ty_ptr(elem, n->flag, has_len, len);
+        /* §201：`*[N]T` 就是普通指针，elem 是 TY_ARRAY，长度信息在 elem 里。
+         * has_len 只留给字符串字面量等历史形状，这里一律 false。 */
+        return ty_ptr(elem, n->flag, false, 0);
     }
 
     case NK_SLICE_TYPE:
@@ -1790,24 +1790,24 @@ static Type *resolve_type(Node *n) {
     }
 
     case NK_REPEAT_TYPE: {
-        /* [T; N]：N 个 T 的内联元组值类型。sema 期展开成 TY_TUPLE——
-         * 布局、发码、下标、反射全部复用元组机制，语言层零新增类型。 */
+        /* §201：[N]T 数组值类型（取代旧的 [T; N] 内联元组）。占 N×size(T)
+         * 栈内存，内建 .ptr/.len；不再是 TY_TUPLE，也不再按元组发码。
+         * 节点沿用 NK_REPEAT_TYPE（字段布局 a=元素类型, b=长度不变），
+         * 避免自举前端 / zxls 的节点编号镜像漂移。 */
         Type *elem = resolve_type(n->a);
         if (elem->kind == TY_INVALID) return ty_invalid();
         IntV v = ev_int(n->b);
         if (!v.ok || v.neg)
-            return BAD(n->b, "repeat-type length must be a non-negative compile-time integer");
-        if (v.v == 0 || v.v > 4096) {
+            return BAD(n->b, "array length must be a non-negative compile-time integer");
+        /* §201：TY_ARRAY 是 struct{ T v[N]; }，不再像旧 TY_TUPLE 那样
+         * 展开 N 份字段；上限只防 C 数组维度溢出，放宽到 int 范围。 */
+        if (v.v == 0 || v.v > 0x3fffffffULL) {
             diag_code_at("E0305", n->line, n->col,
-                         "repeat-type length must be 1..4096 (got %llu)",
+                         "array length must be 1..1073741823 (got %llu)",
                          (unsigned long long)v.v);
             return ty_invalid();
         }
-        int cnt = (int)v.v;
-        Type **items = calloc((size_t)cnt, sizeof(Type *));
-        for (int i = 0; i < cnt; i++) items[i] = elem;
-        Type *t = ty_tuple(items, cnt);
-        free(items);
+        Type *t = ty_array(elem, v.v);
         n->ty = ty_type();
         n->type_val = t;
         return t;
@@ -1910,7 +1910,8 @@ static void collect_methods(Node *n, Type *agg, const char *what) {
         }
 
         Type *r0 = ft->params[0];
-        Type *base = (r0->kind == TY_PTR && !r0->has_len) ? r0->elem : r0;
+        Type *base = (r0->kind == TY_PTR && !r0->has_len && !ty_is_array_ptr(r0))
+                   ? r0->elem : r0;
         if (base != agg && base->kind != TY_INVALID && r0->kind != TY_INVALID && !mrecv_dup(it))
             err_at(it->line, it->col,
                    "method '%s' must take the %s as its first parameter "
@@ -1923,7 +1924,8 @@ static void collect_methods(Node *n, Type *agg, const char *what) {
          * 合并前的 `*const Self` 当成 `Self` 归一化。判定只落在函数类型上：
          * 形参节点 ty 恒为 `Self`，所以方法体里 self 始终是值语义；后端在
          * 发射 self 标识符时按 `sema_sym_self_by_ptr` 补 `(*self)`。 */
-        bool mutable_self = r0->kind == TY_PTR && !r0->has_len && !r0->is_const;
+        bool mutable_self = r0->kind == TY_PTR && !r0->has_len &&
+                            !ty_is_array_ptr(r0) && !r0->is_const;
         if (!mutable_self) {
             int z = ty_size(agg);
             if (z < 0) z = 0;
@@ -1969,11 +1971,13 @@ static bool check_c_able(Node *at, Type *t, const char *fname) {
         return true;
     case TY_FLOAT: case TY_BOOL: case TY_ENUM:
         return true;
+    case TY_ARRAY:                    /* §201：[N]T 作为 extern 字段展开成 C 数组 */
+        return check_c_able(at, t->elem, fname);
     case TY_PTR:
         /* 指针就是一个机器字：指向什么都不影响**这个**结构体的布局。
-         * 定长数组（*[N]T）例外——它作为 extern 字段要展开成 C 数组，
+         * 定长数组指针（*[N]T）例外——它作为 extern 字段要展开成 C 数组，
          * 元素类型必须同样 C 兼容。 */
-        if (t->has_len) return check_c_able(at, t->elem, fname);
+        if (ty_is_array_ptr(t)) return check_c_able(at, t->elem, fname);
         return true;
     case TY_FN: {
         bool ok = t->ret ? check_c_able(at, t->ret, fname) : true;
@@ -2369,6 +2373,9 @@ static Type *unify(Node *at, Type *a, Type *b) {
      * 统一成切片：`*[4]const u8` 与 `*[5]const u8` → `[]const u8`。长度是
      * 类型的一部分，硬要相等的话每个臂都得显式转换，没法写出
      * `switch (k) { .ident: "IDENT", … }`。 */
+    if (ty_is_array_ptr(a) && ty_is_array_ptr(b) && ty_eq(a->elem, b->elem))
+        return ty_slice(a->elem->elem, a->is_const || b->is_const);
+    /* 字符串字面量历史形状：长度不同但 elem 都是 u8 → 统一成 []const u8 */
     if (a->kind == TY_PTR && b->kind == TY_PTR && a->has_len && b->has_len &&
         ty_eq(a->elem, b->elem))
         return ty_slice(a->elem, a->is_const || b->is_const);
@@ -3165,7 +3172,8 @@ static bool ft_path_key_d(Node *e, char *buf, size_t cap, Node **base_out,
         if (fb->kind == NK_FIELD) {
             if (fb->name) {
                 names[np] = fb->name;
-            } else if (fb->a->ty->kind == TY_PTR && !fb->a->ty->has_len) {
+            } else if (fb->a->ty->kind == TY_PTR && !fb->a->ty->has_len &&
+                       !ty_is_array_ptr(fb->a->ty)) {
                 fb = fb->a;                 /* 裸指针 .0：透明穿过 */
                 if (np == 0) deref_head = true;   /* §196：首步穿透 */
                 continue;
@@ -3464,11 +3472,11 @@ static int aesc_const_index(Node *ix) {
     return -1;
 }
 
-/* §192：数组指针的 `.N` 点形式常索引元素访问（与 ptr[N] 等价）。
- * 裸指针的 .0 是纯解引用，不算元素访问。 */
+/* §201：`*[N]T` 的 `.N` / `[i]` 取的是第 i 个**数组**，不是元素；
+ * 元素要继续 `[i]`。裸指针 `.0` 是解引用。两者都不算"元素访问"。 */
 static bool ft_num_elem(Node *e) {
-    return e && e->kind == NK_FIELD && !e->name && e->ival >= 0 &&
-           e->a && e->a->ty && e->a->ty->kind == TY_PTR && e->a->ty->has_len;
+    (void)e;
+    return false;
 }
 
 /* §187：表达式是否带「指针出处」污点——值（或经变量）源自指针→整数
@@ -3559,11 +3567,15 @@ static void agt_clear(Symbol *base, Node *site) {
  * 切片/铸型/解包沿基址剥；其余（指针算术、多级间接）解析不了返回
  * NULL——写入处回退 rt_pending 断线拦截。 */
 static Symbol *agt_base_of(Node *e) {
-    for (int g = 0; g < 6 && e; g++) {
+    for (int g = 0; g < 8 && e; g++) {
         if (e->kind == NK_IDENT)
             return (e->sym && e->sym->kind != SK_CONST) ? e->sym : NULL;
         if (e->kind == NK_SLICE || e->kind == NK_CAST ||
-            e->kind == NK_UNWRAP) { e = e->a; continue; }
+            e->kind == NK_UNWRAP ||
+            /* §201：`xs[0][i]` 里外层 [0] 取的是 [N]T 数组值（不是元素），
+             * 要继续下钻才能找到数组基变量 xs，否则标签进不了群、终扫误报
+             * E0513。旧语义 xs[0] 直接就是元素指针，这里从不需要下钻下标。 */
+            e->kind == NK_INDEX) { e = e->a; continue; }
         return NULL;
     }
     return NULL;
@@ -3689,18 +3701,15 @@ static void tag_of_expr(Node *e, int *id, int *state) {
         tag_of_expr(e->a, id, state);
         return;
     }
-    /* §173 补丁十（收紧版）：常索引读精确元素账——`let q = xs[0];`
-     * 标签精确跟出（槽共享）、`free(xs[0])` 记得上账。§192：数组指针的
-     * `.N` 点形式与 ptr[N] 同一本账（同一 aesc 群，两种拼法互通）。
-     * 运行期索引：数组存过贴标指针就报 E0521（无法指认元素，标签绝不
-     * 静默丢失；续链语句的值读出由调用方预先占座豁免）。只继承 LIVE：
-     * FREED 继承会在"另一臂没存过"的分支场景里假报 E0512。 */
-    if (((e->kind == NK_INDEX && e->a) ||
-         (e->kind == NK_FIELD && !e->name && e->ival >= 0 && e->a &&
-          e->a->ty && e->a->ty->kind == TY_PTR && e->a->ty->has_len)) &&
-        e->a->kind == NK_IDENT &&
+    /* §173 补丁十（收紧版）：常索引读精确元素账——`let q = xs[0][i];`
+     * §201：只有**数组值**的下标才是元素访问；`*[N]T` 的 `[i]` / `.i`
+     * 取的是第 i 个数组，不能按元素账处理。运行期索引：数组存过贴标
+     * 指针就报 E0521（标签绝不静默丢失）。只继承 LIVE。 */
+    bool idx_elem = e->kind == NK_INDEX && e->a &&
+                    !(e->a->ty && ty_is_array_ptr(e->a->ty));
+    if (idx_elem && e->a->kind == NK_IDENT &&
         e->a->sym && e->a->sym->kind != SK_CONST) {
-        int ix = e->kind == NK_INDEX ? aesc_const_index(e->b) : (int)e->ival;
+        int ix = aesc_const_index(e->b);
         int aid = ix >= 0 ? aesc_find(e->a->sym, ix) : 0;
         if (ix < 0 && (aesc_any(e->a->sym) || agt_any(e->a->sym)) &&
             tag_diag_once(e->line, e->col))
@@ -3752,11 +3761,11 @@ static void tag_of_expr(Node *e, int *id, int *state) {
         return;
     }
     /* §174：(*p) 解引用（方法接收者自动补的 name=NULL NK_FIELD，基址
-     * 是指针）：贴标指针经解引用身份不变。§192：数组指针（has_len）的
-     * `.N` 是元素访问不是解引用——上面已按 aesc 精确账处理，这里不吞
-     * （否则整容器分配的标签会错落到元素头上）。 */
+     * 是指针）：贴标指针经解引用身份不变。§201：数组指针的 `.N` 取数组，
+     * 不是解引用也不是元素访问——上面已按精确账处理，这里不吞。 */
     if (e->kind == NK_FIELD && !e->name && e->a && e->a->ty &&
-        e->a->ty->kind == TY_PTR && !e->a->ty->has_len) {
+        e->a->ty->kind == TY_PTR && !e->a->ty->has_len &&
+        !ty_is_array_ptr(e->a->ty)) {
         tag_of_expr(e->a, id, state);
         return;
     }
@@ -5395,6 +5404,10 @@ static bool expr_frame(Node *e) {
         return true;
     case NK_FIELD: case NK_INDEX: case NK_SLICE:
         return expr_frame(e->a);
+    case NK_UNWRAP:                   /* `x.?`：载荷来源跟着 optional 走 */
+        return expr_frame(e->a);
+    case NK_ORELSE: case NK_TRY:      /* 两臂任一来自当前帧即为当前帧 */
+        return expr_frame(e->a) || expr_frame(e->b);
     case NK_BIN:
         if (e->op == TOK_PLUS || e->op == TOK_MINUS)  /* 指针运算保持来源 */
             return expr_frame(e->a) || expr_frame(e->b);
@@ -5405,6 +5418,12 @@ static bool expr_frame(Node *e) {
 
 static bool addr_frame(Node *o) {
     if (!o) return false;
+    /* §201 补丁：`&x.?` / `&x.?.f` 的 unwrap 结果（即便载荷是指针 `*T`）
+     * 会被后端物化到当前帧临时，取它的地址就落在当前帧。必须先于下面的
+     * "指针类型跟着被指物走"分支判定，否则 `&get(b).?.v` 会跟着堆载荷
+     * 判成非栈帧，漏过 E0503、生成悬垂 C。 */
+    if (o->kind == NK_UNWRAP || o->kind == NK_ORELSE || o->kind == NK_TRY)
+        return true;
     Type *t = o->ty;
     if (t && (t->kind == TY_PTR || t->kind == TY_SLICE))
         return expr_frame(o);       /* 取的是被指物：来源跟着被指物走 */
@@ -5419,6 +5438,12 @@ static bool addr_frame(Node *o) {
     }
     case NK_ARRAY_LIT: case NK_TUPLE: case NK_STRUCT_LIT: case NK_ANON_STRUCT:
         return true;                /* &.{…} 等匿名存储落在当前栈帧 */
+    case NK_UNWRAP:
+        /* `&x.?` / `&x.?.f`：unwrap 是 zx_unwrap_...() 的 rvalue，后端会
+         * 物化到当前帧临时；即便载荷来自堆，取地址也落在当前帧。 */
+        return true;
+    case NK_ORELSE: case NK_TRY:
+        return true;                /* 兜底臂/捕获块都是当前帧的临时量 */
     default: return false;
     }
 }
@@ -5478,9 +5503,10 @@ static Type *check_assign(Node *n) {
             if (base && base->kind == NK_IDENT && base->sym)
                 base->sym->nassign++;
         }
-        /* 赋进局部变量的指针也记来源：之后 return 它同样要拦 */
-        if (n->a->kind == NK_IDENT && n->a->sym && expr_frame(n->b))
-            n->a->sym->stack_val = true;
+        /* 赋进局部变量的指针也记来源：之后 return 它同样要拦。
+         * 重算而非只置 true——先存栈地址再改成堆/全局地址必须洗掉旧事实。 */
+        if (n->a->kind == NK_IDENT && n->a->sym)
+            n->a->sym->stack_val = expr_frame(n->b);
         /* §130：赋值重新绑定发行版本；赋成别的值就把旧版本标 opaque */
         if (n->a->kind == NK_IDENT && n->a->sym) {
             int rs = n->b ? n->b->reg_slot : 0;
@@ -5948,11 +5974,21 @@ static Type *check_binary(Node *n, Type *expect) {
 }
 
 /* &.{…}：一块匿名存储的地址。结果类型 *[N]T（R9），const 由绑定形式再决定。 */
+static bool byte_str_ptr_ty(Type *t) {
+    if (!t || t->kind != TY_PTR || !t->has_len || !t->elem) return false;
+    Type *e = t->elem;
+    if (e->kind == TY_ARRAY) e = e->elem;
+    return e && e->kind == TY_INT && e->bits == 8 && !e->is_signed;
+}
+
 static Type *check_array_lit(Node *n, Node **items, int nitems, Type *expect) {
     Type *elem = NULL;
     if (expect) {
-        if (expect->kind == TY_PTR && expect->elem) elem = expect->elem;
-        else if (expect->kind == TY_SLICE) elem = expect->elem;
+        /* §201：期待类型是 `*[N]T`，elem 是 [N]T，字面量的元素类型要再拆一层。 */
+        if (expect->kind == TY_PTR && expect->elem) {
+            elem = expect->elem;
+            if (elem->kind == TY_ARRAY) elem = elem->elem;
+        } else if (expect->kind == TY_SLICE) elem = expect->elem;
     }
     for (int i = 0; i < nitems; i++) {
         Type *it = check_expr(items[i], elem);
@@ -5960,10 +5996,7 @@ static Type *check_array_lit(Node *n, Node **items, int nitems, Type *expect) {
             Type *d = scalar_default(it);
             if (d->kind == TY_INVALID) return d;
             elem = d;
-        } else if (it && it->kind == TY_PTR && it->has_len && it->elem &&
-                   it->elem->kind == TY_INT && it->elem->bits == 8 &&
-                   elem->kind == TY_PTR && elem->has_len && elem->elem &&
-                   elem->elem->kind == TY_INT && elem->elem->bits == 8) {
+        } else if (byte_str_ptr_ty(it) && byte_str_ptr_ty(elem)) {
             /* 字符串数组：长度各不相同的字面量统一成 `[]const u8`
              *（用户 2026-11-09：字符串是 *[N]const u8；不统一的话
              * `["alpha", "beta"]` 每个元素都得显式转换）。 */
@@ -5977,7 +6010,8 @@ static Type *check_array_lit(Node *n, Node **items, int nitems, Type *expect) {
     }
     for (int i = 0; i < nitems; i++)
         coerce_node(items[i], items[i]->ty, elem, "array element");
-    return type_of(n, ty_ptr(elem, false, true, (uint64_t)nitems));
+    return type_of(n, ty_ptr(ty_array(elem, (uint64_t)nitems), false, true,
+                             (uint64_t)nitems));
 }
 
 static Type *check_unary(Node *n, Type *expect) {
@@ -6003,6 +6037,7 @@ static Type *check_unary(Node *n, Type *expect) {
          * `&xs` 是合法的 `**(...)`（用户 2026-11-10 确认的设计）。
          * 以前这里错误地按"内联数组"挡掉，是文档/实现的误解。 */
         bool cst = !lvalue_mutable(n->a);
+        /* §201：取数组值的地址就是普通指针，elem 是 TY_ARRAY */
         return type_of(n, ty_ptr(t, cst, false, 0));
     }
 
@@ -6471,13 +6506,19 @@ static Type *check_field(Node *n) {
 
     /* .len / .size —— 编译器字段 */
     if (n->name && (!strcmp(n->name, "len") || !strcmp(n->name, "size"))) {
+        /* §201：字符串字面量 `"abc".len/.size` 是字面量语法糖，不是
+         * `*[N]T` 的通用内建。数组指针已经是普通指针，不再提供这些成员。 */
+        if (n->a && n->a->kind == NK_STR)
+            return type_of(n, ty_usize());
         if (bt->kind == TY_SLICE) return type_of(n, ty_usize());
         if (bt->kind == TY_TUPLE) return type_of(n, ty_comptime_int());
-        if (bt->kind == TY_PTR && bt->has_len) return type_of(n, ty_usize());
+        if (bt->kind == TY_ARRAY) return type_of(n, ty_comptime_int());  /* §201 */
         if (bt->kind == TY_VEC) return type_of(n, ty_usize());
-        /* 其余情况：结构体自己也可以有叫 len 的字段，落到普通字段查找 */
-        if (bt->kind == TY_PTR && !ty_field(bt->elem, n->name))
-            return BAD(n, "`%s` has no count; use *[N]T or []T", ty_str(bt));
+        /* §197：裸指针 elem 有同名字段就走字段，否则给人话诊断。
+         * `*[N]T`（elem 是数组）落到下面 TY_PTR 分支按普通字段查找。 */
+        if (bt->kind == TY_PTR && !bt->has_len && !ty_is_array_ptr(bt) &&
+            !ty_field(bt->elem, n->name))
+            return BAD(n, "`%s` has no count; use []T", ty_str(bt));
     }
 
     switch (bt->kind) {
@@ -6494,12 +6535,14 @@ static Type *check_field(Node *n) {
     case TY_PTR: {
         Type *e = bt->elem;
         if (!n->name) {
-            if (bt->has_len)
-                /* §193：数组下标只认 `[i]`——`.N` 与元组/向量分量拼法混淆
-                 *（用户 2026-11-20），数组指针上的点下标删除。 */
-                return BAD(n, "array `.N` indexing was removed: write `e[%llu]` "
-                              "-- dot-index stays only for tuples and vectors",
+            if (ty_is_array_ptr(bt)) {
+                /* §201：*[N]T 指向数组，`.0` = 解引用取整个数组 [N]T，
+                 * 于是 `p.0[i]` / `p[0][i]` 都是取元素。其他 .N 不认。 */
+                if (n->ival == 0) return type_of(n, e);   /* e = [N]T */
+                return BAD(n, "array pointer only has `.0` (the whole array); "
+                              "write `p.0[%llu]` for an element",
                            (unsigned long long)n->ival);
+            }
             if (n->ival != 0)
                 return BAD(n, "a bare pointer only has `.0` (dereference); use [] for indexing");
             /* §118 续：statics 的 ptr（b==NULL、type_val=容器、ival=成员下标）
@@ -6538,10 +6581,12 @@ static Type *check_field(Node *n) {
             if (e->kind == TY_OPT || e->kind == TY_ERR)
                 return type_of(n, e->kind == TY_OPT ? ty_bool() : ty_error());
         }
-        /* 数组指针的 .ptr：指向首元素。字符串字面量 `"abc".ptr` 走这条，
-         * 给 C 的 `*const u8` 形参用；元素自己叫 ptr 的字段优先。 */
-        if (n->name && !strcmp(n->name, "ptr") && bt->has_len && !ty_field(e, n->name))
-            return type_of(n, ty_ptr(e, bt->is_const, false, 0));
+        /* §197：字符串字面量的 `.ptr` 是字面量语法糖，取首字节指针。
+         * §201：普通 `*[N]T` 没有 `.ptr` 内建——它是普通指针，`p[0]`
+         * / `p.0` 取出的整个数组才有 `.ptr`。pointee 自己叫 ptr 的字段
+         * 照常由下面的 ty_field 命中，不被内建遮蔽。 */
+        if (n->name && !strcmp(n->name, "ptr") && n->a && n->a->kind == NK_STR)
+            return type_of(n, ty_ptr(bt->elem, bt->is_const, false, 0));
         Field *f = ty_field(e, n->name);
         if (!f) {
             Method *m = ty_method(e, n->name);
@@ -6558,6 +6603,14 @@ static Type *check_field(Node *n) {
         if (deny_member(n, e, f->is_pub, n->name)) return type_of(n, ty_invalid());
         if (f->is_static) return static_member_ty(n, f);
         return type_of(n, f->ty);
+    }
+
+    case TY_ARRAY: {                  /* §201：[N]T 数组值 */
+        if (n->name && !strcmp(n->name, "ptr"))
+            return type_of(n, ty_ptr(bt->elem, false, false, 0));  /* 首元素 *T */
+        if (!n->name)
+            return BAD(n, "array `.N` indexing was removed: write `a[i]`");
+        return BAD(n, "an array only has .ptr / .len / .size");
     }
 
     case TY_SLICE:
@@ -6679,9 +6732,8 @@ static Type *check_index(Node *n) {
     tag_check_deref(n->a);               /* §170：use-after-free / 未防守 */
     Type *it = check_expr(n->b, ty_usize());
     if (!ty_is_int(it)) return BAD(n->b, "index must be an integer, found `%s`", ty_str(it));
-    if (bt->kind == TY_PTR && bt->has_len) {
-        /* 长度在类型里、下标又是编译期值：越界在这里报，不让它拖到运行时
-         * 才 trap（`arr[5]` 对 `*[3]i32` 编译期就能确定）。 */
+    if (bt->kind == TY_ARRAY) {
+        /* §201：数组值下标取元素，N 写在类型里 → 编译期越界检查。 */
         Value *iv = n->b->ct ? n->b->ct : ct_eval_probe(n->b);
         if (iv && iv->kind == V_INT) {
             int64_t x = val_i64(iv);
@@ -6690,6 +6742,12 @@ static Type *check_index(Node *n) {
                            (long long)x, (unsigned long long)bt->len);
         }
         return type_of(n, bt->elem);
+    }
+    if (ty_is_array_ptr(bt)) {
+        /* §201：`p: *[N]T` 的 `p[i]` 取的是**第 i 个数组**（elem 就是 [N]T）。
+         * N 是数组内元素数，不是数组个数，编译期界检查不适用——数组指针
+         * 没携带数组个数，运行期也不查。 */
+        return type_of(n, bt->elem);   /* = [N]T */
     }
     if (bt->kind == TY_PTR) return type_of(n, bt->elem);
     if (bt->kind == TY_SLICE) return type_of(n, bt->elem);
@@ -6732,7 +6790,12 @@ static Type *check_index(Node *n) {
 static Type *check_slice_expr(Node *n) {
     Type *bt = check_expr(n->a, NULL);
     Type *elem = NULL;
-    if (bt->kind == TY_PTR && bt->has_len) elem = bt->elem;
+    /* §201：*[N]T / [N]T 切片时元素是 T（elem 是 [N]T，取它的 elem） */
+    if (ty_is_array_ptr(bt))
+        elem = bt->elem->elem;
+    else if (bt->kind == TY_PTR && bt->has_len)
+        elem = bt->elem;                 /* 字符串字面量 */
+    else if (bt->kind == TY_ARRAY) elem = bt->elem;
     else if (bt->kind == TY_SLICE) elem = bt->elem;
     else if (bt->kind == TY_PTR) {
         /* 裸指针没有数量：必须自己给上界（`p[0..n]`）。
@@ -6754,18 +6817,20 @@ static Type *check_slice_expr(Node *n) {
         if (!ty_is_int(hi)) return BAD(n->c, "slice bound must be an integer");
     }
     /* 编译期已知的上下界：顺序与范围都能提前抓，不必等运行时 trap。 */
-    if (bt->kind == TY_PTR && bt->has_len) {
+    uint64_t total = ty_is_array_ptr(bt) ? bt->elem->len
+                   : (bt->kind == TY_ARRAY || bt->has_len) ? bt->len : 0;
+    if (total > 0 || ty_is_array_ptr(bt)) {
         Value *lv = n->b ? (n->b->ct ? n->b->ct : ct_eval_probe(n->b)) : NULL;
         Value *hv = n->c ? (n->c->ct ? n->c->ct : ct_eval_probe(n->c)) : NULL;
         bool lok = !n->b || (lv && lv->kind == V_INT);
         bool hik = !n->c || (hv && hv->kind == V_INT);
         int64_t lov = lok ? (n->b ? val_i64(lv) : 0) : 0;
-        int64_t hiv = hik ? (n->c ? val_i64(hv) : (int64_t)bt->len) : 0;
+        int64_t hiv = hik ? (n->c ? val_i64(hv) : (int64_t)total) : 0;
         if (lok && n->b && lov < 0)
             return BAD(n->b, "slice lower bound %lld is negative", (long long)lov);
-        if (hik && n->c && hiv > (int64_t)bt->len)
+        if (hik && n->c && hiv > (int64_t)total)
             return BAD(n->c, "slice upper bound %lld is out of bounds (len %llu)",
-                       (long long)hiv, (unsigned long long)bt->len);
+                       (long long)hiv, (unsigned long long)total);
         if (lok && hik && n->b && n->c && lov > hiv)
             return BAD(n, "slice lower bound %lld is greater than upper bound %lld",
                        (long long)lov, (long long)hiv);
@@ -6835,10 +6900,9 @@ static void check_fmt_verb(Node *fmt, Node *arg, int verb) {
                    t->kind == TY_BOOL || t->kind == TY_COMPTIME_INT;
 
     if (verb == 's') {
-        /* 字符串字面量是 *[N]const u8：`{s}` 打印的是字节序列，不是地址 */
-        bool str_arr = t->kind == TY_PTR && t->has_len && t->elem &&
-                       t->elem->kind == TY_INT && t->elem->bits == 8;
-        if (t->kind != TY_SLICE && !str_arr)
+        /* 字符串字面量（`*[N]const u8`）：`{s}` 打印字节序列，不是地址。
+         * byte_str_ptr_ty 同时认旧的 elem=u8 与新的 elem=[N]u8 两种内部形状。 */
+        if (t->kind != TY_SLICE && !byte_str_ptr_ty(t))
             err_at(fmt->line, fmt->col, "format specifier `{s}` needs a slice, found `%s`", ty_str(t));
     } else if (verb == 'c') {
         if (!integer)
@@ -7212,7 +7276,7 @@ static Type *check_method_call(Node *n) {
         for (int i = 0; i < n->nitems; i++) {
             Type *got = check_expr(n->items[i], mft->params[i]);
             if (i == 0 && w0 && w0->kind == TY_PTR && !w0->has_len &&
-                w0->is_const && got && got->kind != TY_PTR &&
+                !ty_is_array_ptr(w0) && w0->is_const && got && got->kind != TY_PTR &&
                 ty_eq(got, w0->elem) && addr_ok(n->items[i])) {
                 Node *addr = node_new(NK_UN, n->items[i]->line, n->items[i]->col);
                 addr->op = (int)TOK_AMP;
@@ -7259,7 +7323,7 @@ static Type *check_method_call(Node *n) {
                        ty_str(rt), ty_str(want));
         }
     } else if (want->kind != TY_PTR && rt && rt->kind == TY_PTR &&
-               !rt->has_len && ty_eq(rt->elem, want)) {
+               !rt->has_len && !ty_is_array_ptr(rt) && ty_eq(rt->elem, want)) {
         /* §151：按值形态的 `Self` 方法遇到指针接收者时自动解引用。
          * 大类型走 const 指针、小类型按值，两种 ABI 下 `p.f()` 写法一致，
          * 调用点不必知道编译期的大小判定。 */
@@ -7448,7 +7512,8 @@ static Type *check_call(Node *n, Type *expect) {
                 tag_auto_decl(n, true);         /* §173：栈分配也建槽，
                                                  * 作用域退出自动标 free */
             }
-            return type_of(n, ty_ptr(elem, false, true, c.v));
+            /* §201：返回指向 [N]T 数组的指针（elem 就是 [N]T） */
+            return type_of(n, ty_ptr(ty_array(elem, c.v), false, true, c.v));
         }
         /* §177：std.free(a, s) —— 释放的对称面。改写成 a.deinit(s)
          * 再走 §173 的同一条变换（切片/定长指针两种形状、字节量计算、
@@ -7959,13 +8024,13 @@ static void tag_transform_deinit(Node *call) {
         Node *mul = node_new(NK_BIN, arg->line, arg->col);
         mul->op = TOK_STAR; mul->a = lf; mul->b = sz;
         ptrE = pf; lenE = mul;
-    } else if (st->kind == TY_PTR && st->has_len) {
-        int esz = ty_size(st->elem);
-        if (esz <= 0) esz = 1;
-        uint64_t n = st->len > 0 ? st->len : 1;
+    } else if (ty_is_array_ptr(st)) {
+        /* §201：elem 就是 [N]T，ty_size(elem) 已是全部字节数，别再乘 N。 */
+        int total = ty_size(st->elem);
+        if (total <= 0) total = 1;
         ptrE = clone_expr_keep_syms(arg);
         Node *sz = node_new(NK_INT, arg->line, arg->col);
-        sz->ival = (uint64_t)esz * n;
+        sz->ival = (uint64_t)total;
         lenE = sz;
     } else {
         /* §173：不可释放形状给一句人话，而不是让 `.deinit` 落进
@@ -9403,9 +9468,9 @@ static void ensure_raw(Symbol *s) {
         bool is_arrlit = ainit && (ainit->kind == NK_ARRAY_LIT ||
             (ainit->kind == NK_UN && ainit->op == TOK_AMP && ainit->a &&
              ainit->a->kind == NK_ARRAY_LIT));
-        if (!d->a && t->kind == TY_PTR && t->has_len && !t->is_const &&
+        if (!d->a && ty_is_array_ptr(t) && !t->is_const &&
             s->kind != SK_VAR && is_arrlit) {
-            t = ty_ptr(t->elem, true, true, t->len);
+            t = ty_ptr(t->elem, true, false, 0);
             d->b->ty = t;
         }
         s->ty = t;
@@ -9908,7 +9973,8 @@ static Type *check_fn_body(Node *fn) {
          * ty 仍是 `Self`。给符号打标记，后端发射时补 `(*self)`。 */
         Type *w0 = (ft && ft->kind == TY_FN && ft->nparams > 0) ? ft->params[0] : NULL;
         if (i == 0 && pm->name && !strcmp(pm->name, "self") &&
-            w0 && w0->kind == TY_PTR && !w0->has_len && w0->is_const &&
+            w0 && w0->kind == TY_PTR && !w0->has_len && !ty_is_array_ptr(w0) &&
+            w0->is_const &&
             pm->ty && pm->ty->kind != TY_PTR && ty_eq(w0->elem, pm->ty))
             s->self_by_ptr = true;
         local_track(s, pm->line, pm->col);
@@ -10326,11 +10392,18 @@ static void check_stmt(Node *n) {
          * 只查返回类型形状，结构体裹栈指针整只漏过）。expr_frame 保留：
          * 没进账本的来源（&局部、&.{…} 匿名存储）只能靠形状看。 */
         {
-            bool esc = (want->kind == TY_PTR || want->kind == TY_SLICE) &&
-                       expr_frame(n->a);
+            /* §201 补丁：不要只看 want 是不是裸指针/切片。`?*T` / `![]T`
+             * 的载荷同样是指针，裹在 optional/error 里也照样悬垂。 */
+            bool ptr_shape = want->kind == TY_PTR || want->kind == TY_SLICE ||
+                ((want->kind == TY_OPT || want->kind == TY_ERR) && want->elem &&
+                 (want->elem->kind == TY_PTR || want->elem->kind == TY_SLICE));
             /* §199：聚合返回值里藏的栈帧来源（S{ .s = &.{} }） */
-            if (!esc && want->kind != TY_PTR && want->kind != TY_SLICE)
-                esc = frame_in_agg(n->a, 0);
+            bool agg_esc = !ptr_shape && frame_in_agg(n->a, 0);
+            /* §201 补丁：标量返回值不查栈来源。`p.a` 是 u64，即便 p 指向
+             * 当前帧，读出来的标量也能安全返回；旧写法无条件算 expr_frame
+             * 把 §152 的 `let p = &self; return p.a;` 全误杀了。聚合字面量
+             * （S{ .s = &.{} }）自身 expr_frame 为假，但 agg_esc 直接算逃逸。 */
+            bool esc = (ptr_shape && expr_frame(n->a)) || agg_esc;
             if (!esc) {
                 int id, st;
                 tag_of_expr(n->a, &id, &st);
@@ -10795,7 +10868,8 @@ static bool seq_len(Node *s, uint64_t *out) {
 
     Node *base = s->a;
     uint64_t blen = 0;
-    if (base->ty && base->ty->kind == TY_PTR && base->ty->has_len) blen = base->ty->len;
+    if (ty_is_array_ptr(base->ty)) blen = base->ty->elem->len;
+    else if (base->ty && base->ty->has_len) blen = base->ty->len;
     else if (base->kind == NK_UN && base->a && base->a->kind == NK_ARRAY_LIT) blen = (uint64_t)base->a->nitems;
     else if (base->kind == NK_ARRAY_LIT) blen = (uint64_t)base->nitems;
     else return false;
@@ -10904,7 +10978,7 @@ static Type *check_for(Node *n, Type *expect) {
             Type *st = check_expr(s, NULL);
             if (st->kind == TY_SLICE) {
                 binds[i] = st->elem;
-            } else if (st->kind == TY_PTR && st->has_len) {
+            } else if (ty_is_array_ptr(st)) {
                 err_at(s->line, s->col,
                        "an array is not a sequence; write `%s[0..]` to make a slice",
                        s->kind == NK_IDENT ? s->name : "xs");
@@ -11888,6 +11962,9 @@ static Value *ct_flat(Value *v, int64_t *off) {
 
 /* 视图长度：*[N]T 看类型，切片 / 字符串看值。 */
 static bool ct_view_len(Value *v, Type *t, int64_t *len) {
+    if (ty_is_array_ptr(t)) { *len = (int64_t)t->elem->len; return true; }
+    /* §201：[N]T 数组值的长度写在类型里，`arr[0][1..]` 编译期切片要用 */
+    if (t && t->kind == TY_ARRAY) { *len = (int64_t)t->len; return true; }
     if (t && t->kind == TY_PTR && t->has_len) { *len = (int64_t)t->len; return true; }
     if (!v) return false;
     if (v->kind == V_STR) { *len = v->slen; return true; }
@@ -11906,7 +11983,8 @@ static Value *ct_field(Node *n) {
      * "has no count"。折叠这里必须同口径，否则 `p.size` 会被折成"指针
      * 自身字节数 8"，而类型检查/后端都当它是 S.size 字段（值 77）。 */
     Type *probe = at;
-    if (probe && probe->kind == TY_PTR && !probe->has_len) probe = probe->elem;
+    if (probe && probe->kind == TY_PTR && !probe->has_len &&
+        !ty_is_array_ptr(probe)) probe = probe->elem;
     bool shadowed = probe && n->name &&
                     (probe->kind == TY_STRUCT || probe->kind == TY_UNION) &&
                     ty_field(probe, n->name) != NULL;
@@ -11915,11 +11993,16 @@ static Value *ct_field(Node *n) {
         Type *t = n->a ? n->a->ty : NULL;
         if (!t) return NULL;
 
-        /* 数量在类型里：*[N]T */
-        if (t->kind == TY_PTR && t->has_len) {
+        /* §201：字符串字面量的 .len/.size 按字面值折，绝不当 *[N]T 内建。 */
+        if (n->a && n->a->kind == NK_STR) {
+            Value *sv = ct_eval(n->a);
+            if (!sv || sv->kind != V_STR) return NULL;
+            return val_int(ty_usize(), (uint64_t)sv->slen, false);
+        }
+        /* §201：[N]T 数组值：len=N，size=N×元素 */
+        if (t->kind == TY_ARRAY) {
             if (is_len) return val_int(ty_usize(), t->len, false);
-            return val_int(ty_usize(),
-                           (uint64_t)ty_size_relaxed(t->elem) * t->len, false);
+            return val_int(ty_usize(), (uint64_t)ty_size_relaxed(t), false);
         }
         if (t->kind == TY_TUPLE && is_len)
             return val_int(ty_usize(), (uint64_t)t->nfields, false);
@@ -11927,13 +12010,18 @@ static Value *ct_field(Node *n) {
         if (t->kind == TY_VEC && is_len)
             return val_int(ty_usize(), t->len, false);
 
-        /* 数量在值里：切片 / 字符串 */
+        /* `.size` 对"长度写在类型里"的聚合（元组 / 数组 / 向量等）直接按
+         * 类型布局折——这段在 §201 改写 has_len 分支时被漏掉，tuple.size
+         * 从此退化成 E0501。只有 []T 的 size 才依赖运行期描述符。 */
         if (!is_len && t->kind != TY_SLICE)
             return val_int(ty_usize(), (uint64_t)ty_size_relaxed(t), false);
 
+        /* 数量在值里：只有 []T 的 .len/.size 是运行期描述符上的值；
+         * `*[N]T` 已经是普通指针，不再在这里折成编译期常量。 */
         Value *b = ct_eval(n->a);
+        if (t->kind != TY_SLICE || !b) return NULL;
         int64_t len;
-        if (!b || !ct_view_len(b, t, &len)) return NULL;
+        if (!ct_view_len(b, t, &len)) return NULL;
         if (is_len) return val_int(ty_usize(), (uint64_t)len, false);
         return val_int(ty_usize(),
                        (uint64_t)ty_size_relaxed(t->elem) * (uint64_t)len, false);
@@ -12043,6 +12131,21 @@ static Value *ct_index(Node *n) {
     Value *b = ct_eval(n->a);
     Value *i = ct_eval(n->b);
     if (!b || !i) return NULL;
+
+    /* §201：数组指针 `*[N]T` 的下标取的是**数组本身**，不是首元素。
+     * `&.{10,20,30}` 折成 V_PTR(base=V_AGG{10,20,30})；`p[0]` 必须给出
+     * 整个 V_AGG，之后 `p[0][i]` 才取元素。旧代码直接 ct_flat 后取
+     * items[k]（= 首元素标量），导致 `arr[0][0]` 二次下标折不动报 E0501。
+     * 只有一个数组（V_PTR 的 base 就是那一个），k 必须是 0。 */
+    Type *bt = n->a ? n->a->ty : NULL;
+    if (ty_is_array_ptr(bt)) {
+        if (val_i64(i) != 0) return NULL;    /* 越界/多数组视图交运行时 */
+        int64_t o = 0;
+        Value *base = ct_flat(b, &o);
+        if (o != 0 || !base || base->kind != V_AGG) return NULL;
+        return base;                          /* 整个 [N]T 数组值 */
+    }
+
     int64_t o = 0;
     Value *base = ct_flat(b, &o);
     int64_t k = o + val_i64(i);

@@ -19,6 +19,6 @@ const S = struct { p: *const u8 };
 const G: S = .{ .p = "xy".ptr };
 
 const main = fn () u8 {
-    std.println("P={} A0={} A1={} G={} L={}", P[0], A[0][0], A[1][0], G.p[0], "hello".len);
+    std.println("P={} A0={} A1={} G={} L={}", P[0], A[0][0][0], A[0][1][0], G.p[0], "hello".len);
     return 0;
 };

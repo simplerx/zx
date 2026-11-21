@@ -5,9 +5,9 @@ const std = @mod("std");
 
 const main = fn () u8 {
     var p = tag.buf : std.heapAlloc(std.heap.page, i32, 4);
-    p[0] = 7;
-    p[1] = p[0] + 1;
-    std.println("sum={d}", p[0] + p[1]);
+    p[0][0] = 7;
+    p[0][1] = p[0][0] + 1;
+    std.println("sum={d}", p[0][0] + p[0][1]);
     // free 收 *u8：指针到指针的 cast 保住 tag 身份（§170 传播规则）
     std.heap.page.free(std.heap.page.ctx, (*u8)p, 16);
     return 0;
