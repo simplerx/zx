@@ -1,0 +1,12 @@
+// expect: bind it to a `let` first
+const P = struct {
+    a: u64, b: u64, c: u64,
+    const read = fn (self: *const Self) u64 { return self.a + self.b + self.c; };
+};
+
+const mk = fn () P { return P{ .a = 1, .b = 2, .c = 3 }; };
+
+const main = fn () u8 {
+    let r = mk().read();      // 大结构体只读方法走 const 指针 ABI：临时值绑 let 即可
+    return (u8)r;
+};

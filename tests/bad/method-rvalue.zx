@@ -1,4 +1,4 @@
-// expect: cannot take the address of this receiver
+// expect: bind it to a `var` first
 const P = struct {
     x: i32,
     const bump = fn (self: *Self) void { self.x = 1; };

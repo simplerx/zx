@@ -7304,9 +7304,15 @@ static Type *check_method_call(Node *n) {
         if (rt && rt->kind == TY_PTR) {
             /* 已经是指针了：剩下的只是 const 的加减，交给普通转换 */
         } else if (rt->kind == TY_STRUCT || rt->kind == TY_UNION || rt->kind == TY_TUPLE) {
-            if (!addr_ok(recv))
+            if (!addr_ok(recv)) {
+                /* §210：rvalue 接收者没法取地址，必须绑到有存储的局部变量。
+                 * 建议的绑定种类要看方法要不要可变接收者——对 `*Self` 方法
+                 * 若还建议 `let`，下一行 lvalue_mutable 会再挡一次，形成
+                 * "先说绑 let、再说要 var" 的自相矛盾诊断。 */
                 return BAD(recv, "cannot take the address of this receiver; "
-                                 "bind it to a `let` first");
+                                 "bind it to a `%s` first",
+                           want->is_const ? "let" : "var");
+            }
             if (!want->is_const && !lvalue_mutable(recv))
                 return BAD(recv, "cannot call `%s` on a read-only receiver; "
                                  "declare it `var` first", fld->name ? fld->name : "?");

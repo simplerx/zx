@@ -1,0 +1,29 @@
+const std = @mod("std");
+
+const Cell = struct {
+    v: i32,
+    const bump = fn (self: *Self) void { self.v = self.v + 1; };
+    const read = fn (self: *const Self) i32 { return self.v; };
+    const byval = fn (self: Self) i32 { return self.v + 1; };
+};
+
+const main = fn () i32 {
+    var a = std.array.Array(Cell, 4).init();
+    _ = a.set(0, .{ .v = 10 });
+
+    // let 接 get().? : 读字段 / 只读方法 / 按值方法都该正常工作
+    let c = a.get(0).?;
+    if (c.v != 10) { return 1; }
+    if (c.read() != 10) { return 2; }
+    if (c.byval() != 11) { return 3; }
+
+    // 要改内容就用 var 接，方法调用落回真实存储
+    var m = a.get(0).?;
+    m.bump();
+    if (m.v != 11) { return 4; }
+    // at() 返回指针，let 接也能通过指针改
+    let p = a.at(0).?;
+    p.v = 20;
+    if (a.get(0).?.v != 20) { return 5; }
+    return 0;
+};
