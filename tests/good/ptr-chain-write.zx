@@ -1,0 +1,58 @@
+// §209：返回指针的函数调用链直接 `.0` 赋值，写入必须落到真实存储。
+//
+// 修前有两层 codegen 坑：
+//  1) rvalue_base 的 NK_FIELD 分支先看「基址是 CALL」就判 rvalue，把
+//     `get().0` 物化成临时拷贝，写入静默丢值（读回随机值）。
+//  2) 更隐蔽：sema 的 ct_call 真执行函数体折值，`&全局 var` 折成 V_PTR，
+//     `.0` 再 ct_flat 把 var 的编译期**初值镜像**（0）折出来烙进节点 ct；
+//     后端 ex() 无条件信任带 ct 的 FIELD，把 `get().0.v` 发成 `0ULL.v`
+//     （B1001）。用户只能先绑局部变量绕开。
+// 修后：rvalue_base 按「结果落在哪」判定（基址是指针就是合法左值）；
+// ct_runtime_tainted 拦下被运行期来源污染的 ct，走真实指针解引用。
+// 写法不再需要局部变量中转，链式直接写即可。
+const std = @mod("std");
+
+const Cell = struct { v: i32 };
+var g_a: Cell = .{ .v = 0 };
+var g_b: Cell = .{ .v = 0 };
+
+const getA = fn () *Cell { return &g_a; };
+const getB = fn () *Cell { return &g_b; };
+const pick = fn (which: bool) ?*Cell {
+    if (which) { return &g_b; }
+    return &g_a;
+};
+
+pub const main = fn () i32 {
+    // 1. 裸调用链 .0 写，立即读回
+    getA().0.v = 11;
+    if (g_a.v != 11) { return 1; }
+
+    // 2. 另一个目标，确认不是写到同一个临时拷贝
+    getB().0.v = 22;
+    if (g_b.v != 22) { return 2; }
+
+    // 3. optional 返回 + unwrap 链写
+    pick(true).?.0.v = 33;
+    if (g_b.v != 33) { return 3; }
+    pick(false).?.0.v = 44;
+    if (g_a.v != 44) { return 4; }
+
+    // 4. 数组下标存指针，链式写
+    var arr: [2]*Cell = .{ &g_a, &g_b };
+    arr[0].0.v = 55;
+    arr[1].0.v = 66;
+    if (g_a.v != 55 || g_b.v != 66) { return 5; }
+
+    // 5. 回归：绑局部变量的旧写法仍正确
+    let p = getA();
+    p.0.v = 77;
+    if (g_a.v != 77) { return 6; }
+
+    std.println("{} {}", g_a.v, g_b.v);
+    return 0;
+};
+
+// expect-output
+// 77 66
+// expect-exit: 0

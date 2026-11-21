@@ -1227,6 +1227,35 @@ static void wrap_slice_len(Buf *b, Buf *len, Node *n, const char *total_c) {
     buf_putc(b, ')');
 }
 
+/* §209：ct 折叠值是否被"运行期来源"污染——基址链里含 CALL / UNWRAP /
+ * ORELSE / TRY。sema 的 ct_call 会真的执行函数体来折值，当函数返回指向
+ * 运行期存储的指针时（`getCell()` → &全局 var），`.0` 再解引用会把 var 的
+ * **编译期初值镜像**折出来（典型是 0），烙进节点 ct。后端若照单全收，
+ * `getCell().0.v = 7` 就发成 `0ULL.v = 7`（B1001）或写到临时拷贝丢值。
+ * 这类节点的真实值只能运行时算，ct 一律不信。与 rvalue_base 的区别：
+ * 那个判"左值是否合法"，这个判"ct 常量是否可信"。 */
+static bool ct_runtime_tainted(Node *n) {
+    if (!n) return false;
+    switch (n->kind) {
+    case NK_CALL:
+        /* 只拦「返回指针」的调用：它才会让 `.0` 解引用到运行时存储、
+         * 把 var 初值镜像折成假常量。返回 TY_TYPE 的泛型工厂（Slots(...)
+         * → struct 类型）取静态成员是合法的编译期值槽，不能拦（§117）。 */
+        return n->ty && (n->ty->kind == TY_PTR || n->ty->kind == TY_SLICE);
+    case NK_UNWRAP: case NK_ORELSE: case NK_TRY:
+        return true;
+    case NK_FIELD: case NK_INDEX: {
+        /* 指针解引用 `.0`（name 为空、基址是指针）本身就是读运行时存储。 */
+        Type *bt = n->a ? n->a->ty : NULL;
+        if (n->kind == NK_FIELD && !n->name && bt &&
+            (bt->kind == TY_PTR || bt->kind == TY_SLICE)) return true;
+        return ct_runtime_tainted(n->a);
+    }
+    default:
+        return false;
+    }
+}
+
 /* §199：字段基址链里是否藏着"不可取地址的右值"（.? / 调用结果）。
  * `x.?.field` 的 x.? 是 zx_unwrap_...() 返回的临时结构体，C 里对它的字段
  * 取地址是非法的（B1001）。检测到就把整个字段物化到临时数组取 [0]。 */
@@ -1238,13 +1267,17 @@ static bool rvalue_base(Node *n) {
     case NK_ARRAY_LIT: case NK_INT: case NK_STR: case NK_BOOL:
         return true;
     case NK_FIELD: {
-        /* unwrap / 调用结果取字段：字段落在 rvalue 载荷上，需物化。
-         * 指针（->field）/ optional 直接字段（.payload）/ 数组下标 的结果
-         * 落在别处存储里，是合法左值，不物化（否则赋值写到临时拷贝丢值）。 */
-        if (n->a && (n->a->kind == NK_UNWRAP || n->a->kind == NK_CALL))
-            return true;
+        /* 判定原则是「结果落在哪」，不是「基址表达式是什么节点」：
+         * 基址是指针/切片时，字段（含 `.0` 解引用）落在它指向的存储里，
+         * 是合法左值——即使基址本身是 call/unwrap 的 rvalue。若在这里
+         * 物化，赋值写到临时拷贝静默丢值（§199 NK_INDEX 踩过），甚至把
+         * 基址表达式发错。必须先看类型，再看节点种类。 */
         Type *bt = n->a ? n->a->ty : NULL;
         if (bt && (bt->kind == TY_PTR || bt->kind == TY_SLICE)) return false;
+        /* 基址是 call/unwrap 且返回「值」（结构体/元组）：字段落在这份
+         * 临时载荷上，是 rvalue，需物化成合法左值。 */
+        if (n->a && (n->a->kind == NK_UNWRAP || n->a->kind == NK_CALL))
+            return true;
         return rvalue_base(n->a);
     }
     case NK_INDEX: {
@@ -1276,10 +1309,12 @@ static void rvalue_lvalue(Buf *b, Node *n) {
 
 /* ---- 可写位置（左值） ---- */
 static void lvalue(Buf *b, Node *n) {
-    /* §199：对右值（.? / 调用结果 / 字面量）或其字段取地址——先物化整个值
-     * 到临时数组再取 [0]。作为函数实参（调用期间有效）安全。显式左值
-     * （IDENT / &local / 数组下标）不碰。 */
-    if ((n->kind == NK_FIELD && rvalue_base(n->a)) || rvalue_base(n)) {
+    /* §199：对右值（.? / 返回值的字段 / 字面量）取地址——先物化整个值到
+     * 临时数组再取 [0]，作为函数实参（调用期间有效）安全。
+     * rvalue_base(n) 已递归判断字段/下标基址：基址是指针时结果落在别处
+     * 存储、是合法左值，不会被物化。不要再单独看 n->a，否则返回指针的
+     * 调用链 `get().0` 会被误判，写入落到临时拷贝。 */
+    if (rvalue_base(n)) {
         rvalue_lvalue(b, n);
         return;
     }
@@ -5297,7 +5332,11 @@ static void ex(Buf *b, Node *n) {
     /* 已折叠成标量的值：直接发字面量（`info.kind == .struct_` 这种
      * 泛型里的编译期判断要靠它，否则会发成读一块全零描述符）。
      * 内建除外——它们有的要发自己的形状（@typeName / @fieldName）。 */
-    if (n->kind == NK_FIELD && n->ct && ex_ct_scalar(b, n)) return;
+    /* §209：基址含运行期来源（返回指针的调用 / unwrap）时，ct 是 sema
+     * 越界折出的初值镜像（0），不能当常量发——否则 `getCell().0.v` 发成
+     * `0ULL.v`。让它走下面的正常字段发射（真指针解引用）。 */
+    if (n->kind == NK_FIELD && n->ct && !ct_runtime_tainted(n) &&
+        ex_ct_scalar(b, n)) return;
 
     switch (n->kind) {
     case NK_INT: {
