@@ -1,0 +1,30 @@
+// B13：同一函数多个 `defer err` 绑定，各自的 err 名必须唯一。sema 给每个
+// defer err 发唯一 cname（行_列），backend 发射时也必须取这个 cname——
+// 旧版 backend 用字面名 `err` 发绑定声明，与块内引用对不上，报 B1001
+// undeclared identifier。此例守住声明/引用口径一致。
+//
+// expect-output
+// E1 3
+// F2 9
+// F1 9
+// expect-exit: 0
+const std = @mod("std");
+
+const one = fn (fail: bool) !i32 {
+    defer err { std.println("E1 {}", err); }
+    if (fail) { return (error)3; }
+    return 1;
+};
+
+const two = fn (fail: bool) !i32 {
+    defer err { std.println("F1 {}", err); }
+    defer err { std.println("F2 {}", err); }
+    if (fail) { return (error)9; }
+    return 2;
+};
+
+pub const main = fn () u8 {
+    let _ = one(true);
+    let _ = two(true);
+    return 0;
+};

@@ -1,0 +1,22 @@
+// B13 bug2：defer 体在 try 展开点就地发射，可能引用其后才声明的局部变量
+// （sema 允许，Zig 语义）。C 要求先声明后使用——含 errdefer 的函数须在
+// 入口把所有局部变量裸声明提升，gen_decl_inner 只发初始化赋值。
+// 旧版在 mark 声明前插入 defer 体，C 报 undeclared identifier（B1001）。
+// 错误路径上 mark 尚未赋值，所以只写不读（读未初始化值是 UB）。
+//
+// expect-output
+// cleanup
+// expect-exit: 0
+const std = @mod("std");
+
+const work = fn (fail: bool) !i32 {
+    defer err { mark = 1; std.println("cleanup"); }
+    if (fail) { return (error)7; }
+    var mark: i32 = 42;
+    return mark;
+};
+
+pub const main = fn () u8 {
+    let _ = work(true);
+    return 0;
+};

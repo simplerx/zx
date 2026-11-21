@@ -962,6 +962,12 @@ static Type *g_cur_ret;
 static bool  g_is_main;
 static bool  g_saw_errdefer;   /* 函数体里登记过 errdefer：return 要做 tag 检查 */
 
+/* B13 bug2：局部变量声明提升。含 errdefer 的函数里，defer 体在 try 展开点
+ * 就地发射，可能引用函数后部才声明的局部变量（sema 允许，Zig 语义），但 C
+ * 要求先声明后使用。对这类函数，函数入口先统一发所有局部变量的裸声明，
+ * gen_decl_inner 只保留初始化赋值——C89 风格 hoist，其他函数零影响。 */
+static bool g_hoist_locals;
+
 /* main 的 C 签名固定是 `int main(...)`，但 Zx 里它可以是 void、u8，
  * 也可以是 !void / !T / ?T。真值要在这里折成进程退出码：
  *   !T  → 标签就是错误码，0 = 成功（正好是 shell 的约定）
@@ -1022,16 +1028,21 @@ static void run_defers_m(int down_to, int mode, const char *errcond,
             if (iserr && errcond) {
                 line("if (%s) {", errcond);
                 g_ind++;
-                if (dn->name && dn->ival)
-                    line("%s %s = %s;", cty(ty_error()), cnames(dn->name),
+                if (dn->name && dn->ival) {
+                    /* B13：绑定名取 err 符号的唯一 cname，与块内 `err` 引用
+                     * 完全对齐；同函数多个 defer err 不再重定义。 */
+                    const char *eb = dn->sym ? sym_cname(dn) : cnames(dn->name);
+                    line("%s %s = %s;", cty(ty_error()), eb,
                          errval ? errval : "0");
+                }
                 gen_stmt(dn->a);
                 g_ind--;
                 line("}");
             } else {
-                if (iserr && dn->name && dn->ival && errval)
-                    line("%s %s = %s;", cty(ty_error()), cnames(dn->name),
-                         errval);
+                if (iserr && dn->name && dn->ival && errval) {
+                    const char *eb = dn->sym ? sym_cname(dn) : cnames(dn->name);
+                    line("%s %s = %s;", cty(ty_error()), eb, errval);
+                }
                 gen_stmt(dn->a);
             }
         }
@@ -6052,6 +6063,24 @@ static void ex(Buf *b, Node *n) {
             buf_puts(b, "))");
             return;
         }
+        /* B13b：指针 ↔ 函数指针的显式 cast 必须在 C 里也显式写出。sema 的
+         * castable 允许这对转换（vkGetInstanceProcAddr 返回的 void* 转扩展入口
+         * 函数指针就是典型用例），但 coerce 走普通赋值路径，clang 会报
+         * incompatible pointer types。这里补一层 C cast。 */
+        if (to && to->kind == TY_FN && ft &&
+            (ft->kind == TY_PTR || ft->kind == TY_FN)) {
+            buf_puts(b, "(("); ctype(b, to); buf_puts(b, ")(");
+            ex(b, n->b);
+            buf_puts(b, "))");
+            return;
+        }
+        if (ft && ft->kind == TY_FN && to &&
+            (to->kind == TY_PTR || to->kind == TY_FN)) {
+            buf_puts(b, "(("); ctype(b, to); buf_puts(b, ")(");
+            ex(b, n->b);
+            buf_puts(b, "))");
+            return;
+        }
         coerce(b, n->b, to);
         return;
     }
@@ -6370,6 +6399,10 @@ static void gen_decl_inner(Node *d) {
     char *cn = (nm && !strcmp(nm, "_")) ? ignored_cname() : cnames(nm);
 
     bool is_var = (d->op == 2);
+    /* B13：声明提升模式下，变量槽已在函数入口裸声明（非 const），这里只发
+     * 初始化赋值。C 里已声明变量不能再用 `{0}` 初始化，聚合/标量统一用
+     * compound literal `(T){0}`；指针用 `= 0`。非提升模式保持原发射不变。 */
+    bool hz = g_hoist_locals;
 
     if (ty_is_array_ptr(t)) {
         Node *init = d->b;
@@ -6378,7 +6411,8 @@ static void gen_decl_inner(Node *d) {
         Type *elt = (arr && arr->kind == TY_ARRAY) ? arr->elem : arr;
         bool lit = init && init->kind == NK_ARRAY_LIT;
         if (lit) {
-            /* 字面量先落一个匿名 [N]T 数组当存储，再让指针指向它。 */
+            /* 字面量先落一个匿名 [N]T 数组当存储，再让指针指向它。
+             * _lit 是独立存储，不参与提升，仍在原位声明。 */
             Buf litdecl; buf_init(&litdecl);
             if (!is_var) buf_puts(&litdecl, "const ");
             ctype(&litdecl, arr);
@@ -6390,8 +6424,9 @@ static void gen_decl_inner(Node *d) {
             }
             buf_puts(&litdecl, " } };");
             line("%s", litdecl.data);
-            line("%s%s *%s = &%s_lit;", is_var ? "" : "const ",
-                 cty(arr), cn, cn);
+            if (hz) line("%s = &%s_lit;", cn, cn);
+            else    line("%s%s *%s = &%s_lit;", is_var ? "" : "const ",
+                         cty(arr), cn, cn);
             return;
         }
         /* R9（v0.10 起）：数组指针 + undefined 不再隐式分配存储。
@@ -6399,30 +6434,30 @@ static void gen_decl_inner(Node *d) {
          * std.stackAlloc / std.heapAlloc / &.{…}。指针本身清零，
          * 误用会撞空指针而不是悄悄改栈。 */
         if (!init || init->kind == NK_UNDEF) {
-            line("%s%s *%s = 0;", is_var ? "" : "const ", cty(t->elem), cn);
+            if (hz) line("%s = 0;", cn);
+            else    line("%s%s *%s = 0;", is_var ? "" : "const ", cty(t->elem), cn);
             return;
         }
         /* 普通指针初始化 */
         if (is_ctl(init)) {
-            line("%s *%s = 0;", cty(t->elem), cn);
+            if (!hz) line("%s *%s = 0;", cty(t->elem), cn);
             gen_value(init, cn, t);
             return;
         }
-        line("%s *%s = %s;", cty(t->elem), cn, cxs(init, t));
+        if (hz) line("%s = %s;", cn, cxs(init, t));
+        else    line("%s *%s = %s;", cty(t->elem), cn, cxs(init, t));
         return;
     }
 
-    if (!d->b) {
-        line("%s %s = {0};", cty(t), cn);
-        return;
-    }
-    if (d->b->kind == NK_UNDEF) {
-        line("%s %s = {0};", cty(t), cn);
+    if (!d->b || d->b->kind == NK_UNDEF) {
+        if (hz) line("%s = (%s){0};", cn, cty(t));
+        else    line("%s %s = {0};", cty(t), cn);
         return;
     }
     /* 初值是控制流表达式（带标签的块 / if / 循环）：先开槽，再往里写 */
     if (is_ctl(d->b)) {
-        line("%s %s = {0};", cty(t), cn);
+        if (hz) line("%s = (%s){0};", cn, cty(t));
+        else    line("%s %s = {0};", cty(t), cn);
         gen_value(d->b, cn, t);
         return;
     }
@@ -6433,14 +6468,17 @@ static void gen_decl_inner(Node *d) {
         Node *lfn = d->b;
         if (lfn->b && !fn_is_generic(lfn)) {
             char *inm = localfn_impl_name(d);
-            line("%s %s = %s;", cty(t), cn, inm);
+            if (hz) line("%s = %s;", cn, inm);
+            else    line("%s %s = %s;", cty(t), cn, inm);
             free(inm);
         } else {
-            line("%s %s = 0;", cty(t), cn);
+            if (hz) line("%s = 0;", cn);
+            else    line("%s %s = 0;", cty(t), cn);
         }
         return;
     }
-    line("%s %s = %s;", cty(t), cn, cxs(d->b, t));
+    if (hz) line("%s = %s;", cn, cxs(d->b, t));
+    else    line("%s %s = %s;", cty(t), cn, cxs(d->b, t));
 }
 
 static void gen_if_stmt(Node *n);
@@ -7289,6 +7327,53 @@ static void gen_fn(Node *fn, const char *name, bool is_main, bool exported);
  * 递归：局部 fn 的体里还能再有局部 fn（gen_fn 内部会再调本函数）。
  * fn 字面量声明节点不往 b 里走——那棵子树由这次 gen_fn 接管，重复
  * 走会发两份函数定义（C 重定义错误）。 */
+/* B13：扫描函数体是否含 errdefer（决定要不要启用声明提升） */
+static bool has_errdefer(Node *n) {
+    if (!n) return false;
+    if (n->kind == NK_ERRDEFER) return true;
+    if (has_errdefer(n->a) || has_errdefer(n->b) ||
+        has_errdefer(n->c) || has_errdefer(n->d)) return true;
+    for (int i = 0; i < n->nitems; i++)
+        if (has_errdefer(n->items[i])) return true;
+    for (int i = 0; i < n->nunroll; i++)
+        if (has_errdefer(n->unroll[i])) return true;
+    return false;
+}
+
+/* B13：为一个局部声明发"裸声明"（只有类型+名字，不初始化）。
+ * 与 gen_decl_inner 的类型口径一致：数组指针 *[N]T → T *name；
+ * 其余 → cty(t) name。跳过编译期绑定 / void / 局部 fn 绑定。 */
+static void hoist_decl_one(Node *d) {
+    Type *t = d->ty;
+    if (!t || t->kind == TY_INVALID || t->kind == TY_TYPE) return;
+    if (sema_ty_ct_only(t)) return;
+    if (!sema_sym_has_storage(d->sym)) return;
+    if (t->kind == TY_VOID) return;
+    /* 局部 fn 绑定也要声明槽：gen_decl_inner 在 hz 模式下会发 `cn = impl`
+     * 初始化赋值（函数体已由 gen_local_fns 发成 static 函数）。 */
+    const char *nm = sym_cname(d);
+    char *cn = (nm && !strcmp(nm, "_")) ? ignored_cname() : cnames(nm);
+    if (ty_is_array_ptr(t))
+        line("%s *%s;", cty(t->elem), cn);
+    else
+        line("%s %s;", cty(t), cn);
+}
+
+/* B13：遍历函数体，把所有局部声明的裸声明发到函数入口。
+ * 与 gen_local_fns 同样的子树口径（a/b/c/d/items/unroll）。
+ * 注意：嵌套局部 fn 的函数体不属于本函数，遇到 NK_FN 不深入。 */
+static void hoist_local_decls(Node *n) {
+    if (!n) return;
+    if (n->kind == NK_FN) return;
+    if (n->kind == NK_DECL) hoist_decl_one(n);
+    hoist_local_decls(n->a);
+    hoist_local_decls(n->b);
+    hoist_local_decls(n->c);
+    hoist_local_decls(n->d);
+    for (int i = 0; i < n->nitems; i++) hoist_local_decls(n->items[i]);
+    for (int i = 0; i < n->nunroll; i++) hoist_local_decls(n->unroll[i]);
+}
+
 static void gen_local_fns(Node *n) {
     if (!n) return;
     if (n->kind == NK_DECL && n->b && n->b->kind == NK_FN) {
@@ -7477,6 +7562,13 @@ static void gen_fn(Node *fn, const char *name, bool is_main, bool exported) {
     g_saw_errdefer = false;
     g_cur_fn_zx = fn->name ? fn->name : "?";
 
+    /* B13 bug2：含 errdefer 的函数启用局部变量声明提升——defer 体在 try
+     * 展开点就地发射，可能引用其后才声明的局部变量。先在函数入口发所有
+     * 局部变量的裸声明，gen_decl_inner 只发初始化赋值。无 errdefer 的
+     * 函数完全走原路径，零影响。 */
+    g_hoist_locals = has_errdefer(fn->b);
+    if (g_hoist_locals && fn->b) hoist_local_decls(fn->b);
+
     g_depth = 0;
     g_csc = NULL;
     g_in_fn = true;
@@ -7495,6 +7587,7 @@ static void gen_fn(Node *fn, const char *name, bool is_main, bool exported) {
     g_cur_ret = NULL;
     g_is_main = false;
     g_in_fn = false;
+    g_hoist_locals = false;
     g_cur_fn_zx = NULL;
 }
 
