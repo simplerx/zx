@@ -1803,6 +1803,39 @@ else
     printf "  FAIL §213 @panic() 无消息\n"; cat "$TPFX.c213b.run"; fail=1
 fi
 
+# §214：zxc test --file 按测试文件路径过滤（位置参数仍按函数名，可组合）。
+printf "\n== §214 zxc test --file 文件过滤\n"
+HAD_ZXJSON=0; [ -e zx.json ] && HAD_ZXJSON=1
+HAD_TESTDIR=0; [ -d src/test ] && HAD_TESTDIR=1
+[ "$HAD_ZXJSON" = 1 ] && cp zx.json "$TPFX.zxjson.bak" 2>/dev/null || true
+mkdir -p src/test
+cat > src/test/zz_filesel_a.zx <<'ZXEOF'
+pub const alpha_case = fn () bool { return true; };
+ZXEOF
+cat > src/test/zz_filesel_b.zx <<'ZXEOF'
+pub const beta_case = fn () bool { return true; };
+ZXEOF
+[ "$HAD_ZXJSON" = 1 ] || printf '{"name":"zxtest"}\n' > zx.json
+FS_OUT=$($ZXC test --file zz_filesel_a 2>&1) || true
+if printf '%s' "$FS_OUT" | grep -q 'PASS.*alpha_case' \
+   && ! printf '%s' "$FS_OUT" | grep -q 'beta_case'; then
+    printf "  ok   --file 只跑匹配的测试文件\n"
+else
+    printf "  FAIL §214 --file 过滤\n"; printf '%s\n' "$FS_OUT"; fail=1
+fi
+FS_OUT=$($ZXC test --file zz_filesel_a beta 2>&1) || true
+if printf '%s' "$FS_OUT" | grep -q 'no cases matched' \
+   && ! printf '%s' "$FS_OUT" | grep -q 'PASS'; then
+    printf "  ok   --file + 名字过滤可组合（无交集则明确提示）\n"
+else
+    printf "  FAIL §214 --file + 名字组合\n"; printf '%s\n' "$FS_OUT"; fail=1
+fi
+rm -f src/test/zz_filesel_a.zx src/test/zz_filesel_b.zx zx.json
+rm -f out/test_zz_filesel_a.exe out/test_zz_filesel_b.exe
+rm -f .zxc-cache/zz_filesel_* .zxc-cache/test_zz_filesel_*
+[ "$HAD_ZXJSON" = 1 ] && cp "$TPFX.zxjson.bak" zx.json 2>/dev/null || rm -f zx.json
+[ "$HAD_TESTDIR" = 1 ] || rmdir src/test 2>/dev/null || true
+
 # 用例会在仓库根留下自己的临时文件：io_fmt.zx 写 io_fmt.tmp，stdfs.zx 建
 # fs_t_dir / fs_t_dir2。跑完统一带走——测试不该往工作区里堆东西。
 rm -rf io_fmt.tmp fs_t_dir fs_t_dir2 2>/dev/null || true

@@ -1144,11 +1144,13 @@ static int help_sub(FILE *f, const char *cmd) {
     }
     if (!strcmp(cmd, "test")) {
         fprintf(f,
-            "zxc test [name filter] [--release] -- run test cases\n"
+            "zxc test [name filter] [--file path] [--release] -- run test cases\n"
             "\n"
             "convention: every zero-arg pub function in src/test/*.zx is a case (no\n"
             "test_ prefix needed; functions with params/generics count as helpers). The\n"
-            "name filter is substring match.\n"
+            "name filter is substring match on function names; --file is substring\n"
+            "match on the test file path. Both can be combined to run just a few cases\n"
+            "in one file, e.g. `zxc test --file parser add`.\n"
             "failure: @trap, returning false, returning a non-zero integer, or std.process.exit(non-zero).\n"
             "each case runs in its own process, so one crash does not affect the rest; tests\n"
             "reference project sources via @mod(\"../xxx.zx\").\n");
@@ -2260,6 +2262,8 @@ static const char *INIT_README =
     "zxc build --lib       # 静态库 out/<名>.a；--lib --shared 动态库 .dll/.so\n"
     "zxc run               # build 后直接运行（-- 之后的参数传给程序）\n"
     "zxc test              # 运行 src/test/ 里的测试（零参 pub 函数即用例）\n"
+    "                      #   zxc test <名字>         按函数名子串过滤\n"
+    "                      #   zxc test --file <路径>  只跑匹配的测试文件\n"
     "zxc check             # 静默检查全部 *.zx（src/ 下也扫）\n"
     "zxc fmt               # 格式化全部 *.zx\n"
     "```\n"
@@ -2305,7 +2309,9 @@ static const char *INIT_README =
     "\n"
     "`src/test/` 下的 `*.zx` 都是测试模块：里面的零参 `pub` 函数全部是用例\n"
     "（不用 test_ 前缀；带参数/泛型的函数可当辅助）。引用工程源码用\n"
-    "`@mod(\"../xxx.zx\")`。`zxc test [名字过滤]` 运行，每个用例独立进程。\n";
+    "`@mod(\"../xxx.zx\")`。`zxc test [名字过滤] [--file 路径过滤]` 运行，\n"
+    "每个用例独立进程。名字过滤匹配函数名，`--file` 匹配测试文件路径子串，\n"
+    "两者可叠加（如 `zxc test --file parser add` 只跑 parser 文件里名字含 add 的用例）。\n";
 
 static int write_text_file(const char *path, const char *content) {
     FILE *f = fopen(path, "wb");
@@ -3865,10 +3871,15 @@ static int test_run1(const char *file, const char *filter, bool release) {
 static int cmd_test(int argc, char **argv, int argi) {
     fetch_check_local(0, stderr);          /* 只读：缺库给提示，不联网 */
     vendor_autoscan();                     /* 测试模块可能引用 vendor 里的 C 库 */
-    const char *filter = NULL;             /* 名字子串过滤 */
+    const char *filter = NULL;             /* 名字子串过滤（用例函数名） */
+    const char *file_filter = NULL;        /* 文件名子串过滤（只跑指定测试文件） */
     bool release = false;
     for (int i = argi; i < argc; i++) {
         if (!strcmp(argv[i], "--release")) { release = true; continue; }
+        if (!strcmp(argv[i], "--file") && i + 1 < argc) {
+            file_filter = argv[++i];
+            continue;
+        }
         if (argv[i][0] == '-' && argv[i][1]) {
             fprintf(stderr, "zxc: unknown test option '%s'\n", argv[i]);
             return 2;
@@ -3881,6 +3892,8 @@ static int cmd_test(int argc, char **argv, int argi) {
     int total = 0, failed = 0;
     for (int fi = 0; fi < nfiles; fi++) {
         const char *f = files[fi];
+        /* --file：按路径子串挑测试文件，只跑匹配的那些 */
+        if (file_filter && !strstr(f, file_filter)) continue;
 
         /* 父进程只轻量 parse 数用例（不碰 sema/后端），决定要不要拉子进程 */
         g_error_count = 0;
@@ -3915,7 +3928,11 @@ static int cmd_test(int argc, char **argv, int argi) {
     }
     if (files) { for (int i = 0; i < nfiles; i++) free(files[i]); free(files); }
     if (total == 0 && failed == 0) {
-        printf("zxc test: no test modules in src/test/ (or no zero-arg pub fns)\n");
+        if (file_filter || filter)
+            printf("zxc test: no cases matched (file='%s', name='%s')\n",
+                   file_filter ? file_filter : "", filter ? filter : "");
+        else
+            printf("zxc test: no test modules in src/test/ (or no zero-arg pub fns)\n");
         return 0;
     }
     printf("zxc test: %d ran, %d failed\n", total, failed);
