@@ -9827,8 +9827,24 @@ static bool file_exists(const char *p) {
     return true;
 }
 
-/* std 源码在哪：$ZX_STD → 可执行文件旁边（bin/ 与项目根）→ 当前目录 */
+/* §208: 平台 std 镜像覆盖目录。zxc 交叉编译非宿主目标时，把生成的 std
+ * 镜像（net/fs/time 已换成平台版）路径注入这里；find_std_path 优先用它。
+ * 单目标/宿主构建不注入，行为与原来完全一致。 */
+static char g_std_override[1400];
+
+void sema_set_std_path(const char *dir) {
+    if (dir && *dir) snprintf(g_std_override, sizeof g_std_override, "%s", dir);
+    else g_std_override[0] = 0;
+}
+
+/* std 源码在哪：§208 平台镜像 → $ZX_STD → 可执行文件旁边 → 当前目录 */
 static bool find_std_path(char *out, size_t cap) {
+    if (g_std_override[0]) {
+        snprintf(out, cap, "%s", g_std_override);
+        if (file_exists(out)) return true;
+        snprintf(out, cap, "%s/std.zx", g_std_override);
+        if (file_exists(out)) return true;
+    }
     const char *env = getenv("ZX_STD");
     if (env && *env) {
         snprintf(out, cap, "%s", env);

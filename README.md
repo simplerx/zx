@@ -68,12 +68,39 @@ sh test.sh      # full regression: syntax / semantics / negative cases / runtime
 sh tools/stress.sh  # stress suite: 3 regression rounds / fuzz / LSP abuse / 600k numeric samples / concurrent builds
 ```
 
-The toolchain ships inside the repo (`.toolchain/zig.exe`, not tracked, ~360 MB).
-If it is missing, unpack zig 0.17.0 to `.toolchain/zig.exe`, or run
-`ZIG=zig sh build.sh` to use a system zig. Windows is the primary platform
-(the FFI demos and the language server are written against it); other
-platforms are unverified. The test suite depends on nothing beyond zig and
-the compiler itself.
+The toolchain ships inside the repo (`.toolchain/zig.exe` on Windows,
+`.toolchain/zig` elsewhere; not tracked, ~360 MB).
+If it is missing, unpack zig 0.17.0 into `.toolchain/`, or run
+`ZIG=zig sh build.sh` to use a system zig. `build.sh` detects the host and
+picks the right toolchain name and artifact suffix. The test suite depends
+on nothing beyond zig and the compiler itself.
+
+### Cross-platform targets (1.7+)
+
+Zx cross-compiles to Windows, Linux and macOS on x86_64 and aarch64. You only
+edit `zx.json`; zxc generates everything else. See `zxc targets` for the list.
+
+```json
+{
+  "name": "myapp",
+  "main": "src/main.zx",
+  "out": "myapp",
+  "targets": ["windows-x86_64", "linux-x86_64", "macos-aarch64"],
+  "platform": { "generate": true }
+}
+```
+
+- `targets`: preset names — `windows-{x86_64,aarch64}`, `linux-{x86_64,aarch64}`,
+  `macos-{x86_64,aarch64}`. Omit it to build for the host only (old behavior).
+- `platform.generate` (default true when `targets` is present): zxc copies the
+  std library into `.zxc-cache/platform/<target>/std/`, swaps in the POSIX
+  `net`/`fs`/`time` implementations, and writes a `platform.zx` constants
+  module (`os`, `arch`, `family`, `triple`, `is_windows`, `is_posix`).
+- Each target builds in its own process; artifacts land in `out/<target>/`
+  (host target stays at `out/`). Intermediates are isolated per target too.
+- The generated C is platform-neutral (`#ifdef _WIN32` selects the runtime
+  branch), so the same source produces PE / ELF / Mach-O binaries. The
+  bundled zig toolchain carries all three libc targets.
 
 A demo with built-in self-checks:
 
@@ -104,6 +131,7 @@ zxc run                  # build and run
 zxc build                # artifacts go to out/, intermediates to .zxc-cache/
 zxc test [filter]        # run cases in src/test/ (zero-arg pub functions)
 zxc check                # static-check the whole project
+zxc targets              # list built-in cross-compilation targets
 zxc fmt [--check]        # format
 ```
 

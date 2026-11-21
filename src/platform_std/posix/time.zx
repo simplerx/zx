@@ -1,0 +1,155 @@
+// time.zx —— POSIX（Linux / macOS）版：高精度单调钟 + 墙钟 + UTC 格式化。
+//
+// 本文件由 zxc 的自动生成机制在 POSIX 目标下选用，替代 std/time.zx。
+// 对外 API 与 Windows 版逐字一致：所有 pub const 的名称、签名与语义均相同。
+// 平台无关代码（Hinnant civil_from_days、formatUtc、DateTime、two）原样复制
+// 自 std/time.zx；仅平台相关的 extern、counter/freq/wall100ns 及 unix* 的
+// 换算替换为 clock_gettime 实现。
+//
+//   const std = @mod("std");
+//   let t0 = std.time.counter();
+//   ... 干活 ...
+//   std.println("{} ms", std.time.nsBetween(t0, std.time.counter()) / 1000000);
+//
+//   std.println("{}", std.time.formatUtc(al, std.time.unixMs()));  // ISO 8601
+//
+// 实现说明：
+//   - clock_gettime 的 struct timespec 是连续两个 i64：[sec, nsec]。Zx 中用
+//     [2]i64 承接，&ts cast 成 *i64 传给 extern。
+//   - counter() 走 CLOCK_MONOTONIC，直接返回纳秒；freq() 恒为 1e9（仅为 API
+//     兼容保留，调用方不再需要换算）。
+//   - wall100ns() 走 CLOCK_REALTIME，返回自 Unix 纪元(1970)起的 100ns 数；
+//     与 Windows 版（自 1601 起）语义不同，故 unix* 不再减 1601→1970 常量。
+//   - 时间差全程 u128（频率换算 1e9 倍不溢出）；formatUtc 固定 24 字节一次
+//     分配，天数→日期是 Hinnant 算法（无循环）。
+
+extern fn clock_gettime(clk: i32, tp: *i64) i32;
+
+// struct timespec 的布局是 [sec, nsec]，Zx 里用 [2]i64 承接。
+// 取 &ts 得到 *[2]i64，调用处 cast 成 *i64。
+// CLOCK_* 是平台 ABI 常量：Linux REALTIME=0/MONOTONIC=1，
+// macOS REALTIME=0/MONOTONIC=6。生成层对 macOS 目标改写 MONOTONIC。
+const CLOCK_REALTIME: i32 = 0;    // 墙钟，可被校时/闰秒拨动（Linux 与 macOS 均为 0）
+const CLOCK_MONOTONIC: i32 = 1;   // 单调钟，只增不减（Linux=1；macOS 生成时替换为 6）
+
+// ---- 单调钟（测耗时用这个，墙钟会被校时/闰秒拨动） -----------------------------
+
+// 高精度单调钟读数，单位纳秒（POSIX 版 counter 本身就是纳秒，只用于减法）。
+pub const counter = fn () u64 {
+    var ts: [2]i64 = .{ 0, 0 };
+    _ = clock_gettime(CLOCK_MONOTONIC, (*i64)&ts);
+    return (u64)ts[0] * 1000000000 + (u64)ts[1];
+};
+
+// 每秒多少个 counter 刻度。counter() 直接是纳秒，故恒为 1e9。
+// 保留此函数只为 API 兼容。
+pub const freq = fn () u64 {
+    return 1000000000;
+};
+
+// 两个计数器读数之间的纳秒数。u128 中转：counter*1e9 对 64 位会溢出
+// （~18 秒就爆），128 位下任何现实区间都安全。
+// POSIX 版 freq() 恒为 1e9，故 d*1e9/1e9 = d，仍保留通用写法以防溢出。
+pub const nsBetween = fn (start: u64, end: u64) u64 {
+    let d: u128 = (u128)end - (u128)start;
+    return (u64)(d * 1000000000 / (u128)freq());
+};
+
+// 从 start 到现在的纳秒数。
+pub const nsSince = fn (start: u64) u64 {
+    return nsBetween(start, counter());
+};
+
+// ---- 墙钟 ---------------------------------------------------------------------
+//
+// POSIX 版 wall100ns() 直接返回自 Unix 纪元(1970-01-01 UTC)起的 100 纳秒数。
+// 与 Windows 版（自 1601 起）语义不同，unix* 换算不再减 1601→1970 的差值。
+
+// 墙钟原始读数（100ns，自 1970）。
+pub const wall100ns = fn () u64 {
+    var ts: [2]i64 = .{ 0, 0 };
+    _ = clock_gettime(CLOCK_REALTIME, (*i64)&ts);
+    return (u64)ts[0] * 10000000 + (u64)(ts[1] / 100);
+};
+
+// Unix 纪元起的毫秒数（JS Date.now() 同一数值域）。
+pub const unixMs = fn () u64 {
+    return wall100ns() / 10000;
+};
+
+// Unix 纪元起的秒数。
+pub const unixSecs = fn () u64 {
+    return wall100ns() / 10000000;
+};
+
+// Unix 纪元起的纳秒数。u64 能撑到 2554 年。
+pub const unixNs = fn () u64 {
+    return wall100ns() * 100;
+};
+
+// ---- UTC 格式化 ----------------------------------------------------------------
+
+// 拆成 UTC 日历分量。民用年从 1 开始（month/day 同理）。
+pub const DateTime = struct {
+    pub year: u64, pub month: u64, pub day: u64,     // y-m-d
+    pub hour: u64, pub min: u64, pub sec: u64, pub ms: u64,
+};
+
+// Unix 毫秒 → 日历分量。天数→年月日走 Hinnant 的 civil_from_days：
+// 纯整数运算（一次除法链），没有逐月逐年的循环。
+pub const fromUnixMs = fn (ms: u64) DateTime {
+    let days = ms / 86400000;
+    let tod = ms % 86400000;                      // 当天内的毫秒
+    // civil_from_days（era 算法，1970-01-01 = 0）
+    let z = days + 719468;
+    let era = z / 146097;
+    let doe = z - era * 146097;                   // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;   // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);                 // [0, 365]
+    let mp = (5 * doy + 2) / 153;                 // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1;         // [1, 31]
+    var m = mp + 3;                               // [3, 14] → [1, 12]
+    if (mp >= 10) { m = mp - 9; }
+    var yr = y;                                   // 民用年：1、2 月属上一年
+    if (m <= 2) { yr = y + 1; }
+    return DateTime{ .year = yr,
+                     .month = m, .day = d,
+                     .hour = tod / 3600000,
+                     .min = (tod % 3600000) / 60000,
+                     .sec = (tod % 60000) / 1000,
+                     .ms = tod % 1000 };
+};
+
+// 两位十进制（内部用）。
+const two = fn (buf: *u8, off: usize, v: u64) void {
+    (buf + off).0 = 48 + (u8)(v / 10);
+    (buf + off + 1).0 = 48 + (u8)(v % 10);
+};
+
+// Unix 毫秒 → "2026-11-03T06:31:49.123Z"（ISO 8601 UTC，固定 24 字节）。
+// 一次精确分配，逐字节写位，不经过格式化机器。
+pub const formatUtc = fn (alloc: Allocator, ms: u64) ?[]u8 {
+    let raw = alloc.alloc(alloc.ctx, 24);
+    if (raw) b {
+        let dt = fromUnixMs(ms);
+        two(b, 0, dt.year / 100);
+        two(b, 2, dt.year % 100);
+        (b + 4).0 = '-';
+        two(b, 5, dt.month);
+        (b + 7).0 = '-';
+        two(b, 8, dt.day);
+        (b + 10).0 = 'T';
+        two(b, 11, dt.hour);
+        (b + 13).0 = ':';
+        two(b, 14, dt.min);
+        (b + 16).0 = ':';
+        two(b, 17, dt.sec);
+        (b + 19).0 = '.';
+        two(b, 20, dt.ms / 10);            // 毫秒前两位
+        (b + 22).0 = 48 + (u8)(dt.ms % 10); // 毫秒个位
+        (b + 23).0 = 'Z';
+        return b[0..24];
+    }
+    return null;
+};

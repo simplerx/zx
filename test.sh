@@ -47,7 +47,7 @@ if [ "${ZX_CHECKED:-0}" = "1" ]; then
     $ZYG cc -std=c11 -O0 -g -o bin/zxc_checked.exe \
         src/zxc.c src/ty.c src/val.c src/lex.c src/parse.c src/sema.c \
         src/backend.c src/main.c src/fe.c src/astload.c src/errors.c \
-        src/cbind.c src/csrc.c src/clib.c src/fetch.c
+        src/cbind.c src/csrc.c src/clib.c src/fetch.c src/platform.c
     ZXC=./bin/zxc_checked.exe
 fi
 # zxc 从自己的路径推 zig cc 的位置，给反斜杠路径它就不必靠 cwd
@@ -1654,6 +1654,57 @@ else
     printf "  FAIL 双前端对拍 %s 处差异（sh bootstrap/diff_ast.sh 看明细）\n" "$ndiff"
     fail=1
 fi
+
+# §208：多平台目标（配置驱动 + 后台生成）。
+# 守三件事：targets 预设齐全、zx.json targets 能驱动三目标交叉构建、
+# 产物 magic 分别是 PE/ELF/Mach-O。运行需目标机，这里只验到编译+链接。
+printf "\n== §208 多平台交叉构建（windows/linux/macos）\n"
+tgt_out=$($ZXC targets 2>/dev/null)
+if printf '%s' "$tgt_out" | grep -q 'linux-aarch64' \
+   && printf '%s' "$tgt_out" | grep -q 'macos-aarch64' \
+   && printf '%s' "$tgt_out" | grep -q 'windows-x86_64'; then
+    printf "  ok   zxc targets 列出 6 个预设\n"
+else
+    printf "  FAIL zxc targets 预设不全\n"; fail=1
+fi
+P208="$ROOT/.tmp/p208.$$"
+rm -rf "$P208"; mkdir -p "$P208/src"
+cat > "$P208/zx.json" <<'ZJEOF'
+{"name":"p208","main":"src/main.zx","out":"p208",
+ "targets":["windows-x86_64","linux-x86_64","macos-aarch64"]}
+ZJEOF
+cat > "$P208/src/main.zx" <<'ZXEOF'
+const std = @mod("std");
+const main = fn () i32 {
+    std.println("{}", std.time.unixMs());
+    return 0;
+};
+ZXEOF
+(
+    cd "$P208"
+    ZX_STD="$ROOT/std" "$ROOT/$ZXC" build --release > "$TPFX.p208.log" 2>&1
+)
+if [ $? -eq 0 ] \
+   && [ -f "$P208/out/p208.exe" ] \
+   && [ -f "$P208/out/linux-x86_64/p208" ] \
+   && [ -f "$P208/out/macos-aarch64/p208" ]; then
+    mz=$(od -An -tx1 -N2 "$P208/out/p208.exe" 2>/dev/null | tr -d ' ')
+    elf=$(od -An -tx1 -N4 "$P208/out/linux-x86_64/p208" 2>/dev/null | tr -d ' ')
+    mach=$(od -An -tx1 -N4 "$P208/out/macos-aarch64/p208" 2>/dev/null | tr -d ' ')
+    if [ "$mz" = "4d5a" ] && [ "$elf" = "7f454c46" ] && [ "$mach" = "cffaedfe" ]; then
+        printf "  ok   三目标产物 magic 正确 (PE/ELF/Mach-O)\n"
+    else
+        printf "  FAIL magic: mz=%s elf=%s mach=%s\n" "$mz" "$elf" "$mach"; fail=1
+    fi
+    if [ -f "$P208/.zxc-cache/platform/linux-x86_64/std/platform.zx" ]; then
+        printf "  ok   std 平台镜像 + platform.zx 已生成\n"
+    else
+        printf "  FAIL std 平台镜像缺失\n"; fail=1
+    fi
+else
+    printf "  FAIL §208 多目标构建失败\n"; tail -12 "$TPFX.p208.log"; fail=1
+fi
+rm -rf "$P208"
 
 # 用例会在仓库根留下自己的临时文件：io_fmt.zx 写 io_fmt.tmp，stdfs.zx 建
 # fs_t_dir / fs_t_dir2。跑完统一带走——测试不该往工作区里堆东西。

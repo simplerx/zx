@@ -39,6 +39,7 @@
 #include "csrc.h"
 #include "clib.h"
 #include "fetch.h"
+#include "platform.h"
 #include <ctype.h>
 #include <stdarg.h>
 #include <time.h>
@@ -67,6 +68,7 @@ void  sema_check(Node *root);
 void  region_ledger_dump(FILE *out, const char *path);   /* §132 分配账本 */
 static void setup_search_paths_for_file(const char *file);
 void  sema_set_search_paths(const char *const *dirs);   /* deps 模块搜索路径 */
+void  sema_set_std_path(const char *dir);               /* §208 平台 std 镜像覆盖 */
 const char *sema_module_path(int i);                    /* 模块 i 的源文件路径 */
 static char *read_source(const char *path, size_t *out_len);
 static int  vendor_autoscan(void);   /* vendor/ 自动接管：build/run/test 解析源码前调 */
@@ -75,6 +77,11 @@ static int  cmd_fetch(int argc, char **argv, int argi);
 
 static const char *g_cc;
 static const char *g_cflags;
+/* §208: 当前构建目标。NULL = 宿主单目标（老路径），非 NULL = 走目标配置。
+ * 用指针而非改所有 build_program 调用点：init 自检、cmd_run、cmd_test
+ * 仍走宿主默认，只有 zxc build 的多目标循环会设置它。 */
+static Target *g_target;
+static const char *g_argv0;      /* §208: 生成层定位 std 源目录用 */
 int g_zx_release = 0;   /* §133：--release 档位，sema 的按点擦除读它 */
 /* dev 档 -O0：迭代速度优先（0.4s/unit 级）；--release 才上 -O2。
  * 注意 zig cc 的 -O0 映射 Debug 会自带 UB 检查（曾把 arena 的未对齐
@@ -594,18 +601,38 @@ static int build_program(Node *root, const char *out, const char *cachedir, OutK
             prog("compiled %d C unit(s) from vendor/", ncomp);
         }
     }
+    /* §208: 有效编译参数 = 档位 + 目标 triple + 目标覆盖 cflags。
+     * 三处消费（stamp / 编译 / 链接）统一用这一份，避免漏注入。 */
+    char cc_flags[1200];
+    snprintf(cc_flags, sizeof cc_flags, "%s%s%s%s",
+             g_cflags ? g_cflags : "",
+             (g_target && g_target->cc_target[0]) ? " " : "",
+             (g_target && g_target->cc_target[0]) ? g_target->cc_target : "",
+             (g_target && g_target->extra_cflags[0]) ? g_target->extra_cflags : "");
+
+    /* §208: 按目标补可执行文件后缀。windows 目标补 .exe；posix 目标不补。
+     * 宿主单目标维持原行为（Windows 补 .exe）。 */
+    {
+        const char *suffix = NULL;
+        if (g_target) {
+            /* 有目标时完全听目标的：posix 目标 exe_suffix 为空串 = 不补。
+             * 绝不能落到下面的宿主 #ifdef，否则 Windows 宿主编 linux 会
+             * 错补 .exe（产物变成 ELF 却带 .exe 后缀，直接运行会失败）。 */
+            if (g_target->exe_suffix[0]) suffix = g_target->exe_suffix;
+        } else {
 #ifdef _WIN32
-    /* zig cc -o 不补 .exe：产物没有扩展名时 cmd / 资源管理器都跑不了
-     * （表现为"程序明明在却没有任何输出"），这里统一补上。 */
-    static char outexe[2048];
-    if (kind == OUT_EXE) {
-        size_t l = strlen(out);
-        if (l < 4 || _stricmp(out + l - 4, ".exe") != 0) {
-            snprintf(outexe, sizeof outexe, "%s.exe", out);
-            out = outexe;
+            suffix = ".exe";
+#endif
+        }
+        if (suffix && kind == OUT_EXE) {
+            size_t l = strlen(out), sl = strlen(suffix);
+            if (l < sl || strcmp(out + l - sl, suffix) != 0) {
+                static char outexe[2048];
+                snprintf(outexe, sizeof outexe, "%s%s", out, suffix);
+                out = outexe;
+            }
         }
     }
-#endif
 
     /* 中间文件前缀：有缓存目录就用 "缓存目录/产物名（去扩展名）"。
      * 前缀里带上优化档位（-dev / -rel）：dev 与 release 的 .o 本来就
@@ -622,7 +649,12 @@ static int build_program(Node *root, const char *out, const char *cachedir, OutK
          * 就是 -O2 与 -O0 的 .o 混进同一个目录，症状是"改个 flag 后
          * 编译出来的程序行为莫名其妙"。按内容认。 */
         const char *mtag = (g_cflags && strstr(g_cflags, "ZX_RELEASE")) ? "-rel" : "-dev";
-        snprintf(stem, sizeof stem, "%s/%s%s", cachedir, base, mtag);
+        /* §208: 缓存路径带目标名——同一工程的 windows/linux 目标中间文件
+         * 分开放，切换目标不会拿错平台的 .o（它们的 ABI 不兼容）。 */
+        if (g_target && g_target->name[0])
+            snprintf(stem, sizeof stem, "%s/%s/%s%s", cachedir, g_target->name, base, mtag);
+        else
+            snprintf(stem, sizeof stem, "%s/%s%s", cachedir, base, mtag);
     } else {
         snprintf(stem, sizeof stem, "%s", out);
     }
@@ -661,7 +693,7 @@ static int build_program(Node *root, const char *out, const char *cachedir, OutK
      * （顺带自愈"旧 .o 带着别的运行时符号"之类的脏状态）。 */
     char fpath[2048], fstamp[512];
     snprintf(fpath, sizeof fpath, "%s.flags", stem);
-    snprintf(fstamp, sizeof fstamp, "%s|%s\n", g_cc, g_cflags);
+    snprintf(fstamp, sizeof fstamp, "%s|%s\n", g_cc, cc_flags);
     bool fchanged = write_file_if_changed(fpath, fstamp, strlen(fstamp));
 
     /* @link 收集的外部库：内容记一份到 .libs。库的增删只影响链接、不影响
@@ -720,7 +752,7 @@ static int build_program(Node *root, const char *out, const char *cachedir, OutK
             snprintf(j->cmd, sizeof j->cmd,
                      "%s %s %s -fno-caret-diagnostics -fno-color-diagnostics "
                      "-c -o \"%s\" \"%s\" > \"%s\" 2>&1",
-                     g_cc, g_cflags, warnflag, opath, cpath, j->log);
+                     g_cc, cc_flags, warnflag, opath, cpath, j->log);
         }
 
         if (pass) buf_puts(&objs, " ");
@@ -777,14 +809,23 @@ static int build_program(Node *root, const char *out, const char *cachedir, OutK
     if (kind == OUT_STATIC) {
         snprintf(cmd, sizeof cmd, "%s rcs \"%s\" %s", archiver_of(g_cc), absout, objs.data);
     } else {
+        /* §208: -fPIC 按目标族决定，而非宿主：交叉编 linux 时即使宿主是
+         * Windows 也要带 -fPIC。 */
         const char *shared = "";
-#ifdef _WIN32
-        if (kind == OUT_SHARED) shared = "-shared";
-#else
-        if (kind == OUT_SHARED) shared = "-shared -fPIC";
+        bool posix_target = g_target ? !strcmp(g_target->family, "posix") : false;
+#ifndef _WIN32
+        posix_target = true;
 #endif
+        if (kind == OUT_SHARED) shared = posix_target ? "-shared -fPIC" : "-shared";
         snprintf(cmd, sizeof cmd, "%s %s %s -o \"%s\" %s",
-                 g_cc, g_cflags, shared, absout, objs.data);
+                 g_cc, cc_flags, shared, absout, objs.data);
+        /* §208: 平台默认系统库（linux 的 -lm -ldl -lpthread 等），放在
+         * @link 收集项之前。链接顺序上系统库靠后更稳，但 zig cc/lld 对
+         * -l 顺序不敏感，这里统一追加即可。 */
+        if (g_target && g_target->default_libs[0])
+            snprintf(cmd + strlen(cmd), sizeof cmd - strlen(cmd), " %s", g_target->default_libs);
+        if (g_target && g_target->extra_link[0])
+            snprintf(cmd + strlen(cmd), sizeof cmd - strlen(cmd), " %s", g_target->extra_link);
         /* @link("ws2_32") 收集的外部库：名字走 -l，带路径分隔符或扩展名的
          * 当文件路径原样传（vendor 目录里的 .lib / .a）。 */
         for (int i = 0; i < g_nlink_libs; i++) {
@@ -1120,6 +1161,7 @@ static int arg_special_flag(int argc, char **argv, int from) {
 static char g_ccbuf[2048];
 
 static const char *default_cc(const char *argv0) {
+#ifdef _WIN32
     char dir[1600];
     snprintf(dir, sizeof dir, "%s", argv0 ? argv0 : "");
     for (char *p = dir; *p; p++) if (*p == '/') *p = '\\';   /* cmd 只认反斜杠 */
@@ -1128,6 +1170,52 @@ static const char *default_cc(const char *argv0) {
     *slash = 0;
     snprintf(g_ccbuf, sizeof g_ccbuf, "%s\\..\\.toolchain\\zig.exe cc", dir);
     return g_ccbuf;
+#else
+    /* §208: POSIX 上 zig 二进制叫 zig（无 .exe），路径用正斜杠。
+     * 优先 ZX_ZIG 环境变量 > zxc 同级的 ../.toolchain/zig > PATH 上的 zig。 */
+    const char *env = getenv("ZX_ZIG");
+    if (env && *env) { snprintf(g_ccbuf, sizeof g_ccbuf, "%s cc", env); return g_ccbuf; }
+    char dir[1600];
+    snprintf(dir, sizeof dir, "%s", argv0 ? argv0 : "");
+    char *slash = strrchr(dir, '/');
+    if (slash) {
+        *slash = 0;
+        snprintf(g_ccbuf, sizeof g_ccbuf, "%s/../.toolchain/zig cc", dir);
+        if (fexists(g_ccbuf) || true) return g_ccbuf;
+    }
+    return "zig cc";
+#endif
+}
+
+/* §208: 定位源 std 目录（与 sema.find_std_path 同策略：ZX_STD > exe 同级
+ * ../std > cwd/std）。argv0 用来算 exe 所在目录。返回静态缓冲，找不到 NULL。 */
+static const char *find_std_source_dir(const char *argv0) {
+    static char dir[1600];
+    const char *env = getenv("ZX_STD");
+    if (env && *env) {
+        snprintf(dir, sizeof dir, "%s", env);
+        char probe[1660];
+        snprintf(probe, sizeof probe, "%s/std.zx", dir);
+        if (fexists(probe)) return dir;
+    }
+    /* zxc 在 bin/ 里，std/ 在它的上一级。 */
+    if (argv0) {
+        char exedir[1600];
+        snprintf(exedir, sizeof exedir, "%s", argv0);
+        char *slash = strrchr(exedir, '/');
+        if (!slash) slash = strrchr(exedir, '\\');
+        if (slash) {
+            *slash = 0;
+            snprintf(dir, sizeof dir, "%s/../std", exedir);
+            char probe[1660]; snprintf(probe, sizeof probe, "%s/std.zx", dir);
+            if (fexists(probe)) return dir;
+            snprintf(dir, sizeof dir, "%s/std", exedir);
+            snprintf(probe, sizeof probe, "%s/std.zx", dir);
+            if (fexists(probe)) return dir;
+        }
+    }
+    if (fexists("std/std.zx")) { snprintf(dir, sizeof dir, "std"); return dir; }
+    return NULL;
 }
 
 /* ---------------- init / check / fmt 子命令 ---------------- */
@@ -1853,6 +1941,8 @@ static char *fmt_transform(const char *src) {
 /* ---- 子命令实现 ---- */
 
 /* 工程清单（zx.json）。定义放前面：check 段也要读 deps。 */
+/* §208 多平台目标：用户在 zx.json "targets" 里写预设名；没写就用宿主。 */
+#define PROJ_MAX_TARGETS 16
 struct Proj {
     bool ok;
     char name[256];     /* 工程名 */
@@ -1860,8 +1950,167 @@ struct Proj {
     char out[256];      /* 产物名（缺省 = 工程名） */
     char *deps[16];     /* "deps" 数组：模块搜索目录（相对工程根） */
     int  ndeps;
+    /* §208: "targets": ["windows-x86_64", "linux-x86_64", ...] */
+    char *targets[PROJ_MAX_TARGETS];
+    int  ntargets;
+    /* §208: "platform": { "generate": bool, "dir": str } —— 后台生成 std 镜像 */
+    bool platform_gen;          /* 缺省 false；写了 platform 段且 generate != false 时开 */
+    char platform_dir[256];     /* 缺省 .zxc-cache/platform */
 };
 typedef struct Proj Proj;
+static int write_text_file(const char *path, const char *content);  /* §208 生成层前置声明 */
+/* §208: 静默拷贝一个文件（二进制安全），失败返回 -1。 */
+static int plat_copy_file(const char *src, const char *dst) {
+    FILE *f = fopen(src, "rb");
+    if (!f) return -1;
+    FILE *o = fopen(dst, "wb");
+    if (!o) { fclose(f); return -1; }
+    char buf[8192];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof buf, f)) > 0) fwrite(buf, 1, n, o);
+    fclose(f);
+    fclose(o);
+    return 0;
+}
+
+/* §208: 为单个目标生成 std 镜像 + platform.zx。
+ * 镜像目录 <dir>/<target>/std/：先拷全部源 std/*.zx，再用平台特化文件
+ * （src/platform_std/<family>/{net,fs,time}.zx）覆盖，并写 platform.zx。
+ * 返回镜像的 std 目录路径（写入 mirror_out），成功 0。
+ *
+ * 增量：比较每个源文件的 mtime，未变则不重写——反复 build 不做无谓拷贝。 */
+static int platform_gen_std(const Proj *pj, const Target *t,
+                            char *mirror_out, size_t mcap) {
+    const char *srcdir = find_std_source_dir(g_argv0);
+    if (!srcdir) {
+        fprintf(stderr, "zxc: cannot locate std/ source (set ZX_STD)\n");
+        return -1;
+    }
+    char mirror[2048];
+    snprintf(mirror, sizeof mirror, "%s/%s/std", pj->platform_dir, t->name);
+    mkdir_p(mirror);
+
+    /* 1) 拷全部 std/*.zx */
+    int nsrc = 0;
+    char **srcs = collect_zx_files(srcdir, &nsrc);
+    for (int i = 0; i < nsrc; i++) {
+        const char *base = strrchr(srcs[i], '/');
+        if (!base) base = strrchr(srcs[i], '\\');
+        base = base ? base + 1 : srcs[i];
+        char dst[2300];
+        snprintf(dst, sizeof dst, "%s/%s", mirror, base);
+        struct stat ss, ds;
+        bool need = stat(srcs[i], &ss) != 0;
+        if (!need) need = stat(dst, &ds) != 0 || ss.st_mtime > ds.st_mtime;
+        if (need && plat_copy_file(srcs[i], dst) != 0) {
+            fprintf(stderr, "zxc: platform gen: cannot copy %s\n", srcs[i]);
+        }
+        free(srcs[i]);
+    }
+    free(srcs);
+
+    /* 2) 用平台特化文件覆盖（net/fs/time）。源在 zxc 旁边的
+     * ../src/platform_std/<family>/，随编译器一起分发。 */
+    char overdir[1600];
+    if (g_argv0) {
+        char exedir[1600];
+        snprintf(exedir, sizeof exedir, "%s", g_argv0);
+        char *slash = strrchr(exedir, '/');
+        if (!slash) slash = strrchr(exedir, '\\');
+        if (slash) {
+            *slash = 0;
+            snprintf(overdir, sizeof overdir, "%s/../src/platform_std/%s",
+                     exedir, t->family);
+        } else {
+            snprintf(overdir, sizeof overdir, "src/platform_std/%s", t->family);
+        }
+    } else {
+        snprintf(overdir, sizeof overdir, "src/platform_std/%s", t->family);
+    }
+    static const char *k_override[] = { "net.zx", "fs.zx", "time.zx", NULL };
+    for (int i = 0; k_override[i]; i++) {
+        char s[1660], d[2300];
+        snprintf(s, sizeof s, "%s/%s", overdir, k_override[i]);
+        snprintf(d, sizeof d, "%s/%s", mirror, k_override[i]);
+        if (fexists(s) && plat_copy_file(s, d) != 0)
+            fprintf(stderr, "zxc: platform gen: cannot copy %s\n", s);
+    }
+
+    /* 2b) §208: struct stat 的字段偏移因 OS 而异。POSIX 模板按 Linux
+     * x86_64 写（size=48/mtime=88/mode=24），macOS 是 96/136/8。
+     * 按目标改写这三个常量——只改本次生成的镜像，不动模板源。 */
+    if (!strcmp(t->os, "macos")) {
+        char fpath[2300];
+        snprintf(fpath, sizeof fpath, "%s/fs.zx", mirror);
+        size_t flen = 0;
+        char *fsrc = read_source(fpath, &flen);
+        if (fsrc) {
+            int rep = 0;
+            const char *p = fsrc;
+            Buf patched; buf_init(&patched);
+            while (p && *p) {
+                const char *hit = NULL;
+                const char *a = strstr(p, "const STAT_SIZE_OFF: usize = 48;");
+                const char *b = strstr(p, "const STAT_MTIME_OFF: usize = 88;");
+                const char *c = strstr(p, "const STAT_MODE_OFF: usize = 24;");
+                if (a && (!hit || a < hit)) hit = a;
+                if (b && (!hit || b < hit)) hit = b;
+                if (c && (!hit || c < hit)) hit = c;
+                if (!hit) { buf_puts(&patched, p); break; }
+                buf_putn(&patched, p, (size_t)(hit - p));
+                if (hit == a) { buf_puts(&patched, "const STAT_SIZE_OFF: usize = 96;"); p = hit + strlen("const STAT_SIZE_OFF: usize = 48;"); }
+                else if (hit == b) { buf_puts(&patched, "const STAT_MTIME_OFF: usize = 136;"); p = hit + strlen("const STAT_MTIME_OFF: usize = 88;"); }
+                else { buf_puts(&patched, "const STAT_MODE_OFF: usize = 8;"); p = hit + strlen("const STAT_MODE_OFF: usize = 24;"); }
+                rep++;
+            }
+            if (rep == 3) write_text_file(fpath, patched.data ? patched.data : "");
+            buf_free(&patched);
+            free(fsrc);
+        }
+        /* macOS 的 CLOCK_MONOTONIC=6（Linux=1）。模板按 Linux 写，替换。 */
+        char tpath[2300];
+        snprintf(tpath, sizeof tpath, "%s/time.zx", mirror);
+        size_t tlen = 0;
+        char *tsrc = read_source(tpath, &tlen);
+        if (tsrc) {
+            const char *old = "const CLOCK_MONOTONIC: i32 = 1;";
+            const char *neu = "const CLOCK_MONOTONIC: i32 = 6;";
+            const char *hit = strstr(tsrc, old);
+            if (hit) {
+                Buf patched; buf_init(&patched);
+                buf_putn(&patched, tsrc, (size_t)(hit - tsrc));
+                buf_puts(&patched, neu);
+                buf_puts(&patched, hit + strlen(old));
+                write_text_file(tpath, patched.data ? patched.data : "");
+                buf_free(&patched);
+            }
+            free(tsrc);
+        }
+    }
+
+    /* 3) platform.zx：编译期常量，用户代码 @mod("platform.zx") 可读。
+     * 值是字符串/整数常量，用 Zx 字面量语法。 */
+    char pz[2048];
+    snprintf(pz, sizeof pz,
+        "// generated by zxc for target %s — do not edit\n"
+        "pub const os = \"%s\";\n"
+        "pub const arch = \"%s\";\n"
+        "pub const family = \"%s\";\n"
+        "pub const triple = \"%s\";\n"
+        "pub const exe_suffix = \"%s\";\n"
+        "pub const is_windows = %s;\n"
+        "pub const is_posix = %s;\n",
+        t->name, t->os, t->arch, t->family, t->triple, t->exe_suffix,
+        !strcmp(t->family, "windows") ? "true" : "false",
+        !strcmp(t->family, "posix") ? "true" : "false");
+    char pzpath[2300];
+    snprintf(pzpath, sizeof pzpath, "%s/platform.zx", mirror);
+    write_text_file(pzpath, pz);
+
+    snprintf(mirror_out, mcap, "%s", mirror);
+    return 0;
+}
+
 static bool proj_load(Proj *pj);
 static void setup_search_paths(const Proj *pj);
 
@@ -2905,6 +3154,71 @@ static int cmd_cbuild(int argc, char **argv, int argi) {
 /* 工程中间文件目录 ZX_CACHE_DIR 定义在文件头（build_program 也要用）：
  * 生成的 .c/.o、共享头、编译参数 stamp 都收在这，不再散落在工程根。 */
 
+/* §208: 抠出一个嵌套对象的正文区间 {"key": { ... }} -> [start, end)。
+ * 大括号配平、跳过字符串里的大括号与转义。返回 false 表示没有该对象。
+ * 用途：读 "platform": {...} 这类嵌套字段，避免 strstr 撞到别处的同名 key。 */
+static bool json_obj_span(const char *text, const char *key,
+                          const char **bs, const char **be) {
+    char pat[64];
+    snprintf(pat, sizeof pat, "\"%s\"", key);
+    const char *p = strstr(text, pat);
+    if (!p) return false;
+    p = strchr(p + strlen(pat), '{');
+    if (!p) return false;
+    const char *s = p + 1;
+    int depth = 1;
+    bool instr = false, esc = false;
+    for (const char *q = s; *q; q++) {
+        if (instr) {
+            if (esc) { esc = false; continue; }
+            if (*q == '\\') { esc = true; continue; }
+            if (*q == '"') instr = false;
+            continue;
+        }
+        if (*q == '"') { instr = true; continue; }
+        if (*q == '{') depth++;
+        else if (*q == '}') {
+            if (--depth == 0) { *bs = s; *be = q; return true; }
+        }
+    }
+    return false;
+}
+
+/* 在一个子串区间里抠 bool：找 "key": true/false。缺省返回 def。 */
+static bool json_bool_in(const char *bs, const char *be, const char *key, bool def) {
+    char pat[64];
+    snprintf(pat, sizeof pat, "\"%s\"", key);
+    size_t plen = strlen(pat);
+    for (const char *p = bs; p && p + plen < be; p++) {
+        if (strncmp(p, pat, plen)) continue;
+        const char *q = p + plen;
+        while (q < be && (*q == ' ' || *q == ':' || *q == '\t')) q++;
+        if (!strncmp(q, "true", 4)) return true;
+        if (!strncmp(q, "false", 5)) return false;
+    }
+    return def;
+}
+
+/* 在一个子串区间里抠 "key": "value"（区间版 json_get_str）。 */
+static bool json_str_in(const char *bs, const char *be, const char *key,
+                        char *out, size_t cap) {
+    char pat[64];
+    snprintf(pat, sizeof pat, "\"%s\"", key);
+    size_t plen = strlen(pat);
+    for (const char *p = bs; p && p + plen < be; p++) {
+        if (strncmp(p, pat, plen)) continue;
+        const char *q = p + plen;
+        while (q < be && *q != '"') { if (*q == '}') return false; q++; }
+        if (q >= be) return false;
+        q++;
+        size_t i = 0;
+        while (q < be && *q != '"' && i + 1 < cap) out[i++] = *q++;
+        out[i] = 0;
+        return true;
+    }
+    return false;
+}
+
 /* 抠 "key": "value"——zx.json 由 zxc init 生成、字段就这几个，
  * 不值得为此拖一个真 JSON 解析器进来。 */
 static bool json_get_str(const char *text, const char *key, char *out, size_t cap) {
@@ -2969,6 +3283,22 @@ static bool proj_load(Proj *pj) {
         snprintf(pj->main, sizeof pj->main,
                  fexists("src/main.zx") ? "src/main.zx" : "main.zx");
     pj->ndeps = json_get_str_array(text, "deps", pj->deps, 16);
+
+    /* §208: targets 数组。缺省为空 = 宿主单目标（向后兼容，老 zx.json 不变）。 */
+    pj->ntargets = json_get_str_array(text, "targets", pj->targets, PROJ_MAX_TARGETS);
+
+    /* §208: "platform": { "generate": bool, "dir": str }。
+     * 缺省：generate=true、dir=.zxc-cache/platform——只要有 targets，默认就
+     * 生成平台镜像（用户只改 targets 一项即可跨平台）。段内可覆盖。 */
+    pj->platform_gen = true;
+    snprintf(pj->platform_dir, sizeof pj->platform_dir, ".zxc-cache/platform");
+    const char *pbs, *pbe;
+    if (json_obj_span(text, "platform", &pbs, &pbe)) {
+        pj->platform_gen = json_bool_in(pbs, pbe, "generate", true);
+        if (json_str_in(pbs, pbe, "dir", pj->platform_dir, sizeof pj->platform_dir) &&
+            !pj->platform_dir[0])
+            snprintf(pj->platform_dir, sizeof pj->platform_dir, ".zxc-cache/platform");
+    }
     return true;
 }
 
@@ -3068,12 +3398,24 @@ static void setup_search_paths_for_file(const char *file) {
     sema_set_search_paths(g_search);
 }
 
-/* 构建 + 产物路径写回 outpath。返回 0 成功。 */
-static int do_build(Proj *pj, bool release, OutKind kind, char *outpath, size_t cap) {
+/* §208: 构建单个目标。target == NULL 表示宿主单目标（老路径）。
+ * 产物路径写回 outpath。返回 0 成功。 */
+static int do_build_one(Proj *pj, const Target *target, bool release,
+                        OutKind kind, char *outpath, size_t cap) {
+    g_target = (Target *)target;
     if (!fexists(pj->main)) {
         fprintf(stderr, "zxc: entry source '%s' not found\n", pj->main);
         return 1;
     }
+    /* §208: 非宿主目标先生成平台 std 镜像，注入 sema；宿主目标清空覆盖。 */
+    if (target && pj->platform_gen) {
+        char mirror[2048];
+        if (platform_gen_std(pj, target, mirror, sizeof mirror) != 0) return 1;
+        sema_set_std_path(mirror);
+    } else {
+        sema_set_std_path(NULL);
+    }
+
     /* 只读、绝不联网：zx.lock 里登记的库若被删了，先给一条可操作的提示。
      * 构建本身永远不会去下载，缺库时交给用户显式跑 `zxc fetch`。 */
     fetch_check_local(0, stderr);
@@ -3082,38 +3424,122 @@ static int do_build(Proj *pj, bool release, OutKind kind, char *outpath, size_t 
     vendor_autoscan();
     mkdir_p(ZX_CACHE_DIR);
     mkdir_p("out");
+    /* §208: 目标中间文件目录 .zxc-cache/<target>/，与 build_program 的 stem 对应 */
+    if (target && target->name[0]) {
+        char tcdir[600];
+        snprintf(tcdir, sizeof tcdir, "%s/%s", ZX_CACHE_DIR, target->name);
+        mkdir_p(tcdir);
+    }
     setup_search_paths(pj);
 
     const char *base = pj->out;
-    if (kind == OUT_EXE) {
-#ifdef _WIN32
-        snprintf(outpath, cap, "out/%s.exe", base);
-#else
+    /* §208: 多目标产物分目录 out/<target>/，避免互相覆盖。 */
+    if (target && target_is_cross(target))
+        snprintf(outpath, cap, "out/%s/%s", target->name, base);
+    else
         snprintf(outpath, cap, "out/%s", base);
-#endif
-    } else if (kind == OUT_STATIC) {
-        snprintf(outpath, cap, "out/%s.a", base);
-    } else {
+    /* 后缀由 build_program 按目标补（.exe / 空），这里不写死。库后缀按目标。 */
+    if (kind == OUT_STATIC) {
+        const char *pfx = (target && target->lib_prefix[0]) ? target->lib_prefix : "";
+        const char *sfx = (target && target->lib_suffix[0]) ? target->lib_suffix : ".a";
+        char name[512];
+        snprintf(name, sizeof name, "%s%s%s", pfx, base, sfx);
+        if (target && target_is_cross(target))
+            snprintf(outpath, cap, "out/%s/%s", target->name, name);
+        else
+            snprintf(outpath, cap, "out/%s", name);
+    } else if (kind == OUT_SHARED) {
+        const char *sfx = (target && target->dll_suffix[0]) ? target->dll_suffix :
 #ifdef _WIN32
-        snprintf(outpath, cap, "out/%s.dll", base);
+                          ".dll";
 #else
-        snprintf(outpath, cap, "out/%s.so", base);
+                          ".so";
 #endif
+        strncat(outpath, sfx, cap - strlen(outpath) - 1);
+    }
+    /* §208: 产物在 out/<target>/ 时先建目录。 */
+    if (target && target_is_cross(target)) {
+        char odir[600];
+        snprintf(odir, sizeof odir, "out/%s", target->name);
+        mkdir_p(odir);
     }
 
     g_cflags = release ? CC_REL : CC_DEV;
     g_zx_release = release;
     g_srcpath = pj->main;
     Node *root = fe_parse_file(pj->main);
-    if (!root || g_error_count) return 1;
+    if (!root || g_error_count) { g_target = NULL; return 1; }
     sema_check(root);
     if (g_error_count) {
         if (g_error_count > g_diag_shown)
             fprintf(stderr, "zxc: %d error(s) (first %d shown)\n",
                     g_error_count, g_diag_shown);
+        g_target = NULL;
         return 1;
     }
-    return build_program(root, outpath, ZX_CACHE_DIR, kind);
+    int rc = build_program(root, outpath, ZX_CACHE_DIR, kind);
+    g_target = NULL;
+    return rc;
+}
+
+/* 构建 + 产物路径写回 outpath。§208: 有 targets 就逐目标构建，
+ * outpath 返回最后一个（供 run 用；多目标时 run 本身无意义，见 cmd_run）。 */
+static int do_build(Proj *pj, bool release, OutKind kind, char *outpath, size_t cap) {
+    if (!fexists(pj->main)) {
+        fprintf(stderr, "zxc: entry source '%s' not found\n", pj->main);
+        return 1;
+    }
+    if (pj->ntargets == 0)
+        return do_build_one(pj, NULL, release, kind, outpath, cap);
+
+    /* §208: 每个目标在独立子进程里构建。原因：sema 的后端 typedef 编号、
+     * 模块表、AST 缓存是进程级全局，跨目标复用会串味（实测：先 windows
+     * 后 linux 时 zxrt 拿到 Windows 版 typedef、net 拿到 closesocket）。
+     * 子进程天然隔离所有全局状态，代价是每个目标多一次 zxc 启动。 */
+    const char *kindflag = kind == OUT_STATIC ? "--static" :
+                           kind == OUT_SHARED ? "--shared" : "--exe";
+    const char *relflag = release ? "--release" : "";
+    int built = 0;
+    for (int i = 0; i < pj->ntargets; i++) {
+        Target t;
+        if (!target_init(&t, pj->targets[i])) {
+            fprintf(stderr, "zxc: unknown target '%s' (see zxc targets)\n", pj->targets[i]);
+            return 1;
+        }
+        prog("=== target %s (%s) ===", t.name, t.triple);
+        char cmd[2400];
+        snprintf(cmd, sizeof cmd, "\"\"%s\" --build-one \"%s\" %s %s\"",
+                 g_argv0 ? g_argv0 : "zxc", t.name, kindflag, relflag);
+        int rc = system(cmd);
+        if (rc != 0) {
+            fprintf(stderr, "zxc: build failed for target %s\n", t.name);
+            return 1;
+        }
+        built++;
+        /* outpath 返回最后一个目标的产物路径 */
+        if (target_is_cross(&t))
+            snprintf(outpath, cap, "out/%s/%s", t.name, pj->out);
+        else
+            snprintf(outpath, cap, "out/%s", pj->out);
+    }
+    if (built == 0) return 1;
+    return 0;
+}
+
+/* §208: 内部入口 —— 只构建一个目标（由 do_build 的多目标循环 spawn）。 */
+static int build_one_mode(const char *target_name, bool release, OutKind kind) {
+    Proj pj;
+    if (!proj_load(&pj)) {
+        fprintf(stderr, "zxc: zx.json not found here (--build-one)\n");
+        return 2;
+    }
+    Target t;
+    if (!target_init(&t, target_name)) {
+        fprintf(stderr, "zxc: unknown target '%s'\n", target_name);
+        return 2;
+    }
+    char outpath[2048];
+    return do_build_one(&pj, &t, release, kind, outpath, sizeof outpath);
 }
 
 /* build 旗标：--exe / --lib × --static / --shared、--release */
@@ -3137,6 +3563,20 @@ static int parse_kind(int argc, char **argv, int argi, bool *release, OutKind *k
         fprintf(stderr, "zxc: --shared needs --lib (an exe is a program, not a library)\n");
         return -1;
     }
+    return 0;
+}
+
+/* §208: zxc targets —— 列出内置目标预设。 */
+static int cmd_targets(void) {
+    printf("Built-in targets (put names in zx.json \"targets\"):\n\n");
+    printf("  %-18s %-22s %-6s %-7s %s\n", "name", "triple", "arch", "family", "exe");
+    for (int i = 0; ; i++) {
+        const PlatPreset *p = plat_at(i);
+        if (!p) break;
+        printf("  %-18s %-22s %-6s %-7s %s\n", p->name, p->triple, p->arch,
+               p->family, p->exe_suffix[0] ? p->exe_suffix : "(none)");
+    }
+    printf("\nHost target: %s\n", plat_host_name());
     return 0;
 }
 
@@ -3476,6 +3916,7 @@ static int cmd_fmt(int argc, char **argv, int argi, bool check_only) {
 
 int main(int argc, char **argv) {
     g_prog_t0 = prog_clock();
+    g_argv0 = argv[0];
     sema_set_argv0(argv[0]);
     /* zxfe.exe 与 zxc.exe 同目录，位置从 argv[0] 推——必须在这里就交给
      * 前端。以前只有单文件模式设，子命令（check / build / run / test，
@@ -3497,6 +3938,17 @@ int main(int argc, char **argv) {
             if (!flt) flt = argv[i];
         }
         return test_run1(argv[2], flt, rel);
+    }
+    /* §208: 单目标构建子进程（由多目标循环的 system() 拉起）。 */
+    if (argc >= 3 && !strcmp(argv[1], "--build-one")) {
+        bool rel = false;
+        OutKind kind = OUT_EXE;
+        for (int i = 3; i < argc; i++) {
+            if (!strcmp(argv[i], "--release")) rel = true;
+            else if (!strcmp(argv[i], "--static")) kind = OUT_STATIC;
+            else if (!strcmp(argv[i], "--shared")) kind = OUT_SHARED;
+        }
+        return build_one_mode(argv[2], rel, kind);
     }
 
     /* 通用 -h / -v（先于子命令：`zxc -v`、`zxc help build` 都不该被当成
@@ -3554,6 +4006,7 @@ int main(int argc, char **argv) {
         if (!strcmp(sub, "fetch"))   return cmd_fetch(argc, argv, 2);
         if (!strcmp(sub, "sync"))    return cmd_sync(argc, argv, 2);
         if (!strcmp(sub, "cbuild")) return cmd_cbuild(argc, argv, 2);
+        if (!strcmp(sub, "targets")) return cmd_targets();
         if (!strcmp(sub, "check")) return cmd_check(argc, argv, 2);
         if (!strcmp(sub, "fmt"))   return cmd_fmt(argc, argv, 2, false);
         if (!strcmp(sub, "build")) return cmd_build(argc, argv, 2);

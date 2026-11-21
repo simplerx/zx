@@ -1,0 +1,427 @@
+// fs.zx —— POSIX（Linux / macOS）版：路径操作 + 目录遍历 + 文件元数据。
+//
+// 本文件由 zxc 的 std 镜像机制在 POSIX 目标下选用，替代 std/fs.zx。
+// 对外 API 与 Windows 版逐字一致：所有 pub const 的名称、签名与语义相同。
+// 平台无关代码（isAbs/basename/dirname/ext/stem/join、readDir/collectAll/
+// PtrList、readAll/writeAll/appendAll、Stat 结构体）原样复制自 std/fs.zx；
+// 仅平台相关的 extern、stat/exists/createDir/removeFile/removeDir 与
+// DirIter 的实现替换为 POSIX libc 调用。
+//
+//   const std = @mod("std");
+//   std.fs.basename("a/b/c.txt")          // "c.txt"（零分配，切片指向原串）
+//   let d = std.fs.readDir(al, "src");    // 目录条目列表
+//
+// 性能约定（与 str.zx 同一思想）：
+//   - 纯路径函数**零分配**：结果是指向原串的切片；
+//   - 遍历优先用 DirIter（流式、零拷贝——名字指向内部工作区，next() 后失效，
+//     和 BufReader 的行同一个语义）；readDir 是"收集版"，名字会复制进分配器；
+//   - 每次 stat 只做一次固定 256 字节的分配；每次目录遍历做一次固定
+//     DIRENT_BUF 字节的 dirent 工作区分配，arena 分配器下一 pass 就没影。
+//
+// ---------------------------------------------------------------------------
+// 可移植性锚点（按目标生成时替换这两个常量即可，无需改其它代码）：
+//
+//   STAT_SIZE_OFF   Linux x86_64 = 48, Linux aarch64 = 48, macOS = 96
+//   STAT_MTIME_OFF  Linux x86_64 = 88, Linux aarch64 = 88, macOS = 136
+//   STAT_MODE_OFF   Linux x86_64 = 24, Linux aarch64 = 24, macOS = 8
+//   STAT_BUF        256（= sizeof(struct stat) 上限，安全余量）
+//
+// struct stat 是平台相关的二进制布局，用 opaque *u8 缓冲 + 指针算术读取。
+// 下面默认值是 Linux x86_64 / aarch64；macOS 目标生成时把三个 OFF 改成
+// 96/136/8。STAT_MODE_OFF 处读 u32 再 & S_IFDIR：macOS 的 st_mode 是 u16，
+// 低 16 位仍在，掩码 0x4000 照常命中。
+// DIRENT_BUF 也是锚点：Linux = 280（sizeof dirent），macOS = 1048
+// （d_name[1024]），因为 next() 要把 libc 返回的 dirent 拷进自有工作区。
+// ---------------------------------------------------------------------------
+
+// ---- POSIX libc extern ------------------------------------------------------
+// 只暴露 C 符号，不 pub，避免用户绕过封装直接调。注意 extern stat 不能写在
+// 模块顶层：它和下面的 pub const stat 同名会触发 E0402 duplicate declaration，
+// 故放在 stat 函数体内声明（C 名仍是 stat，链接不受影响）。
+
+extern fn opendir(p: *const u8) usize;
+extern fn readdir(d: usize) usize;
+extern fn closedir(d: usize) i32;
+extern fn mkdir(p: *const u8, mode: u32) i32;
+extern fn unlink(p: *const u8) i32;
+extern fn rmdir(p: *const u8) i32;
+extern fn access(p: *const u8, mode: i32) i32;
+
+const STAT_BUF: usize = 256;
+const STAT_SIZE_OFF: usize = 48;
+const STAT_MTIME_OFF: usize = 88;
+const STAT_MODE_OFF: usize = 24;
+const S_IFDIR: u32 = 0x4000;          // 0o040000，POSIX 目录位
+
+const DIRENT_BUF: usize = 280;        // Linux: 280；macOS: 1048
+const D_NAME_OFF: usize = 19;         // ino(8)+off(8)+reclen(2)+type(1)
+const D_TYPE_OFF: usize = 18;         // d_type 在 d_name 前一字节
+const DT_DIR: u8 = 4;                 // POSIX d_type 的目录值
+
+const F_OK: i32 = 0;                  // access() 的存在性检查
+const DIR_PERM: u32 = 0x1FF;          // 0777，mkdir 的模式参数
+
+// NUL 结尾的副本（extern 调用都要 C 串）。返回切片不含 NUL，
+// 但分配里 NUL 就紧随其后（str.concat 同一约定）。
+const zpath = fn (alloc: Allocator, p: []const u8) ?[]u8 {
+    let raw = alloc.alloc(alloc.ctx, p.len + 1);
+    if (raw) q {
+        let whole = q[0..p.len + 1];
+        var i: usize = 0;
+        while (i < p.len) { whole[i] = p[i]; i = i + 1; }
+        whole[p.len] = 0;
+        return q[0..p.len];
+    }
+    return null;
+};
+
+// 当前 dirent 条目的名字（指向工作区，下一次 next()/close 之前有效）。
+const nameOf = fn (buf: *u8) []const u8 {
+    let name = buf + D_NAME_OFF;
+    var n: usize = 0;
+    while ((name + n).0 != 0) { n = n + 1; }
+    return name[0..n];
+};
+
+// ---- 路径操作（纯函数，零分配） ---------------------------------------------
+
+const isSep = fn (c: u8) bool { return c == '/' || c == 92; };   // 92 = '\'
+
+// 绝对路径？根路径（/ 或 \ 开头）或盘符（X:）开头都算。
+pub const isAbs = fn (p: []const u8) bool {
+    if (p.len == 0) { return false; }
+    if (isSep(p[0])) { return true; }
+    if (p.len >= 2 && p[1] == ':') { return true; }
+    return false;
+};
+
+// 最后一段。"a/b/" 的 basename 是空串（尾分隔符之后没有东西）。
+pub const basename = fn (p: []const u8) []const u8 {
+    var i = p.len;
+    scan: while (i > 0) {
+        if (isSep(p[i - 1])) { scan: {}; }        // 收割 = 别的语言的 break
+        i = i - 1;
+    }
+    return p[i..];
+};
+
+// 目录部分（不含末尾分隔符）。没有分隔符返回空串（调用者自己当 "." 用）。
+// "a/b/c" → "a/b"；"a/b/" → "a/b"；"/x" → ""（根目录没有"再往上一级"）。
+pub const dirname = fn (p: []const u8) []const u8 {
+    var i = p.len;
+    while (i > 0) {
+        if (isSep(p[i - 1])) { return p[0..i - 1]; }
+        i = i - 1;
+    }
+    return p[0..0];
+};
+
+// 扩展名（含点）。点必须是 basename 的**非首字符**才计数：
+// "a.tar.gz" → ".gz"，".gitignore" → ""（dotfile 不是扩展名）。
+pub const ext = fn (p: []const u8) []const u8 {
+    let b = basename(p);
+    var i = b.len;
+    scan: while (i > 0) {
+        let c = b[i - 1];
+        if (c == '.') {
+            if (i == 1) { return b[b.len..]; }    // ".gitignore"：点在首位
+            return b[i - 1..];
+        }
+        if (isSep(c)) { scan: {}; }
+        i = i - 1;
+    }
+    return b[b.len..];
+};
+
+// 去掉扩展名的 basename："archive.tar.gz" → "archive.tar"。
+pub const stem = fn (p: []const u8) []const u8 {
+    let b = basename(p);
+    let e = ext(b);
+    return b[0..b.len - e.len];
+};
+
+// 拼接。a 末尾已有分隔符就不再加。结果末尾补 NUL（可直接当 C 串用）。
+pub const join = fn (alloc: Allocator, a: []const u8, b: []const u8) ?[]u8 {
+    if (a.len == 0) { return zpath(alloc, b); }
+    if (b.len == 0) { return zpath(alloc, a); }
+    let need = a.len + b.len + 2;        // 可能的分隔符 + NUL
+    let raw = alloc.alloc(alloc.ctx, need);
+    if (raw) q {
+        let whole = q[0..need];
+        var n: usize = 0;
+        var i: usize = 0;
+        while (i < a.len) { whole[n] = a[i]; n = n + 1; i = i + 1; }
+        if (!isSep(a[a.len - 1])) { whole[n] = '/'; n = n + 1; }
+        i = 0;
+        while (i < b.len) { whole[n] = b[i]; n = n + 1; i = i + 1; }
+        whole[n] = 0;
+        return q[0..n];
+    }
+    return null;
+};
+
+// ---- 文件元数据 -------------------------------------------------------------
+
+pub const Stat = struct {
+    pub size: u64,
+    pub mtime: u64,          // 最后写入时间，POSIX = Unix 秒（Windows 版是 FILETIME）
+    pub isDir: bool,
+    pub isHidden: bool,      // POSIX 没有隐藏位，恒 false
+};
+
+// 查一次文件元数据。路径不存在（或分配失败）返回 null。
+pub const stat = fn (alloc: Allocator, path: []const u8) ?Stat {
+    // extern stat 必须局部声明：模块顶层会与同名 pub const stat 冲突（E0402）。
+    extern fn stat(p: *const u8, buf: *u8) i32;
+    let zp = zpath(alloc, path);
+    if (zp) z {
+        let raw = alloc.alloc(alloc.ctx, STAT_BUF);
+        if (raw) b {
+            let bp = (*u8)b;
+            if (stat((*const u8)z.ptr, bp) == 0) {
+                let sp = (*u64)(bp + STAT_SIZE_OFF);
+                let mp = (*i64)(bp + STAT_MTIME_OFF);
+                let md = (*u32)(bp + STAT_MODE_OFF);
+                var s = Stat{ .size = sp.0, .mtime = (u64)mp.0,
+                              .isDir = (md.0 & S_IFDIR) != 0,
+                              .isHidden = false };
+                if (s.isDir) { s.size = 0; }     // 目录的大小无意义，钉成 0
+                alloc.free(alloc.ctx, bp, STAT_BUF);
+                tag bp: null;
+                alloc.free(alloc.ctx, z.ptr, z.len + 1);
+                return s;
+            }
+            alloc.free(alloc.ctx, bp, STAT_BUF);
+            tag bp: null;
+        }
+        alloc.free(alloc.ctx, z.ptr, z.len + 1);   // zpath 的 NUL 后缀也在分配里
+    }
+    return null;
+};
+
+// 存在吗？一次 access(F_OK)。路径要过一遍 C 串拷贝（运行期拼出来的
+// 路径没有 NUL），arena 下这次分配可以忽略。
+pub const exists = fn (alloc: Allocator, path: []const u8) bool {
+    let zp = zpath(alloc, path);
+    if (zp) z {
+        let r = access((*const u8)z.ptr, F_OK) == 0;
+        alloc.free(alloc.ctx, z.ptr, z.len + 1);
+        return r;
+    }
+    return false;
+};
+
+// 建目录（单层；父目录不存在会失败）。
+pub const createDir = fn (alloc: Allocator, path: []const u8) bool {
+    let zp = zpath(alloc, path);
+    if (zp) z {
+        let r = mkdir((*const u8)z.ptr, DIR_PERM) == 0;
+        alloc.free(alloc.ctx, z.ptr, z.len + 1);
+        return r;
+    }
+    return false;
+};
+
+// 删文件（目录要走 rmdir，这里不管）。
+pub const removeFile = fn (alloc: Allocator, path: []const u8) bool {
+    let zp = zpath(alloc, path);
+    if (zp) z {
+        let r = unlink((*const u8)z.ptr) == 0;
+        alloc.free(alloc.ctx, z.ptr, z.len + 1);
+        return r;
+    }
+    return false;
+};
+
+// 删空目录（目录里还有东西会失败；递归删除调用者自己拿 readDir 拼）。
+pub const removeDir = fn (alloc: Allocator, path: []const u8) bool {
+    let zp = zpath(alloc, path);
+    if (zp) z {
+        let r = rmdir((*const u8)z.ptr) == 0;
+        alloc.free(alloc.ctx, z.ptr, z.len + 1);
+        return r;
+    }
+    return false;
+};
+
+// ---- 目录遍历 ----------------------------------------------------------------
+//
+// DirIter 是流式零拷贝：名字指向内部 dirent 工作区，next() 之后失效；
+// 要留住就自己复制（或用下面的 readDir）。
+//
+//   var it = std.fs.DirIter.open(al, "src") orelse { ... };
+//   defer it.close();
+//   while (it.next()) name { std.println("{}", name); }
+//
+// "." 和 ".." 不交付（所有主流 std 的通行约定）。
+// POSIX 的 readdir() 返回 DIR 流自己的 struct dirent*；每次 next() 拷进
+// 自有 buf，这样名字的生命周期和 Windows 版一致（到下次 next()/close）。
+
+pub const DirIter = struct {
+    pub h: usize,
+    pub buf: *u8,            // DIRENT_BUF 字节的 dirent 工作区
+    pub first: bool,         // POSIX 下恒 false（opendir 不预取条目），保留字段兼容
+    pub done: bool,
+    pub alloc: Allocator,    // 只为释放 buf
+
+    // 打开目录。打不开（不存在/是文件/没内存）返回 null。
+    pub const open = fn (alloc: Allocator, path: []const u8) ?Self {
+        let raw = alloc.alloc(alloc.ctx, DIRENT_BUF);
+        if (raw) b {
+            let fd = (*u8)b;
+            let zp = zpath(alloc, path);
+            if (zp) z {
+                let h = opendir((*const u8)z.ptr);
+                alloc.free(alloc.ctx, z.ptr, z.len + 1);
+                if (h != 0) {
+                    return Self{ .h = h, .buf = fd, .first = false,
+                                 .done = false, .alloc = alloc };
+                }
+            }
+            alloc.free(alloc.ctx, fd, DIRENT_BUF);
+            tag fd: null;
+        }
+        return null;
+    };
+
+    // 关闭并归还工作区。重复调用无害（靠句柄哨兵防双重释放）。
+    pub const close = fn (self: *Self) void {
+        if (self.h != 0) {
+            _ = closedir(self.h);
+            self.h = 0;
+            self.alloc.free(self.alloc.ctx, self.buf, DIRENT_BUF);
+        }
+        self.done = true;
+    };
+
+    // 下一个条目。没有更多（或已关闭）返回 null。
+    pub const next = fn (self: *Self) ?[]const u8 {
+        while (!self.done) {
+            let ent = readdir(self.h);
+            if (ent == 0) {
+                self.done = true;
+                return null;
+            }
+            @memcpy(self.buf, (*u8)ent, DIRENT_BUF);
+            let name = nameOf(self.buf);
+            // 跳过 "." / ".."
+            if (name.len == 1 && name[0] == '.') { continue; }
+            if (name.len == 2 && name[0] == '.' && name[1] == '.') { continue; }
+            return name;
+        }
+        return null;
+    };
+
+    // 当前条目是不是目录（紧跟 next() 之后问，下一个 next() 之前有效）。
+    pub const isDir = fn (self: *Self) bool {
+        return (self.buf + D_TYPE_OFF).0 == DT_DIR;
+    };
+
+    // 当前条目的大小。dirent 不含大小，恒返回 0（注释说明；
+    // 要精确大小请用 stat()，它读 struct stat 的 st_size）。
+    pub const size = fn (self: *Self) u64 {
+        _ = self;
+        return 0;
+    };
+};
+
+// 收集版：目录里所有条目（不含 "." / ".."），名字复制进分配器
+// （名字带 NUL 后缀，可直接当 C 串用）。列表倍增扩容。
+// 空目录返回长度 0 的切片（不是 null）；打不开返回 null。
+// 返回的切片和每个名字都归调用者的分配器管。
+pub const readDir = fn (alloc: Allocator, path: []const u8) ?[][]const u8 {
+    let opened = DirIter.open(alloc, path);
+    if (opened) itv {
+        return collectAll(alloc, itv);
+    }
+    return null;
+};
+
+const collectAll = fn (alloc: Allocator, itv: DirIter) ?[][]const u8 {
+    var it = itv;
+    defer it.close();
+
+    var list = PtrList{ .items = undefined, .len = 0, .cap = 0, .alloc = alloc };
+    while (it.next()) name {
+        let copy = zpath(alloc, name);
+        if (copy) c {
+            if (list.push(c)) { continue; }
+        }
+        list.deinit();               // 失败路径自清理
+        return null;
+    }
+    return list.take();
+};
+
+// 局部可增长指针数组（元素是切片）。take() 之后所有权交出去。
+const PtrList = struct {
+    items: *[]const u8,
+    len: usize,
+    cap: usize,
+    alloc: Allocator,
+
+    const push = fn (self: *Self, s: []const u8) bool {
+        if (self.len < self.cap) {
+            (self.items + self.len).0 = s;
+            self.len = self.len + 1;
+            return true;
+        }
+        var ncap = self.cap * 2;
+        if (ncap < 16) { ncap = 16; }
+        let raw = self.alloc.alloc(self.alloc.ctx, ncap * @type([]const u8).size);
+        if (raw) r {
+            let dst = (*[]const u8)r;
+            if (self.len > 0) {
+                @memcpy((*u8)dst, (*u8)self.items, self.len * @type([]const u8).size);
+            }
+            if (self.cap > 0) {
+                self.alloc.free(self.alloc.ctx, (*u8)self.items, self.cap * @type([]const u8).size);
+            }
+            self.items = dst;
+            self.cap = ncap;
+            (self.items + self.len).0 = s;
+            self.len = self.len + 1;
+            return true;
+        }
+        return false;
+    };
+
+    const deinit = fn (self: *Self) void {
+        if (self.cap > 0) {
+            self.alloc.free(self.alloc.ctx, (*u8)self.items, self.cap * @type([]const u8).size);
+        }
+        self.items = undefined;
+        self.len = 0;
+        self.cap = 0;
+    };
+
+    // 交出底层数组（调用者负责释放），自身清空。
+    const take = fn (self: *Self) [][]const u8 {
+        let out = self.items[0..self.len];
+        self.items = undefined;
+        self.len = 0;
+        self.cap = 0;
+        return out;
+    };
+};
+
+// ---- 批量整块读写 -----------------------------------------------------------
+// std.file.* 魔法（编译器运行时 zx_file_*）的模块级入口，名字对齐"一次调用、
+// 整块传输"的批量语义。实现上每次调用独立 fopen/fread(rite)/fclose，无共享
+// 可变状态——多 Task 并发调用是安全的；前提是传入的分配器本身线程安全
+// （heap.page 是 malloc，OK；ArenaAllocator 不是，别跨任务共享）。
+
+// 整块读入：一次 fopen+ftell+fread，返回的切片带一个 NUL 结尾（当 C 串用也安全）。
+pub const readAll = fn (alloc: Allocator, path: []const u8) ?[]const u8 {
+    return file.read(alloc, path);
+};
+
+// 整块写出：一次 fopen+fwrite，成功返回 true。
+pub const writeAll = fn (path: []const u8, data: []const u8) bool {
+    return file.write(path, data);
+};
+
+// 整块追加：同 writeAll，追加模式。
+pub const appendAll = fn (path: []const u8, data: []const u8) bool {
+    return file.append(path, data);
+};
