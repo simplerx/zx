@@ -6007,6 +6007,14 @@ static Type *check_array_lit(Node *n, Node **items, int nitems, Type *expect) {
         coerce_node(items[i], items[i]->ty, elem, "array element");
     /* §205：`.{…}` 位置形式是 [N]T 数组值；`&.{…}` 是 *[N]T 指针。 */
     if (n->flag) return type_of(n, ty_array(elem, (uint64_t)nitems));
+    /* §212：`&.{…}` 就是 stackAlloc 的糖——匿名存储落在当前栈帧，块退出
+     * 即消亡。建 stack TagSlot，复用 tag_scope_exit（出块标 FREED）与
+     * tag_check_deref（块外解引用报 E0512 use after scope），堵住
+     * "pNext 链存 &.{…} 地址、块后进 vkQueueSubmit 崩溃" 这类悬垂指针。
+     * 只在运行期函数体内建槽：全局字面量走静态 backing（§199，无栈帧），
+     * CT 执行中的字面量也不该带运行期标签。 */
+    if (g_fn_depth > 0 && g_ct_exec == 0)
+        tag_auto_decl(n, true);
     return type_of(n, ty_ptr(ty_array(elem, (uint64_t)nitems), false, true,
                              (uint64_t)nitems));
 }

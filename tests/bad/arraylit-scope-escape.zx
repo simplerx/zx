@@ -1,0 +1,10 @@
+// expect: use after scope
+// expect-code: E0512
+const main = fn () u8 {
+    var q: ?*const [3]i32 = null;
+    {
+        let p = &.{ 1, 2, 3 };   // &.{…} = stackAlloc 糖：栈存储随块消亡
+        q = p;
+    }
+    return (u8)q.?[0][0];        // 块外解引用 → E0512
+};
