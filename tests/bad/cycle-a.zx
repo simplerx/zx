@@ -1,12 +1,14 @@
-// expect: cyclic module dependency
-// 惰性模块加载下，声明了但从未引用的 @mod() 不是真实依赖；
-// 这里构造的是真正被引用的循环：a 的函数体用了 b，b 又回头用 a。
+// expect: must be computable at compile time
+// expect-code: E0501
+// §206：模块循环引用允许，但顶层 const 的**值**环不行——A.VALUE_A 要
+// B.VALUE_B，B 又回头要 A.VALUE_A，谁都没有初值。函数体互调的环合法，
+// 这里守的是另一种：编译期值的环必须报错，不能挂死或读到未初始化值。
+// 入口模块自身的值环在 check_stmts 阶段报 E0501；被导入模块的值环走
+// ensure_raw 报 E0601（见 tests/multibad/cycvalue）。两者都必须拒绝。
 const b = @mod("cycle-b.zx");
 
-const getB = fn () u8 {
-    return b.VALUE;
-};
+pub const VALUE_A: u8 = b.VALUE_B;
 
 const main = fn () u8 {
-    return getB();
+    return VALUE_A;
 };

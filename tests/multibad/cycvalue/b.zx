@@ -1,0 +1,2 @@
+const a = @mod("a.zx");
+pub const Y: i32 = a.X;

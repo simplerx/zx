@@ -162,7 +162,7 @@ static const ErrDoc g_errs[] = {
 
     /* ---- 模块 ---- */
     { "E0601", "module resolution failed",
-      "check the path/spelling of `@mod(\"name\")`; break circular deps; `std` must resolve next to the compiler" },
+      "check the path/spelling of `@mod(\"name\")`; circular module imports are allowed, but a cycle in top-level const/var VALUES needs an explicit initial value; `std` must resolve next to the compiler" },
 
     /* ---- 泛型 ---- */
     { "E0701", "generic instantiation failed",

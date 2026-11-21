@@ -228,10 +228,6 @@ typedef struct Module {
                               * alloc/free 一并豁免，内存由 init/deinit 容器账
                               * 管。tag.close 只豁免模块内部申请；pool 这类
                               * 逐笔释放的分配器只有 close、没有 batch。 */
-    /* §179：已解析的导入边（绑定真正被引用才登记——惰性：声明了但
-     * 从未引用的 @mod 不是真实依赖）。循环导入按边图判定。 */
-    struct Module **imports;
-    int          nimports, cimports;
 } Module;
 
 static Module **g_mods;
@@ -1204,14 +1200,10 @@ static Symbol *ns_member(Symbol *ns, const char *name, int line, int col) {
     }
     /* 文件模块：只认带 pub 的顶层声明 */
     if (ns->mod && ns->mod->root) {
-        /* §179：环检测兜底。惰性绑定直接拿到"加载中"的模块对象，
-         * 成员表还没 hoist 完——报 "has no member" 会误导人去找名字，
-         * 真相是循环导入。 */
-        if (ns->mod->loading) {
-            err_at(line, col, "cyclic module dependency: '%s' is still being loaded",
-                   ns->mod->path ? ns->mod->path : ns->mod->stem);
-            return NULL;
-        }
+        /* §206：循环导入已放开，loading 兜底不再需要。成员查找走下面的
+         * 正常路径：hoist 在 check_stmts 之前完成，顶层的 pub 符号总已挂好；
+         * 若目标符号的**类型**还形成环，ensure_raw 的 E0601 会精确报在
+         * 那条 const/var 的初始化器上，不再是含糊的 "has no member"。 */
         for (Symbol *m = ns->mod->scope.first; m; m = m->next) {
             if (!m->name || strcmp(m->name, name)) continue;
             if (!m->is_pub) {
@@ -1266,7 +1258,6 @@ static void ensure(Symbol *s);
 static bool decl_is_lazy_module(Node *d);
 static Module *module_load(const char *rel, int line, int col);
 static Module *module_load_full(const char *full, int line, int col);
-static bool mod_reaches(struct Module *from, struct Module *target, int depth);
 static Module *module_load_std(int line, int col);
 static void sym_copy(Symbol *dst, Symbol *src, const char *name);
 
@@ -8930,28 +8921,10 @@ static Type *check_expr_raw(Node *n, Type *expect) {
             n->sym = NULL;
             return type_of(n, ty_type());
         }
-        /* §179：循环导入判定（边图版）。模块级 loading 标志只罩住顶层
-         * 检查窗口，函数体是惰性检查的——A 的体调 B、B 的体用 A 这种
-         * 环在窗口外发生，loading 抓不住。绑定解析时若目标已能传递地
-         * 回到当前模块，就是环。 */
-        if (g_mod && m != g_mod && !mod_reaches(g_mod, m, 0)) {
-            if (mod_reaches(m, g_mod, 0)) {
-                err_at(n->line, n->col,
-                       "cyclic module dependency: '%s' (transitively) imports "
-                       "'%s' back -- break the cycle so imports form a DAG",
-                       m->stem ? m->stem : "?",
-                       g_mod->stem ? g_mod->stem : "?");
-                n->sym = NULL;
-                return type_of(n, ty_type());
-            }
-            if (g_mod->nimports == g_mod->cimports) {
-                g_mod->cimports = g_mod->cimports ? g_mod->cimports * 2 : 8;
-                g_mod->imports = realloc(g_mod->imports,
-                                         sizeof(Module *) * (size_t)g_mod->cimports);
-                if (!g_mod->imports) { fprintf(stderr, "zxc: out of memory\n"); exit(1); }
-            }
-            g_mod->imports[g_mod->nimports++] = m;
-        }
+        /* §206：循环导入允许。后端所有 pub 函数原型/全局声明都进共享
+         * header，各单元 include 后即可互相调用——函数体互调、类型互引
+         * 用都能正常链接。真正无法求值的是顶层 const/var 的值环，由
+         * ensure_raw 的 E0601 精确拦截（见 §179/§206）。 */
         n->sym = m->ns;
         return type_of(n, ty_type());
     }
@@ -9702,25 +9675,10 @@ static Module *module_load(const char *rel, int line, int col) {
     return m;
 }
 
-/* §179：from 的导入图能否（传递地）到达 target。 */
-static bool mod_reaches(Module *from, Module *target, int depth) {
-    if (!from || depth > 64) return false;
-    if (from == target) return true;
-    for (int i = 0; i < from->nimports; i++)
-        if (mod_reaches(from->imports[i], target, depth + 1)) return true;
-    return false;
-}
-
 static Module *module_load_full(const char *full_in, int line, int col) {
     char *full = path_normalize(full_in);   /* 查重前先归一化（见 path_normalize） */
     Module *old = module_find(full);
-    if (old) {
-        if (old->loading) {
-            err_at(line, col, "cyclic module dependency: '%s' is still being loaded", full);
-            return NULL;
-        }
-        return old;
-    }
+    if (old) return old;   /* §206：循环导入允许——已登记的模块直接复用 */
 
     /* 打得开吗？先探一下，保留 "cannot open module" 的语义
      * （解析/读源由 fe_parse_file 接手，Zx 前端在 zxfe 里读）。 */
@@ -10485,11 +10443,19 @@ static void check_stmt(Node *n) {
         if (n->kind == NK_ERRDEFER && n->name) {
             /* §188：`defer err { … }` —— err 绑错误码（与 try 捕获同一
              * 口径：SK_CAPTURE、ty_error）。块里引用了 err 才算用过；
-             * 没引用后端就不发绑定声明（省一个未用变量）。 */
+             * 没引用后端就不发绑定声明（省一个未用变量）。
+             * B13 修复：给 err 绑定唯一 cname（行_列后缀，与局部变量同款），
+             * 并挂到节点 sym。同一函数多个 defer err 在 try 展开点就地发射时，
+             * 各自声明名唯一，不再撞成 C 的 err 重定义；块内 `err` 引用经符号
+             * 解析拿到同一个 cname，声明与引用天然一致。 */
             Scope sc;
             scope_push(&sc);
             Symbol *s = scope_add(&sc, n->name, SK_CAPTURE);
-            if (s) { s->ty = ty_error(); s->state = 2; }
+            if (s) {
+                s->ty = ty_error(); s->state = 2;
+                s->cname = local_cname(n->name, n->line, n->col);
+                n->sym = s;
+            }
             if (n->a->kind == NK_BLOCK) check_block(n->a);
             else check_expr(n->a, NULL);
             n->ival = (s && s->used) ? 1 : 0;

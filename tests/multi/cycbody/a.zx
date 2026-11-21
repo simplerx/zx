@@ -1,0 +1,8 @@
+const b = @mod("b.zx");
+
+pub const A = struct { pub next: ?*b.B, pub val: i32 };
+
+pub const fa = fn (n: i32) i32 {
+    if (n <= 0) { return 0; }
+    return b.fb(n - 1) + 1;
+};

@@ -1,0 +1,14 @@
+// §206：模块循环引用允许。a↔b 互相 @mod，函数体互调 + 类型互引用（用
+// 指针打断递归）都要能正常编译链接运行。后端把全部 pub 声明进共享 header。
+const a = @mod("a.zx");
+const b = @mod("b.zx");
+
+const main = fn () u8 {
+    let v = a.fa(5);
+    if (v != 5) { return 1; }
+    var x: a.A = .{ .next = null, .val = 9 };
+    var y: b.B = .{ .next = &x, .val = 10 };
+    if (y.next.?.val != 9) { return 2; }
+    if (y.val != 10) { return 3; }
+    return 0;
+};

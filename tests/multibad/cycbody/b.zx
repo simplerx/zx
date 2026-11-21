@@ -1,6 +1,0 @@
-const std = @mod("std");
-const a = @mod("a.zx");
-
-pub const fb = fn () i32 {
-    return a.fa() + 1;
-};

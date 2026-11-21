@@ -1,0 +1,6 @@
+// expect: cyclic dependency while resolving
+// expect-code: E0601
+// §206：模块循环引用允许，但顶层 const 的**值**环无法求值——A.X 要 B.Y、
+// B.Y 又要 A.X，没有初值。ensure_raw 必须精确报在初始化器上，不能挂死。
+const a = @mod("a.zx");
+const main = fn () i32 { return a.X; };
