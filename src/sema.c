@@ -6792,6 +6792,36 @@ static Type *check_index(Node *n) {
     return BAD(n, "`%s` cannot be indexed", ty_str(bt));
 }
 
+/* §219：裸指针切片的来源里有没有「只指向一个元素」的读取器（当前是
+ * List.at / 任何名为 at 的方法）。at() 返回 ?*T，语义上是**单个元素**
+ * 的指针——拿它造 `p[0..100]` 这种长切片，长度没有任何依据（列表里可能
+ * 只有 1 个元素），读到的是相邻内存。这类指针不带长度、运行期无从兜底，
+ * 只能在编译期按来源拦：沿着 `.?` unwrap、let/var 绑定的右值、括号/强转
+ * 一路回溯，看到一个 `at(...)` 调用就认。分配器返回的裸指针（heap.page
+ * 的 *u8 等）不会被误认——那类来源是 CALL 但方法名不是 at。 */
+static bool expr_from_at_elem(Node *e, int depth) {
+    if (!e || depth > 16) return false;
+    switch (e->kind) {
+    case NK_UNWRAP:                       /* list.at(i).? */
+    case NK_CAST:                         /* (*T)list.at(i) */
+        return expr_from_at_elem(e->a, depth + 1);
+    case NK_IDENT: {                      /* let p = list.at(i).?; p[0..n] */
+        Symbol *s = e->sym ? e->sym : (e->name ? lookup(e->name) : NULL);
+        if (s && s->decl && s->decl->kind == NK_DECL && s->decl->b)
+            return expr_from_at_elem(s->decl->b, depth + 1);
+        return false;
+    }
+    case NK_CALL: {                       /* list.at(i) —— 方法名 at */
+        Node *cal = e->a;
+        if (cal && cal->kind == NK_FIELD && cal->name && !strcmp(cal->name, "at"))
+            return true;
+        return false;
+    }
+    default:
+        return false;
+    }
+}
+
 static Type *check_slice_expr(Node *n) {
     Type *bt = check_expr(n->a, NULL);
     Type *elem = NULL;
@@ -6808,6 +6838,18 @@ static Type *check_slice_expr(Node *n) {
         if (!n->c)
             return BAD(n, "`%s` has no length; write `p[lo..hi]` with an explicit upper bound",
                        ty_str(bt));
+        /* §219：来自 at() 的指针只指向一个元素，造长切片没有依据。
+         * 长度是用户手写的常量时能在编译期抓；变量长度（p[0..n]）留到
+         * 运行期由 zx_slice_len 按真实 .len 兜底（若 p 本来就是切片）。 */
+        if (expr_from_at_elem(n->a, 0)) {
+            Value *hv = n->c->ct ? n->c->ct : ct_eval_probe(n->c);
+            if (hv && hv->kind == V_INT && val_i64(hv) > 1)
+                return BAD_CODE("E0531", n,
+                    "slicing a single-element pointer from `at()` to length %lld has no "
+                    "backing storage -- `at()` returns a pointer to ONE element, so `p[0..%lld]` "
+                    "reads adjacent memory; use `list.items()[lo..hi]` (carries .len) or index "
+                    "the list directly", (long long)val_i64(hv), (long long)val_i64(hv));
+        }
         elem = bt->elem;
     }
     else

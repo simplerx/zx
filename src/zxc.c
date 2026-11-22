@@ -109,6 +109,7 @@ static const DiagRule g_rules[] = {
     { "moved away",                       "E0529" },
     { "was already moved",                "E0529" },
     { "carry ownership to move",          "E0530" },
+    { "slicing a single-element pointer", "E0531" },
 
     /* 控制流位置：continue/return/defer 放错地方，标签找不到 */
     { "does not take an `else` branch",   "E0405" },

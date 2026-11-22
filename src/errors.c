@@ -159,6 +159,8 @@ static const ErrDoc g_errs[] = {
       "`std.move(p)` transferred the pointer's ownership to the receiver (line given in the message) -- the original variable is sealed: it can be neither dereferenced, freed, moved again, nor handed off again. Use the variable the move produced; to keep tracking on the receiving side, bind a tag there (`tag q : tag.x = ...`)" },
     { "E0530", "std.move needs a pointer the tag ledger tracks",
       "`std.move` transfers ownership, so the argument must be an allocation the compiler tracks -- a `std.heapAlloc`/`std.stackAlloc` site or a pointer bound with `tag.x : ...`. A bare pointer (e.g. cast back from `usize` in a thread) has no owner to transfer; bind a tag to it first" },
+    { "E0531", "slicing a single-element pointer from at()",
+      "`list.at(i)` returns a pointer to ONE element (`?*T`), not a buffer. Writing `at(i).?[0..N]` with N>1 invents a length out of nothing: the pointer carries no size, so the extra elements are just adjacent memory and reads return garbage. Use `list.items()[lo..hi]` (a real slice with .len, bounds-checked) or index the list directly with `list.at(j).?`. If you have a genuine multi-element buffer, slice that buffer instead" },
 
     /* ---- 模块 ---- */
     { "E0601", "module resolution failed",
