@@ -11736,13 +11736,36 @@ static bool arm_ends(Node *a) {
  * 只在这里按「最后一条语句」递归看：
  *  - 单语句臂 `orelse break;` / `orelse out: v;`：根节点就是 NK_YIELD；
  *  - 块臂 `{ …; break; }`：看块的最后一条语句（嵌套块递归）。
+ * §223：收割到**臂内带标签块**是块的取值方式（`b: { b: v; }`），块本身
+ * 仍往下走，不能算发散；只有收割到臂外标签或 break 才是真发散。
  * 只认尾语句——中间收割后面的语句不可达，但那是另一条诊断管。 */
-static bool arm_ends_with_yield(Node *n) {
-    if (!n) return false;
-    if (n->kind == NK_YIELD) return true;
-    if (n->kind == NK_BLOCK && n->nitems > 0)
-        return arm_ends_with_yield(n->items[n->nitems - 1]);
+typedef struct YieldScope {
+    const char *label;
+    const struct YieldScope *up;
+} YieldScope;
+
+static bool yield_targets_local_block(const char *label, const YieldScope *sc) {
+    if (!label) return false;                 /* break：永远是真发散 */
+    for (; sc; sc = sc->up)
+        if (sc->label && !strcmp(sc->label, label)) return true;
     return false;
+}
+
+static bool arm_ends_with_yield_r(Node *n, const YieldScope *sc) {
+    if (!n) return false;
+    if (n->kind == NK_YIELD) return !yield_targets_local_block(n->label, sc);
+    if (n->kind == NK_BLOCK && n->nitems > 0) {
+        YieldScope here;
+        here.label = n->label;
+        here.up = sc;
+        return arm_ends_with_yield_r(n->items[n->nitems - 1],
+                                     n->label ? &here : sc);
+    }
+    return false;
+}
+
+static bool arm_ends_with_yield(Node *n) {
+    return arm_ends_with_yield_r(n, NULL);
 }
 
 /* 不可达代码用的判定：比 `stmt_ends` 多认一个"收割"（`tag: expr;` 会跳出所在块），

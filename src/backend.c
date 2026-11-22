@@ -6165,6 +6165,23 @@ static void ex(Buf *b, Node *n) {
             line("}");
             /* 值就是左载荷：扁平 ?T 是 tmp 本身，带标签的是 tmp.payload */
             buf_printf(b, "(%s%s)", tmp, pay);
+        } else if (is_ctl(n->b)) {
+            /* §223：兜底臂是带标签块（或 if/switch 等控制流）时不能塞进
+             * C 三元式——gen_value 会在表达式前面落语句，那样右臂即使走不到
+             * 也会先执行。改成先开结果槽，再在 else 里把块的值写进去。 */
+            char res[64];
+            snprintf(res, sizeof res, "_orres%d", on++);
+            line("%s %s = {0};", cty(t->elem), res);
+            line("if ((%s)%s) %s = %s%s; else {", tmp, has, res, tmp, pay);
+            g_ind++;
+            {
+                CScope s; cscope_push(&s);
+                gen_value(n->b, res, t->elem);
+                cscope_leave();
+            }
+            g_ind--;
+            line("}");
+            buf_printf(b, "(%s)", res);
         } else {
             buf_printf(b, "((%s)%s ? %s%s : (", tmp, has, tmp, pay);
             coerce(b, n->b, t->elem);

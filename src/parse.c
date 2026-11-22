@@ -755,11 +755,13 @@ static Node *parse_orelse_arm_yield(P *p) {
 
 /* orelse 后面这个 IDENT 是不是标签收割（`tag: value`）的开头。
  * 排除两类：bool 字面量，以及 `tag v :` 续链（peek1 是 IDENT 不是冒号）。
- * 标签后接 for/while/switch/if 是「标签控制流」而非收割，也不算。 */
+ * 标签后接 for/while/switch/if 是「标签控制流」而非收割；后接语句块
+ * （`tag: { …; }`）是带标签的块表达式——块自己交出值，也不是收割。 */
 static bool orelse_arm_is_yield(P *p) {
     if (!at(p, TOK_IDENT) || is_bool_word(cur(p))) return false;
     if (peek(p, 1)->kind != TOK_COLON) return false;
     TokKind after = peek(p, 2)->kind;
+    if (after == TOK_LBRACE) return !brace_is_block(p, p->i + 2);
     return after != TOK_KW_FOR && after != TOK_KW_WHILE &&
            after != TOK_KW_SWITCH && after != TOK_KW_IF;
 }

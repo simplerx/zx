@@ -1250,13 +1250,15 @@ pub const Parser = struct {
 
     // §220：orelse 后 `tag: value;` 标签收割的开头判据（不吃分号版本）。
     // 排除 bool 字面量、`tag v :` 续链（peek1 非冒号），以及后接控制流关键字
-    // 的标签语句（`lbl: if/while/...`，那是标签块不是收割）。
+    // 的标签语句（`lbl: if/while/...`）。后接语句块（`lbl: { …; }`）是带标签
+    // 的块表达式——块自己交出值，同样不是收割。
     const orelse_arm_is_yield = fn (self: *Parser) bool {
         if (self.cur().kind != lex.Kind.ident or self.is_bool_word(self.cur())) {
             return false;
         }
         if (self.peek_tok(1).kind != lex.Kind.colon) { return false; }
         let after = self.peek_tok(2).kind;
+        if (after == lex.Kind.lbrace) { return !self.brace_is_block(self.i + 2); }
         return after != lex.Kind.kw_for and after != lex.Kind.kw_while and
                after != lex.Kind.kw_switch and after != lex.Kind.kw_if;
     };

@@ -2049,6 +2049,14 @@ const main = fn () i32 {
     // 值臂不误伤
     let d = mk(3) orelse 42;
     if (d != 3) { return 8; }
+    // §223：标签块是值（不是收割到外层 pick），且只在左臂为空时求值
+    let lb = mk(-1) orelse pick: { pick: 77; };
+    if (lb != 77) { return 9; }
+    let lb2 = mk(4) orelse pick: { pick: 77; };
+    if (lb2 != 4) { return 10; }
+    var touched: i32 = 0;
+    let lazy = mk(3) orelse lazy_pick: { touched = touched + 1; lazy_pick: 8; };
+    if (touched != 0 or lazy != 3) { return 11; }
     return 0;
 };
 ZXEOF
