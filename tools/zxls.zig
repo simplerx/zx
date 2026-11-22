@@ -5361,6 +5361,13 @@ fn inferExprType(text: []const u8, doc: *const Document, expr: []const u8, depth
         if (lb) |l| {
             const ix = trimSl(e[l + 1 .. e.len - 1]);
             if (inferExprType(text, doc, e[0..l], depth + 1)) |bt| {
+                // `p[lo..hi]` 是**切片**：结果是 `[]T`，不是元素 T。
+                // 旧代码没分切片/下标，一律走 elemTyOf，于是
+                // `let slice = plist[0..2]` 的行内提示错标成 `: T`
+                //（用户 2026-11-22 截图）——照样能 `[1]` 下标却提示是标量。
+                if (std.mem.indexOf(u8, ix, "..") != null) {
+                    if (sliceTyOf(bt)) |st| return st;
+                }
                 // 元组下标（tup[2]，下标是编译期值）：先按元组取第 N 项，
                 // 再退回切片/数组元素。用户 2026-11-11：`const s = tup[2];`
                 // 类型丢失——elemTyOf 不认 `{i32,i32,str}` 这种元组类型。
@@ -6023,6 +6030,41 @@ fn elemTyOf(ty0: []const u8) ?[]const u8 {
         const et = trimSl(t[rb + 1 ..]);
         return if (et.len > 0) et else null;
     }
+    return null;
+}
+
+/// `base[lo..hi]` 切片表达式的结果类型——是 `[]T`（一段连续视图），
+/// 不是 elemTyOf 给的元素 T。与 sema `check_slice_expr` 同一口径：
+/// 裸指针 `*T` → `[]T`、`*const T` → `[]const T`、`*[N]T`/`[N]T` → `[]T`，
+/// 已有切片原样返回；`str` 切片仍是 `str`（Zx 的字符串就是只读字节切片）。
+fn sliceTyOf(ty0: []const u8) ?[]const u8 {
+    var t = trimSl(ty0);
+    var g: usize = 0;
+    while (t.len > 0 and (t[0] == '?' or t[0] == '!') and g < 4) : (g += 1)
+        t = trimSl(t[1..]);
+    while (t.len > 0 and t[t.len - 1] == '?') t = trimSl(t[0 .. t.len - 1]);
+    if (t.len == 0) return null;
+    if (std.mem.eql(u8, t, "str")) return "str";
+    if (std.mem.startsWith(u8, t, "[]")) return t;
+    // `[]const T` 已在上面覆盖；下面处理带 const 的指针/数组。
+    if (t[0] == '*') {
+        const rest = trimSl(t[1..]);
+        if (rest.len == 0) return null;
+        // `*[N]T`：elem 是 [N]T，切片元素是 T（数组指针按元素展开）。
+        if (rest[0] == '[') {
+            if (elemTyOf(rest)) |et| return std.fmt.allocPrint(gpa, "[]{s}", .{et}) catch null;
+            return null;
+        }
+        // `*const T` → `[]const T`
+        if (std.mem.startsWith(u8, rest, "const "))
+            return std.fmt.allocPrint(gpa, "[]const {s}", .{trimSl(rest["const ".len..])}) catch null;
+        return std.fmt.allocPrint(gpa, "[]{s}", .{rest}) catch null;
+    }
+    if (t[0] == '[') {
+        if (elemTyOf(t)) |et| return std.fmt.allocPrint(gpa, "[]{s}", .{et}) catch null;
+        return null;
+    }
+    if (vecTyParse(t)) |v| return std.fmt.allocPrint(gpa, "[]{s}", .{v.elem}) catch null;
     return null;
 }
 

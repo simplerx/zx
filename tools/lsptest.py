@@ -818,6 +818,43 @@ check("inlayHint.skipNonValue",
       all(hint_at(k) is None for k in ("const Obj", "const Shape", "const std", "const push")), detail)
 # 类型提示是 kind=1；参数名提示是 kind=2，按 label 前缀区分
 check("inlayHint.kind", all(h.get("kind") == 1 for h in hints if h["label"].startswith(":")), str(hints[:2]))
+
+# 3n2 切片 inlay（§215）：`p[lo..hi]` 的结果是 `[]T`，不是元素 T。
+#     旧实现把切片当普通下标走 elemTyOf，`let slice = plist[0..1]` 被错标成 `: T`
+#     （用户 2026-11-22 截图），看起来像"标量还能下标、没有越界检查"。
+SLICE_INLAY = """const std = @mod("std");
+const main = fn () i32 {
+    var b: [4]i32 = .{ 1, 2, 3, 4 };
+    let pa = &b[0];
+    let pslice = pa[0..2];
+    let aslice = b[1..3];
+    let sslice = "hello"[0..2];
+    var pc: *const i32 = &b[0];
+    let cslice = pc[1..3];
+    let pelem = pa[1];
+    return 0;
+};
+"""
+sliceuri = "file:///" + os.path.join(TESTDIR, "inlay_slice.zx").replace("\\", "/")
+open(os.path.join(TESTDIR, "inlay_slice.zx"), "w", encoding="utf-8").write(SLICE_INLAY)
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": sliceuri, "languageId": "zx", "version": 1, "text": SLICE_INLAY}}})
+send({"jsonrpc": "2.0", "id": 128, "method": "textDocument/inlayHint", "params": {
+    "textDocument": {"uri": sliceuri},
+    "range": {"start": {"line": 0, "character": 0},
+              "end": {"line": SLICE_INLAY.count("\n"), "character": 0}}}})
+r, _ = recv_id("inlayHint.slice", 128)
+shints = r["result"] if r and r.get("result") is not None else []
+sby = {(h["position"]["line"], h["position"]["character"]): h["label"] for h in shints}
+def shard(decl):
+    p = pos(SLICE_INLAY, SLICE_INLAY.index(decl) + len(decl))
+    return sby.get((p["line"], p["character"]))
+sdetail = str(sorted(sby.items()))[:240]
+check("inlayHint.slice.ptr", shard("let pslice") == ": []i32", sdetail)
+check("inlayHint.slice.array", shard("let aslice") == ": []i32", sdetail)
+check("inlayHint.slice.string", shard("let sslice") == ": str", sdetail)
+check("inlayHint.slice.const", shard("let cslice") == ": []const i32", sdetail)
+check("inlayHint.slice.indexNotSlice", shard("let pelem") == ": i32", sdetail)
 # 匿名 struct 当实参也有参数名提示：`push(info: .{…})`
 def label_at_call(call):
     p = pos(MAIN, MAIN.index(call) + len(call))
