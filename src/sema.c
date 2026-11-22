@@ -139,6 +139,11 @@ struct Symbol {
     bool        used;      /* 被读过或写过一次；没碰过的局部绑定要报（M66） */
     struct Symbol *locals_next;  /* 本函数体的局部登记链（见 local_track） */
     bool        stack_val; /* 它的值指向当前栈帧（逃逸检查用，见 addr_frame） */
+    /* §221：捕获指针 *t 的栈借用标记。独立于 tag 账本——tag.close 只挡
+     * TagSlot 建槽，挡不住这里的 expr_frame 逃逸检查。捕获符号打上它，
+     * 赋值/别名传播时用 expr_borrow 继承，出口处（return/字段/全局/实参）
+     * 一律拦。stack_val 也一并置位，让通用 return 逃逸检查同样覆盖。 */
+    bool        cap_borrow;
     int         reg_slot;  /* §130 发行版本 id：0 = 无 / opaque（见 region_ledger） */
     int         tag_id;    /* §170 tag 账本 id（TagSlot 下标+1，0 = 无） */
     int         tag_state; /* §170 载体状态 TC_*（0 NONE / 1 LIVE / 2 FREED /
@@ -5408,6 +5413,27 @@ static bool expr_frame(Node *e) {
     }
 }
 
+/* §221：表达式是否携带捕获指针（*t）的栈借用。与 expr_frame 平行，但只认
+ * cap_borrow 标记的符号——普通 &local 的栈指针不算（传给函数是合法的），
+ * 只有捕获指针这套借用才禁传参/禁外泄。赋值/别名沿 NK_IDENT 传播（符号的
+ * cap_borrow 由 check_assign 重算），cast/下标/字段读取保持来源。 */
+static bool expr_borrow(Node *e) {
+    if (!e) return false;
+    switch (e->kind) {
+    case NK_IDENT: return e->sym && e->sym->cap_borrow;
+    case NK_CAST:  return expr_borrow(e->a);
+    case NK_FIELD: case NK_INDEX: case NK_SLICE: case NK_UNWRAP:
+        return expr_borrow(e->a);
+    case NK_ORELSE: case NK_TRY:
+        return expr_borrow(e->a) || expr_borrow(e->b);
+    case NK_BIN:
+        if (e->op == TOK_PLUS || e->op == TOK_MINUS)
+            return expr_borrow(e->a) || expr_borrow(e->b);
+        return false;
+    default: return false;
+    }
+}
+
 static bool addr_frame(Node *o) {
     if (!o) return false;
     /* §201 补丁：`&x.?` / `&x.?.f` 的 unwrap 结果（即便载荷是指针 `*T`）
@@ -5481,6 +5507,26 @@ static Type *check_assign(Node *n) {
     if (n->op == TOK_ASSIGN) {
         rt = check_expr(n->b, lt);
         coerce_node(n->b, rt, lt, "assignment");
+        /* §221：捕获指针借用不许存进长生命周期位置——字段、全局/静态、
+         * 数组/切片元素。局部简单变量赋值是别名传播（上面会记 cap_borrow），
+         * 不算逃逸。tag.close 关不掉这条（走 expr_borrow 而非 tag 账本）。 */
+        if (expr_borrow(n->b)) {
+            bool escapes = false;
+            const char *where = "a struct field";
+            if (n->a->kind == NK_FIELD) {
+                escapes = true; where = "a struct field";
+            } else if (n->a->kind == NK_INDEX || n->a->kind == NK_SLICE) {
+                escapes = true; where = "an array/slice element";
+            } else if (n->a->kind == NK_IDENT && n->a->sym && n->a->sym->is_top) {
+                escapes = true; where = "a global or static variable";
+            }
+            if (escapes) {
+                diag_code_at("E0532", n->b->line, n->b->col,
+                    "cannot store a captured pointer `*t` into %s: it is a borrow "
+                    "that must not outlive the capture scope", where);
+                return type_of(n, ty_invalid());
+            }
+        }
         /* 重新绑定过就不再信任初值（§138：分配器去虚拟化的前提是
          * "这个变量从声明到这里没被改过"）。 */
         if (n->a->kind == NK_IDENT && n->a->sym) n->a->sym->nassign++;
@@ -5497,8 +5543,11 @@ static Type *check_assign(Node *n) {
         }
         /* 赋进局部变量的指针也记来源：之后 return 它同样要拦。
          * 重算而非只置 true——先存栈地址再改成堆/全局地址必须洗掉旧事实。 */
-        if (n->a->kind == NK_IDENT && n->a->sym)
+        if (n->a->kind == NK_IDENT && n->a->sym) {
             n->a->sym->stack_val = expr_frame(n->b);
+            /* §221：捕获指针借用沿别名传播（重算而非只置 true，赋成干净值即洗白） */
+            n->a->sym->cap_borrow = expr_borrow(n->b);
+        }
         /* §130：赋值重新绑定发行版本；赋成别的值就把旧版本标 opaque */
         if (n->a->kind == NK_IDENT && n->a->sym) {
             int rs = n->b ? n->b->reg_slot : 0;
@@ -7616,6 +7665,12 @@ static Type *check_call(Node *n, Type *expect) {
             Type *want = ft->params[i];
             Type *got = check_expr(n->items[i], want);
             coerce_node(n->items[i], got, want, "argument");
+            if (expr_borrow(n->items[i])) {
+                diag_code_at("E0532", n->items[i]->line, n->items[i]->col,
+                    "cannot pass a captured pointer `*t` as a function argument: it is a "
+                    "borrow that must not escape the capture scope");
+                return type_of(n, ty_invalid());
+            }
         }
         return type_of(n, ret);
     }
@@ -7694,6 +7749,14 @@ static Type *check_call(Node *n, Type *expect) {
         Type *want = ct->params[i];
         Type *got = check_expr(n->items[i], want);
         coerce_node(n->items[i], got, want, "argument");
+        /* §221：捕获指针 *t 一律不许作为实参传出（用户裁定）——它是对
+         * 原对象的栈借用，函数可能把它存到比捕获作用域更长的地方。 */
+        if (expr_borrow(n->items[i])) {
+            diag_code_at("E0532", n->items[i]->line, n->items[i]->col,
+                "cannot pass a captured pointer `*t` as a function argument: it is a "
+                "borrow that must not escape the capture scope");
+            return type_of(n, ty_invalid());
+        }
     }
     /* §173：贴标载体过调用点（实参释放判定 / 返回流 / 字段账） */
     tag_call_flow(n);
@@ -9468,7 +9531,10 @@ static void ensure_raw(Symbol *s) {
         return;
     }
     Type *init = d->b ? check_expr(d->b, ann) : NULL;
-    if (d->b) s->stack_val = expr_frame(d->b);   /* 初值指向当前栈帧？记下来 */
+    if (d->b) {
+        s->stack_val = expr_frame(d->b);   /* 初值指向当前栈帧？记下来 */
+        s->cap_borrow = expr_borrow(d->b); /* §221：别名继承捕获指针借用 */
+    }
 
     if (ann && init) {
         coerce_node(d->b, init, ann, "initializer");
@@ -10445,6 +10511,14 @@ static void check_stmt(Node *n) {
          * 只查返回类型形状，结构体裹栈指针整只漏过）。expr_frame 保留：
          * 没进账本的来源（&局部、&.{…} 匿名存储）只能靠形状看。 */
         {
+            /* §221：捕获指针 *t 是栈借用，绝不许作为返回值带出作用域。
+             * 独立于 tag 账本——tag.close 挡不住这条。 */
+            if (expr_borrow(n->a)) {
+                diag_code_at("E0532", n->a->line, n->a->col,
+                    "cannot return a captured pointer `*t`: it is a borrow into the "
+                    "enclosing object and must not outlive the capture scope");
+                return;
+            }
             /* §201 补丁：不要只看 want 是不是裸指针/切片。`?*T` / `![]T`
              * 的载荷同样是指针，裹在 optional/error 里也照样悬垂。 */
             bool ptr_shape = want->kind == TY_PTR || want->kind == TY_SLICE ||
@@ -10658,6 +10732,34 @@ static bool arm_is_capture_value(Node *a, const char *cap) {
     return a && a->kind == NK_IDENT && a->name && !strcmp(a->name, cap);
 }
 
+/* §221：捕获指针的前置校验。条件必须是可写左值——捕获的 *t 指向"原对象"
+ * 的载荷存储，右值（函数调用结果、字面量）没有原对象可写回。
+ * 成功返回指向载荷的指针类型 *T；失败报错并返回 NULL。 */
+static Type *cap_ptr_prepare(Node *n, Type *cap_ty, bool is_opt_or_err) {
+    if (!n->cap_ptr) return cap_ty;              /* 普通值捕获，原样 */
+    if (!is_opt_or_err || !cap_ty || cap_ty->kind == TY_VOID) {
+        err_at(n->line, n->col,
+               "`*t` pointer capture needs a ?T / !T condition with a payload");
+        return NULL;
+    }
+    if (!lvalue_mutable(n->a)) {
+        err_at(n->a->line, n->a->col,
+               "pointer capture `*t` needs an addressable, mutable condition "
+               "(write `var o = ...; if (o) *t { ... }`; a temporary has no "
+               "original object to write back to)");
+        return NULL;
+    }
+    return ty_ptr(cap_ty, cap_ty->is_const, false, 0);
+}
+
+/* 给捕获符号打 §221 栈借用标记。stack_val 让通用 return 逃逸检查覆盖它，
+ * cap_borrow 让 §221 专用出口检查（实参/字段/全局）拦它。 */
+static void cap_mark_borrow(Symbol *s) {
+    if (!s) return;
+    s->cap_borrow = true;
+    s->stack_val = true;
+}
+
 static Type *check_if(Node *n, Type *expect) {
     Label *lb = n->label ? label_push(n->label, false) : NULL;
 
@@ -10699,6 +10801,9 @@ static Type *check_if(Node *n, Type *expect) {
                "branch, or `else e` for the error code", ty_str(c));
         cap_ty = NULL;
     }
+    /* §221：指针捕获——载荷类型换成 *T，条件必须是可写左值 */
+    if (n->cap_ptr && n->name)
+        cap_ty = cap_ptr_prepare(n, cap_ty, is_opt || is_err);
 
     /* 条件是编译期常量时，只检查真的会走到的那一支：另一支可能只对
      * 某些类型成立（`if (@sizeOf(T) > 8) @compileError(…)`）。
@@ -10735,7 +10840,8 @@ static Type *check_if(Node *n, Type *expect) {
             if (s) { s->ty = cap_ty; s->state = 2;
                      s->reg_slot = region_of_expr(n->a);
                      s->cap_src = n->a;
-                     tag_capture_inherit(s, n->a, NULL); }
+                     tag_capture_inherit(s, n->a, NULL);
+                     if (n->cap_ptr) cap_mark_borrow(s); }
         }
         tt = (known && !cv->bval) ? ty_void() : check_arm(n->b, expect);
         if (!(known && !cv->bval)) {
@@ -10871,6 +10977,9 @@ static Type *check_while(Node *n, Type *expect) {
                "`while` condition must be bool, or ?T / !T with a capture name; found `%s`",
                ty_str(c));
     Type *cap_ty = (is_opt || is_err) ? c->elem : NULL;
+    /* §221：while 指针捕获 —— 载荷换 *T，条件必须可写左值 */
+    if (n->cap_ptr && n->name)
+        cap_ty = cap_ptr_prepare(n, cap_ty, is_opt || is_err);
 
     {
         Scope sc;
@@ -10878,7 +10987,8 @@ static Type *check_while(Node *n, Type *expect) {
         if (cap_ty && n->name) {
             Symbol *s = scope_add(&sc, n->name, SK_CAPTURE);
             if (s) { s->ty = cap_ty; s->state = 2;
-                     tag_capture_inherit(s, n->a, NULL); }
+                     tag_capture_inherit(s, n->a, NULL);
+                     if (n->cap_ptr) cap_mark_borrow(s); }
         }
         TagSnap snapW;                     /* §170：循环配平 */
         tag_snap(&snapW);
@@ -11383,6 +11493,18 @@ static Type *check_switch(Node *n, Type *expect) {
                        "drop the capture and match the pattern alone", ty_str(s));
                 cap_ty = NULL;
             }
+            /* §221：switch 捕获指针 `pattern: *cap { … }` —— 载荷换 *T，
+             * 主语必须是可写左值（有原对象可写回）。逐臂校验，错误每臂一次。 */
+            if (arm->cap_ptr && cap_ty) {
+                if (!lvalue_mutable(n->a)) {
+                    err_at(n->a->line, n->a->col,
+                           "pointer capture `*t` needs an addressable, mutable switch "
+                           "subject (write `var s = ...; switch (s) { ... }`)");
+                    cap_ty = NULL;
+                } else {
+                    cap_ty = ty_ptr(cap_ty, cap_ty->is_const, false, 0);
+                }
+            }
         }
 
         ArmExit ex = { 0, TC_NONE, NULL, false };
@@ -11402,6 +11524,7 @@ static Type *check_switch(Node *n, Type *expect) {
                         (arm->nitems == 1 && arm->items[0]->kind == NK_FIELD &&
                          arm->items[0]->name) ? arm->items[0]->name : NULL;
                     tag_capture_inherit(cs, n->a, vn);
+                    if (arm->cap_ptr) cap_mark_borrow(cs);
                 }
             }
             Type *at = check_arm(arm->a, expect);
