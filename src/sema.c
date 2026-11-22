@@ -5421,15 +5421,16 @@ static bool expr_borrow(Node *e) {
     if (!e) return false;
     switch (e->kind) {
     case NK_IDENT: return e->sym && e->sym->cap_borrow;
-    case NK_CAST:  return expr_borrow(e->a);
-    case NK_FIELD: case NK_INDEX: case NK_SLICE: case NK_UNWRAP:
-        return expr_borrow(e->a);
+    case NK_CAST:  return expr_borrow(e->a);   /* 指针 cast 仍是借用 */
     case NK_ORELSE: case NK_TRY:
         return expr_borrow(e->a) || expr_borrow(e->b);
     case NK_BIN:
         if (e->op == TOK_PLUS || e->op == TOK_MINUS)
             return expr_borrow(e->a) || expr_borrow(e->b);
         return false;
+    /* 注意：NK_FIELD / NK_INDEX / NK_UNWRAP 是"穿过借用指针读载荷"——
+     * 结果是载荷值，不是借用指针本身。t[0] / t.f 不携带借用，不能在这里
+     * 传播，否则 `t[0] = t[0]+1` 会被误判成把借用存进数组元素。 */
     default: return false;
     }
 }

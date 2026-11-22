@@ -7217,19 +7217,42 @@ static void gen_if_body(Node *n, const char *slot, Type *slot_ty) {
      * 那时没有载荷可捕获，只有 tag 可判）。 */
     if (is_opt || is_err) {
         bool flat = is_opt && ty_opt_flat(c);
+        /* §221：指针捕获——条件是可写左值（语义层保证），取它的地址，
+         * 让 t 指向原对象的载荷而非临时副本，写回才能落到原对象。
+         * flat（?*T）：载荷就是那个指针值本身，t 指向整个 optional 变量（**T）。 */
+        bool capptr = n->cap_ptr && n->name;
         static int cn;
-        char tmp[64];
-        snprintf(tmp, sizeof tmp, "_c%d", cn++);
-        line("%s %s = %s;", cty(c), tmp, cxs(n->a, c));
-        if (flat)       line("if (%s) {", tmp);
-        else if (is_opt) line("if (%s.tag) {", tmp);
-        else            line("if (%s.tag == 0) {", tmp);
+        int my = cn++;
+        char tmp[64], ptr[72], tagref[80];
+        snprintf(tmp, sizeof tmp, "_c%d", my);
+        snprintf(ptr, sizeof ptr, "_c%dp", my);
+        if (capptr) {
+            Buf lv; buf_init(&lv);
+            lvalue(&lv, n->a);            /* 条件的左值（原对象存储） */
+            line("%s *%s = &(%s);", cty(c), ptr, lv.data);
+            buf_free(&lv);
+            snprintf(tagref, sizeof tagref, "%s->", ptr);
+        } else {
+            line("%s %s = %s;", cty(c), tmp, cxs(n->a, c));
+            snprintf(tagref, sizeof tagref, "%s.", tmp);
+        }
+        if (flat)       line("if (%s) {", capptr ? ptr : tmp);
+        else if (is_opt) line("if (%stag) {", tagref);
+        else            line("if (%stag == 0) {", tagref);
         g_ind++;
         CScope s; cscope_push(&s);
         /* `!void` 的载荷是 0 字节，没有可声明的变量（语义层已就此报错，
          * 这里只是不让坏代码变成 `void v = …` 这种非法 C）。 */
-        if (n->name && c->elem->kind != TY_VOID)
-            line("%s %s = %s%s;", cty(c->elem), cnames(n->name), tmp, flat ? "" : ".payload");
+        if (n->name && c->elem->kind != TY_VOID) {
+            if (capptr && flat)
+                /* flat ?*T：载荷就是这个指针值，t 指向整个 optional 变量（**T） */
+                line("%s *%s = %s;", cty(c->elem), cnames(n->name), ptr);
+            else if (capptr)
+                /* t 的类型是 *T（sema 已绑），指向原对象载荷 */
+                line("%s *%s = &%spayload;", cty(c->elem), cnames(n->name), tagref);
+            else
+                line("%s %s = %s%s;", cty(c->elem), cnames(n->name), tmp, flat ? "" : ".payload");
+        }
         gen_arm(n->b, slot, slot_ty);
         cscope_pop();
         g_ind--;
@@ -7250,8 +7273,8 @@ static void gen_if_body(Node *n, const char *slot, Type *slot_ty) {
                 cstr(&pf, mp, (int)strlen(mp));
                 cstr(&pn, fp, (int)strlen(fp));
                 line("#ifndef ZX_RELEASE");
-                line("zx_cap_push((unsigned)%s.tag, %s, %d, %d, %s);",
-                     tmp, pf.data, n->line, n->col, pn.data);
+                line("zx_cap_push((unsigned)%stag, %s, %d, %d, %s);",
+                     tagref, pf.data, n->line, n->col, pn.data);
                 line("#endif");
                 buf_free(&pf); buf_free(&pn);
             }
@@ -7261,7 +7284,7 @@ static void gen_if_body(Node *n, const char *slot, Type *slot_ty) {
                 Type *et = is_err ? ty_error() : ty_bool();
                 const char *cpt = (n->d->name && !strcmp(n->d->name, "_"))
                                       ? ignored_cname() : cnames(n->d->name);
-                line("%s %s = %s.tag;", cty(et), cpt, tmp);
+                line("%s %s = %stag;", cty(et), cpt, tagref);
             }
             gen_arm(n->c, slot, slot_ty);
             cscope_pop();
@@ -7324,16 +7347,34 @@ static void gen_loop_value(Node *n, const char *slot, Type *slot_ty) {
             line("for (;;) {");
             g_ind++;
             static int cn;
-            char tmp[64];
-            snprintf(tmp, sizeof tmp, "_w%d", cn++);
-            line("%s %s = %s;", cty(c), tmp, cxs(n->a, c));
             bool wflat = is_opt && ty_opt_flat(c);
-            if (wflat)      line("if (!%s) break;", tmp);
-            else if (is_opt) line("if (!%s.tag) break;", tmp);
-            else            line("if (%s.tag != 0) break;", tmp);
+            bool capptr = n->cap_ptr && n->name;   /* §221 */
+            int my = cn++;
+            char tmp[64], ptr[72], tagref[80];
+            snprintf(tmp, sizeof tmp, "_w%d", my);
+            snprintf(ptr, sizeof ptr, "_w%dp", my);
+            if (capptr) {
+                Buf lv; buf_init(&lv);
+                lvalue(&lv, n->a);
+                line("%s *%s = &(%s);", cty(c), ptr, lv.data);
+                buf_free(&lv);
+                snprintf(tagref, sizeof tagref, "%s->", ptr);
+            } else {
+                line("%s %s = %s;", cty(c), tmp, cxs(n->a, c));
+                snprintf(tagref, sizeof tagref, "%s.", tmp);
+            }
+            if (wflat)      line("if (!%s) break;", capptr ? ptr : tmp);
+            else if (is_opt) line("if (!%stag) break;", tagref);
+            else            line("if (%stag != 0) break;", tagref);
             CScope s; cscope_push(&s);
-            if (n->name && c->elem->kind != TY_VOID)
-                line("%s %s = %s%s;", cty(c->elem), cnames(n->name), tmp, wflat ? "" : ".payload");
+            if (n->name && c->elem->kind != TY_VOID) {
+                if (capptr && wflat)
+                    line("%s *%s = %s;", cty(c->elem), cnames(n->name), ptr);
+                else if (capptr)
+                    line("%s *%s = &%spayload;", cty(c->elem), cnames(n->name), tagref);
+                else
+                    line("%s %s = %s%s;", cty(c->elem), cnames(n->name), tmp, wflat ? "" : ".payload");
+            }
             emit_loop_cancel_check();
             gen_block_stmts(n->b);
             line("Lcont%d: ;", id);
@@ -7575,10 +7616,46 @@ static void gen_switch(Node *n, const char *slot, Type *slot_ty) {
                 cap = st;
                 src = tmp;
             }
+            /* §221：switch 捕获指针——取原主语（可写左值）载荷的地址，
+             * 让 *t 写回原对象，而不是写进 hoist 的临时副本。flat optional
+             * 没有 payload 字段，载荷就是主语指针本身，取主语变量地址。 */
+            if (arm->cap_ptr) {
+                Buf lv; buf_init(&lv);
+                lvalue(&lv, n->a);
+                if (st && st->kind == TY_UNION && st->is_tagged && cap && vname) {
+                    Buf ab; buf_init(&ab);
+                    buf_printf(&ab, "&(%s).u.", lv.data); mname(&ab, vname);
+                    src = ab.data;
+                } else if (st && st->kind == TY_OPT && !ty_opt_flat(st)) {
+                    Buf ab; buf_init(&ab);
+                    buf_printf(&ab, "&(%s).payload", lv.data);
+                    src = ab.data;
+                } else if (st && st->kind == TY_OPT && ty_opt_flat(st)) {
+                    Buf ab; buf_init(&ab);
+                    buf_printf(&ab, "&(%s)", lv.data);
+                    src = ab.data;
+                } else if (st && st->kind == TY_ERR) {
+                    /* .err 捕获错误值取 tag 地址；.ok 取 payload 地址 */
+                    bool err_pat = vname && !strcmp(vname, "err");
+                    Buf ab; buf_init(&ab);
+                    if (err_pat) buf_printf(&ab, "&(%s).tag", lv.data);
+                    else         buf_printf(&ab, "&(%s).payload", lv.data);
+                    src = ab.data;
+                } else {
+                    Buf ab; buf_init(&ab);
+                    buf_printf(&ab, "&(%s)", lv.data);
+                    src = ab.data;
+                }
+                buf_free(&lv);
+            }
             /* 0 字节的载荷（`!void` 的 `.ok`）没有可声明的 C 变量；
              * 语义层已经就此报错，这里只是别生成 `void v = …`。 */
-            if (cap && src && cap->kind != TY_VOID)
-                line("%s %s = %s;", cty(cap), cnames(arm->name), src);
+            if (cap && src && cap->kind != TY_VOID) {
+                if (arm->cap_ptr)
+                    line("%s *%s = %s;", cty(cap), cnames(arm->name), src);
+                else
+                    line("%s %s = %s;", cty(cap), cnames(arm->name), src);
+            }
         }
         if (arm->label) {
             CLab *l = &g_labs[g_nlabs++];
