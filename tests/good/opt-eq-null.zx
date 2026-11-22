@@ -20,10 +20,10 @@ const main = fn () u8 {
     // 运行期（var，发射 .tag 判定）
     var x: ?i32 = null;
     var y: ?i32 = 42;
-    if (!(x == null) || x != null) { return 6; }
-    if (y == null || !(y != null)) { return 7; }
-    if (!(null == x) || null != x) { return 8; }
-    if (null == y || !(null != y)) { return 9; }
+    if (!(x == null) or x != null) { return 6; }
+    if (y == null or !(y != null)) { return 7; }
+    if (!(null == x) or null != x) { return 8; }
+    if (null == y or !(null != y)) { return 9; }
 
     // 扁平 ?*T 仍按 0 指针比较
     var p: ?*i32 = null;

@@ -8,7 +8,7 @@
 const I64_MAX: i64 = 9223372036854775807;
 
 const isSpace = fn (c: u8) bool {
-    return c == 32 || c == 9 || c == 10 || c == 13;
+    return c == 32 or c == 9 or c == 10 or c == 13;
 };
 
 // hay[i..i+needle.len] 是不是 needle。调用者必须先保证 i + needle.len <= hay.len：
@@ -77,14 +77,14 @@ pub const contains = fn (hay: []const u8, needle: []const u8) bool {
 // 从开头去掉空白
 pub const trimStart = fn (s: []const u8) []const u8 {
     var i: usize = 0;
-    while (i < s.len && isSpace(s[i])) { i = i + 1; }
+    while (i < s.len and isSpace(s[i])) { i = i + 1; }
     return s[i..];
 };
 
 // 从结尾去掉空白
 pub const trimEnd = fn (s: []const u8) []const u8 {
     var n = s.len;
-    while (n > 0 && isSpace(s[n - 1])) { n = n - 1; }
+    while (n > 0 and isSpace(s[n - 1])) { n = n - 1; }
     return s[0..n];
 };
 
@@ -98,7 +98,7 @@ pub const parseInt = fn (s: []const u8) ?i64 {
     if (t.len == 0) { return null; }
     var i: usize = 0;
     var neg = false;
-    if (t[0] == 45 || t[0] == 43) {
+    if (t[0] == 45 or t[0] == 43) {
         neg = (t[0] == 45);
         i = 1;
         if (t.len == 1) { return null; }
@@ -106,7 +106,7 @@ pub const parseInt = fn (s: []const u8) ?i64 {
     var v: i64 = 0;
     while (i < t.len) {
         let c = t[i];
-        if (c < 48 || c > 57) { return null; }
+        if (c < 48 or c > 57) { return null; }
         let d: i64 = (i64)(c - 48);
         if (v > (I64_MAX - d) / 10) { return null; }   /* 溢出：宁可 null，不要乱数 */
         v = v * 10 + d;
@@ -164,7 +164,7 @@ pub const split = fn (alloc: Allocator, s: []const u8, sep: []const u8) ?[][]con
         var k: usize = 0;
         var start: usize = 0;
         var i: usize = 0;
-        while (sep.len > 0 && i + sep.len <= s.len) {
+        while (sep.len > 0 and i + sep.len <= s.len) {
             if (matchAt(s, i, sep)) {
                 slots[k] = s[start..i];
                 k = k + 1;

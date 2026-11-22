@@ -27,8 +27,8 @@ const main = fn () !i32 {
         var i: usize = 0;
         while (i < 256) {
             let h = co.spawn(bump, 6).?;
-            if (round == 0 && i == 0) { stale = h; }
-            if (round == 5 && i == 255) { last = h; }
+            if (round == 0 and i == 0) { stale = h; }
+            if (round == 5 and i == 255) { last = h; }
             i = i + 1;
         }
         try co.awaitAll();

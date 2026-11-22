@@ -175,7 +175,7 @@ const step = fn (g: *Game) void {
     let hy = head / (i32)W;
     let nx = hx + g.dx;
     let ny = hy + g.dy;
-    if (nx < 0 || nx >= (i32)W || ny < 0 || ny >= (i32)H) {
+    if (nx < 0 or nx >= (i32)W or ny < 0 or ny >= (i32)H) {
         g.alive = false;
         return;
     }
@@ -315,11 +315,11 @@ const play = fn (o: *Out, g: *Game, best: *usize) i32 {
         // 方向：按住即生效，反向直接忽略（否则一步就撞自己）。
         var ndx = g.dx;
         var ndy = g.dy;
-        if (held(VK_RIGHT) || held(VK_D)) { ndx = 1; ndy = 0; }
-        else if (held(VK_LEFT) || held(VK_A)) { ndx = -1; ndy = 0; }
-        else if (held(VK_UP) || held(VK_W)) { ndx = 0; ndy = -1; }
-        else if (held(VK_DOWN) || held(VK_S)) { ndx = 0; ndy = 1; }
-        if (ndx != -g.dx || ndy != -g.dy) {
+        if (held(VK_RIGHT) or held(VK_D)) { ndx = 1; ndy = 0; }
+        else if (held(VK_LEFT) or held(VK_A)) { ndx = -1; ndy = 0; }
+        else if (held(VK_UP) or held(VK_W)) { ndx = 0; ndy = -1; }
+        else if (held(VK_DOWN) or held(VK_S)) { ndx = 0; ndy = 1; }
+        if (ndx != -g.dx or ndy != -g.dy) {
             g.dx = ndx;
             g.dy = ndy;
         }
@@ -365,7 +365,7 @@ const play = fn (o: *Out, g: *Game, best: *usize) i32 {
 //   demo\snake.exe --sim        跑 300 局，全过打印一行 summary
 
 const blocked = fn (g: *Game, x: i32, y: i32) bool {
-    if (x < 0 || x >= (i32)W || y < 0 || y >= (i32)H) { return true; }
+    if (x < 0 or x >= (i32)W or y < 0 or y >= (i32)H) { return true; }
     return on_snake(g, y * (i32)W + x);
 };
 
@@ -384,24 +384,24 @@ const bot_move = fn (g: *Game, rng: *u32) void {
         var dx: i32 = 0;
         var dy: i32 = 0;
         if (k == 0) { dx = 1; } else if (k == 1) { dx = -1; } else if (k == 2) { dy = 1; } else { dy = -1; }
-        if (!(dx == -g.dx && dy == -g.dy) && !blocked(g, hx + dx, hy + dy)) {
+        if (!(dx == -g.dx and dy == -g.dy) and !blocked(g, hx + dx, hy + dy)) {
             g.dx = dx;
             g.dy = dy;
             return;
         }
     }
 
-    if (fx > hx && !(g.dx == -1) && !blocked(g, hx + 1, hy)) { g.dx = 1; g.dy = 0; return; }
-    if (fx < hx && !(g.dx == 1) && !blocked(g, hx - 1, hy)) { g.dx = -1; g.dy = 0; return; }
-    if (fy > hy && !(g.dy == -1) && !blocked(g, hx, hy + 1)) { g.dx = 0; g.dy = 1; return; }
-    if (fy < hy && !(g.dy == 1) && !blocked(g, hx, hy - 1)) { g.dx = 0; g.dy = -1; return; }
+    if (fx > hx and !(g.dx == -1) and !blocked(g, hx + 1, hy)) { g.dx = 1; g.dy = 0; return; }
+    if (fx < hx and !(g.dx == 1) and !blocked(g, hx - 1, hy)) { g.dx = -1; g.dy = 0; return; }
+    if (fy > hy and !(g.dy == -1) and !blocked(g, hx, hy + 1)) { g.dx = 0; g.dy = 1; return; }
+    if (fy < hy and !(g.dy == 1) and !blocked(g, hx, hy - 1)) { g.dx = 0; g.dy = -1; return; }
 
     var k2: i32 = 0;
     while (k2 < 4) {
         var dx: i32 = 0;
         var dy: i32 = 0;
         if (k2 == 0) { dx = 1; } else if (k2 == 1) { dx = -1; } else if (k2 == 2) { dy = 1; } else { dy = -1; }
-        if (!(dx == -g.dx && dy == -g.dy) && !blocked(g, hx + dx, hy + dy)) {
+        if (!(dx == -g.dx and dy == -g.dy) and !blocked(g, hx + dx, hy + dy)) {
             g.dx = dx;
             g.dy = dy;
             return;
@@ -415,7 +415,7 @@ const verify = fn (g: *Game) u8 {
     var i: usize = 0;
     while (i < g.len) {
         let c = g.body[0][i];
-        if (c < 0 || c >= (i32)TOTAL) { return 1; }          // 越界
+        if (c < 0 or c >= (i32)TOTAL) { return 1; }          // 越界
         var j: usize = i + 1;
         while (j < g.len) {
             if (g.body[0][j] == c) { return 2; }                // 身子自己重叠
@@ -423,7 +423,7 @@ const verify = fn (g: *Game) u8 {
         }
         i = i + 1;
     }
-    if (g.food >= 0 && on_snake(g, g.food)) { return 3; }    // 食物压在蛇身上
+    if (g.food >= 0 and on_snake(g, g.food)) { return 3; }    // 食物压在蛇身上
     if (g.score != g.len - 3) { return 4; }                  // 计分和长度对不上
     return 0;
 };
@@ -436,7 +436,7 @@ const simulate = fn (g: *Game, games: usize) u8 {
     while (gi < games) {
         reset(g);
         var n: usize = 0;
-        while (g.alive && n < 20000) {
+        while (g.alive and n < 20000) {
             bot_move(g, &rng);
             let before = g.score;
             step(g);
@@ -501,7 +501,7 @@ const main = fn () u8 {
     let args = std.process.args();
 
     // std.process.args() 不含 argv[0]：args[0] 就是第一个真参数。
-    if (args.len > 0 && std.str.eq(args[0], "--sim")) {
+    if (args.len > 0 and std.str.eq(args[0], "--sim")) {
         if (mem) raw {
             var g0 = new_game(raw);
             return simulate(&g0, 300);

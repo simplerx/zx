@@ -146,41 +146,44 @@ const keyword = fn (s: []const u8) ?Kind {
     if (std.str.eq(s, "orelse")) { return Kind.kw_orelse; }
     if (std.str.eq(s, "try")) { return Kind.kw_try; }
     if (std.str.eq(s, "break")) { return Kind.kw_break; }
+    // §222：and/or 是唯一布尔拼写（&&/|| 已删），复用同一 Kind（AST 编号不变）
+    if (std.str.eq(s, "and")) { return Kind.andand; }
+    if (std.str.eq(s, "or")) { return Kind.oror; }
     return null;
 };
 
 // ---- 字符分类（C 侧同名 helper）----
 
 const is_ident_start = fn (c: u8) bool {
-    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_';
+    return (c >= 'A' and c <= 'Z') or (c >= 'a' and c <= 'z') or c == '_';
 };
 const is_ident_char = fn (c: u8) bool {
-    return is_ident_start(c) || (c >= '0' && c <= '9');
+    return is_ident_start(c) or (c >= '0' and c <= '9');
 };
 const is_digit = fn (c: u8) bool {
-    return c >= '0' && c <= '9';
+    return c >= '0' and c <= '9';
 };
 const hexval = fn (c: u8) i32 {
-    if (c >= '0' && c <= '9') { return (i32)(c - '0'); }
-    if (c >= 'a' && c <= 'f') { return (i32)(c - 'a') + 10; }
-    if (c >= 'A' && c <= 'F') { return (i32)(c - 'A') + 10; }
+    if (c >= '0' and c <= '9') { return (i32)(c - '0'); }
+    if (c >= 'a' and c <= 'f') { return (i32)(c - 'a') + 10; }
+    if (c >= 'A' and c <= 'F') { return (i32)(c - 'A') + 10; }
     return -1;
 };
 const is_hex = fn (c: u8) bool { return hexval(c) >= 0; };
 const alnum_in_base = fn (c: u8, base: u32) bool {
     let d = hexval(c);
-    return d >= 0 && (u32)d < base;
+    return d >= 0 and (u32)d < base;
 };
 
 const is_int_suffix = fn (s: []const u8) bool {
-    return std.str.eq(s, "u8") || std.str.eq(s, "u16") || std.str.eq(s, "u32") ||
-           std.str.eq(s, "u64") || std.str.eq(s, "u128") || std.str.eq(s, "i8") ||
-           std.str.eq(s, "i16") || std.str.eq(s, "i32") || std.str.eq(s, "i64") ||
-           std.str.eq(s, "i128") || std.str.eq(s, "usize") || std.str.eq(s, "isize");
+    return std.str.eq(s, "u8") or std.str.eq(s, "u16") or std.str.eq(s, "u32") or
+           std.str.eq(s, "u64") or std.str.eq(s, "u128") or std.str.eq(s, "i8") or
+           std.str.eq(s, "i16") or std.str.eq(s, "i32") or std.str.eq(s, "i64") or
+           std.str.eq(s, "i128") or std.str.eq(s, "usize") or std.str.eq(s, "isize");
 };
 const is_float_suffix = fn (s: []const u8) bool {
-    return std.str.eq(s, "f16") || std.str.eq(s, "f32") ||
-           std.str.eq(s, "f64") || std.str.eq(s, "f128");
+    return std.str.eq(s, "f16") or std.str.eq(s, "f32") or
+           std.str.eq(s, "f64") or std.str.eq(s, "f128");
 };
 
 // 浮点文本 → f64。**必须正确舍入**：编译期字面量的值就是程序语义的一部分，
@@ -204,7 +207,7 @@ const parse_float = fn (s: []const u8) f64 {
     };
     var n: usize = 0;
     var i: usize = 0;
-    while (i < s.len && n < 63) {
+    while (i < s.len and n < 63) {
         if (s[i] != '_') { buf[0][n] = s[i]; n = n + 1; }
         i = i + 1;
     }
@@ -255,7 +258,7 @@ pub const Lexer = struct {
         // 否则首字符按"非 ASCII 标识符"报 E0102（用户压力测试抓到的）。
         var bom: usize = 0;
         if (src.len >= 3) {
-            if (src[0] == 0xEF && src[1] == 0xBB && src[2] == 0xBF) { bom = 3; }
+            if (src[0] == 0xEF and src[1] == 0xBB and src[2] == 0xBF) { bom = 3; }
         }
         return Lexer{
             .src = src, .p = bom, .line = 1, .col = 1,
@@ -379,21 +382,21 @@ pub const Lexer = struct {
         var more = true;
         while (more) {
             let c = self.peek();
-            if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+            if (c == ' ' or c == '\t' or c == '\r' or c == '\n') {
                 _ = self.adv();
-            } else if (c == '/' && self.peek2() == '/') {
-                var go = self.peek() != 0 && self.peek() != '\n';
+            } else if (c == '/' and self.peek2() == '/') {
+                var go = self.peek() != 0 and self.peek() != '\n';
                 while (go) {
                     _ = self.adv();
-                    go = self.peek() != 0 && self.peek() != '\n';
+                    go = self.peek() != 0 and self.peek() != '\n';
                 }
-            } else if (c == '/' && self.peek2() == '*') {
+            } else if (c == '/' and self.peek2() == '*') {
                 _ = self.adv();
                 _ = self.adv();
                 var closed = false;
                 var scanning = true;
-                while (scanning && self.p < self.src.len) {
-                    if (self.peek() == '*' && self.peek2() == '/') {
+                while (scanning and self.p < self.src.len) {
+                    if (self.peek() == '*' and self.peek2() == '/') {
                         _ = self.adv();
                         _ = self.adv();
                         closed = true;
@@ -430,7 +433,7 @@ pub const Lexer = struct {
         if (e == 'x') {
             let hi = hexval(self.adv());
             let lo = hexval(self.adv());
-            if (hi < 0 || lo < 0) { self.fail("E0102", "`\\x` needs exactly two hex digits"); return -1; }
+            if (hi < 0 or lo < 0) { self.fail("E0102", "`\\x` needs exactly two hex digits"); return -1; }
             _ = self.strbuf.push((u8)(hi * 16 + lo));
             return 1;
         }
@@ -444,7 +447,7 @@ pub const Lexer = struct {
             _ = self.adv();                       // '{'
             var cp: u32 = 0;
             var nd: i32 = 0;
-            while (is_hex(self.peek()) && nd < 6) {
+            while (is_hex(self.peek()) and nd < 6) {
                 let d = hexval(self.adv());
                 cp = cp * 16 + (u32)d;
                 nd = nd + 1;
@@ -461,7 +464,7 @@ pub const Lexer = struct {
     // 码点 → UTF-8（1..4 字节），追加进 strbuf
     pub const utf8_encode = fn (self: *Lexer, cp: u32) i32 {
         // 代理区（U+D800..U+DFFF）单独出现不是合法码点，超出 U+10FFFF 更不是
-        if (cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) {
+        if (cp > 0x10FFFF or (cp >= 0xD800 and cp <= 0xDFFF)) {
             self.fail("E0102", "code point out of range (U+0000..U+10FFFF, surrogates excluded)");
             return -1;
         }
@@ -494,9 +497,9 @@ pub const Lexer = struct {
         let off = self.strbuf.len;
         var closed = false;
         var bad = false;
-        while (!closed && !bad) {
+        while (!closed and !bad) {
             let c = self.peek();
-            if (c == 0 || c == '\n') {
+            if (c == 0 or c == '\n') {
                 bad = true;               // unterminated string（C 不吃掉换行，直接 break）
             } else if (c == '"') {
                 _ = self.adv();
@@ -526,14 +529,14 @@ pub const Lexer = struct {
         if (n == 0) { return 0; }
         let b0 = s[off];
         if (b0 < 0x80) { return (u64)(b0); }
-        if ((b0 & 0xE0) == 0xC0 && n >= 2) {
+        if ((b0 & 0xE0) == 0xC0 and n >= 2) {
             return ((u64)(b0 & 0x1F)) << 6 | ((u64)(s[off + 1] & 0x3F));
         }
-        if ((b0 & 0xF0) == 0xE0 && n >= 3) {
+        if ((b0 & 0xF0) == 0xE0 and n >= 3) {
             return ((u64)(b0 & 0x0F)) << 12 | ((u64)(s[off + 1] & 0x3F)) << 6
                  | ((u64)(s[off + 2] & 0x3F));
         }
-        if ((b0 & 0xF8) == 0xF0 && n >= 4) {
+        if ((b0 & 0xF8) == 0xF0 and n >= 4) {
             return ((u64)(b0 & 0x07)) << 18 | ((u64)(s[off + 1] & 0x3F)) << 12
                  | ((u64)(s[off + 2] & 0x3F)) << 6 | ((u64)(s[off + 3] & 0x3F));
         }
@@ -544,8 +547,8 @@ pub const Lexer = struct {
         _ = self.adv();                       // 开引号
         let off = self.strbuf.len;
         let c = self.peek();
-        if (c == '\'' || c == 0 || c == '\n') {
-            if (c == 0 || c == '\n') {
+        if (c == '\'' or c == 0 or c == '\n') {
+            if (c == 0 or c == '\n') {
                 self.fail("E0101", "unterminated char literal");
             } else {
                 self.fail("E0102", "empty char literal");
@@ -574,10 +577,10 @@ pub const Lexer = struct {
         }
         if (self.peek() != '\'') {
             self.fail("E0102", "a char literal holds exactly one value");
-            var go = self.peek() != 0 && self.peek() != '\'' && self.peek() != '\n';
+            var go = self.peek() != 0 and self.peek() != '\'' and self.peek() != '\n';
             while (go) {
                 _ = self.adv();
-                go = self.peek() != 0 && self.peek() != '\'' && self.peek() != '\n';
+                go = self.peek() != 0 and self.peek() != '\'' and self.peek() != '\n';
             }
         } else {
             _ = self.adv();
@@ -591,21 +594,21 @@ pub const Lexer = struct {
         var is_float = false;
         var base: u32 = 10;
 
-        if (self.peek() == '0' && (self.peek2() == 'x' || self.peek2() == 'X')) {
+        if (self.peek() == '0' and (self.peek2() == 'x' or self.peek2() == 'X')) {
             base = 16;
             _ = self.adv();
             _ = self.adv();
             if (!is_hex(self.peek())) { self.fail("E0102", "hex literal needs digits after `0x`"); }
-        } else if (self.peek() == '0' && (self.peek2() == 'b' || self.peek2() == 'B')) {
+        } else if (self.peek() == '0' and (self.peek2() == 'b' or self.peek2() == 'B')) {
             base = 2;
             _ = self.adv();
             _ = self.adv();
-            if (self.peek() != '0' && self.peek() != '1') { self.fail("E0102", "binary literal needs digits after `0b`"); }
-        } else if (self.peek() == '0' && (self.peek2() == 'o' || self.peek2() == 'O')) {
+            if (self.peek() != '0' and self.peek() != '1') { self.fail("E0102", "binary literal needs digits after `0b`"); }
+        } else if (self.peek() == '0' and (self.peek2() == 'o' or self.peek2() == 'O')) {
             base = 8;
             _ = self.adv();
             _ = self.adv();
-            if (self.peek() < '0' || self.peek() > '7') { self.fail("E0102", "octal literal needs digits after `0o`"); }
+            if (self.peek() < '0' or self.peek() > '7') { self.fail("E0102", "octal literal needs digits after `0o`"); }
         }
 
         var val: u64 = 0;
@@ -613,7 +616,7 @@ pub const Lexer = struct {
         var overflow = false;
 
         if (base != 10) {
-            while (alnum_in_base(self.peek(), base) || self.peek() == '_') {
+            while (alnum_in_base(self.peek(), base) or self.peek() == '_') {
                 let c = self.adv();
                 if (c == '_') { continue; }
                 any = true;
@@ -631,7 +634,7 @@ pub const Lexer = struct {
                 while (is_ident_char(self.peek())) { _ = self.adv(); }
             }
         } else {
-            while (is_digit(self.peek()) || self.peek() == '_') {
+            while (is_digit(self.peek()) or self.peek() == '_') {
                 let c = self.adv();
                 if (c == '_') { continue; }
                 any = true;
@@ -642,16 +645,16 @@ pub const Lexer = struct {
             if (!any) { self.emit(Kind.int, start); return; }
 
             // 浮点：'.' 后必须跟数字（t.0.0 规则）
-            if (self.peek() == '.' && is_digit(self.peek2())) {
+            if (self.peek() == '.' and is_digit(self.peek2())) {
                 is_float = true;
                 _ = self.adv();
-                while (is_digit(self.peek()) || self.peek() == '_') { _ = self.adv(); }
-                if (self.peek() == 'e' || self.peek() == 'E') {
+                while (is_digit(self.peek()) or self.peek() == '_') { _ = self.adv(); }
+                if (self.peek() == 'e' or self.peek() == 'E') {
                     let save = self.p;
                     let sline = self.line;
                     let scol = self.col;
                     _ = self.adv();
-                    if (self.peek() == '+' || self.peek() == '-') { _ = self.adv(); }
+                    if (self.peek() == '+' or self.peek() == '-') { _ = self.adv(); }
                     if (is_digit(self.peek())) {
                         while (is_digit(self.peek())) { _ = self.adv(); }
                     } else {
@@ -665,12 +668,12 @@ pub const Lexer = struct {
 
             // 指数可以不带小数点：`1e7` ≡ `1.0e7`（EBNF 两条都收，实现也得都收）。
             // 后面没有数字就整块回退，交给后缀扫描报错。
-            if (self.peek() == 'e' || self.peek() == 'E') {
+            if (self.peek() == 'e' or self.peek() == 'E') {
                 let save = self.p;
                 let sline = self.line;
                 let scol = self.col;
                 _ = self.adv();
-                if (self.peek() == '+' || self.peek() == '-') { _ = self.adv(); }
+                if (self.peek() == '+' or self.peek() == '-') { _ = self.adv(); }
                 if (is_digit(self.peek())) {
                     is_float = true;
                     while (is_digit(self.peek())) { _ = self.adv(); }
@@ -698,7 +701,7 @@ pub const Lexer = struct {
         let suf = self.src[suf_start..self.p];
         if (is_float) {
             if (!is_float_suffix(suf)) { self.fail("E0102", "unknown float type suffix; use f16 / f32 / f64 / f128"); }
-        } else if (suf.len == 1 && (suf[0] == 'e' || suf[0] == 'E')) {
+        } else if (suf.len == 1 and (suf[0] == 'e' or suf[0] == 'E')) {
             // `1e` —— 指数后面没有数字，回滚后 e 被当成整数后缀；
             // 报"unknown suffix"不如直接说该写什么。
             self.fail("E0102", "float exponent needs digits: write `1e7` or `1.0e7`");
@@ -738,7 +741,7 @@ pub const Lexer = struct {
                     let nstart = self.p;
                     var v: u64 = 0;
                     var ovf = false;
-                    while (is_digit(self.peek()) || self.peek() == '_') {
+                    while (is_digit(self.peek()) or self.peek() == '_') {
                         let c = self.adv();
                         if (c == '_') { continue; }
                         let nv = v * 10 + (u64)(c - '0');
@@ -778,12 +781,20 @@ pub const Lexer = struct {
 
             '&' : {
                 if (self.peek() == '=') { _ = self.adv(); self.emit(Kind.ampeq, start); }
-                else if (self.peek() == '&') { _ = self.adv(); self.emit(Kind.andand, start); }
+                else if (self.peek() == '&') {
+                    _ = self.adv();
+                    self.fail("E0211", "`&&` was removed: write `and`");
+                    self.emit(Kind.andand, start);   // 只为减少级联错，编译已失败
+                }
                 else { self.emit(Kind.amp, start); }
             };
             '|' : {
                 if (self.peek() == '=') { _ = self.adv(); self.emit(Kind.pipeeq, start); }
-                else if (self.peek() == '|') { _ = self.adv(); self.emit(Kind.oror, start); }
+                else if (self.peek() == '|') {
+                    _ = self.adv();
+                    self.fail("E0211", "`||` was removed: write `or`");
+                    self.emit(Kind.oror, start);
+                }
                 else { self.emit(Kind.pipe, start); }
             };
 
@@ -863,7 +874,7 @@ pub const Lexer = struct {
         var done = false;
         while (!done) {
             self.skip_trivia();
-            if (self.peek() == 0 && self.p >= self.src.len) {
+            if (self.peek() == 0 and self.p >= self.src.len) {
                 self.emit(Kind.eof, self.p);
                 done = true;
             } else if (self.peek() == 0) {
@@ -969,7 +980,7 @@ pub const dump = fn (lx: *Lexer, out: *std.array.List(u8)) void {
                 j = j + 1;
             }
             _ = out.push('"');
-        } else if (t.len > 0 && t.len < 64) {
+        } else if (t.len > 0 and t.len < 64) {
             let raw = lx.src[t.start..t.start + t.len];
             var j: usize = 0;
             while (j < raw.len) {

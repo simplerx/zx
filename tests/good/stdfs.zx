@@ -55,8 +55,8 @@ const main = fn () i32 {
         var i: usize = 0;
         while (i < items.len) {
             let n = items[i];
-            if (std.str.eq(n, "one.txt") || std.str.eq(n, "two.txt")
-                || std.str.eq(n, "three.dat")) {
+            if (std.str.eq(n, "one.txt") or std.str.eq(n, "two.txt")
+                or std.str.eq(n, "three.dat")) {
                 found = found + 1;
             } else {
                 // 有幽灵条目（比如 "." / ".." 漏进来）就报出来

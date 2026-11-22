@@ -40,7 +40,7 @@ const main = fn () !i32 {
     }
     let n = std.atomic.atomicLoad(&ticks);
     var interrupted: usize = 0;
-    if (n > 0 && n < LIMIT) { interrupted = 1; }
+    if (n > 0 and n < LIMIT) { interrupted = 1; }
     std.println("interrupted:{}", interrupted);
     pl.close();
     return 0;

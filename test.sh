@@ -1931,10 +1931,11 @@ else
     cat "$TPFX.c218.log" 2>/dev/null || true; fail=1
 fi
 
-# §219：at() 返回单元素指针（?*T），拿它造长切片是凭空造长度——读到相邻
-# 内存且地址仍在已映射页内，硬件/CRT 抓不到。编译期按来源拦（含 let 中转
-# 与直接 .?），报 E0531；items() 与 alloc() 裸指针切片不受影响。
-printf "\n== §219 单元素指针长切片编译期拦截\n"
+# §222 用户裁定：移除 §219 的 at() 单元素指针长切片限制。
+# at() 返回 ?*T，拿它造 `p[0..n]` 此前报 E0531；现在完全放行，长度由写码
+# 者自己负责（越界后果自负），编译器不拦。守门反转为「必须能编译」；
+# items() 的 .len 运行时兜底与 alloc() 裸指针通道照旧验证。
+printf "\n== §222 移除 at() 长切片限制\n"
 cat > "$TPFX.c219.zx" <<'ZXEOF'
 const std = @mod("std");
 const main = fn () i32 {
@@ -1946,11 +1947,10 @@ const main = fn () i32 {
 };
 ZXEOF
 $ZXC "$TPFX.c219.zx" -o "$TPFX.c219.exe" > "$TPFX.c219.log" 2>&1 && ok219=1 || ok219=0
-if [ "$ok219" = 0 ] && grep -q 'E0531' "$TPFX.c219.log" \
-   && grep -q 'single-element pointer' "$TPFX.c219.log"; then
-    printf "  ok   at().? 的 let 中转长切片报 E0531\n"
+if [ "$ok219" = 1 ]; then
+    printf "  ok   at().? 的 let 中转长切片已放行\n"
 else
-    printf "  FAIL §219 let 中转未拦\n"; cat "$TPFX.c219.log"; fail=1
+    printf "  FAIL §222 let 中转仍被拦\n"; cat "$TPFX.c219.log"; fail=1
 fi
 cat > "$TPFX.c219b.zx" <<'ZXEOF'
 const std = @mod("std");
@@ -1962,10 +1962,10 @@ const main = fn () i32 {
 };
 ZXEOF
 $ZXC "$TPFX.c219b.zx" -o "$TPFX.c219b.exe" > "$TPFX.c219b.log" 2>&1 && ok219b=1 || ok219b=0
-if [ "$ok219b" = 0 ] && grep -q 'E0531' "$TPFX.c219b.log"; then
-    printf "  ok   直接 at().?[0..N] 报 E0531\n"
+if [ "$ok219b" = 1 ]; then
+    printf "  ok   直接 at().?[0..N] 已放行\n"
 else
-    printf "  FAIL §219 直接形式未拦\n"; cat "$TPFX.c219b.log"; fail=1
+    printf "  FAIL §222 直接形式仍被拦\n"; cat "$TPFX.c219b.log"; fail=1
 fi
 # items() 是正当兜底：编译过、运行时按 .len 界检查报非 0
 cat > "$TPFX.c219c.zx" <<'ZXEOF'
@@ -2128,6 +2128,43 @@ cap_escape global 'var g: ?*i32 = null; const main = fn () void { var o: ?i32 = 
 cap_escape alias 'const main = fn () ?*i32 { var o: ?i32 = 42; if (o) *t { let u = t; return u; }; return null; };'
 cap_escape non-lvalue 'const mk = fn () ?i32 { return 42; }; const main = fn () void { if (mk()) *t { }; };'
 cap_escape tag.close 'tag.close; const main = fn () ?*i32 { var o: ?i32 = 42; if (o) *t { return t; }; return null; };'
+
+# §222：and/or 是 &&/|| 的词法别名——同优先级、同短路、可混用；双前端各跑一遍
+printf "\n== §222 and/or 现代布尔拼写\n"
+cat > "$TPFX.c222.zx" <<'ZXEOF'
+const main = fn () i32 {
+    let t = true;
+    let f = false;
+    if (!(t and !f)) { return 1; }
+    if (!(f or t)) { return 2; }
+    if (t or f and f) {} else { return 3; }   // and 优先于 or
+    if (f and t or t) {} else { return 4; }
+    if (t and f or t) {} else { return 5; }
+    return 0;
+};
+ZXEOF
+if $ZXC "$TPFX.c222.zx" -o "$TPFX.c222.exe" > "$TPFX.c222.log" 2>&1 \
+   && "$TPFX.c222.exe"; then
+    printf "  ok   and/or 语义与优先级\n"
+else
+    printf "  FAIL §222 and/or 语义\n"; cat "$TPFX.c222.log"; fail=1
+fi
+if $ZXC --fe=c "$TPFX.c222.zx" -o "$TPFX.c222c.exe" > "$TPFX.c222c.log" 2>&1 \
+   && "$TPFX.c222c.exe"; then
+    printf "  ok   and/or C 前端交叉\n"
+else
+    printf "  FAIL §222 and/or C 前端\n"; cat "$TPFX.c222c.log"; fail=1
+fi
+# 旧拼写必须被拒（E0211）：两个前端各验一次
+for oldop in '&&' '||'; do
+    printf 'const main = fn () i32 { let a = true; let b = false; if (a %s b) { return 1; } return 0; };\n' "$oldop" > "$TPFX.c222old.zx"
+    $ZXC "$TPFX.c222old.zx" -o "$TPFX.c222old.exe" > "$TPFX.c222old.log" 2>&1 && oldok=1 || oldok=0
+    if [ "$oldok" = 0 ] && grep -q 'E0211' "$TPFX.c222old.log"; then
+        printf "  ok   旧拼写 %s 报 E0211\n" "$oldop"
+    else
+        printf "  FAIL §222 旧拼写 %s 未拒绝\n" "$oldop"; cat "$TPFX.c222old.log"; fail=1
+    fi
+done
 # 用例会在仓库根留下自己的临时文件：io_fmt.zx 写 io_fmt.tmp，stdfs.zx 建
 # fs_t_dir / fs_t_dir2。跑完统一带走——测试不该往工作区里堆东西。
 rm -rf io_fmt.tmp fs_t_dir fs_t_dir2 2>/dev/null || true

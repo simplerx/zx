@@ -61,7 +61,7 @@ const near = fn (a: f32, b: f32, eps: f32) bool {
 const rotEq = fn (q: Quat, m: Mat3, v: V4) bool {
     let a = q.rotate(v);
     let b = m.mulVec(v);
-    return near(a.0, b.0, 1e-5) && near(a.1, b.1, 1e-5) && near(a.2, b.2, 1e-5);
+    return near(a.0, b.0, 1e-5) and near(a.1, b.1, 1e-5) and near(a.2, b.2, 1e-5);
 };
 
 pub const main = fn () u8 {
@@ -108,7 +108,7 @@ pub const main = fn () u8 {
     std.println("mask edges: allT={} anyF={} allF={}",
                 std.simd.all(fullT), std.simd.any(fullF), std.simd.all(fullF));
     // 掩码能直接进 if
-    if (std.simd.any(m) && !std.simd.all(m)) { std.println("mask: if ok"); }
+    if (std.simd.any(m) and !std.simd.all(m)) { std.println("mask: if ok"); }
 
     // ---- 3D ----
     let cx = std.simd.cross(V4{1.0, 0.0, 0.0, 0.0}, V4{0.0, 1.0, 0.0, 0.0});
@@ -166,8 +166,8 @@ pub const main = fn () u8 {
     let tsback = ts.mul(tsi);
     let restored = tsi.mulVec(tp);
     std.println("mat4 inv: {} {}", tsback.approxEq(i4, 1e-5),
-                near(restored.0, mv.0, 1e-5) && near(restored.1, mv.1, 1e-5)
-                && near(restored.2, mv.2, 1e-5) && near(restored.3, mv.3, 1e-5));
+                near(restored.0, mv.0, 1e-5) and near(restored.1, mv.1, 1e-5)
+                and near(restored.2, mv.2, 1e-5) and near(restored.3, mv.3, 1e-5));
 
     // 双重转置回到自身。中间值要绑到 let：Mat4 > 16 字节，方法按
     // const 指针收接收者，临时值取不到地址。
@@ -205,7 +205,7 @@ pub const main = fn () u8 {
                          V4{0.0, 1.0, 0.0, 0.0});
     let lv4 = la.mulVec(V4{0.0, 0.0, 0.0, 1.0});
     std.println("mat4 lookAt: {}", near(lv4.0, 0.0, 1e-6)
-                && near(lv4.1, 0.0, 1e-6) && near(lv4.2, -5.0, 1e-6));
+                and near(lv4.1, 0.0, 1e-6) and near(lv4.2, -5.0, 1e-6));
 
     // ---- Mat3：2D 齐次 + 3D 线性 ----
     let i3 = Mat3.identity();

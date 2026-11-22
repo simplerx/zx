@@ -149,11 +149,11 @@ pub const main = fn () u8 {
     // det == 1 (1e20 * 1e-20), round trip must stay inside f32 noise.
     let s = Mat4.fromScale(V4{1e20, 1e-20, 1.0, 0.0});
     let r = s.mul(s.invert());
-    let diag = near(r.c0.0, 1.0, 1e-3) && near(r.c1.1, 1.0, 1e-3)
-            && near(r.c2.2, 1.0, 1e-3) && near(r.c3.3, 1.0, 1e-3);
+    let diag = near(r.c0.0, 1.0, 1e-3) and near(r.c1.1, 1.0, 1e-3)
+            and near(r.c2.2, 1.0, 1e-3) and near(r.c3.3, 1.0, 1e-3);
     let off = r.c0.1 + r.c0.2 + r.c0.3 + r.c1.0 + r.c1.2 + r.c1.3
             + r.c2.0 + r.c2.1 + r.c2.3 + r.c3.0 + r.c3.1 + r.c3.2;
-    std.println("ext scale: ok={} det={}", diag && near(off, 0.0, 1e-3),
+    std.println("ext scale: ok={} det={}", diag and near(off, 0.0, 1e-3),
                 s.determinant());
 
     // det underflows to 0 -> zero matrix, no division by zero.

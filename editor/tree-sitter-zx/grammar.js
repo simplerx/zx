@@ -599,8 +599,6 @@ module.exports = grammar({
           ["<=", PREC.COMPARE],
           [">", PREC.COMPARE],
           [">=", PREC.COMPARE],
-          ["&&", PREC.AND],
-          ["||", PREC.OR],
         ].map(([op, p]) => prec.left(p, seq(field("left", $._expression), field("operator", op), field("right", $._expression)))),
         prec.left(PREC.ORELSE, seq(field("left", $._expression), "orelse", field("right", $._expression))),
         // 单独列出以便着色 and/or/not 关键字形状

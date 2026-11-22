@@ -170,7 +170,7 @@ pub const BufReader = struct {
             while (i < self.end) {
                 if ((self.buf + i).0 == '\n') {
                     var stop = i;
-                    if (stop > self.start && (self.buf + stop - 1).0 == '\r') { stop = stop - 1; }
+                    if (stop > self.start and (self.buf + stop - 1).0 == '\r') { stop = stop - 1; }
                     let line = self.buf[self.start..stop];
                     self.start = i + 1;
                     return line;

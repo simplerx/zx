@@ -44,8 +44,10 @@ static const ErrDoc g_errs[] = {
       "slice `.N` dot-indexing (write `a[i]`; dot-index stays only for tuples "
       "and vectors). Older removals: write conversions as `(T)value`; "
       "reflection is the single `@type(x)` (`.size` / `.align` / `.name` / "
-      "`.fields`); vector math lives in `std.simd`; `zxc explain E0211` lists "
-      "which names went away and what to write instead" },
+      "`.fields`); vector math lives in `std.simd`. §222 also removed the C-style "
+      "boolean spellings `&&` and `||` -- write `and` / `or` (same short-circuit "
+      "behavior and precedence). `zxc explain E0211` lists which names went away "
+      "and what to write instead" },
 
     { "E0300", "type error (uncategorized)",
       "compare the expression's type at the caret with the expected type" },
@@ -159,8 +161,6 @@ static const ErrDoc g_errs[] = {
       "`std.move(p)` transferred the pointer's ownership to the receiver (line given in the message) -- the original variable is sealed: it can be neither dereferenced, freed, moved again, nor handed off again. Use the variable the move produced; to keep tracking on the receiving side, bind a tag there (`tag q : tag.x = ...`)" },
     { "E0530", "std.move needs a pointer the tag ledger tracks",
       "`std.move` transfers ownership, so the argument must be an allocation the compiler tracks -- a `std.heapAlloc`/`std.stackAlloc` site or a pointer bound with `tag.x : ...`. A bare pointer (e.g. cast back from `usize` in a thread) has no owner to transfer; bind a tag to it first" },
-    { "E0531", "slicing a single-element pointer from at()",
-      "`list.at(i)` returns a pointer to ONE element (`?*T`), not a buffer. Writing `at(i).?[0..N]` with N>1 invents a length out of nothing: the pointer carries no size, so the extra elements are just adjacent memory and reads return garbage. Use `list.items()[lo..hi]` (a real slice with .len, bounds-checked) or index the list directly with `list.at(j).?`. If you have a genuine multi-element buffer, slice that buffer instead" },
     { "E0532", "captured pointer escape or invalid capture",
       "`if (o) *t { }` / `while (o) *t { }` / `switch (s) { .tag: *t { } }` capture a POINTER to the matched payload so you can write back to the original object (`t[0] = value`). The condition/subject must be an addressable, mutable left-hand side (a `var`), because a temporary has no original object to write back to. The captured pointer is a stack borrow: it may be used inside the arm to read/write the payload and aliased to other locals, but it must never escape — not returned, not stored into a struct field, global, or array/slice element, and not passed as a function argument. This check is independent of the tag ledger, so `tag.close` does not disable it" },
 

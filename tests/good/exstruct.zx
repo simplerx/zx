@@ -49,7 +49,7 @@ const main = fn () u8 {
     b.data[0] = 'A';
     b.data[1] = 'B';
     b.data[2] = 0;
-    if (b.data[0] != 'A' || b.data[1] != 'B' || b.n != 3) { return 7; }
+    if (b.data[0] != 'A' or b.data[1] != 'B' or b.n != 3) { return 7; }
 
     var iv: IV = undefined;
     iv.i = 0x3f800000;

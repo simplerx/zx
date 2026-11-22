@@ -359,7 +359,7 @@ pub const Mat3 = struct {
             return Quat{ .v = V4{ (m21 - m12) / s, (m02 - m20) / s,
                                   (m10 - m01) / s, s * 0.25 } };
         }
-        if (m00 > m11 && m00 > m22) {
+        if (m00 > m11 and m00 > m22) {
             let s = sqrtf(1.0 + m00 - m11 - m22) * 2.0;
             return Quat{ .v = V4{ s * 0.25, (m01 + m10) / s,
                                   (m02 + m20) / s, (m21 - m12) / s } };
@@ -417,14 +417,14 @@ pub const Mat3 = struct {
     };
 
     pub const eq = fn (self: Self, o: Self) bool {
-        return all(self.c0 == o.c0) && all(self.c1 == o.c1)
-            && all(self.c2 == o.c2);
+        return all(self.c0 == o.c0) and all(self.c1 == o.c1)
+            and all(self.c2 == o.c2);
     };
 
     // eps 是逐分量最大绝对差；eps == 0 时等价于 eq（见模块级 near4）。
     pub const approxEq = fn (self: Self, o: Self, eps: f32) bool {
-        return near4(self.c0, o.c0, eps) && near4(self.c1, o.c1, eps)
-            && near4(self.c2, o.c2, eps);
+        return near4(self.c0, o.c0, eps) and near4(self.c1, o.c1, eps)
+            and near4(self.c2, o.c2, eps);
     };
 };
 
@@ -588,13 +588,13 @@ pub const Mat4 = struct {
     };
 
     pub const eq = fn (self: Self, o: Self) bool {
-        return all(self.c0 == o.c0) && all(self.c1 == o.c1)
-            && all(self.c2 == o.c2) && all(self.c3 == o.c3);
+        return all(self.c0 == o.c0) and all(self.c1 == o.c1)
+            and all(self.c2 == o.c2) and all(self.c3 == o.c3);
     };
 
     pub const approxEq = fn (self: Self, o: Self, eps: f32) bool {
-        return near4(self.c0, o.c0, eps) && near4(self.c1, o.c1, eps)
-            && near4(self.c2, o.c2, eps) && near4(self.c3, o.c3, eps);
+        return near4(self.c0, o.c0, eps) and near4(self.c1, o.c1, eps)
+            and near4(self.c2, o.c2, eps) and near4(self.c3, o.c3, eps);
     };
 };
 

@@ -113,7 +113,7 @@ const main = fn () i32 {
         let e = std.json.member(d, "e") orelse std.json.Value{ .nul = 0 };
         let sa = asStr(a) orelse "";
         let se = asStr(e) orelse "";
-        let esc_ok = sa.len == 3 && sa[0] == 'A' && sa[1] == '\t' && sa[2] == '"';
+        let esc_ok = sa.len == 3 and sa[0] == 'A' and sa[1] == '\t' and sa[2] == '"';
         std.println("esc={} emoji_len={}", esc_ok, se.len);
     } else e {
         std.println("esc err {}", e);

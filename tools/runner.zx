@@ -36,7 +36,7 @@ const Cmd = struct {
     };
     const add = fn (self: *Cmd, s: []const u8) void {
         var i: usize = 0;
-        while (i < s.len && self.n + 1 < BUFCAP) {
+        while (i < s.len and self.n + 1 < BUFCAP) {
             self.p[0][self.n] = s[i];
             self.n = self.n + 1;
             i = i + 1;
@@ -103,7 +103,7 @@ const no_cr = fn (al: std.Allocator, s: []const u8) []const u8 {
 
 // 前缀判断：路径属于哪一类
 const is_err_test = fn (path: []const u8) bool {
-    return std.str.startsWith(path, "tests/bad/") ||
+    return std.str.startsWith(path, "tests/bad/") or
            std.str.startsWith(path, "tests/multibad/");
 };
 
@@ -143,7 +143,7 @@ const expect_output = fn (al: std.Allocator, parts: [][]const u8) []const u8 {
             var good = true;
             if (n > 0) { good = sb.push('\n'); }
             var i: usize = 0;
-            while (i < body.len && good) {
+            while (i < body.len and good) {
                 good = sb.push(body[i]);
                 i = i + 1;
             }
@@ -158,7 +158,7 @@ const expect_output = fn (al: std.Allocator, parts: [][]const u8) []const u8 {
  * `const main = fn (…)`。判错了不会报错——只会静默跳过运行，
  * 让 47 个 expect-output 用例退化成纯类型检查。 */
 const has_main = fn (src: []const u8) bool {
-    return std.str.contains(src, "fn main(") || std.str.contains(src, "main = fn");
+    return std.str.contains(src, "fn main(") or std.str.contains(src, "main = fn");
 };
 
 /* `// expect-output` 有没有写，和它后面写了几个期望行是两件事。
@@ -294,7 +294,7 @@ const main = fn () i32 {
 
                     // 有 expect-output 就跑一遍真二进制
                     let want = expect_output(al, ps);
-                    if (has_main(src) && has_output(ps)) {
+                    if (has_main(src) and has_output(ps)) {
                         var cb = Cmd.init();
                         cb.addpath(zxc); cb.add(" \""); cb.addpath(f); cb.add("\" -o \""); cb.addpath(b);
                         cb.add("\" > \""); cb.addpath(o1); cb.add("\" 2>&1");

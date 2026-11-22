@@ -13,7 +13,7 @@ const main = fn () u8 {
     std.println("argc={d}", args.len);
     for (0..args.len) i { std.println("arg {d}: {s}", i, args[i]); }
 
-    if (args.len > 0 && eqlStr(args[0], "--exit")) {
+    if (args.len > 0 and eqlStr(args[0], "--exit")) {
         std.println("exiting");
         std.process.exit(3);                // noreturn
     }

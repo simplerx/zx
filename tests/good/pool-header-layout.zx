@@ -52,7 +52,7 @@ pub const main = fn () i32 {
             std.println("A struct deref = {}", nd.value);
 
             std.println("A free = {}", pp.free(qv));
-            std.println("A flags after free = {}", h.0 == 32 && (h + 2).0 == 2);
+            std.println("A flags after free = {}", h.0 == 32 and (h + 2).0 == 2);
         }
         pp.deinit();
         tag pp: null;

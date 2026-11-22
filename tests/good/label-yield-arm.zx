@@ -62,7 +62,7 @@ const main = fn () !void {
         var b = 0;
         inner: while (b < 10) {
             b += 1;
-            if (a == 3 && b == 7) outer: {};
+            if (a == 3 and b == 7) outer: {};
         }
         seen = seen + 1;
     }

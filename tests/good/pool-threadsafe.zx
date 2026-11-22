@@ -51,7 +51,7 @@ const work = fn (id: usize) !usize {
     var list = std.array.List(i32).init(a);
     var j: usize = 0;
     while (j < 100) { _ = list.push((i32)j); j = j + 1; }
-    let good = list.len == 100 && list.at(99).?.0 == 99;
+    let good = list.len == 100 and list.at(99).?.0 == 99;
     list.deinit();
     if (good) { _ = std.atomic.atomicAdd(&g_view, 1); }
     else { _ = std.atomic.atomicAdd(&g_bad, 1); }

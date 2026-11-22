@@ -109,7 +109,6 @@ static const DiagRule g_rules[] = {
     { "moved away",                       "E0529" },
     { "was already moved",                "E0529" },
     { "carry ownership to move",          "E0530" },
-    { "slicing a single-element pointer", "E0531" },
     { "captured pointer",                 "E0532" },
     { "pointer capture",                  "E0532" },
 

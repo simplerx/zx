@@ -135,7 +135,7 @@ const keywords = [_][]const u8{
     "const",  "let",    "var",  "fn",     "type",   "null",     "undefined",
     "if",     "else",   "while", "for",  "inline", "switch", "continue", "return",
     "defer",  "struct", "union", "enum", "error",  "pub",    "extern",   "orelse",
-    "try",    "break",
+    "try",    "break",  "and",    "or",
 };
 
 const Snip = struct { label: []const u8, body: []const u8, detail: []const u8 };

@@ -37,7 +37,7 @@ const wnd_proc = fn (h: *u8, msg: u32, wp: usize, lp: usize) usize {
     if (msg == win.WM_CLOSE) { win.DestroyWindow(h); return 0; }
     if (msg == win.WM_DESTROY) { win.PostQuitMessage(0); return 0; }
     if (msg == win.WM_ERASEBKGND) { return 1; }
-    if (msg == win.WM_KEYDOWN && wp == win.VK_ESCAPE) { win.DestroyWindow(h); return 0; }
+    if (msg == win.WM_KEYDOWN and wp == win.VK_ESCAPE) { win.DestroyWindow(h); return 0; }
     return win.def_proc(h, msg, wp, lp);
 };
 
@@ -93,8 +93,8 @@ const main = fn () u8 {
     var ai: usize = 0;
     while (ai < argv.len) {
         let a = argv[ai];
-        if (std.str.eq(a, "--frames") && ai + 1 < argv.len) { limit = parse_dec(argv[ai + 1]); }
-        if (std.str.eq(a, "--shot") && ai + 1 < argv.len) { shot = argv[ai + 1]; }
+        if (std.str.eq(a, "--frames") and ai + 1 < argv.len) { limit = parse_dec(argv[ai + 1]); }
+        if (std.str.eq(a, "--shot") and ai + 1 < argv.len) { shot = argv[ai + 1]; }
         ai = ai + 1;
     }
 
@@ -206,7 +206,7 @@ const main = fn () u8 {
         win.GetClientRect(hwnd, &rc);
         let cw = rc.right - rc.left;
         let ch = rc.bottom - rc.top;
-        if (cw > 0 && ch > 0) {
+        if (cw > 0 and ch > 0) {
             let aspect: f32 = (f32)cw / (f32)ch;
 
             gl.glViewport(0, 0, cw, ch);
@@ -225,7 +225,7 @@ const main = fn () u8 {
 
             // 截帧要在 SwapBuffers **之前**：后缓冲里才是刚画完的这一帧，
             // 交换之后前缓冲的内容由驱动决定（多缓冲下可能是上一帧或空）。
-            if (shot.len > 0 && limit > 0 && total + 1 >= limit) {
+            if (shot.len > 0 and limit > 0 and total + 1 >= limit) {
                 if (shot_bmp(shot, cw, ch)) { std.println("shot: {}", shot); }
                 shot = "";
             }
@@ -253,7 +253,7 @@ const main = fn () u8 {
         }
 
         total = total + 1;
-        if (limit > 0 && total >= limit) { done: 0; }
+        if (limit > 0 and total >= limit) { done: 0; }
     };
 
     let elapsed = std.time.nsSince(t_start);
@@ -288,7 +288,7 @@ const cstr = fn (p: *const u8) []const u8 {
 const parse_dec = fn (s: []const u8) u64 {
     var v: u64 = 0;
     for (s) c {
-        if (c >= 48 && c <= 57) { v = v * 10 + (u64)(c - 48); }
+        if (c >= 48 and c <= 57) { v = v * 10 + (u64)(c - 48); }
     }
     return v;
 };

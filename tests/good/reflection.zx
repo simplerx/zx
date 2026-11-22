@@ -33,14 +33,14 @@ const main = fn () u8 {
     if (@type(y).ty != i32) { return 2; }
 
     // ---- 标量四样 ----
-    if (tp.size != 8 || tp.align != 4) { return 3; }
+    if (tp.size != 8 or tp.align != 4) { return 3; }
     if (tp.fieldCount != 2) { return 4; }
 
     // ---- 字段：名字 / 类型 / 偏移 ----
     const f0 = tp.fields[0];
     const f1 = tp.fields[1];
-    if (f0.name[0] != 'x' || f1.name[0] != 'y') { return 5; }
-    if (f0.ty != i32 || f1.ty != i32) { return 6; }
+    if (f0.name[0] != 'x' or f1.name[0] != 'y') { return 5; }
+    if (f0.ty != i32 or f1.ty != i32) { return 6; }
     if (f1.offset != @type(i32).size) { return 7; }
 
     // ---- 泛型实例化 ----

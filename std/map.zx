@@ -73,7 +73,7 @@ pub const HashMap = struct (V: type) {
             while (probes <= mask) {
                 let sh = (self.hashes + i).0;
                 if (sh == 0) { return i; }              // 空槽：插入点
-                if (sh == h && str.eq((self.keys + i).0, key)) { return i; }
+                if (sh == h and str.eq((self.keys + i).0, key)) { return i; }
                 i = (i + 1) & mask;
                 probes = probes + 1;
             }
@@ -107,7 +107,7 @@ pub const HashMap = struct (V: type) {
         // ---- 写入 ----
 
         pub const put = fn (self: *Self, key: []const u8, val: V) bool {
-            if (self.cap == 0 || (self.n + 1) * 4 > self.cap * 3) {
+            if (self.cap == 0 or (self.n + 1) * 4 > self.cap * 3) {
                 if (!self.grow()) { return false; }
             }
             let h = Self.norm(fnv1a(key));
@@ -123,7 +123,7 @@ pub const HashMap = struct (V: type) {
         // 只在键不存在时写入；已存在就返回它原来的值。
         // 一次探测同时完成"查旧"和"插入"，不像 get+put 那样哈希两遍。
         const putNew = fn (self: *Self, key: []const u8, val: V) ?V {
-            if (self.cap == 0 || (self.n + 1) * 4 > self.cap * 3) {
+            if (self.cap == 0 or (self.n + 1) * 4 > self.cap * 3) {
                 if (!self.grow()) { return val; }       // 扩容失败：写入没有发生
             }
             let h = Self.norm(fnv1a(key));
@@ -147,12 +147,12 @@ pub const HashMap = struct (V: type) {
 
         // 槽下标从 0 到 capacity()-1；空槽返回 null，跳过即可。
         pub const keyAt = fn (self: *Self, i: usize) ?[]const u8 {
-            if (i >= self.cap || (self.hashes + i).0 == 0) { return null; }
+            if (i >= self.cap or (self.hashes + i).0 == 0) { return null; }
             return (self.keys + i).0;
         };
 
         pub const valueAt = fn (self: *Self, i: usize) ?V {
-            if (i >= self.cap || (self.hashes + i).0 == 0) { return null; }
+            if (i >= self.cap or (self.hashes + i).0 == 0) { return null; }
             return (self.vals + i).0;
         };
 

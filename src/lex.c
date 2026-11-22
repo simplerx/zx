@@ -40,6 +40,9 @@ static const KwEntry g_keywords[] = {
     {"pub", TOK_KW_PUB},       {"extern", TOK_KW_EXTERN},
     {"orelse", TOK_KW_ORELSE},
     {"try", TOK_KW_TRY},
+    /* §222：and/or 是唯一布尔拼写（&&/|| 已删除），复用同一个 TokKind，
+     * 后端与 AST 序列化完全不变。 */
+    {"and", TOK_ANDAND}, {"or", TOK_OROR},
 };
 
 static TokKind ident_kind(const char *s, int len) {
@@ -494,12 +497,20 @@ static void lex_token(Lex *l) {
 
     case '&':
         if (peek(l) == '=') { adv(l); emit(l, TOK_AMPEQ, start); return; }
-        if (peek(l) == '&') { adv(l); emit(l, TOK_ANDAND, start); return; }
+        if (peek(l) == '&') {
+            adv(l);
+            lex_error(l, start, "`&&` was removed: write `and`");
+            emit(l, TOK_ANDAND, start); return;   /* 只为了减少级联语法错，编译已失败 */
+        }
         emit(l, TOK_AMP, start); return;
 
     case '|':
         if (peek(l) == '=') { adv(l); emit(l, TOK_PIPEEQ, start); return; }
-        if (peek(l) == '|') { adv(l); emit(l, TOK_OROR, start); return; }
+        if (peek(l) == '|') {
+            adv(l);
+            lex_error(l, start, "`||` was removed: write `or`");
+            emit(l, TOK_OROR, start); return;
+        }
         emit(l, TOK_PIPE, start); return;
 
     case '=':

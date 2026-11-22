@@ -158,7 +158,7 @@ pub const List = struct (T: type) {
 
     // 就地交换两个元素。
     pub const swap = fn (self: *Self, i: usize, j: usize) bool {
-        if (i >= self.len || j >= self.len) { return false; }
+        if (i >= self.len or j >= self.len) { return false; }
         let t = (self.buf + i).0;
         (self.buf + i).0 = (self.buf + j).0;
         (self.buf + j).0 = t;
@@ -256,7 +256,7 @@ pub const Array = struct (T: type, N: usize) {
     };
 
     pub const swap = fn (self: *Self, i: usize, j: usize) bool {
-        if (i >= N || j >= N) { return false; }
+        if (i >= N or j >= N) { return false; }
         let t = self.data[i];
         self.data[i] = self.data[j];
         self.data[j] = t;

@@ -124,7 +124,7 @@
 (binary_expression
   operator: [
     "+" "-" "*" "/" "%" "<<" ">>" "&" "|" "^"
-    "==" "!=" "<" "<=" ">" ">=" "&&" "||" "and" "or"
+    "==" "!=" "<" "<=" ">" ">=" "and" "or"
   ] @operator)
 
 (unary_expression

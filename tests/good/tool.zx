@@ -31,7 +31,7 @@ const main = fn () i32 {
                 if (cur) c {
                     var j = i;
                     var going = true;
-                    while (j > 0 && going) {
+                    while (j > 0 and going) {
                         let prev = xs.get(j - 1);
                         if (prev) pv {
                             if (pv > c) {

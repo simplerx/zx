@@ -42,7 +42,7 @@ pub const main = fn () i32 {
     var arr: [2]*Cell = .{ &g_a, &g_b };
     arr[0].0.v = 55;
     arr[1].0.v = 66;
-    if (g_a.v != 55 || g_b.v != 66) { return 5; }
+    if (g_a.v != 55 or g_b.v != 66) { return 5; }
 
     // 5. 回归：绑局部变量的旧写法仍正确
     let p = getA();

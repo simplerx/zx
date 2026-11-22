@@ -4,7 +4,7 @@
 // 下会不会崩 / 会不会漂"。样本由 LCG 生成，种子写死，所以每次运行的输入
 // 完全一样，期望输出可以进 expect-output。
 //
-// 求逆用**后向误差**判定：||m*inv - I|| / (||m|| * ||inv||) <= 1e-5。
+// 求逆用**后向误差**判定：orm*inv - Ior / (ormor * orinvor) <= 1e-5。
 // 它与矩阵尺度和条件数无关；绝对误差在 20 万样本的尾部必然出现超阈值的
 // 样本（f32 的正常现象），当判据会随样本量抖动。
 // 四元数与矩阵互转比**旋转效果**（q 和 -q 是同一个旋转，不能比分量），
@@ -116,7 +116,7 @@ const mat3MaxAbs = fn (m: Mat3) f32 {
     return r;
 };
 
-// 求逆的**后向误差**：||m*inv - I|| / (||m|| * ||inv||)。
+// 求逆的**后向误差**：orm*inv - Ior / (ormor * orinvor)。
 // 它与矩阵尺度无关，是数值线性代数的标准判据；绝对误差会随条件数放大，
 // 20 万样本的尾部必然出现"看起来超阈值"的样本，那不是实现缺陷。
 const backErr4 = fn (m: Mat4, inv: Mat4) f32 {
@@ -180,7 +180,7 @@ const probeRot = fn (q1: Quat, q2: Quat) f32 {
 pub const main = fn () u8 {
     var rng = Rng{ .s = 20261114 };
 
-    // ---- 4x4 随机求逆：后向误差 ||m*inv - I|| / (||m||*||inv||) ----
+    // ---- 4x4 随机求逆：后向误差 orm*inv - Ior / (ormor*orinvor) ----
     var bad4: u32 = 0;
     var n: usize = 0;
     while (n < 20000) {

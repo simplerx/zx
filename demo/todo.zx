@@ -66,7 +66,7 @@ const main = fn () u8 {
     let al = std.heap.page;
     let args = std.process.args();                          // argv[0] 不算
 
-    if (args.len == 0 || std.str.eq(args[0], "list")) {
+    if (args.len == 0 or std.str.eq(args[0], "list")) {
         list(load(al));
         return 0;
     }
@@ -80,12 +80,12 @@ const main = fn () u8 {
         return 0;
     }
 
-    if (std.str.eq(args[0], "done") || std.str.eq(args[0], "rm")) {
+    if (std.str.eq(args[0], "done") or std.str.eq(args[0], "rm")) {
         if (args.len < 2) { usage(); return 1; }
         let n = std.str.parseInt(args[1]);
         if (n) v {
             var xs = load(al);
-            if (v < 1 || (usize)(v) > xs.len) {
+            if (v < 1 or (usize)(v) > xs.len) {
                 std.println("no item {s}", args[1]);
                 return 1;
             }

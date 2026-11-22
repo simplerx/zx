@@ -79,13 +79,13 @@ const nameOf = fn (fd: *u8) []const u8 {
 
 // ---- 路径操作（纯函数，零分配） ---------------------------------------------
 
-const isSep = fn (c: u8) bool { return c == '/' || c == 92; };   // 92 = '\'
+const isSep = fn (c: u8) bool { return c == '/' or c == 92; };   // 92 = '\'
 
 // 绝对路径？根路径（/ 或 \ 开头）或盘符（X:）开头都算。
 pub const isAbs = fn (p: []const u8) bool {
     if (p.len == 0) { return false; }
     if (isSep(p[0])) { return true; }
-    if (p.len >= 2 && p[1] == ':') { return true; }
+    if (p.len >= 2 and p[1] == ':') { return true; }
     return false;
 };
 
@@ -260,7 +260,7 @@ pub const DirIter = struct {
             var n: usize = 0;
             var i: usize = 0;
             while (i < path.len) { pat[n] = path[i]; n = n + 1; i = i + 1; }
-            if (n > 0 && !isSep(pat[n - 1])) { pat[n] = 92; n = n + 1; }
+            if (n > 0 and !isSep(pat[n - 1])) { pat[n] = 92; n = n + 1; }
             pat[n] = '*'; n = n + 1;
             pat[n] = 0;
 
@@ -306,8 +306,8 @@ pub const DirIter = struct {
             self.first = false;
             let name = nameOf(self.buf);
             // 跳过 "." / ".."
-            if (name.len == 1 && name[0] == '.') { continue; }
-            if (name.len == 2 && name[0] == '.' && name[1] == '.') { continue; }
+            if (name.len == 1 and name[0] == '.') { continue; }
+            if (name.len == 2 and name[0] == '.' and name[1] == '.') { continue; }
             return name;
         }
         return null;
