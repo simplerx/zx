@@ -88,6 +88,13 @@ const conf = fn (name: []const u8, opts: struct{ depth: i32, kind: []const u8 })
 const deep = fn (cfg: struct{ opts: struct{ width: i32, height: i32 }, flag: bool }) void {
     std.println("{} {}", cfg.opts.width, cfg.flag);
 };
+
+// §220 orelse inlay：`x orelse alt` 出左载荷类型（去一层 ?/!）
+const orelseProbe = fn () i32 {
+    let maybe: ?i32 = null;
+    let pv = maybe orelse return 0;
+    return pv;
+};
 """
 
 uri = "file:///" + TESTDIR.replace("\\", "/") + "/main.zx"
@@ -818,6 +825,8 @@ check("inlayHint.skipNonValue",
       all(hint_at(k) is None for k in ("const Obj", "const Shape", "const std", "const push")), detail)
 # 类型提示是 kind=1；参数名提示是 kind=2，按 label 前缀区分
 check("inlayHint.kind", all(h.get("kind") == 1 for h in hints if h["label"].startswith(":")), str(hints[:2]))
+# §220：`o orelse return 0` 的绑定要出左载荷类型 `: i32`（去掉 optional 的 ?）
+check("inlayHint.orelse", hint_at("let pv") == ": i32", detail)
 
 # 3n2 切片 inlay（§215）：`p[lo..hi]` 的结果是 `[]T`，不是元素 T。
 #     旧实现把切片当普通下标走 elemTyOf，`let slice = plist[0..1]` 被错标成 `: T`

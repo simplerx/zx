@@ -555,6 +555,7 @@ static Type *unify(Node *at, Type *a, Type *b);
 static Type *scalar_default(Type *t);
 static Type *sema_construct(Node *n, Type *expect);
 static bool  falls_through(Node *blk);      /* 缺返回路径分析：块末尾可达吗 */
+static bool  arm_ends_with_yield(Node *n);  /* §220：臂尾是否收割（orelse 专用） */
 static void  check_return_paths(Node *fn, Type *ret);
 static bool  stmt_blocks_next(Node *s);     /* 不可达代码：这条之后的下一条还到得了吗 */
 
@@ -8735,6 +8736,12 @@ static Type *check_expr_raw(Node *n, Type *expect) {
          * E0301）。用 stmt_ends/falls_through 的同一套"末尾可达吗"判定。 */
         bool alt_exits = (alt && alt->kind == TY_NORETURN) ||
                          (n->b && n->b->kind == NK_BLOCK && !falls_through(n->b));
+        /* §220：兜底臂末尾是收割（break / `tag: value`）时也算发散——
+         * 它跳出当前匿名臂，不会给 orelse 贡献值。falls_through 不能全局
+         * 认 yield（标签块本身要 fall through），所以在这里单独扫臂尾。
+         * 单语句臂 `orelse break;` / `orelse out: v;` 与块臂 `{ break; }`
+         * 都覆盖（后者递归进 NK_BLOCK 的 items）。 */
+        if (!alt_exits && n->b) alt_exits = arm_ends_with_yield(n->b);
         n->flag = alt_exits;         /* 后端据此跳过右支的 C 表达式位置 */
         if (!alt_exits)
             coerce_node(n->b, alt, elem, "`orelse` alternative");
@@ -11608,6 +11615,13 @@ static bool stmt_ends(Node *s) {
     case NK_RETURN:
     case NK_CONTINUE:
         return true;
+    case NK_YIELD:
+        /* §220：`break`（label==NULL）跳出最近外循环，对当前块发散。
+         * 带 label 的收割不能在这里算发散：它跳到标签块末尾，标签块本身
+         * 收完值还会继续往下（见 stmt_blocks_next 的注释），全局认它会把
+         * `out: {…}; return -1;` 的 return 误判成不可达。orelse 匿名兜底
+         * 臂里的标签收割由 check_slice 的 alt_exits 单独识别。 */
+        return s->label == NULL;
     case NK_BLOCK:
         return !falls_through(s);
     case NK_IF: {
@@ -11631,6 +11645,20 @@ static bool arm_ends(Node *a) {
     if (!a) return false;
     if (a->kind == NK_BLOCK) return !falls_through(a);
     return stmt_ends(a);
+}
+
+/* §220：兜底臂末尾是否在收割（break / `tag: value`）——供 orelse 判定
+ * 无值臂。falls_through 不能全局认 yield（标签块收完值还要往下走），所以
+ * 只在这里按「最后一条语句」递归看：
+ *  - 单语句臂 `orelse break;` / `orelse out: v;`：根节点就是 NK_YIELD；
+ *  - 块臂 `{ …; break; }`：看块的最后一条语句（嵌套块递归）。
+ * 只认尾语句——中间收割后面的语句不可达，但那是另一条诊断管。 */
+static bool arm_ends_with_yield(Node *n) {
+    if (!n) return false;
+    if (n->kind == NK_YIELD) return true;
+    if (n->kind == NK_BLOCK && n->nitems > 0)
+        return arm_ends_with_yield(n->items[n->nitems - 1]);
+    return false;
 }
 
 /* 不可达代码用的判定：比 `stmt_ends` 多认一个"收割"（`tag: expr;` 会跳出所在块），

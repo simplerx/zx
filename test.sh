@@ -2007,6 +2007,64 @@ else
     printf "  FAIL §219 alloc 误伤\n"; cat "$TPFX.c219d.log"; fail=1
 fi
 
+# §220：orelse 单语句兜底臂（不写 {}）——return / break / continue / 标签收割。
+# 分号属于外层 let；块臂形状与 §200 的 `{ return ... }` 一致，sema/后端复用发散臂。
+printf "\n== §220 orelse 单语句兜底臂 + 标签收割 + inlay\n"
+cat > "$TPFX.c220.zx" <<'ZXEOF'
+const mk = fn (x: i32) ?i32 { if (x < 0) return null; return x; };
+
+// return 臂：optional + error union 两种
+const ret = fn (o: ?i32) i32 { let v = o orelse return 99; return v + 1; };
+const ef = fn (x: i32) !i32 { if (x < 0) return error.Bad; return x; };
+const eret = fn (x: i32) i32 { let v = ef(x) orelse return -1; return v + 1; };
+
+const main = fn () i32 {
+    if (ret(5) != 6) { return 1; }
+    if (ret(null) != 99) { return 2; }
+    if (eret(5) != 6) { return 3; }
+    if (eret(-1) != -1) { return 4; }
+    // break 臂
+    var i: i32 = 0; var acc: i32 = 0;
+    while (i < 5) {
+        acc = acc + 1;
+        let v = mk(i - 2) orelse break;
+        acc = acc + v;
+        i = i + 1;
+    }
+    if (acc != 1) { return 5; }
+    // continue 臂
+    i = 0; acc = 0;
+    while (i < 5) {
+        i = i + 1;
+        let v = mk(2 - i) orelse continue;
+        acc = acc + v;
+    }
+    if (acc != 1) { return 6; }
+    // 标签收割臂：orelse out: 7 跳出标签块并带回 7
+    let g = out: {
+        let v = mk(-1) orelse out: 7;
+        out: v + 1;
+    };
+    if (g != 7) { return 7; }
+    // 值臂不误伤
+    let d = mk(3) orelse 42;
+    if (d != 3) { return 8; }
+    return 0;
+};
+ZXEOF
+if $ZXC "$TPFX.c220.zx" -o "$TPFX.c220.exe" > "$TPFX.c220.log" 2>&1 \
+   && "$TPFX.c220.exe"; then
+    printf "  ok   return/break/continue/标签收割/值臂 全覆盖\n"
+else
+    printf "  FAIL §220 单语句臂\n"; cat "$TPFX.c220.log"; fail=1
+fi
+# 双前端交叉验证：默认 Zx 前端已跑，这里再验 C 前端同构
+if $ZXC --fe=c "$TPFX.c220.zx" -o "$TPFX.c220c.exe" > "$TPFX.c220c.log" 2>&1 \
+   && "$TPFX.c220c.exe"; then
+    printf "  ok   C 前端交叉验证通过\n"
+else
+    printf "  FAIL §220 C 前端交叉\n"; cat "$TPFX.c220c.log"; fail=1
+fi
 # 用例会在仓库根留下自己的临时文件：io_fmt.zx 写 io_fmt.tmp，stdfs.zx 建
 # fs_t_dir / fs_t_dir2。跑完统一带走——测试不该往工作区里堆东西。
 rm -rf io_fmt.tmp fs_t_dir fs_t_dir2 2>/dev/null || true

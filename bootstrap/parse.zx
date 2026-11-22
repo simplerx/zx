@@ -1232,6 +1232,70 @@ pub const Parser = struct {
                k == lex.Kind.shleq || k == lex.Kind.shreq;
     };
 
+    // §220：orelse 的单语句兜底臂——`x orelse return 0;` / `break` / `continue`。
+    // 在表达式位置，结尾分号属于外层语句，所以只吃关键字和值、不吃分号，
+    // 包成单语句块交给 §200 已有的发散臂判定。非这三种返回 null。
+    const is_orelse_arm_kw = fn (k: lex.Kind) bool {
+        return k == lex.Kind.kw_return || k == lex.Kind.kw_break ||
+               k == lex.Kind.kw_continue;
+    };
+
+    // §220：orelse 后 `tag: value;` 标签收割的开头判据（不吃分号版本）。
+    // 排除 bool 字面量、`tag v :` 续链（peek1 非冒号），以及后接控制流关键字
+    // 的标签语句（`lbl: if/while/...`，那是标签块不是收割）。
+    const orelse_arm_is_yield = fn (self: *Parser) bool {
+        if (self.cur().kind != lex.Kind.ident || self.is_bool_word(self.cur())) {
+            return false;
+        }
+        if (self.peek_tok(1).kind != lex.Kind.colon) { return false; }
+        let after = self.peek_tok(2).kind;
+        return after != lex.Kind.kw_for && after != lex.Kind.kw_while &&
+               after != lex.Kind.kw_switch && after != lex.Kind.kw_if;
+    };
+
+    // §220：`tag: value;` 的不吃分号版本，与 C 版 parse_orelse_arm_yield 同构。
+    const parse_orelse_arm_yield = fn (self: *Parser) !*Node {
+        let t = self.cur();
+        let tag = try self.take_ident();
+        try self.expect(lex.Kind.colon);
+        let n = self.new_at(NK.yield, t);
+        n.label = tag;
+        if (self.at(lex.Kind.lbrace)) {
+            n.a = try self.parse_brace_expr();
+        } else {
+            n.a = try self.parse_expr();
+        }
+        return n;
+    };
+
+    const parse_orelse_arm_stmt = fn (self: *Parser) !*Node {
+        let t = self.cur();
+        if (t.kind == lex.Kind.kw_return) {
+            _ = self.advance();
+            let n = self.new_at(NK.return_, t);
+            if (!self.at(lex.Kind.semi) && !self.at(lex.Kind.rbrace)) {
+                n.a = try self.parse_expr();
+            }
+            return n;
+        }
+        if (t.kind == lex.Kind.kw_break) {
+            _ = self.advance();
+            let n = self.new_at(NK.yield, t);
+            if (!self.at(lex.Kind.semi) && !self.at(lex.Kind.rbrace)) {
+                n.a = try self.parse_expr();
+            }
+            return n;
+        }
+        if (t.kind == lex.Kind.kw_continue) {
+            _ = self.advance();
+            let n = self.new_at(NK.continue_, t);
+            if (self.accept(lex.Kind.colon)) { n.label = try self.take_ident(); }
+            return n;
+        }
+        if (orelse_arm_is_yield(self)) { return self.parse_orelse_arm_yield(); }
+        return (error)Fail.f;
+    };
+
     pub const parse_binary_rest = fn (self: *Parser, lhs0: *Node, min_prec: u32) !*Node {
         var lhs = lhs0;
         var go = true;
@@ -1249,8 +1313,19 @@ pub const Parser = struct {
                 go = false;
             } else {
                 _ = self.advance();
-                let ur = try self.parse_unary();
-                let rhs = try self.parse_binary_rest(ur, prec + 1);
+                var rhs: *Node = undefined;
+                // §220：orelse 后跟发散语句关键字时收成单语句块（不写 `{}`），
+                // 分号留给外层语句；块臂形状与 §200 的 `{ return ... }` 一致。
+                if (k == lex.Kind.kw_orelse &&
+                    (is_orelse_arm_kw(self.cur().kind) || orelse_arm_is_yield(self))) {
+                    let st = try self.parse_orelse_arm_stmt();
+                    let blk = self.new(NK.block);
+                    self.push_item(blk, st);
+                    rhs = blk;
+                } else {
+                    let ur = try self.parse_unary();
+                    rhs = try self.parse_binary_rest(ur, prec + 1);
+                }
                 // orelse 不是算术：自带节点（后端要短路，不能当普通二元运算发）
                 var nk = NK.bin;
                 if (k == lex.Kind.kw_orelse) { nk = NK.or_else; }

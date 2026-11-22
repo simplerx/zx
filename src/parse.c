@@ -177,6 +177,7 @@ static bool can_follow_cast(TokKind k) {
 static Node *parse_type(P *p);
 static Node *parse_expr(P *p);
 static Node *parse_block(P *p);
+static Node *parse_brace_expr(P *p);
 static Node *parse_primary(P *p);
 static Node *parse_decl(P *p);
 static Node *parse_fn(P *p, bool allow_name);
@@ -738,6 +739,59 @@ static bool is_assign_op(TokKind k) {
 static Node *parse_expr(P *p);
 static Node *parse_unary(P *p);
 
+/* §220：`orelse` 后跟 `tag: value;` 标签收割时的不吃分号版本。
+ * 与 parse_yield 同构，只是把 expect(SEMI) 留给外层语句——分号归属和
+ * return/break/continue 的 orelse 单语句臂一致。 */
+static Node *parse_orelse_arm_yield(P *p) {
+    Token *t = cur(p);
+    const char *tag = take_ident(p);
+    expect(p, TOK_COLON);
+    Node *n = node_new(NK_YIELD, t->line, t->col);
+    n->label = tag;
+    if (at(p, TOK_LBRACE)) n->a = parse_brace_expr(p);
+    else                   n->a = parse_expr(p);
+    return n;
+}
+
+/* orelse 后面这个 IDENT 是不是标签收割（`tag: value`）的开头。
+ * 排除两类：bool 字面量，以及 `tag v :` 续链（peek1 是 IDENT 不是冒号）。
+ * 标签后接 for/while/switch/if 是「标签控制流」而非收割，也不算。 */
+static bool orelse_arm_is_yield(P *p) {
+    if (!at(p, TOK_IDENT) || is_bool_word(cur(p))) return false;
+    if (peek(p, 1)->kind != TOK_COLON) return false;
+    TokKind after = peek(p, 2)->kind;
+    return after != TOK_KW_FOR && after != TOK_KW_WHILE &&
+           after != TOK_KW_SWITCH && after != TOK_KW_IF;
+}
+
+/* §220：`orelse` 的单语句兜底臂——`x orelse return 0;` / `... break;` /
+ * `... continue;` / `... tag: value;`。与 if 臂的糖不同，这里在表达式
+ * 位置，结尾分号属于外层语句（let / 表达式语句），所以只吃关键字/收割
+ * 和值、不吃分号；包成单语句块交给 §200 的 alt_exits 判定和后端 gen_arm。 */
+static Node *parse_orelse_arm_stmt(P *p) {
+    Token *t = cur(p);
+    if (t->kind == TOK_KW_RETURN) {
+        advance(p);
+        Node *n = node_new(NK_RETURN, t->line, t->col);
+        if (!at(p, TOK_SEMI) && !at(p, TOK_RBRACE)) n->a = parse_expr(p);
+        return n;
+    }
+    if (t->kind == TOK_KW_BREAK) {
+        advance(p);
+        Node *n = node_new(NK_YIELD, t->line, t->col);
+        if (!at(p, TOK_SEMI) && !at(p, TOK_RBRACE)) n->a = parse_expr(p);
+        return n;
+    }
+    if (t->kind == TOK_KW_CONTINUE) {
+        advance(p);
+        Node *n = node_new(NK_CONTINUE, t->line, t->col);
+        if (accept(p, TOK_COLON)) n->label = take_ident(p);
+        return n;
+    }
+    if (orelse_arm_is_yield(p)) return parse_orelse_arm_yield(p);
+    return NULL;
+}
+
 static Node *parse_binary_rest(P *p, Node *lhs, int min_prec) {
     int chain = 0;
     for (;;) {
@@ -752,7 +806,21 @@ static Node *parse_binary_rest(P *p, Node *lhs, int min_prec) {
             break;
         }
         advance(p);
-        Node *rhs = parse_binary_rest(p, parse_unary(p), prec + 1);
+        /* §220：`orelse` 后跟发散语句时收成单语句块（不写 `{}`）：
+         *   `let p = o orelse return 0;` / `... break;` / `... continue;` /
+         *   `... out: 7;`（标签收割）
+         * 分号留给外层语句；块臂形状与 §200 的 `{ return ... }` 一致。
+         * 其它 token 仍走普通表达式右臂。 */
+        Node *rhs;
+        if (k == TOK_KW_ORELSE &&
+            (at(p, TOK_KW_RETURN) || at(p, TOK_KW_BREAK) ||
+             at(p, TOK_KW_CONTINUE) || orelse_arm_is_yield(p))) {
+            Node *blk = node_new(NK_BLOCK, cur(p)->line, cur(p)->col);
+            push(blk, parse_orelse_arm_stmt(p));
+            rhs = blk;
+        } else {
+            rhs = parse_binary_rest(p, parse_unary(p), prec + 1);
+        }
         /* orelse 不是算术：它自带一个节点（语义是"空则取右边"，
          * 后端要短路，不能当普通二元运算发） */
         Node *n = node_new(k == TOK_KW_ORELSE ? NK_ORELSE : NK_BIN, lhs->line, lhs->col);

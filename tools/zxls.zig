@@ -5279,6 +5279,20 @@ fn inferExprType(text: []const u8, doc: *const Document, expr: []const u8, depth
         }
         return null;
     }
+    // §220：`a orelse b` → 左臂 ?T / !T 去掉一层包装的载荷类型。
+    // 与上面 `.?` unwrap 同口径（复用递归推断 + 去 ?/!），右臂不影响类型。
+    // 放在 `.?` 之后、向量运算之前：形如 `list.at(0) orelse {...}`。
+    if (depth < 4) {
+        if (orelseLhs(e)) |lhs| {
+            if (inferExprType(text, doc, lhs, depth + 1)) |t0| {
+                var t = trimSl(t0);
+                var g: usize = 0;
+                while (t.len > 1 and (t[0] == '?' or t[0] == '!') and g < 4) : (g += 1)
+                    t = trimSl(t[1..]);
+                if (t.len > 0) return t;
+            }
+        }
+    }
     // §162 — 向量二元运算：`a + b` / `a < b`。左操作数推出来是向量就够
     //（sema 已保证两边同型）。比较给掩码（同 lane 数的有符号整数向量），
     // 算术给原类型。放在下面各分支之前，否则 `a < b` 会被当纯路径失败掉。
@@ -5995,6 +6009,32 @@ fn vecBinOp(e: []const u8) ?struct { lhs: []const u8, cmp: bool } {
     const lhs = trimSl(e[0..p0]);
     if (lhs.len == 0) return null;
     return .{ .lhs = lhs, .cmp = bestcmp };
+}
+
+/// §220：找表达式里顶层的 ` orelse `（不在括号/字符串里），返回左臂。
+/// `a orelse b` 的类型就是左臂 ?T / !T 去掉一层包装后的载荷 T——右臂
+/// 只是兜底，不参与类型。用于 `let p = list.at(0) orelse {...}` 的行内
+/// 类型提示（否则 inferExprType 认不出整条表达式，提示整段消失）。
+fn orelseLhs(e: []const u8) ?[]const u8 {
+    var d: usize = 0;
+    var i: usize = 0;
+    while (i < e.len) : (i += 1) {
+        const ch = e[i];
+        if (ch == '(' or ch == '[' or ch == '{') { d += 1; continue; }
+        if (ch == ')' or ch == ']' or ch == '}') {
+            if (d > 0) d -= 1;
+            continue;
+        }
+        if (d != 0) continue;
+        if (ch != ' ') continue;
+        if (i + 7 >= e.len) continue;
+        if (!std.mem.eql(u8, e[i + 1 .. i + 7], "orelse")) continue;
+        if (e[i + 7] != ' ') continue;
+        const lhs = trimSl(e[0..i]);
+        if (lhs.len == 0) return null;
+        return lhs;
+    }
+    return null;
 }
 
 /// 元素类型 → 掩码向量的元素位宽（比较结果的 lane 宽度跟操作数一致）。
