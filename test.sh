@@ -1901,6 +1901,36 @@ else
     printf "  FAIL §217 编译失败\n"; fail=1
 fi
 
+# §218：[]u8 与 []const u8 是两个 Type*，但都映射成 C 名 ZxSlice_u8。
+# 非简单基址下标各请求一次 idx helper，收集口若按 Type* 去重就会把同名
+# 原型+定义各发两遍，cc 报 redefinition（B1003）。按 C 名去重后应只剩一份。
+printf "\n== §218 同名 C 类型的 slice helper 去重\n"
+cat > "$TPFX.c218.zx" <<'ZXEOF'
+const mut = fn (s: []u8) []u8 { return s; };
+const con = fn (s: []const u8) []const u8 { return s; };
+const main = fn () i32 {
+    var buf: [4]u8 = .{ 'a', 'b', 'c', 'd' };
+    let m: []u8 = buf[0..4];
+    let c: []const u8 = buf[0..4];
+    let a = mut(m)[1];
+    let b = con(c)[2];
+    if (a != 'b') { return 1; }
+    if (b != 'c') { return 2; }
+    return 0;
+};
+ZXEOF
+$ZXC "$TPFX.c218.zx" --emit-c > "$TPFX.c218.c" 2>/dev/null || true
+NIDX=$(grep -Fc 'uint8_t *zx_idx_ZxSlice_u8(ZxSlice_u8 s, long long i, const char *loc) {' "$TPFX.c218.c")
+NIDXU=$(grep -Fc 'uint8_t *zx_idxu_ZxSlice_u8(ZxSlice_u8 s, uint64_t i, const char *loc) {' "$TPFX.c218.c")
+if [ "$NIDX" = 1 ] && [ "$NIDXU" = 1 ] \
+   && $ZXC "$TPFX.c218.zx" -o "$TPFX.c218.exe" > "$TPFX.c218.log" 2>&1 \
+   && "$TPFX.c218.exe"; then
+    printf "  ok   []u8/[]const u8 同名 slice 只发一份 helper（无 B1003）\n"
+else
+    printf "  FAIL §218 slice helper 去重（def idx=%s idxu=%s）\n" "$NIDX" "$NIDXU"
+    cat "$TPFX.c218.log" 2>/dev/null || true; fail=1
+fi
+
 # 用例会在仓库根留下自己的临时文件：io_fmt.zx 写 io_fmt.tmp，stdfs.zx 建
 # fs_t_dir / fs_t_dir2。跑完统一带走——测试不该往工作区里堆东西。
 rm -rf io_fmt.tmp fs_t_dir fs_t_dir2 2>/dev/null || true

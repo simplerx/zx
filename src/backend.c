@@ -1189,13 +1189,23 @@ static bool g_need_idx;
 
 static void idx_helper_add(Type *sl) {
     ensure_type(sl);
-    for (int i = 0; i < g_idx_n; i++) if (g_idx_types[i] == sl) return;
+    /* §218：按 **C 名**去重，不按 Type* 指针。[]u8 与 []const u8 是两个
+     * 不同的 Type*，但 tn() 都得到 ZxSlice_u8（const 不进名字，C 表示也
+     * 一样）；按指针去重会漏，于是同一个 zx_idx_ZxSlice_u8 原型 + 定义
+     * 被发两遍，cc 直接报 redefinition。与 ensure_type 里 typedef 的
+     * 去重口径（§「两个 Type 映射到同一 C 名」）保持一致。 */
+    Buf sn; buf_init(&sn); tn(&sn, sl);
+    for (int i = 0; i < g_idx_n; i++) {
+        Buf o; buf_init(&o); tn(&o, g_idx_types[i]);
+        bool same = !strcmp(o.data, sn.data);
+        buf_free(&o);
+        if (same) { buf_free(&sn); return; }
+    }
     if (g_idx_n == g_idx_cap) {
         g_idx_cap = g_idx_cap ? g_idx_cap * 2 : 8;
         g_idx_types = realloc(g_idx_types, sizeof(Type *) * (size_t)g_idx_cap);
     }
     g_idx_types[g_idx_n++] = sl;
-    Buf sn; buf_init(&sn); tn(&sn, sl);
     Buf ct; buf_init(&ct); ctype(&ct, sl->elem);
     bline(&g_bproto, "%s *zx_idx_%s(%s s, long long i, const char *loc);",
           ct.data, sn.data, sn.data);
