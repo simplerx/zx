@@ -2065,6 +2065,69 @@ if $ZXC --fe=c "$TPFX.c220.zx" -o "$TPFX.c220c.exe" > "$TPFX.c220c.log" 2>&1 \
 else
     printf "  FAIL §220 C 前端交叉\n"; cat "$TPFX.c220c.log"; fail=1
 fi
+
+# §221：捕获指针 *t —— 写回原对象 + 栈借用禁逃逸（tag.close 关不掉）。
+printf "\n== §221 捕获指针 *t 写回与逃逸检查\n"
+cat > "$TPFX.c221.zx" <<'ZXEOF'
+const std = @mod("std");
+const Shape = union(enum) { circle: f64, square: i32 };
+const main = fn () i32 {
+    // if 捕获：写回 optional 载荷
+    var a: ?i32 = 1;
+    if (a) *t { t[0] = 9; };
+    if (a.? != 9) { return 1; }
+    // 别名读载荷（t[0] 是值，不是借用，不许误判成逃逸）
+    if (a) *t2 { let v = t2[0] + 1; if (v != 10) { return 2; } };
+    // while 捕获：逐轮写回
+    var b: ?i32 = 1;
+    var n: i32 = 0;
+    while (b) *w { w[0] = w[0] + 10; n = n + 1; if (n == 3) { b = null; } };
+    if (n != 3) { return 3; }
+    // switch 捕获：写回变体载荷
+    var s: Shape = Shape{ .square = 3 };
+    switch (s) { .square: *v { v[0] = 77; }; .circle: {}; };
+    if (s.square != 77) { return 4; }
+    // flat ?*T 捕获：t 是 **T，写回让 optional 改指
+    var x: i32 = 5;
+    var y: i32 = 88;
+    var p: ?*i32 = &x;
+    if (p) *f { f[0] = &y; };
+    if (p.?[0] != 88) { return 5; }
+    return 0;
+};
+ZXEOF
+if $ZXC "$TPFX.c221.zx" -o "$TPFX.c221.exe" > "$TPFX.c221.log" 2>&1 \
+   && "$TPFX.c221.exe"; then
+    printf "  ok   if/while/switch/flat 写回 + 别名读载荷\n"
+else
+    printf "  FAIL §221 写回\n"; cat "$TPFX.c221.log"; fail=1
+fi
+# 双前端交叉
+if $ZXC --fe=c "$TPFX.c221.zx" -o "$TPFX.c221c.exe" > "$TPFX.c221c.log" 2>&1 \
+   && "$TPFX.c221c.exe"; then
+    printf "  ok   C 前端交叉验证通过\n"
+else
+    printf "  FAIL §221 C 前端交叉\n"; cat "$TPFX.c221c.log"; fail=1
+fi
+# 逃逸出口全拦：每个用例期望 E0532；tag.close 模块也要拦
+cap_escape() {
+    name=$1; body=$2
+    printf '%s\n' "$body" > "$TPFX.c221e.zx"
+    if $ZXC "$TPFX.c221e.zx" > "$TPFX.c221e.log" 2>&1; then
+        printf "  FAIL §221 逃逸未拦: %s\n" "$name"; cat "$TPFX.c221e.log"; fail=1
+    elif ! grep -q "E0532" "$TPFX.c221e.log"; then
+        printf "  FAIL §221 逃逸诊断码不符: %s\n" "$name"; cat "$TPFX.c221e.log"; fail=1
+    else
+        printf "  ok   逃逸拦截: %s\n" "$name"
+    fi
+}
+cap_escape return 'const main = fn () ?*i32 { var o: ?i32 = 42; if (o) *t { return t; }; return null; };'
+cap_escape arg 'const use = fn (p: *i32) i32 { return p[0]; }; const main = fn () void { var o: ?i32 = 42; if (o) *t { let x = use(t); }; };'
+cap_escape field 'const Box = struct { p: ?*i32 = null }; const main = fn () void { var o: ?i32 = 42; var b = Box{}; if (o) *t { b.p = t; }; };'
+cap_escape global 'var g: ?*i32 = null; const main = fn () void { var o: ?i32 = 42; if (o) *t { g = t; }; };'
+cap_escape alias 'const main = fn () ?*i32 { var o: ?i32 = 42; if (o) *t { let u = t; return u; }; return null; };'
+cap_escape non-lvalue 'const mk = fn () ?i32 { return 42; }; const main = fn () void { if (mk()) *t { }; };'
+cap_escape tag.close 'tag.close; const main = fn () ?*i32 { var o: ?i32 = 42; if (o) *t { return t; }; return null; };'
 # 用例会在仓库根留下自己的临时文件：io_fmt.zx 写 io_fmt.tmp，stdfs.zx 建
 # fs_t_dir / fs_t_dir2。跑完统一带走——测试不该往工作区里堆东西。
 rm -rf io_fmt.tmp fs_t_dir fs_t_dir2 2>/dev/null || true
