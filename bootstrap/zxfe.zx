@@ -121,6 +121,7 @@ const ser_node = fn (al: std.Allocator, out: *std.array.List(u8), n: *parse.Node
     if (n.flag) { flg = flg + 1; }
     if (n.is_pub) { flg = flg + 2; }
     if (n.is_extern) { flg = flg + 4; }
+    if (n.cap_ptr) { flg = flg + 8; }   // §221：捕获指针 *t
     pushs(out, utos(al, flg));
     pushs(out, " ");
     pushs(out, utos(al, n.ival));

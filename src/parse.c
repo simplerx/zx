@@ -1589,7 +1589,14 @@ static bool ends_arm_here(TokKind k) {
  *
  * implicit_ok 只在"真值臂"上为真：`else` 臂那边 `if (c) x else y` 的 x/y 一直是
  * 普通表达式（老写法），不能读成捕获。 */
-static Node *parse_if_arm(P *p, const char **capture, bool implicit_ok) {
+static Node *parse_if_arm(P *p, const char **capture, bool *cap_ptr, bool implicit_ok) {
+    /* §221：捕获指针 `*t` —— `if (?T) *t { … }`。捕获名前面带 `*`，
+     * 由出参 cap_ptr 写回 IF/WHILE/ARM 节点。`*` 在表达式位置不是一元
+     * 运算符（只在类型位置），所以 arm 开头的 `* IDENT` 不歧义。 */
+    if (at(p, TOK_STAR) && peek(p, 1)->kind == TOK_IDENT) {
+        advance(p);                 /* 吃 '*' */
+        if (cap_ptr) *cap_ptr = true;
+    }
     if (at(p, TOK_IDENT) && peek(p, 1)->kind == TOK_COLON) {
         /* `lbl:` 后面跟什么决定它是标签还是收割，臂位置也得照着分：
          *   构造（if/while/for/switch）→ 带标签的构造
@@ -1688,7 +1695,7 @@ static Node *parse_if(P *p, const char *label) {
     n->a = parse_expr(p);
     expect(p, TOK_RPAREN);
 
-    n->b = parse_if_arm(p, &n->name, true);
+    n->b = parse_if_arm(p, &n->name, &n->cap_ptr, true);
 
     /* 单表达式语句臂（语法糖）：`if (c) call(); else other();`
      * 臂就是一条表达式语句，分号属于臂本身，不是外层语句的结束符。
@@ -1711,7 +1718,8 @@ static Node *parse_if(P *p, const char *label) {
             n->c = parse_if(p, NULL);
         } else {
             const char *cap2 = NULL;
-            n->c = parse_if_arm(p, &cap2, false);
+            bool cap2ptr = false;   /* else 臂不支持指针捕获（错误码无写回语义） */
+            n->c = parse_if_arm(p, &cap2, &cap2ptr, false);
             if (cap2) {
                 Node *id = node_new(NK_IDENT, t->line, t->col);
                 id->name = cap2;
@@ -1741,6 +1749,13 @@ static Node *parse_while(P *p, const char *label) {
     /* `while (c) v { … }` 捕获。标签不写在这里——循环的名字写在关键字前面
      * （`done: while (…) { … }`）：标签是循环的出口，写成后缀看起来像
      * "体的名字"，读者会以为它只跳到体末、下一轮继续。 */
+    /* §221：`while (?T) *t { … }` 指针捕获 */
+    if (at(p, TOK_STAR) && peek(p, 1)->kind == TOK_IDENT &&
+        (peek(p, 2)->kind == TOK_LBRACE || peek(p, 2)->kind == TOK_IDENT ||
+         peek(p, 2)->kind == TOK_SEMI)) {
+        advance(p);
+        n->cap_ptr = true;
+    }
     if (at(p, TOK_IDENT) && peek(p, 1)->kind == TOK_LBRACE) n->name = take_ident(p);
     if (at(p, TOK_IDENT) && !is_bool_word(cur(p)) && peek(p, 1)->kind == TOK_COLON) {
         Token *id = cur(p);
@@ -1858,6 +1873,11 @@ static Node *parse_switch(P *p, const char *label) {
          * 就是捕获值本身——`pattern: cap;` ≡ `pattern: cap { cap }`；
          * 想要外部常量请加括号：`pattern: (cap)`。 */
         Node *implicit = NULL;
+        /* §221：`pattern: *cap { … }` 指针捕获 */
+        if (at(p, TOK_STAR) && peek(p, 1)->kind == TOK_IDENT) {
+            advance(p);
+            arm->cap_ptr = true;
+        }
         if (at(p, TOK_IDENT) && !is_bool_word(cur(p))) {
             bool ends = peek(p, 1)->kind == TOK_SEMI || peek(p, 1)->kind == TOK_RBRACE;
             if (!arm->flag && ends) {
@@ -2338,6 +2358,8 @@ void ast_dump(const Node *n, int depth) {
     if (n->flag && (n->kind == NK_STRUCT_TYPE || n->kind == NK_PTR_TYPE ||
                     n->kind == NK_SLICE_TYPE || n->kind == NK_ARM))
         fputs(" !", stdout);
+    if (n->cap_ptr && (n->kind == NK_IF || n->kind == NK_WHILE || n->kind == NK_ARM))
+        fputs(" *cap", stdout);   /* §221：指捕获，进 AST 对拍 */
 
     bool items_first = n->kind == NK_ROOT || n->kind == NK_BLOCK ||
                        n->kind == NK_TUPLE || n->kind == NK_FOR ||

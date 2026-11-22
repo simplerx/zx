@@ -10,6 +10,7 @@
  *   - kind/op 编号与 ast.h NodeKind / zxc.h TokKind 同序（两边顺序注释钉死）；
  *   - Zx 的 op2 承载 decl 种类（0=const 1=let 2=var）与 union(enum) 糖标记，
  *     C 侧分别放在 op（DECL）与 op（UNION_TYPE，=1）；DECL 的 flag = (op2==1)。
+ *   - flg 位 0/1/2/3 = flag / is_pub / is_extern / cap_ptr（§221 捕获指针）。
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -150,6 +151,7 @@ static Node *lnode(Loader *L) {
     n->flag      = (kind == (unsigned long long)NK_DECL) ? (op2 == 1) : (flg & 1);
     n->is_pub    = (flg & 2) != 0;
     n->is_extern = (flg & 4) != 0;
+    n->cap_ptr   = (flg & 8) != 0;   /* §221：捕获指针 *t */
 
     int sl = 0;
     char *s;

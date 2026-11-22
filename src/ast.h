@@ -92,6 +92,11 @@ struct Node {
     Node      **items;
     int         nitems;
     bool        flag;
+    /* §221：捕获指针——`if (?T) *t {}` / `while (?T) *t {}` / switch 捕获臂
+     * 的 `*` 前缀。挂在 NK_IF / NK_WHILE / NK_ARM 上，与 n->name（捕获名）
+     * 配套：为真时捕获名绑定到 *载荷类型而非载荷值，后端取原对象地址写回。
+     * 序列化走 flg bit3，见 astload.c / bootstrap/zxfe.zx。 */
+    bool        cap_ptr;
     /* inline for：sema 按迭代次数克隆循环体，后端逐份发射。
      * 只挂在 NK_FOR 上（flag = 是不是 inline）。 */
     Node      **unroll;

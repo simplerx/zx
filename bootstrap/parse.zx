@@ -151,6 +151,7 @@ pub const Node = struct {
     pub flag: bool,
     pub is_pub: bool,
     pub is_extern: bool,
+    pub cap_ptr: bool,       // §221：捕获指针 *t（IF/WHILE/arm），序列化 flg bit3
     pub op2: u8,             // decl: 0=const 1=let 2=var；union(enum): 1
     pub a: ?*Node,
     pub b: ?*Node,
@@ -334,6 +335,10 @@ pub const dump = fn (n: *Node, out: *std.array.List(u8), depth: u32) void {
         ok = out.push(' ');
         ok = out.push('!');
     }
+    if (n.cap_ptr && (n.kind == NK.if_ || n.kind == NK.while_ || n.kind == NK.arm)) {
+        ok = out.push(' ');
+        puts(out, "*cap");   // §221：指捕获，与 C 侧 ast_dump 同格式
+    }
 
     var items_first = false;
     if (n.kind == NK.root) { items_first = true; }
@@ -444,6 +449,7 @@ pub const Parser = struct {
     pub al: std.Allocator,
     pub spec_depth: u32,
     pub cap: ?[]const u8,     // parse_if_arm 的捕获名出参
+    pub cap_ptr: bool,        // §221：捕获指针 *t 出参（与 cap 配套）
     pub errs: std.array.List(Err),   // 语法诊断（试探区里不记录）
     pub msgb: std.array.List(u8),    // 消息拼装草稿（record 前复制走）
 
@@ -457,6 +463,7 @@ pub const Parser = struct {
             .al = al,
             .spec_depth = 0,
             .cap = null,
+            .cap_ptr = false,
             .errs = std.array.List(Err).init(al),
             .msgb = std.array.List(u8).init(al),
         };
@@ -593,6 +600,7 @@ pub const Parser = struct {
             n.flag = false;
             n.is_pub = false;
             n.is_extern = false;
+            n.cap_ptr = false;
             n.op2 = 0;
             n.a = null;
             n.b = null;
@@ -2084,6 +2092,12 @@ pub const Parser = struct {
     // 一个 if 臂。捕获名放 self.cap 出参。
     // implicit_ok 只在真值臂上为真：else 臂的裸名字一直是普通表达式。
     pub const parse_if_arm = fn (self: *Parser, implicit_ok: bool) !*Node {
+        // §221：捕获指针 `*t` —— `if (?T) *t { … }`。`*` 在表达式位置不是
+        // 一元运算符，arm 开头的 `* IDENT` 不歧义。
+        if (self.at(lex.Kind.star) && self.peek_tok(1).kind == lex.Kind.ident) {
+            _ = self.advance();
+            self.cap_ptr = true;
+        }
         if (self.at(lex.Kind.ident) && self.peek_tok(1).kind == lex.Kind.colon) {
             // `lbl:` 后面跟什么决定它是标签还是收割，臂位置也得照着分：
             //   构造（if/while/for/switch）→ 带标签的构造
@@ -2168,6 +2182,7 @@ pub const Parser = struct {
         // cap 是共享出参：嵌套 if（在臂块内）会重写它，
         // 先存下外层未读的值，臂读回后恢复，模拟 C 的栈上局部出参。
         let saved_cap = self.cap;
+        let saved_cap_ptr = self.cap_ptr;
         let t = self.advance();
         let n = self.new_at(NK.if_, t);
         n.label = label;
@@ -2176,9 +2191,12 @@ pub const Parser = struct {
         try self.expect(lex.Kind.rparen);
 
         self.cap = null;
+        self.cap_ptr = false;
         n.b = try self.parse_if_arm(true);
         if (self.cap) c { n.name = c; }
+        n.cap_ptr = self.cap_ptr;
         self.cap = saved_cap;
+        self.cap_ptr = saved_cap_ptr;
 
         // 单表达式语句臂（语法糖）：`; else` 连着时把臂包进块
         var stmt_arm = false;
@@ -2202,6 +2220,7 @@ pub const Parser = struct {
                 n.c = try self.parse_if(null);
             } else {
                 self.cap = null;
+                self.cap_ptr = false;
                 n.c = try self.parse_if_arm(false);
                 if (self.cap) c2 {
                     // C 版：else 捕获 id 的位置 = if 关键字
@@ -2234,6 +2253,12 @@ pub const Parser = struct {
         try self.expect(lex.Kind.lparen);
         n.a = try self.parse_expr();
         try self.expect(lex.Kind.rparen);
+        // §221：`while (?T) *t { … }` 指针捕获
+        if (self.at(lex.Kind.star) && self.peek_tok(1).kind == lex.Kind.ident &&
+            self.peek_tok(2).kind == lex.Kind.lbrace) {
+            _ = self.advance();
+            n.cap_ptr = true;
+        }
         // 标签写在关键字前面，这里不再收（旧写法是报错路径）。
         if (self.at(lex.Kind.ident) && self.peek_tok(1).kind == lex.Kind.lbrace) {
             n.name = try self.take_ident();
@@ -2382,6 +2407,11 @@ pub const Parser = struct {
             // 冒号后最多两个名字：cap / lbl / cap lbl
             // M50 的糖：名字后面什么都没有（紧跟 `;` / `}`）→ 臂值就是捕获值
             var implicit: ?*Node = null;
+            // §221：`pattern: *cap { … }` 指针捕获
+            if (self.at(lex.Kind.star) && self.peek_tok(1).kind == lex.Kind.ident) {
+                _ = self.advance();
+                arm.cap_ptr = true;
+            }
             if (self.at(lex.Kind.ident) && !self.is_bool_word(self.cur())) {
                 let ends = self.peek_tok(1).kind == lex.Kind.semi ||
                            self.peek_tok(1).kind == lex.Kind.rbrace;
