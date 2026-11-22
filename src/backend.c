@@ -1203,6 +1203,9 @@ static void idx_helper_add(Type *sl) {
           ct.data, sn.data, sn.data);
     buf_free(&sn); buf_free(&ct);
     g_need_idx = true;
+    /* §216: 助手实现调用 zx_bound/zx_bound_s，必须一并带上 bounds runtime，
+     * 否则只有链式下标、没有简单基址下标的程序会 B1003（zx_bound 未声明）。 */
+    g_need_bounds = true;
 }
 
 /* NK_INDEX 的统一发射口：ex() 与 lvalue() 都必须走这里，否则两条路径的
@@ -2443,6 +2446,7 @@ static void emit_diag_runtime(void) {
     buf_puts(g_out,
         "#include <stdarg.h>\n"
         "#include <signal.h>\n"
+        "#include <string.h>\n"
         "#if defined(_WIN32)\n"
         "#include <io.h>\n"
         "#else\n"
@@ -2488,7 +2492,9 @@ static void emit_diag_runtime(void) {
     /* 崩溃处理器：POSIX sigaction 全信号；Windows SetUnhandledExceptionFilter。
      * 全部只用 zx_diag_raw（async-signal-safe 的 write）输出，不碰 malloc/stdio。 */
     buf_puts(g_out,
-        "static void zx_crash_report(const char *tag) {\n"
+        "/* §217: C/OS 层的故障信息（信号/异常码 + 故障地址），只在这里拼一次。\n"
+        " * has_fault 独立于地址值：访问地址 0 也是有效信息，不能当\"无地址\"丢掉。 */\n"
+        "static void zx_crash_report(const char *tag, void *fault_addr, int has_fault) {\n"
         "    zx_diag_raw(\"zx: fatal \", 10);\n"
         "    zx_diag_raw(tag, strlen(tag));\n"
         "    zx_diag_raw(\" at \", 4);\n"
@@ -2496,27 +2502,44 @@ static void emit_diag_runtime(void) {
         "    zx_diag_raw(\":\", 1);\n"
         "    char ln[24]; int m = snprintf(ln, sizeof ln, \"%d:%d\", zx_loc_line, zx_loc_col);\n"
         "    if (m > 0) zx_diag_raw(ln, (size_t)m < sizeof ln ? (size_t)m : sizeof ln - 1);\n"
+        "    if (has_fault) {                  /* C/OS 报的非法访问地址，原样转发 */\n"
+        "        zx_diag_raw(\" [fault addr \", 13);\n"
+        "        char ab[32]; int an = snprintf(ab, sizeof ab, \"%p]\", fault_addr);\n"
+        "        if (an > 0) zx_diag_raw(ab, (size_t)an < sizeof ab ? (size_t)an : sizeof ab - 1);\n"
+        "    }\n"
         "    zx_diag_raw(\"\\n\", 1);\n"
         "}\n\n");
     /* 信号处理器两平台都装：abort()/除零走 CRT 的 signal，不走 SEH。
      * Windows 再额外挂 SEH filter 兜住真正的访问违例（SIGSEGV 在 mingw
      * CRT 下未必映射到 SEH）。两路都只调 zx_diag_raw，可重入、无缓冲。 */
     buf_puts(g_out,
-        "static void zx_crash_signal(int sig) {\n"
-        "    const char *nm = \"signal\";\n"
+        "static const char *zx_signal_name(int sig) {\n"
         "    switch (sig) {\n"
-        "    case SIGSEGV: nm = \"SIGSEGV (invalid memory access)\"; break;\n"
+        "    case SIGSEGV: return \"SIGSEGV (invalid memory access)\";\n"
         "#ifndef _WIN32\n"
-        "    case SIGBUS:  nm = \"SIGBUS (bad memory alignment)\"; break;\n"
+        "    case SIGBUS:  return \"SIGBUS (bad memory alignment)\";\n"
         "#endif\n"
-        "    case SIGFPE:  nm = \"SIGFPE (floating point / divide by zero)\"; break;\n"
-        "    case SIGILL:  nm = \"SIGILL (illegal instruction)\"; break;\n"
-        "    case SIGABRT: nm = \"SIGABRT (abort)\"; break;\n"
-        "    default: break;\n"
+        "    case SIGFPE:  return \"SIGFPE (floating point / divide by zero)\";\n"
+        "    case SIGILL:  return \"SIGILL (illegal instruction)\";\n"
+        "    case SIGABRT: return \"SIGABRT (abort)\";\n"
+        "    default: return \"signal\";\n"
         "    }\n"
-        "    if (!zx_reported) zx_crash_report(nm);\n"
+        "}\n\n"
+        "static void zx_crash_signal(int sig) {\n"
+        "    if (!zx_reported) zx_crash_report(zx_signal_name(sig), NULL, 0);\n"
         "    signal(sig, SIG_DFL); raise(sig);   /* keep the real exit status */\n"
         "}\n\n"
+        "#ifndef _WIN32\n"
+        "/* §217: SA_SIGINFO handler 拿到 C/OS 报的故障地址（si_addr），原样转发。\n"
+        " * 第二参数用 void* 而非 siginfo_t*：原型提取器(buf_protos_from)会把\n"
+        " * 签名提到共享头且不带平台条件，用平台类型会让 Windows 编译炸。 */\n"
+        "static void zx_crash_fault(int sig, void *sip, void *ctx) {\n"
+        "    (void)ctx;\n"
+        "    siginfo_t *si = (siginfo_t *)sip;\n"
+        "    if (!zx_reported) zx_crash_report(zx_signal_name(sig), si ? si->si_addr : NULL, si != NULL);\n"
+        "    signal(sig, SIG_DFL); raise(sig);\n"
+        "}\n"
+        "#endif\n\n"
         "#if defined(_WIN32)\n"
         "/* MinGW / zig cc windows-gnu: EXCEPTION_POINTERS via windows.h is heavy;\n"
         " * declare the two records we read (ExceptionCode / ExceptionAddress). */\n"
@@ -2531,21 +2554,42 @@ static void emit_diag_runtime(void) {
         "    _ZX_EP *ep = (_ZX_EP *)arg;\n"
         "    char b[64];\n"
         "    unsigned long code = (ep && ep->ExceptionRecord) ? ep->ExceptionRecord->ExceptionCode : 0;\n"
-        "    int m = snprintf(b, sizeof b, \"seh exception 0x%lx\", (unsigned long)code);\n"
-        "    if (!zx_reported) zx_crash_report(m > 0 ? b : \"seh exception\");\n"
+        "    /* 访问违例(0xC0000005)的 ExceptionInformation[1] 就是故障地址 */\n"
+        "    void *addr = NULL; int has_addr = 0;\n"
+        "    if (code == 0xC0000005UL) {\n"
+        "        if (ep && ep->ExceptionRecord && ep->ExceptionRecord->NumberParameters >= 2) {\n"
+        "            addr = (void *)(size_t)ep->ExceptionRecord->ExceptionInformation[1];\n"
+        "            has_addr = 1;\n"
+        "        }\n"
+        "        snprintf(b, sizeof b, \"SIGSEGV (invalid memory access)\");\n"
+        "    } else {\n"
+        "        snprintf(b, sizeof b, \"seh exception 0x%lx\", (unsigned long)code);\n"
+        "    }\n"
+        "    if (!zx_reported) zx_crash_report(b, addr, has_addr);\n"
         "    return 1;  /* EXCEPTION_EXECUTE_HANDLER: terminate */\n"
         "}\n"
         "#endif\n\n"
         "void zx_crash_init(void) {\n"
-        "    signal(SIGSEGV, zx_crash_signal);\n"
-        "#ifndef _WIN32\n"
-        "    signal(SIGBUS,  zx_crash_signal);\n"
-        "#endif\n"
+        "#if defined(_WIN32)\n"
+        "    /* §217: SIGSEGV 交给 SEH filter——signal() 的 handler 拿不到故障地址，\n"
+        "     * mingw CRT 又会把访问违例先转成 SIGSEGV；不装它，SEH 才能报出地址。 */\n"
         "    signal(SIGFPE,  zx_crash_signal);\n"
         "    signal(SIGILL,  zx_crash_signal);\n"
         "    signal(SIGABRT, zx_crash_signal);\n"
-        "#if defined(_WIN32)\n"
         "    (void)SetUnhandledExceptionFilter((ZX_SEH_FN)zx_seh_filter);\n"
+        "#else\n"
+        "    /* §217: 内存类信号用 SA_SIGINFO，拿到 si_addr 原样转发 */\n"
+        "    struct sigaction sa;\n"
+        "    memset(&sa, 0, sizeof sa);\n"
+        "    sa.sa_sigaction = (void (*)(int, siginfo_t *, void *))zx_crash_fault;\n"
+        "    sa.sa_flags = SA_SIGINFO;\n"
+        "    sigemptyset(&sa.sa_mask);\n"
+        "    sigaction(SIGSEGV, &sa, NULL);\n"
+        "    sigaction(SIGBUS,  &sa, NULL);\n"
+        "    /* 其余信号没有故障地址意义，沿用简单 handler */\n"
+        "    signal(SIGFPE,  zx_crash_signal);\n"
+        "    signal(SIGILL,  zx_crash_signal);\n"
+        "    signal(SIGABRT, zx_crash_signal);\n"
         "#endif\n"
         "}\n\n");
 }
@@ -8608,6 +8652,15 @@ int backend_emit_split(Node *root, Buf *header, Buf *rt, BUnit *units, int maxun
 
     /* 头文件 */
     buf_puts(header, "/* generated by zxc — do not edit */\n");
+    /* §217: POSIX feature macro 必须在任何系统头之前定义——-std=c11 下
+     * sigaction/siginfo_t/setenv 等 POSIX 符号默认不声明。放这里让下面
+     * 以及各 .c 里的系统头都能看到。Windows 不需要（mingw 隐式提供）。 */
+    buf_puts(header,
+        "#ifndef _WIN32\n"
+        "#ifndef _POSIX_C_SOURCE\n"
+        "#define _POSIX_C_SOURCE 200809L\n"
+        "#endif\n"
+        "#endif\n\n");
     buf_puts(header, "#ifndef ZX_GEN_H\n#define ZX_GEN_H\n\n");
     buf_puts(header, "#include <stdint.h>\n#include <stdbool.h>\n");
     buf_puts(header, "#include <stddef.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <math.h>\n");

@@ -1878,6 +1878,29 @@ else
     printf "  FAIL §216 链式切片写入\n"; cat "$TPFX.c216b.run" 2>/dev/null || true; fail=1
 fi
 
+# §217：读真正非法地址时崩溃 handler 报 zx 坐标 + 转发 C/OS 的故障地址。
+printf "\n== §217 崩溃转发 C 故障地址\n"
+cat > "$TPFX.c217.zx" <<'ZXEOF'
+const std = @mod("std");
+const main = fn () i32 {
+    let p: *i32 = (*i32)(0);
+    std.println("{}", p[0]);
+    return 0;
+};
+ZXEOF
+if $ZXC "$TPFX.c217.zx" -o "$TPFX.c217.exe" > /dev/null 2>&1; then
+    "$TPFX.c217.exe" > "$TPFX.c217.run" 2>&1 || true
+    if grep -q 'zx: fatal SIGSEGV' "$TPFX.c217.run" \
+       && grep -q 'c217.zx:4:16' "$TPFX.c217.run" \
+       && grep -qE '\[fault addr [0-9a-fA-F]+\]' "$TPFX.c217.run"; then
+        printf "  ok   非法地址崩溃报 zx 坐标 + C 故障地址\n"
+    else
+        printf "  FAIL §217 故障地址转发\n"; cat "$TPFX.c217.run"; fail=1
+    fi
+else
+    printf "  FAIL §217 编译失败\n"; fail=1
+fi
+
 # 用例会在仓库根留下自己的临时文件：io_fmt.zx 写 io_fmt.tmp，stdfs.zx 建
 # fs_t_dir / fs_t_dir2。跑完统一带走——测试不该往工作区里堆东西。
 rm -rf io_fmt.tmp fs_t_dir fs_t_dir2 2>/dev/null || true
