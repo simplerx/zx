@@ -1179,6 +1179,69 @@ static void bounds_loc(Buf *b, Node *n) {
     buf_printf(b, ":%d\"", n->line);
 }
 
+/* §216：非简单基址的切片下标——把整个切片按值传进类型特化助手，基址只求值
+ * 一次，助手内部用 .len 做 zx_bound 检查后返回元素指针。这样 `p[0..2][i]`
+ * / 调用结果[ i ] / unwrap 结果[i] 这类链式基址也能拿到越界检查；旧实现
+ * 因为要二次发基址取 .len，遇到非简单基址就直接放弃检查，读越界零诊断。 */
+static Type **g_idx_types;
+static int g_idx_n, g_idx_cap;
+static bool g_need_idx;
+
+static void idx_helper_add(Type *sl) {
+    ensure_type(sl);
+    for (int i = 0; i < g_idx_n; i++) if (g_idx_types[i] == sl) return;
+    if (g_idx_n == g_idx_cap) {
+        g_idx_cap = g_idx_cap ? g_idx_cap * 2 : 8;
+        g_idx_types = realloc(g_idx_types, sizeof(Type *) * (size_t)g_idx_cap);
+    }
+    g_idx_types[g_idx_n++] = sl;
+    Buf sn; buf_init(&sn); tn(&sn, sl);
+    Buf ct; buf_init(&ct); ctype(&ct, sl->elem);
+    bline(&g_bproto, "%s *zx_idx_%s(%s s, long long i, const char *loc);",
+          ct.data, sn.data, sn.data);
+    bline(&g_bproto, "%s *zx_idxu_%s(%s s, uint64_t i, const char *loc);",
+          ct.data, sn.data, sn.data);
+    buf_free(&sn); buf_free(&ct);
+    g_need_idx = true;
+}
+
+/* NK_INDEX 的统一发射口：ex() 与 lvalue() 都必须走这里，否则两条路径的
+ * 越界检查会再次分叉。 */
+static void emit_index_checked(Buf *b, Node *n, Type *bt);
+
+static void emit_idx_node(Buf *b, Node *n) {
+    Type *bt = n->a ? n->a->ty : NULL;
+    if (bt && bt->kind == TY_SLICE && !simple_index_base(n->a)) {
+        idx_helper_add(bt);
+        Buf sn; buf_init(&sn); tn(&sn, bt);
+        bool sgn = n->b && n->b->ty && n->b->ty->kind == TY_INT && n->b->ty->is_signed;
+        buf_printf(b, "(*zx_%s%s(", sgn ? "idx_" : "idxu_", sn.data);
+        ex(b, n->a);
+        buf_puts(b, ", ");
+        ex(b, n->b);
+        buf_puts(b, ", ");
+        bounds_loc(b, n);
+        buf_puts(b, "))");
+        return;
+    }
+    /* §201：数组值 [N]T → C struct { T v[N]; }，下标取 v 字段。 */
+    if (bt && bt->kind == TY_ARRAY) {
+        buf_puts(b, "(");
+        ex(b, n->a);
+        buf_puts(b, ").v");
+    } else {
+        /* 括号包住基址：`.ptr` / `&x.v[0]` / `p+1` 这类表达式直接接
+         * `[i]` 会被 C 的优先级拆开（`&(t).v[0][0]` 错，应 `(&(t).v[0])[0]`）。 */
+        buf_puts(b, "(");
+        ex(b, n->a);
+        buf_puts(b, ")");
+        if (bt && bt->kind == TY_SLICE) buf_puts(b, ".ptr");
+    }
+    buf_putc(b, '[');
+    emit_index_checked(b, n, bt);
+    buf_putc(b, ']');
+}
+
 /* `base[i]` 里的 i：能拿到长度就包一层 zx_bound */
 static void emit_index_checked(Buf *b, Node *n, Type *bt) {
     bool is_slice = bt && bt->kind == TY_SLICE;
@@ -1188,7 +1251,13 @@ static void emit_index_checked(Buf *b, Node *n, Type *bt) {
                     (bt && bt->kind == TY_PTR && bt->has_len &&
                      !ty_is_array_ptr(bt)) ||          /* 字符串字面量 */
                     (bt && bt->kind == TY_VEC);   /* §162：分量数在类型里 */
-    if ((!is_slice && !is_arr) || !simple_index_base(n->a)) {
+    if (!is_slice && !is_arr) {
+        ex(b, n->b);
+        return;
+    }
+    /* 数组/字符串的长度在类型里，检查不重发基址——链式基址也照样能查。
+     * 切片只可能是简单基址走到这里，其余已由 emit_idx_node 的助手接走。 */
+    if (is_slice && !simple_index_base(n->a)) {
         ex(b, n->b);
         return;
     }
@@ -1401,26 +1470,9 @@ static void lvalue(Buf *b, Node *n) {
         dotname(b, n->name);
         return;
     }
-    case NK_INDEX: {
-        Type *bt = n->a->ty;
-        /* §201：数组值 [N]T 在 C 里是 struct { T v[N]; }，下标取 v 字段。 */
-        if (bt && bt->kind == TY_ARRAY) {
-            buf_puts(b, "(");
-            ex(b, n->a);
-            buf_puts(b, ").v");
-        } else {
-            /* 括号包住基址：`.ptr` / `&x.v[0]` / `p+1` 这类表达式直接接
-             * `[i]` 会被 C 的优先级拆开（`&(t).v[0][0]` 错，应 `(&(t).v[0])[0]`）。 */
-            buf_puts(b, "(");
-            ex(b, n->a);
-            buf_puts(b, ")");
-            if (bt && bt->kind == TY_SLICE) buf_puts(b, ".ptr");
-        }
-        buf_putc(b, '[');
-        emit_index_checked(b, n, bt);
-        buf_putc(b, ']');
+    case NK_INDEX:
+        emit_idx_node(b, n);
         return;
-    }
     default:
         /* 不是左值：退化成表达式，交给 C 编译器报错 */
         ex(b, n);
@@ -5253,6 +5305,25 @@ static void where_lit(Buf *b, int line) {
 }
 
 
+/* §216：把非简单基址切片下标的助手实现落到 zxrt 单元。原型已在
+ * idx_helper_add() 里登记到共享头，各 TU 直接调用。 */
+static void emit_idx_runtime(void) {
+    for (int i = 0; i < g_idx_n; i++) {
+        Type *sl = g_idx_types[i];
+        Buf sn; buf_init(&sn); tn(&sn, sl);
+        Buf ct; buf_init(&ct); ctype(&ct, sl->elem);
+        buf_printf(g_out,
+            "%s *zx_idx_%s(%s s, long long i, const char *loc) {\n"
+            "    return s.ptr + zx_bound_s(i, s.len, loc);\n"
+            "}\n\n"
+            "%s *zx_idxu_%s(%s s, uint64_t i, const char *loc) {\n"
+            "    return s.ptr + zx_bound(i, s.len, loc);\n"
+            "}\n\n",
+            ct.data, sn.data, sn.data, ct.data, sn.data, sn.data);
+        buf_free(&sn); buf_free(&ct);
+    }
+}
+
 static void emit_bounds_runtime(void) {
     bline(&g_bproto, "static size_t zx_bound(size_t i, size_t n, const char *loc);");
     bline(&g_bproto, "static size_t zx_bound_s(long long i, size_t n, const char *loc);");
@@ -5775,26 +5846,9 @@ static void ex(Buf *b, Node *n) {
         return;
     }
 
-    case NK_INDEX: {
-        Type *bt = n->a->ty;
-        /* §201：数组值 [N]T → C struct { T v[N]; }，下标取 v 字段。 */
-        if (bt && bt->kind == TY_ARRAY) {
-            buf_puts(b, "(");
-            ex(b, n->a);
-            buf_puts(b, ").v");
-        } else {
-            /* 括号包住基址：`.ptr` / `&x.v[0]` / `p+1` 这类表达式直接接
-             * `[i]` 会被 C 的优先级拆开（`&(t).v[0][0]` 错，应 `(&(t).v[0])[0]`）。 */
-            buf_puts(b, "(");
-            ex(b, n->a);
-            buf_puts(b, ")");
-            if (bt && bt->kind == TY_SLICE) buf_puts(b, ".ptr");
-        }
-        buf_putc(b, '[');
-        emit_index_checked(b, n, bt);
-        buf_putc(b, ']');
+    case NK_INDEX:
+        emit_idx_node(b, n);
         return;
-    }
 
     case NK_SLICE: {
         Type *bt = n->a->ty;
@@ -8542,6 +8596,7 @@ int backend_emit_split(Node *root, Buf *header, Buf *rt, BUnit *units, int maxun
     if (g_nhslice) emit_heapslice_runtime();   /* 依赖 zx_heapalloc 的原型 */
     if (g_need_div) emit_div_runtime();
     if (g_need_bounds) emit_bounds_runtime();
+    if (g_need_idx) emit_idx_runtime();   /* §216：非简单基址切片下标 */
     if (g_need_f2i) emit_f2i_runtime();
     if (g_nuw) emit_unwrap_runtime();
     /* 128 位转十进制：编译期 printf 路径（g_need_i128）与 zx_fmt 的

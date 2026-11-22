@@ -1836,6 +1836,48 @@ rm -f .zxc-cache/zz_filesel_* .zxc-cache/test_zz_filesel_*
 [ "$HAD_ZXJSON" = 1 ] && cp "$TPFX.zxjson.bak" zx.json 2>/dev/null || rm -f zx.json
 [ "$HAD_TESTDIR" = 1 ] || rmdir src/test 2>/dev/null || true
 
+# §216：非简单基址（链式切片）下标必须带运行时越界检查；写入/取地址不回归。
+printf "\n== §216 链式切片下标越界检查\n"
+cat > "$TPFX.c216.zx" <<'ZXEOF'
+const std = @mod("std");
+const main = fn () i32 {
+    var b: [2]i32 = .{ 1, 2 };
+    let p = &b[0];
+    var i: usize = 5;
+    if (std.process.args().len > 99) { i = 0; }
+    std.println("{}", p[0..2][i]);
+    return 0;
+};
+ZXEOF
+$ZXC "$TPFX.c216.zx" -o "$TPFX.c216.exe" > /dev/null 2>&1 || true
+"$TPFX.c216.exe" > "$TPFX.c216.run" 2>&1 || true
+if grep -q 'index 5 is out of bounds (len 2)' "$TPFX.c216.run" \
+   && grep -q 'c216.zx:7' "$TPFX.c216.run"; then
+    printf "  ok   链式切片读越界报运行时诊断（zx 位置）\n"
+else
+    printf "  FAIL §216 链式切片越界\n"; cat "$TPFX.c216.run"; fail=1
+fi
+cat > "$TPFX.c216b.zx" <<'ZXEOF'
+const main = fn () i32 {
+    var b: [2]i32 = .{ 1, 2 };
+    let p = &b[0];
+    p[0..2][1] = 42;
+    let s = p[0..2];
+    if (b[1] != 42) { return 1; }
+    if (s[1] != 42) { return 2; }
+    let q = &p[0..2][0];
+    q.0 = 9;
+    if (b[0] != 9) { return 3; }
+    return 0;
+};
+ZXEOF
+if $ZXC "$TPFX.c216b.zx" -o "$TPFX.c216b.exe" > /dev/null 2>&1 \
+   && "$TPFX.c216b.exe" > "$TPFX.c216b.run" 2>&1; then
+    printf "  ok   链式切片写入/取地址与简单基址不回归\n"
+else
+    printf "  FAIL §216 链式切片写入\n"; cat "$TPFX.c216b.run" 2>/dev/null || true; fail=1
+fi
+
 # 用例会在仓库根留下自己的临时文件：io_fmt.zx 写 io_fmt.tmp，stdfs.zx 建
 # fs_t_dir / fs_t_dir2。跑完统一带走——测试不该往工作区里堆东西。
 rm -rf io_fmt.tmp fs_t_dir fs_t_dir2 2>/dev/null || true
