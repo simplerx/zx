@@ -1,0 +1,89 @@
+// §235：标准库第二轮补齐的能力守门。
+// random / test 新模块；sort 边界查找与极值；str 反向查找、忽略大小写、
+// 浮点解析；math 位运算；List 查找；HashMap 墓碑删除。
+const std = @mod("std");
+const t = std.test;
+const lessI = fn (a: i32, b: i32) bool { return a < b; };
+const eqI = fn (a: i32, b: i32) bool { return a == b; };
+
+const main = fn () i32 {
+    var failed: usize = 0;
+
+    // random：状态显式、可复现；shuffle 仍是排列
+    var rng = std.random.Rng.seed(7);
+    let a = rng.next();
+    let b = rng.next();
+    if (!t.ok(a != b, "rng advances")) { failed = failed + 1; }
+    if (!t.ok(rng.between(3, 3) == 3, "empty range")) { failed = failed + 1; }
+    if (!t.ok(rng.unit() >= 0.0, "unit nonneg")) { failed = failed + 1; }
+    var xs: [5]i32 = .{ 1, 2, 3, 4, 5 };
+    std.random.shuffle(i32, &rng, xs[0..]);
+    std.sort.sort(i32, xs[0..], lessI);
+    if (!t.eqI((i64)xs[0], 1, "shuffle preserves")) { failed = failed + 1; }
+
+    // sort：lower/upper_bound 与极值
+    var ys: [6]i32 = .{ 1, 2, 2, 2, 5, 9 };
+    if (!t.eqU(std.sort.lowerBound(i32, ys[0..], 2, lessI), 1, "lowerBound")) { failed = failed + 1; }
+    if (!t.eqU(std.sort.upperBound(i32, ys[0..], 2, lessI), 4, "upperBound")) { failed = failed + 1; }
+    if (!t.eqI((i64)std.sort.min(i32, 3, 7, lessI), 3, "min")) { failed = failed + 1; }
+    if (!t.eqI((i64)std.sort.max(i32, 3, 7, lessI), 7, "max")) { failed = failed + 1; }
+
+    // str：反向查找、ASCII 忽略大小写、浮点解析与拒绝
+    if (!t.eqU(std.str.lastIndexOf("a.b.c", ".").?, 3, "lastIndexOf")) { failed = failed + 1; }
+    if (!t.ok(std.str.eqIgnoreCase("HeLLo", "hello"), "eqIgnoreCase")) { failed = failed + 1; }
+    if (!t.near(std.str.parseFloat("-12.5e2").?, -1250.0, 0.001, "parseFloat")) { failed = failed + 1; }
+    if (!t.ok(std.str.parseFloat("1x") == null, "parseFloat reject")) { failed = failed + 1; }
+
+    // math：位运算
+    if (!t.eqU((usize)std.math.popcount32(0xF0), 4, "popcount32")) { failed = failed + 1; }
+    if (!t.eqU((usize)std.math.ctz32(0x10), 4, "ctz32")) { failed = failed + 1; }
+    if (!t.eqU((usize)std.math.clz32(0x1), 31, "clz32")) { failed = failed + 1; }
+    if (!t.eqU(std.math.alignForward(17, 8), 24, "alignForward")) { failed = failed + 1; }
+
+    // List：按比较器查找
+    var list = std.array.List(i32).init(std.heap.page);
+    _ = list.push(3);
+    _ = list.push(7);
+    if (!t.ok(list.contains(7, eqI), "list contains")) { failed = failed + 1; }
+    if (!t.eqU(list.indexOf(7, eqI).?, 1, "list indexOf")) { failed = failed + 1; }
+    list.deinit();
+
+    // HashMap：删除留墓碑，探测链上后续键仍可达；重插复用墓碑；扩容后仍正确
+    var m = std.map.HashMap(i32).init(std.heap.page);
+    _ = m.put("a", 1);
+    _ = m.put("b", 2);
+    _ = m.put("c", 3);
+    if (!t.ok(m.remove("b"), "remove b")) { failed = failed + 1; }
+    if (!t.ok(!m.remove("b"), "remove twice")) { failed = failed + 1; }
+    if (!t.eqI((i64)m.get("a").?, 1, "a survives")) { failed = failed + 1; }
+    if (!t.eqI((i64)m.get("c").?, 3, "c survives")) { failed = failed + 1; }
+    if (!t.eqU(m.count(), 2, "count after remove")) { failed = failed + 1; }
+    _ = m.put("b", 22);
+    if (!t.eqI((i64)m.get("b").?, 22, "reinsert tombstone")) { failed = failed + 1; }
+
+    var keys: [24][]const u8 = .{
+        "k00", "k01", "k02", "k03", "k04", "k05", "k06", "k07",
+        "k08", "k09", "k10", "k11", "k12", "k13", "k14", "k15",
+        "k16", "k17", "k18", "k19", "k20", "k21", "k22", "k23",
+    };
+    var i: usize = 0;
+    while (i < keys.len) { _ = m.put(keys[i], (i32)i); i = i + 1; }
+    i = 0;
+    while (i < keys.len) {
+        if ((i % 3) == 0) { _ = m.remove(keys[i]); }
+        i = i + 1;
+    }
+    i = 0;
+    while (i < keys.len) {
+        let want = m.get(keys[i]);
+        if ((i % 3) == 0) {
+            if (!t.ok(want == null, "deleted key absent")) { failed = failed + 1; }
+        } else {
+            if (want) v { if (!t.eqI((i64)v, (i64)i, "kept value")) { failed = failed + 1; } }
+        }
+        i = i + 1;
+    }
+    m.deinit();
+
+    return t.summary(failed);
+};

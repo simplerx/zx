@@ -52,6 +52,22 @@ pub const List = struct (T: type) {
 
     pub const items = fn (self: *Self) []T { return self.buf[0..self.len]; };
 
+    // 按调用方给的 eq 找元素。Zx 没有 trait/重载，`==` 对聚合类型不可用
+    // （E0306），所以和 std.sort 一样把比较口径交给调用方。
+    pub const indexOf = fn (self: *Self, key: T, eq: fn (T, T) bool) ?usize {
+        var i: usize = 0;
+        while (i < self.len) {
+            if (eq((self.buf + i).0, key)) { return i; }
+            i = i + 1;
+        }
+        return null;
+    };
+
+    pub const contains = fn (self: *Self, key: T, eq: fn (T, T) bool) bool {
+        if (self.indexOf(key, eq)) _ { return true; }
+        return false;
+    };
+
     pub const clear = fn (self: *Self) void { self.len = 0; };
 
     // ---- 增长 ----

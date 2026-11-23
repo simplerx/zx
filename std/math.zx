@@ -148,3 +148,42 @@ pub const sign = fn (x: f64) i32 {
 
 pub const degToRad = fn (d: f64) f64 { return d * pi / 180.0; };
 pub const radToDeg = fn (r: f64) f64 { return r * 180.0 / pi; };
+
+// ---- 位运算工具（u32，纯 Zx，无编译器内建）-------------------------------
+// 本文件约定整数工具用 *32 后缀标明宽度（见文件头的简约约定）。
+
+// 置位数。x=0 返回 0。
+pub const popcount32 = fn (x: u32) u32 {
+    var v = x;
+    var n: u32 = 0;
+    while (v != 0) {
+        v = v & (v - 1);        // 清掉最低的 1
+        n = n + 1;
+    }
+    return n;
+};
+
+// 末尾连续 0 的个数。x=0 返回 32（没有最低的 1）。
+pub const ctz32 = fn (x: u32) u32 {
+    if (x == 0) { return 32; }
+    var v = x;
+    var n: u32 = 0;
+    while ((v & 1) == 0) { v = v >> 1; n = n + 1; }
+    return n;
+};
+
+// 开头连续 0 的个数。x=0 返回 32。
+pub const clz32 = fn (x: u32) u32 {
+    if (x == 0) { return 32; }
+    var v = x;
+    var n: u32 = 0;
+    while ((v & 0x80000000) == 0) { v = v << 1; n = n + 1; }
+    return n;
+};
+
+// 向上对齐到 alignment（须为 2 的幂）。已是倍数就原样返回。
+pub const alignForward = fn (x: usize, alignment: usize) usize {
+    let mask = alignment - 1;
+    let t = x + mask;
+    return t - (t & mask);      // 等价于 t & ~mask，不依赖位取反
+};

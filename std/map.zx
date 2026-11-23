@@ -11,10 +11,14 @@
 //     新表里找第一个空槽放进去就是正确的线性探测结果；
 //   - clear 是一次 memset，不是逐槽清。
 //
-// 没有 remove：要删就重建一张表。省略它是为了让探测链里没有墓碑——
-// 少一个状态，少一类 bug。
+// 删除用墓碑（hashes[i] == DELETED）：直接清空会把同一条探测链上后面的
+// 键截断，所以删掉的位置必须保留成"链还在走、这里没键"的状态。墓碑在
+// 插入时优先复用；扩容重排时丢掉。有效哈希 >= 2，0 = 空槽、1 = 墓碑。
 
 const str = @mod("str.zx");
+
+// 槽状态：0 空，1 墓碑，>= 2 是规范后的有效哈希。
+const DELETED: u64 = 1;
 
 // FNV-1a 64 位。溢出是 u64 回绕（C 里定义良好的那种），不是错误。
 pub const fnv1a = fn (s: []const u8) u64 {
@@ -64,43 +68,65 @@ pub const HashMap = struct (V: type) {
 
         // ---- 查找 ----
 
-        // 命中返回它的下标；没命中返回第一个空槽——也就是插入点。
-        // 探测先比哈希（8 字节，同一缓存行几乎总在），哈希不同不碰字符串。
-        const slotFor = fn (self: *Self, key: []const u8, h: u64) usize {
+        // 找已有键：空槽说明链到此为止，墓碑要继续往后探。
+        const findSlot = fn (self: *Self, key: []const u8, h: u64) ?usize {
             let mask = self.cap - 1;
             var i = (usize)h & mask;
             var probes: usize = 0;
             while (probes <= mask) {
                 let sh = (self.hashes + i).0;
-                if (sh == 0) { return i; }              // 空槽：插入点
-                if (sh == h and str.eq((self.keys + i).0, key)) { return i; }
+                if (sh == 0) { return null; }
+                if (sh >= 2 and sh == h and str.eq((self.keys + i).0, key)) { return i; }
                 i = (i + 1) & mask;
                 probes = probes + 1;
             }
+            return null;
+        };
+
+        // 找插入点：记下第一块墓碑继续走，命中已有键就返回它，遇到空槽时
+        // 优先复用墓碑（复用后探测链仍然完整）。
+        const insertSlot = fn (self: *Self, key: []const u8, h: u64) usize {
+            let mask = self.cap - 1;
+            var i = (usize)h & mask;
+            var tomb: usize = self.cap;       // cap 是"没有墓碑"的哨兵
+            var probes: usize = 0;
+            while (probes <= mask) {
+                let sh = (self.hashes + i).0;
+                if (sh == 0) {
+                    if (tomb != self.cap) { return tomb; }
+                    return i;
+                }
+                if (sh == DELETED) {
+                    if (tomb == self.cap) { tomb = i; }
+                } else if (sh == h and str.eq((self.keys + i).0, key)) {
+                    return i;
+                }
+                i = (i + 1) & mask;
+                probes = probes + 1;
+            }
+            if (tomb != self.cap) { return tomb; }
             return i;               /* 表满（不会发生：负载上限 3/4） */
         };
 
-        // FNV 结果可能是 0，而 0 是"空槽"哨兵——压成 1。
-        const norm = fn (h: u64) u64 { return if (h == 0) 1 else h; };
+        // FNV 结果可能是 0 或 1，而它们是空槽 / 墓碑哨兵——压到 2。
+        const norm = fn (h: u64) u64 { return if (h < 2) 2 else h; };
 
         pub const get = fn (self: *Self, key: []const u8) ?V {
             if (self.cap == 0) { return null; }
-            let i = self.slotFor(key, Self.norm(fnv1a(key)));
-            if ((self.hashes + i).0 != 0) { return (self.vals + i).0; }
+            if (self.findSlot(key, Self.norm(fnv1a(key)))) i { return (self.vals + i).0; }
             return null;
         };
 
         pub const contains = fn (self: *Self, key: []const u8) bool {
             if (self.cap == 0) { return false; }
-            let i = self.slotFor(key, Self.norm(fnv1a(key)));
-            return (self.hashes + i).0 != 0;
+            if (self.findSlot(key, Self.norm(fnv1a(key)))) _ { return true; }
+            return false;
         };
 
         // 取指针：已经存在就直接改它，省一次查找。
         pub const getPtr = fn (self: *Self, key: []const u8) ?*V {
             if (self.cap == 0) { return null; }
-            let i = self.slotFor(key, Self.norm(fnv1a(key)));
-            if ((self.hashes + i).0 != 0) { return self.vals + i; }
+            if (self.findSlot(key, Self.norm(fnv1a(key)))) i { return self.vals + i; }
             return null;
         };
 
@@ -111,8 +137,8 @@ pub const HashMap = struct (V: type) {
                 if (!self.grow()) { return false; }
             }
             let h = Self.norm(fnv1a(key));
-            let i = self.slotFor(key, h);
-            let existed = (self.hashes + i).0 != 0;
+            let i = self.insertSlot(key, h);
+            let existed = (self.hashes + i).0 >= 2;
             (self.keys + i).0 = key;
             (self.vals + i).0 = val;
             (self.hashes + i).0 = h;
@@ -127,13 +153,25 @@ pub const HashMap = struct (V: type) {
                 if (!self.grow()) { return val; }       // 扩容失败：写入没有发生
             }
             let h = Self.norm(fnv1a(key));
-            let i = self.slotFor(key, h);
-            if ((self.hashes + i).0 != 0) { return (self.vals + i).0; }
+            let i = self.insertSlot(key, h);
+            if ((self.hashes + i).0 >= 2) { return (self.vals + i).0; }
             (self.keys + i).0 = key;
             (self.vals + i).0 = val;
             (self.hashes + i).0 = h;
             self.n = self.n + 1;
             return null;
+        };
+
+        // 删掉键。命中返回 true。位置留成墓碑，保住同一条探测链上后续键
+        // 的可达性；新插入会优先复用墓碑。count() 立即反映删除结果。
+        pub const remove = fn (self: *Self, key: []const u8) bool {
+            if (self.cap == 0) { return false; }
+            if (self.findSlot(key, Self.norm(fnv1a(key)))) i {
+                (self.hashes + i).0 = DELETED;
+                self.n = self.n - 1;
+                return true;
+            }
+            return false;
         };
 
         pub const clear = fn (self: *Self) void {
@@ -147,12 +185,12 @@ pub const HashMap = struct (V: type) {
 
         // 槽下标从 0 到 capacity()-1；空槽返回 null，跳过即可。
         pub const keyAt = fn (self: *Self, i: usize) ?[]const u8 {
-            if (i >= self.cap or (self.hashes + i).0 == 0) { return null; }
+            if (i >= self.cap or (self.hashes + i).0 < 2) { return null; }
             return (self.keys + i).0;
         };
 
         pub const valueAt = fn (self: *Self, i: usize) ?V {
-            if (i >= self.cap or (self.hashes + i).0 == 0) { return null; }
+            if (i >= self.cap or (self.hashes + i).0 < 2) { return null; }
             return (self.vals + i).0;
         };
 
@@ -177,11 +215,12 @@ pub const HashMap = struct (V: type) {
 
                         // 键在旧表里本来就唯一：新表里找第一个空槽放进去，
                         // 就是正确的线性探测结果——不重算哈希、不比字符串。
+                        // 墓碑不搬过去：扩容正好把删除留下的链垃圾清掉。
                         let mask = ncap - 1;
                         var i: usize = 0;
                         while (i < self.cap) {
                             let h = (self.hashes + i).0;
-                            if (h != 0) {
+                            if (h >= 2) {
                                 var t = (usize)h & mask;
                                 while ((nhashes + t).0 != 0) {
                                     t = (t + 1) & mask;

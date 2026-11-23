@@ -74,3 +74,39 @@ pub const binarySearch = fn (T: type, xs: []T, key: T,
     if (lo < xs.len and !less(key, xs[lo])) { return lo; }
     return null;
 };
+
+// ---- 边界查找 ----
+
+// 第一个「不小于 key」的下标（key 可插入的最左位置），范围 [0, xs.len]。
+// 切片必须按同一个 less 排好；未排序时结果未定义。
+pub const lowerBound = fn (T: type, xs: []T, key: T,
+                           less: fn (T, T) bool) usize {
+    var lo: usize = 0;
+    var hi = xs.len;
+    while (lo < hi) {
+        let mid = lo + (hi - lo) / 2;
+        if (less(xs[mid], key)) { lo = mid + 1; } else { hi = mid; }
+    }
+    return lo;
+};
+
+// 第一个「大于 key」的下标（key 可插入的最右位置），范围 [0, xs.len]。
+pub const upperBound = fn (T: type, xs: []T, key: T,
+                           less: fn (T, T) bool) usize {
+    var lo: usize = 0;
+    var hi = xs.len;
+    while (lo < hi) {
+        let mid = lo + (hi - lo) / 2;
+        if (!less(key, xs[mid])) { lo = mid + 1; } else { hi = mid; }
+    }
+    return lo;
+};
+
+// 按 less 取较小 / 较大的一个。相等时 min 返回 a、max 返回 b。
+pub const min = fn (T: type, a: T, b: T, less: fn (T, T) bool) T {
+    return if (less(a, b)) a else b;
+};
+
+pub const max = fn (T: type, a: T, b: T, less: fn (T, T) bool) T {
+    return if (less(a, b)) b else a;
+};

@@ -65,6 +65,14 @@ pub const math = @mod("math.zx");
 // 比较器 `less(a,b)` 由调用方提供：a 严格排在 b 前面时为 true。
 pub const sort = @mod("sort.zx");
 
+// 伪随机（random.zx）。Rng 是显式状态，没有全局随机源；shuffle 是顶层泛型
+// 函数（容器方法不能带类型参数）。xorshift64*，非密码学用途。
+pub const random = @mod("random.zx");
+
+// 断言工具（test.zx）。ok/eqI/eqU/eqStr/near 失败时打印差异并返回 false，
+// 调用方自己计数；summary(failed) 直接当 main 的退出码。
+pub const test = @mod("test.zx");
+
 // 网络（net.zx）。同步 IPv4 TCP / UDP，Windows Winsock2 先行；
 // 用 `std.net.init()` / `deinit()` 包住，句柄由 TcpListener/TcpStream/UdpSocket 拿。
 pub const net = @mod("net.zx");

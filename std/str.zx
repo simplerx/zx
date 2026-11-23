@@ -334,3 +334,84 @@ pub const repeat = fn (alloc: Allocator, s: []const u8, n: usize) ?[]u8 {
     }
     return null;
 };
+
+// 从后往前找 needle。空 needle 返回 hay.len（末尾位置），找不到返回 null。
+pub const lastIndexOf = fn (hay: []const u8, needle: []const u8) ?usize {
+    if (needle.len == 0) { return hay.len; }
+    if (needle.len > hay.len) { return null; }
+    var i = hay.len - needle.len;
+    while (true) {
+        if (matchAt(hay, i, needle)) { return i; }
+        if (i == 0) { return null; }
+        i = i - 1;
+    }
+};
+
+const lowerAscii = fn (c: u8) u8 {
+    if (c >= 65 and c <= 90) { return c + 32; }
+    return c;
+};
+
+// ASCII 大小写不敏感比较。非 ASCII 字节原样比较（字符串是裸 []const u8）。
+pub const eqIgnoreCase = fn (a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) { return false; }
+    var i: usize = 0;
+    while (i < a.len) {
+        if (lowerAscii(a[i]) != lowerAscii(b[i])) { return false; }
+        i = i + 1;
+    }
+    return true;
+};
+
+// 十进制浮点，形如 [-+]ddd[.ddd][eE[-+]ddd]。前后空白会被 trim。
+// 整数或小数部分至少要有数字；指数超范围（|exp| > 400）算失败，
+// 免得积出一堆 inf 还假装成功。多余字符一律失败。
+pub const parseFloat = fn (s: []const u8) ?f64 {
+    let t = trim(s);
+    if (t.len == 0) { return null; }
+    var i: usize = 0;
+    var neg = false;
+    if (t[0] == 45 or t[0] == 43) {
+        neg = (t[0] == 45);
+        i = 1;
+        if (t.len == 1) { return null; }
+    }
+    var v: f64 = 0.0;
+    var digits: usize = 0;
+    while (i < t.len and t[i] >= 48 and t[i] <= 57) {
+        v = v * 10.0 + (f64)(t[i] - 48);
+        i = i + 1;
+        digits = digits + 1;
+    }
+    if (digits == 0) { return null; }
+    if (i < t.len and t[i] == 46) {              // '.'
+        i = i + 1;
+        var frac: f64 = 0.1;
+        while (i < t.len and t[i] >= 48 and t[i] <= 57) {
+            v = v + (f64)(t[i] - 48) * frac;
+            frac = frac / 10.0;
+            i = i + 1;
+        }
+    }
+    if (i < t.len and (t[i] == 101 or t[i] == 69)) {  // e / E
+        i = i + 1;
+        var eneg = false;
+        if (i < t.len and (t[i] == 45 or t[i] == 43)) {
+            eneg = (t[i] == 45);
+            i = i + 1;
+        }
+        var ev: usize = 0;
+        while (i < t.len and t[i] >= 48 and t[i] <= 57) {
+            if (ev <= 400) { ev = ev * 10 + (usize)(t[i] - 48); }
+            i = i + 1;
+        }
+        if (ev > 400) { return null; }
+        var p: f64 = 1.0;
+        var k: usize = 0;
+        while (k < ev) { p = p * 10.0; k = k + 1; }
+        if (eneg) { v = v / p; } else { v = v * p; }
+    }
+    if (i != t.len) { return null; }
+    if (neg) { v = -v; }
+    return v;
+};

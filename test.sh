@@ -2384,6 +2384,20 @@ else
     printf "  FAIL §233 Zed indents 结构\n"; fail=1
 fi
 
+# §235：标准库第二轮补齐。tests/good 会自动发现并跑通该用例，这里额外
+# 钉双前端——新模块（random/test）和 HashMap 墓碑逻辑都要两边一致。
+printf "\n== §235 标准库补齐（random/test/sort/str/math/list/map.remove）\n"
+for fe in zx c; do
+    if $ZXC --fe=$fe tests/good/stdlib_more.zx -o "$TPFX.smore$fe.exe" \
+        > "$TPFX.smore$fe.log" 2>&1 \
+       && "$TPFX.smore$fe.exe" > /dev/null 2>&1; then
+        printf "  ok   §235 --fe=%s 标准库新 API 编译运行通过\n" "$fe"
+    else
+        printf "  FAIL §235 --fe=%s 标准库新 API\n" "$fe"
+        tail -8 "$TPFX.smore$fe.log"; fail=1
+    fi
+done
+
 # 用例会在仓库根留下自己的临时文件：io_fmt.zx 写 io_fmt.tmp，stdfs.zx 建
 # fs_t_dir / fs_t_dir2。跑完统一带走——测试不该往工作区里堆东西。
 rm -rf io_fmt.tmp fs_t_dir fs_t_dir2 2>/dev/null || true

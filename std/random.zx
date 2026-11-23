@@ -1,0 +1,61 @@
+// random.zx —— 伪随机数。纯 Zx 代码，不依赖 C 运行时，也不依赖全局状态。
+//
+//   const std = @mod("std");
+//   var rng = std.random.Rng.seed(12345);
+//   let n = rng.between(1, 7);       // [1, 7) 里的 u64
+//   let x = rng.unit();              // [0, 1) 里的 f64
+//   std.random.shuffle(i32, &rng, xs[0..]);
+//
+// 算法是 xorshift64*：三次异或移位 + 一次乘法混合。周期 2^64-1，
+// 统计质量足够做采样、打乱、压力测试和临时名；**不是密码学随机源**，
+// 不要拿它生成密钥或令牌。u64 乘法按回绕语义算（与 C 的 unsigned 一致）。
+
+pub const Rng = struct {
+    state: u64,
+
+    // 0 不能作为 xorshift 的状态（会永远输出 0），换成黄金比例常数。
+    pub const seed = fn (s: u64) Self {
+        return Self{ .state = if (s == 0) 0x9E3779B97F4A7C15 else s };
+    };
+
+    // 下一个 u64。调用方持有 *Self，所以多个 Rng 互不干扰。
+    pub const next = fn (self: *Self) u64 {
+        var x = self.state;
+        x = x ^ (x >> 12);
+        x = x ^ (x << 25);
+        x = x ^ (x >> 27);
+        self.state = x;
+        return x * 2685821657736338717;
+    };
+
+    // [lo, hi) 均匀取样。hi <= lo 时直接返回 lo（不会死循环）。
+    pub const between = fn (self: *Self, lo: u64, hi: u64) u64 {
+        if (hi <= lo) { return lo; }
+        return lo + self.next() % (hi - lo);
+    };
+
+    // [0, 1) 均匀分布。取高 53 位，刚好是 f64 能精确表示的尾数宽度。
+    pub const unit = fn (self: *Self) f64 {
+        return (f64)(self.next() >> 11) / 9007199254740992.0;
+    };
+
+    // 以 p 的概率返回 true；p <= 0 恒 false，p >= 1 恒 true。
+    pub const chance = fn (self: *Self, p: f64) bool {
+        if (p <= 0.0) { return false; }
+        if (p >= 1.0) { return true; }
+        return self.unit() < p;
+    };
+};
+
+// Fisher-Yates 原地打乱。顶层泛型函数（容器方法不能带类型参数，
+// 见 decisions §198）——Rng 不依赖 T，T 只出现在切片上。
+pub const shuffle = fn (T: type, rng: *Rng, xs: []T) void {
+    var i = xs.len;
+    while (i > 1) {
+        i = i - 1;
+        let j = (usize)(rng.next() % (u64)(i + 1));
+        let t = xs[i];
+        xs[i] = xs[j];
+        xs[j] = t;
+    }
+};

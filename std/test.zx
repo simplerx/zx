@@ -1,0 +1,68 @@
+// test.zx —— 轻量断言工具。给 `zxc test` 之外的手写测试main用：
+// 每个断言返回 bool 并在失败时打印差异，调用方自己汇总计数。
+//
+//   const std = @mod("std");
+//   const t = std.test;
+//   var failed: usize = 0;
+//   if (!t.eqI(std.str.count("aaa", "a"), 3, "count")) { failed = failed + 1; }
+//   if (!t.ok(xs[0] == 1, "first element")) { failed = failed + 1; }
+//   return t.summary(failed);       // 0 = 全过，1 = 有失败
+//
+// 不抛异常、不 abort：Zx 没有异常（只有 !T），让调用方决定失败后怎么走。
+// 打印用编译器的 println 内建，不 @mod("std")——避免标准库内部顶层值环。
+
+// 一般条件。msg 用来定位失败点。
+pub const ok = fn (cond: bool, msg: []const u8) bool {
+    if (cond) { return true; }
+    println("[test] FAIL: {s}", msg);
+    return false;
+};
+
+// 两个 i64 相等。
+pub const eqI = fn (got: i64, want: i64, msg: []const u8) bool {
+    if (got == want) { return true; }
+    println("[test] FAIL: {s}: got {} want {}", msg, got, want);
+    return false;
+};
+
+// 两个 usize 相等（长度、下标、计数）。
+pub const eqU = fn (got: usize, want: usize, msg: []const u8) bool {
+    if (got == want) { return true; }
+    println("[test] FAIL: {s}: got {} want {}", msg, got, want);
+    return false;
+};
+
+// 两个字符串相等，失败时连内容一起打出来。
+pub const eqStr = fn (got: []const u8, want: []const u8, msg: []const u8) bool {
+    let n = got.len;
+    if (n == want.len) {
+        var i: usize = 0;
+        var same = true;
+        while (i < n) {
+            if (got[i] != want[i]) { same = false; }
+            i = i + 1;
+        }
+        if (same) { return true; }
+    }
+    println("[test] FAIL: {s}: got \"{s}\" want \"{s}\"", msg, got, want);
+    return false;
+};
+
+// 浮点近似相等（绝对误差）。NaN 永不相等。
+pub const near = fn (got: f64, want: f64, eps: f64, msg: []const u8) bool {
+    var d = got - want;
+    if (d < 0.0) { d = -d; }
+    if (d <= eps) { return true; }
+    println("[test] FAIL: {s}: got {} want {} (eps {})", msg, got, want, eps);
+    return false;
+};
+
+// 汇总：全过返回 0（可直接当 main 的退出码），有失败返回 1。
+pub const summary = fn (failed: usize) i32 {
+    if (failed == 0) {
+        println("[test] all assertions passed");
+        return 0;
+    }
+    println("[test] {} assertion(s) failed", failed);
+    return 1;
+};
