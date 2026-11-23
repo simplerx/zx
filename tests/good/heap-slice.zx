@@ -11,7 +11,6 @@
 // xs = 10 37 40
 // fixed = 7
 // done
-tag.close;
 const std = @mod("std");
 
 var calls: usize = 0;

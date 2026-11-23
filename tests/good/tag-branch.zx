@@ -1,3 +1,4 @@
+tag.enable;
 // tag-branch.zx —— §170 分支传出：臂内分配必须由臂值传出，臂内 free 必须传 null
 // then 臂分配并传出 LIVE 载体，else 臂传 null → 合并成 COND（判空后可用）。
 const std = @mod("std");

@@ -1,3 +1,4 @@
+tag.enable;
 // debug-alloc-abort.zx —— DebugAllocator 的三条致命路径：泄漏 / 重复释放 /
 // 释放长度不符。三条都会打印现场并 panic（abort），所以不能写 expect-output
 // 交给 runner 跑（abort 会带走整个测试进程）；test.sh 用独立进程分别跑，

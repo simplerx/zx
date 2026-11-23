@@ -1,3 +1,4 @@
+tag.enable;
 // expect: never freed
 // expect-code: E0513
 // expect-count: 1

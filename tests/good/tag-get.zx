@@ -1,3 +1,4 @@
+tag.enable;
 // §178：@tag(p) 取指针携带的标签——进数组等会断链的地方前先取出来存住，
 // 之后 tag v : keep = xs[k] 把链续上；不取标签就断链的仍报 E0521。
 const std = @mod("std");

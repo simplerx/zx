@@ -1,3 +1,4 @@
+tag.enable;
 // expect: is not balanced
 // expect-code: E0516
 // §170：循环每轮必须从同一状态开始、在同一状态结束；轮内只分配不释放不配平。

@@ -3,7 +3,7 @@
 // 目标：与 src/lex.c 的词法规则逐条对应（spec v0.5 §1 起）：
 //   - `.{` 是一个 token（DOT_BRACE）；`..` 是范围 token；`.5` 非法（浮点必须有整数部分）
 //   - 行注释 //；块注释 /* */ 不嵌套
-//   - 整数后缀 u8..isize，浮点后缀 f16..f128；数字里可以夹下划线
+//   - 整数后缀 u8..isize，浮点后缀 f16/f32/f64/f128；数字里可以夹下划线
 //   - 字符串转义 \n \t \r \0 \\ \" \' \a \b \f \v \e \xHH \uXXXX（解码后进 strbuf）
 //   - char 解码 1..4 字节 UTF-8；{} 占位符原样通过（格式化层的事）
 //
@@ -13,9 +13,8 @@
 // 同一批源文件 diff 必须为空（见 spec/bootstrap.md §4 阶段 1）。
 const std = @mod("std");
 
-// §187：分配器豁免（单独申请）：Lexer 的 token/字符串缓冲随 Lexer 生命周期
-// 整体清算，不逐笔 free，整模块关账。
-tag.close;
+// §225：标签账本默认关闭，本模块不写 tag.enable——Lexer 的 token/字符串
+// 缓冲随 Lexer 生命周期整体清算，不逐笔 free，无需账本追踪。
 
 // ---- token 种类：名字与 C 侧 TOKEN_KINDS 一一对应 ----
 
@@ -701,6 +700,11 @@ pub const Lexer = struct {
         let suf = self.src[suf_start..self.p];
         if (is_float) {
             if (!is_float_suffix(suf)) { self.fail("E0102", "unknown float type suffix; use f16 / f32 / f64 / f128"); }
+            // token 在扫后缀前就发了；把后缀并回文本，sema 才能按后缀定型。
+            let nt = self.toks.len - 1;
+            let toks = self.toks.items();
+            toks[nt].len = self.p - start;
+            toks[nt].col = self.col - (u32)toks[nt].len;
         } else if (suf.len == 1 and (suf[0] == 'e' or suf[0] == 'E')) {
             // `1e` —— 指数后面没有数字，回滚后 e 被当成整数后缀；
             // 报"unknown suffix"不如直接说该写什么。

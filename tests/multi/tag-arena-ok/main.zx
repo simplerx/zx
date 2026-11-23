@@ -1,4 +1,6 @@
-// §187：arena——alloc 不建槽（tag.close 豁免）、init/deinit 容器账配对，零诊断。
+// §225：本模块写 tag.enable 才开账——验证 arena 的 init/deinit 容器账配对
+// （arena 自身 batch 豁免、经它分配的块不建独立槽，资源账由容器统一清算）。
+tag.enable;
 const std = @mod("std");
 const main = fn () u8 {
     var ar = std.arena.ArenaAllocator.init(std.heap.page);

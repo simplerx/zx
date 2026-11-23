@@ -1,0 +1,19 @@
+tag.enable;
+// expect: is never freed
+// expect-code: E0513
+// §226：同结构体的两个数组字段必须是**两本独立的账**。群键 = 基变量 +
+// 字段路径（"a" / "b"）；若退化成裸基变量，free(s.a[0]) 会把 s.b 的成员
+// 一并标 FREED，b 的真泄漏就被漏掉。这条用例钉住 s.b 确实报泄漏——
+// 报的行必须是 s.b 那次分配（第 13 行），而不是 s.a 的。
+const std = @mod("std");
+
+const Two = struct { a: [2]*u8, b: [2]*u8 };
+
+pub const main = fn () u8 {
+    var s = Two{ .a = .{ undefined, undefined }, .b = .{ undefined, undefined } };
+    s.a[0] = std.heapAlloc(std.heap.page, u8, 8);
+    s.b[0] = std.heapAlloc(std.heap.page, u8, 8);
+    std.heap.page.free(std.heap.page.ctx, s.a[0], 8);   // 只释放 a
+    std.println("{}", s.a.len);
+    return 0;
+};

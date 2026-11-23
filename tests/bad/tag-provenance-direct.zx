@@ -1,3 +1,4 @@
+tag.enable;
 // expect: already freed
 // expect-code: E0509
 // §186 行为保持：指针直传整数再直传转回（无中转洗源）可追踪，

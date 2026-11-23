@@ -8600,7 +8600,10 @@ fn scanTagNames(text: []const u8, list: *Json, seen: *std.StringHashMapUnmanaged
         if (j == i + 4) { i += 3; continue; }
         const nm = text[i + 4 .. j];
         i = j;
-        if (std.mem.eql(u8, nm, "close")) continue;
+        // §225：tag.enable / tag.batch 是文件级语句指令，tag.close 已删除——
+        // 三者都不是标签名，别当"本文件出现过的标签"补出来。
+        if (std.mem.eql(u8, nm, "close") or std.mem.eql(u8, nm, "enable") or
+            std.mem.eql(u8, nm, "batch")) continue;
         if (prefix.len > 0 and !std.mem.startsWith(u8, nm, prefix)) continue;
         addItem(list, seen, nm, 6, "tag 标签（首次引用自动建槽）", 0);
     }
@@ -9021,15 +9024,17 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
     // 输入 std.p 时走的是关键字分支，std 成员一个都不出——现在
     // 空前缀（贴点）与带前缀（std.p / obj.fi）都走这条。
     var dotted = ps > 0 and text[ps - 1] == '.';
-    // §172：`tag.` 补全 —— close + 本文件出现过的 tag 名。命中直接收尾，
-    // 不走容器/切片兜底链（否则 tag. 会误出 0/len/size）。
+    // §172：`tag.` 补全 —— §225 的文件级指令（enable/batch）+ 本文件出现过
+    // 的 tag 名。命中直接收尾，不走容器/切片兜底链（否则 tag. 会误出 0/len/size）。
     if (dotted) {
         var w = ps - 1;
         while (w > 0 and isIdentChar(text[w - 1])) w -= 1;
         const tagrecv = text[w .. ps - 1];
         if (tagrecv.len == 3 and std.mem.eql(u8, tagrecv, "tag")) {
-            if (prefix.len == 0 or std.mem.startsWith(u8, "close", prefix))
-                addItem(&list, &seen, "close", 14, "关闭本模块的强制贴标", 0);
+            if (prefix.len == 0 or std.mem.startsWith(u8, "enable", prefix))
+                addItem(&list, &seen, "enable", 14, "开启本模块的标签账本（§225，默认关闭）", 0);
+            if (prefix.len == 0 or std.mem.startsWith(u8, "batch", prefix))
+                addItem(&list, &seen, "batch", 14, "声明整批清算分配器（§188，与开关正交）", 0);
             scanTagNames(text, &list, &seen, prefix);
             list.raw("]}}", .{});
             return list.buf.items;

@@ -614,7 +614,8 @@ static void ctype(Buf *b, Type *t) {
         else buf_puts(b, t->is_signed ? "__int128" : "unsigned __int128");
         break;
     case TY_FLOAT:
-        buf_puts(b, t->bits == 16 ? "_Float16" : t->bits == 32 ? "float" : "double");
+        buf_puts(b, t->bits == 16 ? "_Float16" : t->bits == 32 ? "float" :
+                       t->bits == 128 ? "__float128" : "double");
         break;
     case TY_COMPTIME_INT:   buf_puts(b, "int64_t"); break;
     case TY_COMPTIME_FLOAT: buf_puts(b, "double"); break;
@@ -1402,10 +1403,6 @@ static void lvalue(Buf *b, Node *n) {
     }
     switch (n->kind) {
     case NK_IDENT:
-        /* §151：`&self` / 赋值左侧也要遵守同样的 ABI 透明规则。按指针传的
-         * `Self` 接收者在 C 里是 `T *self`，直接发 `&(self)` 会得到 `T **`
-         * （B1001）。交给 ex() 补 `(*self)`，`&(*self)` 才是 `*Self`。 */
-        if (n->sym && sema_sym_self_by_ptr(n->sym)) { ex(b, n); return; }
         cname(b, sym_cname(n));
         return;
     case NK_FIELD: {
@@ -5220,6 +5217,53 @@ static void emit_big128(Buf *b, uint64_t hi, uint64_t lo, bool neg) {
                    (unsigned long long)hi, (unsigned long long)lo);
 }
 
+/* __float128 → 十六进制浮点字面量（p 后是 2 的幂）。
+ * 不能用 %.17g——那是 double，会丢掉 61 位有效数字。阴极/规格/次正规都按
+ * IEEE 位型现拼，发出的字面量经 C 编译器再舍一次仍然回到同一个位型。 */
+static void emit_f128_lit(Buf *b, ZxF128 x) {
+    unsigned __int128 bits = 0;
+    memcpy(&bits, &x, sizeof bits);
+    bool neg = (bool)(bits >> 127);
+    int exp = (int)((bits >> 112) & 0x7fff);
+    unsigned __int128 frac = bits & ((((unsigned __int128)1) << 112) - 1);
+    if (exp == 0x7fff) {
+        buf_puts(b, frac ? "((__float128)0.0Q/(__float128)0.0Q)"
+                         : "((__float128)1.0Q/(__float128)0.0Q)");
+        return;
+    }
+    int p;
+    if (exp == 0) {
+        if (!frac) { buf_puts(b, neg ? "(-0Q)" : "0Q"); return; }
+        p = -16382;
+        while (!(frac & (((unsigned __int128)1) << 111))) { frac <<= 1; p--; }
+    } else {
+        p = exp - 16383;
+    }
+    if (neg) buf_putc(b, '-');
+    buf_puts(b, "0x1.");
+    for (int i = 27; i >= 0; i--)
+        buf_putc(b, "0123456789abcdef"[(int)((frac >> (i * 4)) & 0xf)]);
+    buf_printf(b, "p%dQ", p);
+}
+
+/* 编译期浮点值 → C 字面量，按目标类型保留身份（f16/f32/f128 都不能
+ * 裸发 double，否则参与运算时被提升，编译期/运行期又分成两个答案）。 */
+static void emit_float_value(Buf *b, Type *t, Value *v) {
+    int bits = (t && t->kind == TY_FLOAT) ? t->bits : 64;
+    if (bits == 128) {
+        emit_f128_lit(b, v && v->kind == V_FLOAT ? v->f128val : (ZxF128)0);
+        return;
+    }
+    if (bits == 16)  buf_puts(b, "(_Float16)");
+    else if (bits == 32) buf_puts(b, "(float)");
+    double f = v && v->kind == V_FLOAT ? v->fval : 0.0;
+    Buf num; buf_init(&num);
+    buf_printf(&num, "%.17g", f);
+    if (!strpbrk(num.data, ".eEnN")) buf_puts(&num, ".0");
+    buf_puts(b, num.data);
+    buf_free(&num);
+}
+
 /* 整数位宽 → C 无符号类型名（同宽度；带符号比较/位运算用） */
 
 /* M19 数值语义的统一发射：整数二元运算在 C 里的形态。
@@ -5553,11 +5597,7 @@ static bool ex_ct_scalar(Buf *b, Node *n) {
     switch (v->kind) {
     case V_BOOL:  buf_puts(b, v->bval ? "true" : "false"); return true;
     case V_FLOAT:
-        /* f32 的编译期值必须**以 float 身份**落进 C：裸 `%.17g` 是 double
-         * 字面量，跟 float 比较/参与运算时会被提升成 double，值和运行时
-         * 差 1 ULP（`(f32)(0.1+0.2) == (f32)0.3` 编译期 false）。 */
-        if (n->ty && n->ty->kind == TY_FLOAT && n->ty->bits == 32) buf_puts(b, "(float)");
-        buf_printf(b, "%.17g", v->fval);
+        emit_float_value(b, n->ty, v);
         return true;
     case V_INT:
         if (v->big) {
@@ -5606,10 +5646,16 @@ static void ex(Buf *b, Node *n) {
         return;
     }
     case NK_FLOAT: {
+        Type *ft = n->ty ? n->ty : ty_comptime_float();
+        if (ft->kind == TY_FLOAT && ft->bits == 128) {
+            Value *fv = val_float_lit(ft, n->str, n->fval);
+            emit_float_value(b, ft, fv);
+            return;
+        }
         Buf t; buf_init(&t);
         buf_printf(&t, "%.17g", n->fval);
         if (!strpbrk(t.data, ".eEnN")) buf_puts(&t, ".0");
-        if (n->ty && n->ty->kind == TY_FLOAT && n->ty->bits == 32) buf_puts(&t, "f");
+        if (ft->kind == TY_FLOAT && ft->bits == 32) buf_puts(&t, "f");
         buf_puts(b, t.data);
         return;
     }
@@ -5659,9 +5705,7 @@ static void ex(Buf *b, Node *n) {
             return;
         }
         if (cv && cv->kind == V_FLOAT) {
-            /* 同 ex_ct_scalar：f32 常量要带上 float 身份 */
-            if (n->ty && n->ty->kind == TY_FLOAT && n->ty->bits == 32) buf_puts(b, "(float)");
-            buf_printf(b, "%.17g", cv->fval);
+            emit_float_value(b, n->ty ? n->ty : cv->ty, cv);
             return;
         }
         if (cv && cv->kind == V_BOOL)  { buf_puts(b, cv->bval ? "true" : "false"); return; }
@@ -5684,16 +5728,6 @@ static void ex(Buf *b, Node *n) {
         /* 容器体内裸名引用同容器的静态函数（§139）：定义发的是实例名
          * `a_i<n>`，引用点必须发同一个，否则 C 那边就是"未声明的函数"。 */
         if (n->inst) { buf_puts(b, inst_name(n->inst, n->name)); return; }
-        /* §151：编译期判定为「大类型」的 `Self` 接收者，C 形参发的是
-         * `const T *self`，而方法体里 self 仍是值语义（sema 保留形参符号的
-         * ty 为 `Self`）。补一层解引用，`self.x` 就落成 `(*self).x`。 */
-        if (n->sym && sema_sym_self_by_ptr(n->sym)) {
-            need_by_cname(sym_cname(n));
-            buf_puts(b, "(*");
-            emit_sym_name(b, n);
-            buf_putc(b, ')');
-            return;
-        }
         need_by_cname(sym_cname(n));
         emit_sym_name(b, n);
         return;
@@ -8002,7 +8036,7 @@ static void val_init(Buf *b, Value *v, Type *t) {
                         t && t->kind == TY_INT && t->bits > 32 ? "ULL" : "");
         return;
     case V_FLOAT:
-        buf_printf(b, "%.17g", v->fval);
+        emit_float_value(b, t, v);
         return;
     case V_BOOL:
         buf_puts(b, v->bval ? "true" : "false");

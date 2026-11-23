@@ -1,3 +1,4 @@
+tag.enable;
 // expect: is never freed
 // expect-code: E0513
 // §179：工厂经切片字段把贴标内存装进结构体返回——账随切片走，

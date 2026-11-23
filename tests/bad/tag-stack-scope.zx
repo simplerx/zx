@@ -1,3 +1,4 @@
+tag.enable;
 // expect: use after scope
 // expect-code: E0512
 // §173：stackAlloc 也建槽，离开作用域自动回收；外层副本再用即拦截。

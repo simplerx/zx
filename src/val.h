@@ -17,6 +17,9 @@
 
 typedef struct Value Value;
 
+/* f128 的编译期值容器。后端发的就是 __float128（zig cc 支持），两边同一精度。 */
+typedef __float128 ZxF128;
+
 typedef enum {
     V_VOID,
     V_UNDEF,      /* undefined：有类型没有值 */
@@ -52,6 +55,7 @@ struct Value {
     uint64_t    hi;        /* V_INT：绝对值的高 64 位（big 时有效） */
     uint64_t    ival;
     double      fval;
+    ZxF128      f128val;    /* V_FLOAT 且 ty 是 f128 时生效 */
     bool        bval;
     const char *sval;
     int         slen;
@@ -69,6 +73,9 @@ Value *val_big128(Type *t, const char *text, bool neg);
 void   val_big_split(const char *text, uint64_t *hi, uint64_t *lo);
 Value *val_from_i64(Type *t, int64_t x);
 Value *val_float(Type *t, double f);
+Value *val_f128(Type *t, ZxF128 f);
+/* 浮点字面量：f128 按原文解析（strtod 丢精度），其余按目标精度舍入。 */
+Value *val_float_lit(Type *t, const char *text, double f);
 Value *val_bool(bool b);
 Value *val_str(const char *s, int n);
 Value *val_type(Type *t);

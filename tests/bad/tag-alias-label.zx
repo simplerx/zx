@@ -1,3 +1,4 @@
+tag.enable;
 // expect: is not a label value
 // expect-code: E0520
 // §173：`x : expr` 贴标要求 x 是 tag 值（const x = tag.x;）。

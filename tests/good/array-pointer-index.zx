@@ -7,7 +7,6 @@
 // br = 11 38
 // len = 8
 // stack = 22 33
-tag.close;
 const std = @mod("std");
 
 const bumpAt = fn (p: *[8]i32, i: usize) void { p[0][i] = p[0][i] + 1; };

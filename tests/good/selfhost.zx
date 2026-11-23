@@ -6,7 +6,6 @@
 // 覆盖：递归类型（AST 指针子节点）、方法互递归、可变接收者、按字节扫字符串、
 // switch 分派、带标签联合体 + 穷尽性检查、HashMap 关键字表、ArrayList 收集、
 // 深递归（嵌套括号）、while 无 break 的替代写法、堆分配与打印。
-tag.close;
 const std = @mod("std");
 
 // ① 递归类型：AST 的子节点必须能指向同一种节点

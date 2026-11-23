@@ -1,6 +1,5 @@
 // §130：正常一次 free 不报诊断。`(*u8)p` 是指针→指针强转，地址不变，
 // 编译期仍认得同一个发行版本（provenance 未断）；指针↔整数互转才抹源。
-tag.close;
 const std = @mod("std");
 
 const main = fn () u8 {

@@ -46,7 +46,9 @@ static const ErrDoc g_errs[] = {
       "reflection is the single `@type(x)` (`.size` / `.align` / `.name` / "
       "`.fields`); vector math lives in `std.simd`. §222 also removed the C-style "
       "boolean spellings `&&` and `||` -- write `and` / `or` (same short-circuit "
-      "behavior and precedence). `zxc explain E0211` lists which names went away "
+      "behavior and precedence). §225 removed `tag.close;` -- the tag ledger is "
+      "off by default now, write `tag.enable;` to turn it on for a module. "
+      "`zxc explain E0211` lists which names went away "
       "and what to write instead" },
 
     { "E0300", "type error (uncategorized)",
@@ -162,7 +164,7 @@ static const ErrDoc g_errs[] = {
     { "E0530", "std.move needs a pointer the tag ledger tracks",
       "`std.move` transfers ownership, so the argument must be an allocation the compiler tracks -- a `std.heapAlloc`/`std.stackAlloc` site or a pointer bound with `tag.x : ...`. A bare pointer (e.g. cast back from `usize` in a thread) has no owner to transfer; bind a tag to it first" },
     { "E0532", "captured pointer escape or invalid capture",
-      "`if (o) *t { }` / `while (o) *t { }` / `switch (s) { .tag: *t { } }` capture a POINTER to the matched payload so you can write back to the original object (`t[0] = value`). The condition/subject must be an addressable, mutable left-hand side (a `var`), because a temporary has no original object to write back to. The captured pointer is a stack borrow: it may be used inside the arm to read/write the payload and aliased to other locals, but it must never escape — not returned, not stored into a struct field, global, or array/slice element, and not passed as a function argument. This check is independent of the tag ledger, so `tag.close` does not disable it" },
+      "`if (o) *t { }` / `while (o) *t { }` / `switch (s) { .tag: *t { } }` capture a POINTER to the matched payload so you can write back to the original object (`t[0] = value`). The condition/subject must be an addressable, mutable left-hand side (a `var`), because a temporary has no original object to write back to. The captured pointer is a stack borrow: it may be used inside the arm to read/write the payload and aliased to other locals, but it must never escape — not returned, not stored into a struct field, global, or array/slice element, and not passed as a function argument. This check is independent of the tag ledger (§225), so neither turning the ledger on nor leaving it off disables it" },
 
     /* ---- 模块 ---- */
     { "E0601", "module resolution failed",
@@ -174,7 +176,7 @@ static const ErrDoc g_errs[] = {
 
     /* ---- 内建与格式串 ---- */
     { "E0802", "format string does not match arguments",
-      "count `{}` placeholders vs arguments; the index in `{[1]:>8.2}` must be in range" },
+      "count `{}` placeholders vs arguments; the index in `{1:>8.2}` must be in range" },
 
     /* ---- 错误集与传播 ---- */
     { "E0900", "internal error (uncategorized)",

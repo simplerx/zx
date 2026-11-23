@@ -5,6 +5,7 @@
 #include "val.h"
 
 extern bool g_ct_soft_div;   /* sema.c：投机折叠期间除零软失败 */
+static double rt_f64(Type *t, double v);   /* 下方定义：按目标精度收敛 */
 
 static Value *valloc(ValKind k, Type *t) {
     Value *v = calloc(1, sizeof(Value));
@@ -55,10 +56,82 @@ Value *val_big128(Type *t, const char *text, bool neg) {
     return r;
 }
 
+Value *val_f128(Type *t, ZxF128 f) {
+    Value *r = valloc(V_FLOAT, t);
+    r->f128val = f;
+    r->fval = (double)f;          /* 诊断/整数转换的兜底表示 */
+    return r;
+}
+
 Value *val_float(Type *t, double f) {
+    if (t && t->kind == TY_FLOAT && t->bits == 128)
+        return val_f128(t, (ZxF128)f);
     Value *r = valloc(V_FLOAT, t);
     r->fval = f;
     return r;
+}
+
+/* 10^e（e >= 0）。e 到 4932 左右会溢出成 inf，正好对应 f128 的取值范围。 */
+static ZxF128 pow10_f128(int e) {
+    ZxF128 r = 1, base = 10;
+    while (e > 0) {
+        if (e & 1) r *= base;
+        e >>= 1;
+        if (e) base *= base;
+    }
+    return r;
+}
+
+/* 十进制浮点文本 → 二进制 128。strtod 只到 f64，直接拿它会让 f128 字面量
+ * 在编译期先掉 64 位精度；这里把所有有效数字收进 unsigned __int128 后一次
+ * 缩放，舍入只发生在最后一次 __float128 运算上。 */
+static ZxF128 parse_f128_lit(const char *s) {
+    if (!s) return 0;
+    size_t n = strlen(s);
+    /* 后缀已被 lexer 收进 token 文本；只接受 f128（其它后缀不走这条路）。 */
+    if (n >= 4 && !strcmp(s + n - 4, "f128")) n -= 4;
+    bool neg = false;
+    size_t i = 0;
+    if (i < n && (s[i] == '-' || s[i] == '+')) { neg = s[i] == '-'; i++; }
+
+    unsigned __int128 mant = 0;
+    int frac = 0, exp = 0, dropped = 0;
+    bool dot = false, in_exp = false, exp_neg = false;
+    unsigned __int128 max = ~(unsigned __int128)0;
+    for (; i < n; i++) {
+        char c = s[i];
+        if (c == '_') continue;
+        if (c == '.') { dot = true; continue; }
+        if (c == 'e' || c == 'E') {
+            in_exp = true;
+            if (i + 1 < n && (s[i + 1] == '-' || s[i + 1] == '+')) {
+                exp_neg = s[i + 1] == '-';
+                i++;
+            }
+            continue;
+        }
+        if (c < '0' || c > '9') continue;
+        unsigned d = (unsigned)(c - '0');
+        if (!in_exp) {
+            if (mant <= (max - d) / 10) {
+                mant = mant * 10 + d;
+                if (dot && frac < 100000) frac++;
+            } else if (dropped < 100000) dropped++;
+        } else if (exp < 100000) exp = exp * 10 + (int)d;
+    }
+    int e10 = (exp_neg ? -exp : exp) - frac + dropped;
+    if (e10 > 5000) e10 = 5000;
+    if (e10 < -5000) e10 = -5000;
+    ZxF128 v = (ZxF128)mant;
+    if (e10 > 0) v *= pow10_f128(e10);
+    else if (e10 < 0) v /= pow10_f128(-e10);
+    return neg ? -v : v;
+}
+
+Value *val_float_lit(Type *t, const char *text, double f) {
+    if (t && t->kind == TY_FLOAT && t->bits == 128)
+        return val_f128(t, parse_f128_lit(text));
+    return val_float(t, rt_f64(t, f));
 }
 
 Value *val_bool(bool b) {
@@ -116,7 +189,10 @@ bool val_truthy(Value *v) {
     switch (v->kind) {
     case V_BOOL:  return v->bval;
     case V_INT:   return v->ival != 0;
-    case V_FLOAT: return v->fval != 0.0;
+    case V_FLOAT:
+        if (v->ty && v->ty->kind == TY_FLOAT && v->ty->bits == 128)
+            return v->f128val != 0;
+        return v->fval != 0.0;
     case V_NULL:  return false;
     default:      return true;
     }
@@ -134,7 +210,10 @@ bool val_eq(Value *a, Value *b) {
     case V_VOID: case V_UNDEF: case V_NULL: return true;
     case V_BOOL:  return a->bval == b->bval;
     case V_INT:   return a->neg == b->neg && a->hi == b->hi && a->ival == b->ival;
-    case V_FLOAT: return a->fval == b->fval;
+    case V_FLOAT:
+        if (a->ty && a->ty->kind == TY_FLOAT && a->ty->bits == 128)
+            return a->f128val == b->f128val;
+        return a->fval == b->fval;
     case V_STR:   return a->slen == b->slen && (a->slen == 0 || !memcmp(a->sval, b->sval, (size_t)a->slen));
     case V_TYPE:  return ty_eq(a->tval, b->tval);
     case V_FN:    return a->fn == b->fn;
@@ -152,15 +231,26 @@ bool val_eq(Value *a, Value *b) {
 /* ---------------- 运算 ---------------- */
 
 static bool is_floatish(Value *v) { return v && v->kind == V_FLOAT; }
+static bool val_is_f128(Value *v) {
+    return v && v->kind == V_FLOAT && v->ty && v->ty->kind == TY_FLOAT && v->ty->bits == 128;
+}
+static ZxF128 val_as_f128(Value *v) {
+    if (val_is_f128(v)) return v->f128val;
+    if (v && v->kind == V_FLOAT) return (ZxF128)v->fval;
+    return (ZxF128)val_i64(v);
+}
 
 /* 把编译期浮点结果收敛到目标精度。
  *
- * 编译期用 double 算，但 f32 的语义是「每步按 32 位舍入」。不收敛的话
+ * 编译期用 double 算，但 f32/f16 的语义是「每步按目标精度舍入」。不收敛的话
  * `(f32)0.3` 会带着 f64 的 0.3 走，和运行时算出来的 f32 相差 1 ULP，
  * `(f32)(0.1+0.2) == (f32)0.3` 于是编译期 false、运行时 true——R10 明令禁止
- * 的「两个答案」。f16 没有可移植的 C 类型，暂时保持 double（已知缺口）。 */
+ * 的「两个答案」。f16 走同一条路：后端本来就发 `_Float16`，这里用同一个 C
+ * 类型舍入，ct 与 rt 拿到逐位相同的半精度值。 */
 static double rt_f64(Type *t, double v) {
-    if (t && t->kind == TY_FLOAT && t->bits == 32) return (double)(float)v;
+    if (!t || t->kind != TY_FLOAT) return v;
+    if (t->bits == 16) return (double)(_Float16)v;
+    if (t->bits == 32) return (double)(float)v;
     return v;
 }
 
@@ -223,11 +313,28 @@ static Value *int_bin(int op, Value *a, Value *b, int line, int col) {
 Value *val_bin(int op, Value *a, Value *b, int line, int col) {
     if (!a || !b) return NULL;
 
-    /* 比较运算：任何数值对都能比，结果是 bool */
+    /* 比较运算：任何数值对都能比，结果是 bool。f128 全程留在 __float128，
+     * 不先降到 double——否则 1.0f128/3.0f128 的编译期值只剩 53 位精度。 */
     if (is_floatish(a) || is_floatish(b)) {
+        Type *rt = a->ty && a->kind == V_FLOAT ? a->ty : b->ty;
+        if (rt && rt->kind == TY_FLOAT && rt->bits == 128) {
+            ZxF128 x = val_as_f128(a), y = val_as_f128(b);
+            switch (op) {
+            case TOK_PLUS:  return val_f128(rt, x + y);
+            case TOK_MINUS: return val_f128(rt, x - y);
+            case TOK_STAR:  return val_f128(rt, x * y);
+            case TOK_SLASH: return val_f128(rt, x / y);
+            case TOK_LT: return val_bool(x <  y);
+            case TOK_LE: return val_bool(x <= y);
+            case TOK_GT: return val_bool(x >  y);
+            case TOK_GE: return val_bool(x >= y);
+            case TOK_EQ: return val_bool(x == y);
+            case TOK_NE: return val_bool(x != y);
+            default: return NULL;
+            }
+        }
         double x = a->kind == V_FLOAT ? a->fval : (double)val_i64(a);
         double y = b->kind == V_FLOAT ? b->fval : (double)val_i64(b);
-        Type *rt = a->ty && a->kind == V_FLOAT ? a->ty : b->ty;
         switch (op) {
         case TOK_PLUS:  return val_float(rt, rt_f64(rt, x + y));
         case TOK_MINUS: return val_float(rt, rt_f64(rt, x - y));
@@ -297,7 +404,10 @@ Value *val_un(int op, Value *a, int line, int col) {
             }
             return val_from_i64(a->ty, -val_i64(a));
         }
-        if (a->kind == V_FLOAT) return val_float(a->ty, -a->fval);
+        if (a->kind == V_FLOAT) {
+            if (val_is_f128(a)) return val_f128(a->ty, -a->f128val);
+            return val_float(a->ty, rt_f64(a->ty, -a->fval));
+        }
         return NULL;
     case TOK_PLUS:
         return a;
@@ -344,12 +454,18 @@ Value *val_cast(Type *to, Value *v) {
             return v;
         }
         if (v->kind == V_BOOL) return val_int(to, v->bval ? 1 : 0, false);
-        if (v->kind == V_FLOAT) return val_from_i64(to, (int64_t)v->fval);
+        if (v->kind == V_FLOAT)
+            return val_from_i64(to, (int64_t)(val_is_f128(v) ? v->f128val : (ZxF128)v->fval));
         return NULL;
     }
     if (ty_is_float(to)) {
+        if (to->kind == TY_FLOAT && to->bits == 128) {
+            if (v->kind == V_INT)   return val_f128(to, (ZxF128)val_i64(v));
+            if (v->kind == V_FLOAT) return val_f128(to, val_is_f128(v) ? v->f128val : (ZxF128)v->fval);
+            return NULL;
+        }
         if (v->kind == V_INT)   return val_float(to, rt_f64(to, (double)val_i64(v)));
-        if (v->kind == V_FLOAT) return val_float(to, rt_f64(to, v->fval));
+        if (v->kind == V_FLOAT) return val_float(to, rt_f64(to, val_is_f128(v) ? (double)v->f128val : v->fval));
         return NULL;
     }
     if (to->kind == TY_ENUM && v->kind == V_INT) {

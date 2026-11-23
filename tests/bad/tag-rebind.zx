@@ -1,3 +1,4 @@
+tag.enable;
 // expect: already owns an allocation
 // expect-code: E0518
 // §170：tag 是单实例标签——上一次分配还 LIVE 不能再贴到同一个 tag。

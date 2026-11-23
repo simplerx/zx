@@ -1,34 +1,34 @@
-// self-recv-abi.zx —— §151：方法接收者只有 `Self` / `*Self` 两种语义形态。
+// self-recv-abi.zx —— §224：方法接收者形态完全由写法决定，编译器不再按
+// 大小改 ABI。`self: Self` 就是普通按值参数（C 里发 `ZxS self`，无论结构
+// 多大），`self: *Self` 发 `ZxS * self`，`self: *const Self` 发
+// `const ZxS * self`。不再有 >16B 自动降级成 const 指针，也不再有方法体里
+// 补 `(*self)` 或调用点自动补 `&` / 自动解引用。
 //
-// `Self` 恒不可变；传递方式由编译期 `ty_size(Self)` 决定：<=16B 按值复制，
-// >16B 按 `const Self *` 传地址（只读、零拷贝）。0 大小类型落在按值档，
-// 不退化成关联函数。无论哪种 ABI，源码里 self 都是值语义 —— `return self;`
-// / `self.x` 照写，`p.f()` 对指针接收者也照常可用。
-//
-// 生成 C 的形态由 test.sh §151 断言钉住：Small 按值、Big 按 const 指针、
-// Big 方法体里 self 发成 `(*self)`、Empty 带 1 字节占位。
+// 生成 C 的形态由 test.sh §224 断言钉住：Small/Big 都按值、没有 (*self)。
 // expect-exit: 0
 // expect-output
-// small: 13 13
-// big: 15 15 15
+// small: 3
+// big: 15
+// copy: 15
 // empty: 0
-// explicit: 15
+// mut: 17
 const std = @mod("std");
 
 const Small = struct {
     x: i32,
     y: i32,
     const sum = fn (self: Self) i32 { return self.x + self.y; };
-    const bump = fn (self: *Self, d: i32) void { self.x = self.x + d; };
 };
 
 const Big = struct {
     a: i32, b: i32, c: i32, d: i32, e: i32,
+    // >16B 也照写法按值收：C 形参是结构体本身，不是 const 指针
     const total = fn (self: Self) i32 {
         return self.a + self.b + self.c + self.d + self.e;
     };
-    // 按指针传时 self 仍是值语义：整体返回不用改写法
     const copy = fn (self: Self) Self { return self; };
+    const peek = fn (self: *const Self) i32 { return self.a + 10; };
+    const bumpMe = fn (self: *Self, d: i32) void { self.a = self.a + d; };
 };
 
 const Empty = struct {
@@ -36,16 +36,15 @@ const Empty = struct {
 };
 
 pub const main = fn () i32 {
-    var s = Small{ .x = 1, .y = 2 };
-    s.bump(10);                       // *Self 改的是调用者本身
-    let ps = &s;
+    let s = Small{ .x = 1, .y = 2 };
     var b = Big{ .a = 1, .b = 2, .c = 3, .d = 4, .e = 5 };
-    let pb = &b;
     let e = Empty{};
+    std.println("small: {}", s.sum());
+    std.println("big: {}", b.total());
     let bc = b.copy();
-    std.println("small: {} {}", s.sum(), ps.sum());
-    std.println("big: {} {} {}", b.total(), pb.total(), bc.total());
+    std.println("copy: {}", bc.total());
     std.println("empty: {}", e.zero());
-    std.println("explicit: {}", Big.total(b));  // 显式调用传值，编译器补 &
+    b.bumpMe(6);
+    std.println("mut: {}", b.peek());
     return 0;
 };

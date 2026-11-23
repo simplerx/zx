@@ -1,3 +1,4 @@
+tag.enable;
 // tag-auto.zx —— §172：标签自动建槽（引用即声明），手动 `tag.buf;` 已丢弃
 // 覆盖：贴标点自动建槽、裸引用一等值 const 绑定、别名回退指向同一槽。
 const std = @mod("std");

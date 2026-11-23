@@ -1,3 +1,4 @@
+tag.enable;
 // expect: use after free
 // expect-code: E0512
 // §184：跨模块（@mod）调用的指针状态对账。释放之后把指针递给会解引用

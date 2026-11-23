@@ -1,3 +1,4 @@
+tag.enable;
 // expect: this value already carries label
 // expect-code: E0522
 // expect-count: 1

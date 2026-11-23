@@ -1,3 +1,4 @@
+tag.enable;
 // expect: manual tag declaration is gone
 // expect-code: E0519
 // §172：普通声明已自动化，裸 `tag.buf;` 报 E0519（只有 .static 仍需手动声明）。

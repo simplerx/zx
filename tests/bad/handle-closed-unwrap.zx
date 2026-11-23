@@ -1,3 +1,4 @@
+tag.enable;
 // §135：另一条作废路径。deinit() 把同一张表的整批句柄标 RS_DEAD，
 // 之后读它同样是 E0510，但原因串不同（table closed by deinit）。
 // expect: handle table closed by deinit

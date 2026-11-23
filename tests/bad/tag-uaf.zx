@@ -1,3 +1,4 @@
+tag.enable;
 // expect: use after free
 // expect-code: E0512
 // §170：free 之后解引用，状态机在编译期就知道载体已失效。

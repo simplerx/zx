@@ -1,3 +1,4 @@
+tag.enable;
 // expect-exit: 0
 // §173 补丁九：手动标记可以用使用者自己的变量名——载体变量
 // （tag p : null）或数组基变量（tag xs : null，标记存入它的全部

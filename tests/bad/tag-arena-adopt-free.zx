@@ -1,3 +1,4 @@
+tag.enable;
 // expect: owned by an arena
 // expect-code: E0526
 // §187：adopt 后手动 free——编译期记释放事件，撞账报 E0526。

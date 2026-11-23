@@ -166,8 +166,12 @@ Type *ty_err_set(Type *elem, void *set) {
 /* ---------------- 错误集 ---------------- */
 
 /* 名字 → 码的登记表：码就是 u16 值，首次出现分配，进程内稳定。
- * 65535 保留给 error.null（§5），命名码从 1 起到 65534。 */
-#define ZX_ERRCODE_MAX 1024
+ * §224：容量按 u16 的真实空间给满——命名码 1..65533，65534 是表满哨兵，
+ * 65535 保留给 error.null（§5）。原来的 1024 是隐藏上限：超出后不同错误名
+ * 静默挤进同一个码（65534），回放时 ty_err_name 还给不出名字，用户看不出
+ * 任何异常。给满之后这条路径需要 65533 个不同错误名才可能走到，语言文档
+ * 里写的范围和实现也就一致了（512 KB 静态指针表，编译器进程内可接受）。 */
+#define ZX_ERRCODE_MAX 65533
 static const char *g_errnames[ZX_ERRCODE_MAX + 1];   /* 下标 = 码 */
 static int g_nerrcodes;
 
@@ -203,6 +207,9 @@ void ty_err_code_at(const char *name, uint16_t code) {
 
 const char *ty_err_name(uint16_t code) {
     if (code == 65535) return "null";   /* 保留码：errName(error.null) → "null" */
+    /* §224：表满哨兵——不同错误名被挤进同一个码时，回放至少能看出是溢出，
+     * 而不是静默地"这个码没有名字"。 */
+    if (code == 65534) return "error.tableFull";
     if (code == 0 || code > g_nerrcodes) return NULL;
     return g_errnames[code - 1];
 }

@@ -1,3 +1,4 @@
+tag.enable;
 // §135：编译期确定失效的句柄不能再读。free 之后状态机记 FREED，
 // 此时任何 get 都是 E0510——运行时 side table 已经撤掉，没有第二道防线。
 // expect: read of an invalid handle

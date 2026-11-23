@@ -1,3 +1,4 @@
+tag.enable;
 // expect: release in a branch arm must be confirmed
 // expect-code: E0528
 // §171 + §189：try 错误臂里 free 了贴标指针，必须紧跟 `tag p : null;`

@@ -413,7 +413,13 @@ static void lex_number(Lex *l) {
 
     if (is_float) {
         for (size_t i = 0; i < sizeof float_sufs / sizeof *float_sufs; i++)
-            if (strcmp(suf, float_sufs[i]) == 0) return;
+            if (strcmp(suf, float_sufs[i]) == 0) {
+                /* token 在扫描后缀前就 emit 了；把后缀并回文本，sema 才能
+                 * 按 f16/f32/f64/f128 定型、f128 才能按原文解析精度。 */
+                t->len = (int)(l->p - start);
+                t->col = l->col - t->len;
+                return;
+            }
         lex_error(l, start, "invalid float suffix '%s'", suf);
     } else if (strcmp(suf, "e") == 0 || strcmp(suf, "E") == 0) {
         /* `1e` —— 指数后面没有数字，回滚后 e 被当成整数后缀；

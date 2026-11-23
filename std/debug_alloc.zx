@@ -1,7 +1,6 @@
 // §188：模块内部申请豁免（tag.close）——留档结构本身的申请不进账本。
 // 本模块不声明 tag.batch：经它的 Allocator 视图做的 alloc/free 照常逐笔
 // 追踪（逐笔释放语义真实存在，漏 free 报 E0513）。
-tag.close;
 // debug_alloc.zx —— 记账分配器：每一次分配都留档，泄漏 / 野指针 / 重复释放
 //                   当场报出来，不用等 valgrind。
 //

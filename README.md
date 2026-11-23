@@ -56,8 +56,9 @@ pub const main = fn () !i32 {
 
 Key points: variables are either `let` (immutable) or `var` (mutable); functions
 are values, written as `const name = fn (args) ret { ... };`; `!T` means
-"either a `T` or an error"; `Self` refers to the enclosing struct; there is no
-`break` — early exit uses labeled expressions:
+"either a `T` or an error"; `Self` refers to the enclosing struct. Loops have
+both `break` / `continue` and labeled yields — `break v;` harvests the nearest
+enclosing loop, while `done: 42;` harvests any labeled scope:
 `const v = done: while (...) { ... done: 42; };`.
 
 ## Build and test
@@ -187,6 +188,7 @@ projects rebuild incrementally per-module `.o`; the language server computes
 ```sh
 zxc errors               # all error codes, grouped by category
 zxc explain E0304        # meaning and fixes for one code
+zxc explain region f.zx  # dump a file's allocation ledger (slot / state / merge)
 ```
 
 The error text lives in `src/errors.c`; `zxc errors` / `zxc explain` read it

@@ -1,3 +1,4 @@
+tag.enable;
 // expect: use after free
 // expect-code: E0512
 // §181：两遍扫描按源码逆序查 defer 体，等于后端 run_defers 的 LIFO 执行

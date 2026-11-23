@@ -4,7 +4,6 @@
 // expect: this allocation was already freed
 // expect-code: E0509
 // expect-count: 1
-tag.close;
 const std = @mod("std");
 
 const main = fn () u8 {

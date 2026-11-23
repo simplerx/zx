@@ -1,3 +1,4 @@
+tag.enable;
 // expect: release in a branch arm must be confirmed
 // expect-code: E0528
 // expect-count: 1

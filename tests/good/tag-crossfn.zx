@@ -1,3 +1,4 @@
+tag.enable;
 // tag-crossfn.zx —— §173 跨函数全链路：形参借出、工厂返回流（所有权随
 // 返回值转移）、别名贴标（const buf = tag.buf; 之后 buf : expr）、
 // allocator.deinit(slice) 与 stackAlloc 作用域自动回收。

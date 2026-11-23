@@ -1,3 +1,4 @@
+tag.enable;
 // tag-releaser.zx —— §170 释放器封装：函数体里直接调 Allocator.free 的函数
 // 是"释放器"，调用点视作一次释放事件，无需额外语法。
 const std = @mod("std");

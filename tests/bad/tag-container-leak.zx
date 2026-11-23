@@ -1,3 +1,4 @@
+tag.enable;
 // expect: is never torn down
 // expect-code: E0513
 // §187：std 容器 .init 调用点自动开账（通用规则，不点名容器），

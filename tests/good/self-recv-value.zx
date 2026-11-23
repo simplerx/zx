@@ -1,0 +1,35 @@
+// self-recv-value.zx —— §224：接收者形态完全由写法决定。
+//
+// `self: Self` 是普通按值参数（进函数复制一份，和方法外的普通形参同规则：
+// 只读槽位）；`self: *const Self` 只读、`self: *Self` 可改调用者本身。
+// 编译器不再按 ty_size(Self) 偷偷把 `Self` 升级成 `const Self *`，调用点
+// 也不再自动补 `&` 或自动解引用——要指针就自己写出来。
+// expect-exit: 0
+// expect-output
+// by-val: 3
+// ro: 3
+// mut: 101
+// deref-call: 103
+// ro-ptr: 103
+const std = @mod("std");
+
+const P = struct {
+    x: i32,
+    y: i32,
+
+    const sum = fn (self: Self) i32 { return self.x + self.y; };
+    const ro = fn (self: *const Self) i32 { return self.x + self.y; };
+    const bump = fn (self: *Self, d: i32) void { self.x = self.x + d; };
+};
+
+pub const main = fn () i32 {
+    var p = P{ .x = 1, .y = 2 };
+    std.println("by-val: {}", p.sum());     // 按值：传副本
+    std.println("ro: {}", p.ro());          // 只读指针：调用点自动取址仍需可取址
+    p.bump(100);                            // 可变指针：改的是调用者本身
+    std.println("mut: {}", p.x);
+    let pp = &p;
+    std.println("deref-call: {}", pp.0.sum());   // 按值方法：显式解引用
+    std.println("ro-ptr: {}", pp.ro());          // 指针实参对只读指针接收者
+    return 0;
+};
