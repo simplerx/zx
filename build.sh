@@ -51,7 +51,7 @@ ZXFE="bin/zxfe$EXE"
 ZXLS="bin/zxls$EXE"
 
 "$ZIG" cc -std=c11 -Wall -Wextra -O1 -o "$ZXC" \
-    src/zxc.c src/ty.c src/val.c src/lex.c src/parse.c src/sema.c src/backend.c src/main.c \
+    src/zxc.c src/ty.c src/val.c src/lex.c src/parse.c src/sema*.c src/backend.c src/main.c \
     src/fe.c src/astload.c src/errors.c src/cbind.c src/csrc.c src/clib.c src/fetch.c src/platform.c
 if [ "$HOST" = windows ]; then rm -f bin/zxc.pdb 2>/dev/null || true; fi
 echo "built $ZXC"

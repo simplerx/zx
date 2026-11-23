@@ -45,7 +45,7 @@ fail=0
 if [ "${ZX_CHECKED:-0}" = "1" ]; then
     printf "== 构建编译器（Debug -O0，zig 的运行时检查开着）\n"
     $ZYG cc -std=c11 -O0 -g -o bin/zxc_checked.exe \
-        src/zxc.c src/ty.c src/val.c src/lex.c src/parse.c src/sema.c \
+        src/zxc.c src/ty.c src/val.c src/lex.c src/parse.c src/sema*.c \
         src/backend.c src/main.c src/fe.c src/astload.c src/errors.c \
         src/cbind.c src/csrc.c src/clib.c src/fetch.c src/platform.c
     ZXC=./bin/zxc_checked.exe
@@ -679,7 +679,7 @@ rm -rf "$pdir" 2>/dev/null || true
 # 手册与离线文档站已删（std 还没定型），只留错误码参考。
 printf "\n== 错误码目录（zxc errors / explain / docs/errors.md 三方一致）\n"
 # 真源 = 编译器里实际会发出的码；文案表必须与它**相等**（多一个少一个都算漂移）
-codes=$(grep -ohE '"E[0-9]{4}"' src/zxc.c src/sema.c src/parse.c src/lex.c src/backend.c | tr -d '"' | sort -u)
+codes=$(grep -ohE '"E[0-9]{4}"' src/zxc.c src/sema*.c src/parse.c src/lex.c src/backend.c | tr -d '"' | sort -u)
 codes_doc=$(grep -ohE '"E[0-9]{4}"' src/errors.c | tr -d '"' | sort -u)
 ncodes=$(printf "%s\n" "$codes" | grep -c '^E')
 $ZXC errors > "$TPFX.cli.codes" 2>&1 || true
@@ -1097,7 +1097,7 @@ fi
 #     用户 2026-11-08 截图踩中：ct_call 克隆执行函数体时只绑
 #     min(形参,实参) 个形参，push() 零参调用把 push 体里的 a、b 全部
 #     假报成 unknown identifier（还带 "did you mean 调用者的 h" 的
-#     误导建议）。KEEP 标记在 src/sema.c ct_call。
+#     误导建议）。KEEP 标记在 src/sema_ct.c ct_call。
 printf "\n== 实参个数不匹配不假报形参 unknown identifier\n"
 BP="$TPFX.arity"
 if mkdir -p "$BP/src" \
