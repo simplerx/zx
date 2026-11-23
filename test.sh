@@ -1240,34 +1240,34 @@ for dt in removed-dot-tuple removed-dot-pattern; do
     fi
 done
 
-# §151：方法接收者只有 Self / *Self；Self 恒不可变，编译期按大小选 ABI。
-# 8B 按值、20B 按指针、方法体 self 发 (*self)、指针接收者自动解引用、
-# 0 大小空聚合带 1 字节占位。
+# §224：方法接收者形态由写法决定，编译器不再按大小改 ABI。
+# `Self` 一律按值（8B 和 20B 都是）、`*Self` 发可变指针、`*const Self` 发
+# const 指针；方法体里不再补 `(*self)`，调用点不再自动补 `&` / 自动解引用。
 $ZXC tests/good/self-recv-abi.zx --emit-c > "$TPFX.s151.c" 2>/dev/null
 if grep -Eq 'sum_[A-Za-z0-9_]+\(ZxS[0-9]+ self\)' "$TPFX.s151.c" \
-   && grep -Eq 'total_[A-Za-z0-9_]+\(ZxS[0-9]+ \* self\)' "$TPFX.s151.c" \
-   && ! grep -Eq 'sum_[A-Za-z0-9_]+\(ZxS[0-9]+ \*' "$TPFX.s151.c" \
-   && grep -qF '(*self).a' "$TPFX.s151.c" \
-   && grep -Eq '_dr[0-9]+ = \(\*self\)' "$TPFX.s151.c" \
-   && grep -Eq '\(\*ps_[0-9_]+\)' "$TPFX.s151.c" \
-   && grep -qF 'uint8_t _zx_pad;' "$TPFX.s151.c"; then
-    printf "  ok   §151 Self 按大小选 ABI（值/指针/(*self)/auto-deref/空聚合占位）\n"
+   && grep -Eq 'total_[A-Za-z0-9_]+\(ZxS[0-9]+ self\)' "$TPFX.s151.c" \
+   && grep -Eq 'copy_[A-Za-z0-9_]+\(ZxS[0-9]+ self\)' "$TPFX.s151.c" \
+   && grep -Eq 'bumpMe_[A-Za-z0-9_]+\(ZxS[0-9]+ \* self,' "$TPFX.s151.c" \
+   && grep -Eq 'peek_[A-Za-z0-9_]+\(ZxS[0-9]+ \* self\)' "$TPFX.s151.c" \
+   && ! grep -qF '(*self)' "$TPFX.s151.c"; then
+    printf "  ok   §224 Self 接收者按写法定形态（值/可变指针/只读指针，无 (*self)）\n"
 else
-    printf "  FAIL §151 Self 接收者 ABI 判定\n"
-    grep -nE 'sum_|total_|copy_|zero_|_zx_pad' "$TPFX.s151.c" | head -20
+    printf "  FAIL §224 Self 接收者形态判定\n"
+    grep -nE 'sum_|total_|copy_|zero_|peek_|bumpMe_' "$TPFX.s151.c" | head -20
     fail=1
 fi
 
-# §152：`&self` 在按指针形态必须穿透成 &((*self))。发成 &(self) 会得到
-# `Self **`，C 编译器直接拒编（B1001）；按值形态仍是 &(self)。
+# §224：`&self` 就是普通形参取址，发 `&(self)`，不再按 ABI 穿透成
+# `&((*self))`（按值 self 是副本，取址取的就是这个副本；要拿调用者地址
+# 得把方法写成 `self: *Self` / `self: *const Self`）。
 # 只读 / 不可返回由 tests/bad/addr-self-*.zx 的 E0403、E0503 守门。
 $ZXC tests/good/addr-self.zx --emit-c > "$TPFX.s152.c" 2>/dev/null
-if grep -qF '&((*self))' "$TPFX.s152.c" \
-   && grep -qF '&((*self).a)' "$TPFX.s152.c" \
-   && grep -qF '&(self)' "$TPFX.s152.c"; then
-    printf "  ok   §152 &self 穿透 ABI（值 &(self) / 指针 &((*self))）\n"
+if grep -qF '&(self)' "$TPFX.s152.c" \
+   && grep -qF '&(self.a)' "$TPFX.s152.c" \
+   && ! grep -qF '&((*self))' "$TPFX.s152.c"; then
+    printf "  ok   §224 &self 按普通形参取址（&(self)，无 ABI 穿透）\n"
 else
-    printf "  FAIL §152 &self 没有按形态取地址\n"
+    printf "  FAIL §224 &self 取址形态\n"
     grep -nE '&\(\(?\*?self' "$TPFX.s152.c" | head -20
     fail=1
 fi
@@ -1725,7 +1725,7 @@ printf "\n== §211 CRT 无缓冲诊断 + 崩溃自动打点\n"
 $ZXC tests/good/debug-alloc-abort.zx -o "$TPFX.d211.exe" > /dev/null 2>&1 || true
 "$TPFX.d211.exe" leak > "$TPFX.d211.panic" 2>&1 || true
 if grep -q 'panic: \[debug_alloc\] memory leak' "$TPFX.d211.panic" \
-   && grep -q 'at .*debug_alloc.zx:249:28' "$TPFX.d211.panic" \
+   && grep -Eq 'at .*debug_alloc\.zx:[0-9]+:[0-9]+ in deinit' "$TPFX.d211.panic" \
    && ! grep -q 'zx: fatal' "$TPFX.d211.panic"; then
     printf "  ok   显式 panic 单条诊断，无重复崩溃报告\n"
 else
@@ -2074,7 +2074,7 @@ else
     printf "  FAIL §220 C 前端交叉\n"; cat "$TPFX.c220c.log"; fail=1
 fi
 
-# §221：捕获指针 *t —— 写回原对象 + 栈借用禁逃逸（tag.close 关不掉）。
+# §221：捕获指针 *t —— 写回原对象 + 栈借用禁逃逸（账本开关关不掉）。
 printf "\n== §221 捕获指针 *t 写回与逃逸检查\n"
 cat > "$TPFX.c221.zx" <<'ZXEOF'
 const std = @mod("std");
@@ -2117,7 +2117,7 @@ if $ZXC --fe=c "$TPFX.c221.zx" -o "$TPFX.c221c.exe" > "$TPFX.c221c.log" 2>&1 \
 else
     printf "  FAIL §221 C 前端交叉\n"; cat "$TPFX.c221c.log"; fail=1
 fi
-# 逃逸出口全拦：每个用例期望 E0532；tag.close 模块也要拦
+# 逃逸出口全拦：每个用例期望 E0532；账本开着（tag.enable）的模块也要拦
 cap_escape() {
     name=$1; body=$2
     printf '%s\n' "$body" > "$TPFX.c221e.zx"
@@ -2135,7 +2135,7 @@ cap_escape field 'const Box = struct { p: ?*i32 = null }; const main = fn () voi
 cap_escape global 'var g: ?*i32 = null; const main = fn () void { var o: ?i32 = 42; if (o) *t { g = t; }; };'
 cap_escape alias 'const main = fn () ?*i32 { var o: ?i32 = 42; if (o) *t { let u = t; return u; }; return null; };'
 cap_escape non-lvalue 'const mk = fn () ?i32 { return 42; }; const main = fn () void { if (mk()) *t { }; };'
-cap_escape tag.close 'tag.close; const main = fn () ?*i32 { var o: ?i32 = 42; if (o) *t { return t; }; return null; };'
+cap_escape ledger-on 'tag.enable; const main = fn () ?*i32 { var o: ?i32 = 42; if (o) *t { return t; }; return null; };'
 
 # §222：and/or 是 &&/|| 的词法别名——同优先级、同短路、可混用；双前端各跑一遍
 printf "\n== §222 and/or 现代布尔拼写\n"
@@ -2173,6 +2173,81 @@ for oldop in '&&' '||'; do
         printf "  FAIL §222 旧拼写 %s 未拒绝\n" "$oldop"; cat "$TPFX.c222old.log"; fail=1
     fi
 done
+
+# §227：f16 编译期收敛 + f128 类型。R10 按目标精度判等（不是 double 判等）。
+printf "\n== §227 f16 编译期舍入 + f128\n"
+cat > "$TPFX.c224.zx" <<'ZXEOF'
+const c16: f16 = 1.0 / 3.0;
+const c128: f128 = 1.0 / 3.0;
+const lit: f128 = 0.1f128;
+const div16 = fn (a: f16, b: f16) f16 { return a / b; };
+const div128 = fn (a: f128, b: f128) f128 { return a / b; };
+const main = fn () i32 {
+    var a16: f16 = 1.0;
+    var b16: f16 = 3.0;
+    var a128: f128 = 1.0;
+    var b128: f128 = 3.0;
+    if (c16 != div16(a16, b16)) { return 1; }
+    if (c128 != div128(a128, b128)) { return 2; }
+    if (lit != 0.1f128) { return 3; }
+    if (@type(f128).size != 16) { return 4; }
+    // 半精度真值 0x1.555p-2，不是 double 的 1/3
+    if ((f32)c16 != 0.333251953125) { return 5; }
+    return 0;
+};
+ZXEOF
+if $ZXC "$TPFX.c224.zx" -o "$TPFX.c224.exe" > "$TPFX.c224.log" 2>&1 \
+   && "$TPFX.c224.exe"; then
+    printf "  ok   f16 ct=rt / f128 ct=rt / 后缀精度 / size=16\n"
+else
+    printf "  FAIL §227 f16/f128 语义\n"; cat "$TPFX.c224.log"; fail=1
+fi
+if $ZXC --fe=c "$TPFX.c224.zx" -o "$TPFX.c224c.exe" > "$TPFX.c224c.log" 2>&1 \
+   && "$TPFX.c224c.exe"; then
+    printf "  ok   C 前端交叉验证通过\n"
+else
+    printf "  FAIL §227 C 前端交叉\n"; cat "$TPFX.c224c.log"; fail=1
+fi
+
+# §225：标签账本默认关闭——tag.enable 才开账；tag.close 已删除。
+printf "\n== §225 标签账本默认关闭 + tag.enable\n"
+# ① 默认关闭：未贴标的堆分配泄漏不报 E0513（账本休眠）
+printf 'const std = @mod("std");\npub const main = fn () u8 {\n    let p = std.heapAlloc(std.heap.page, i32, 4);\n    std.println("{}", p[0]);\n    return 0;\n};\n' > "$TPFX.c225off.zx"
+if $ZXC "$TPFX.c225off.zx" --check > "$TPFX.c225off.log" 2>&1 \
+   && ! grep -q 'E0513' "$TPFX.c225off.log"; then
+    printf "  ok   默认关闭：未贴标泄漏不报 E0513\n"
+else
+    printf "  FAIL §225 默认未关闭\n"; cat "$TPFX.c225off.log"; fail=1
+fi
+# ② tag.enable：同一份源码开账后必须报 E0513
+printf 'tag.enable;\nconst std = @mod("std");\npub const main = fn () u8 {\n    let p = std.heapAlloc(std.heap.page, i32, 4);\n    std.println("{}", p[0]);\n    return 0;\n};\n' > "$TPFX.c225on.zx"
+if ! $ZXC "$TPFX.c225on.zx" --check > "$TPFX.c225on.log" 2>&1 \
+   && grep -q 'E0513' "$TPFX.c225on.log"; then
+    printf "  ok   tag.enable 开账后泄漏报 E0513\n"
+else
+    printf "  FAIL §225 tag.enable 未开账\n"; cat "$TPFX.c225on.log"; fail=1
+fi
+# ③ tag.close 已删：用了报 E0211（两个前端各验一次）
+printf 'tag.close;\nconst main = fn () i32 { return 0; };\n' > "$TPFX.c225close.zx"
+for fe in zx c; do
+    $ZXC --fe=$fe "$TPFX.c225close.zx" --check > "$TPFX.c225close.log" 2>&1 && ck=0 || ck=1
+    if [ "$ck" = 1 ] && grep -q 'E0211' "$TPFX.c225close.log" && grep -q 'gone' "$TPFX.c225close.log"; then
+        printf "  ok   tag.close 删除（--fe=%s 报 E0211）\n" "$fe"
+    else
+        printf "  FAIL §225 tag.close 未删（--fe=%s）\n" "$fe"; cat "$TPFX.c225close.log"; fail=1
+    fi
+done
+# ④ 开关按模块独立：main 不开账、helper 开账——只有 helper 的分配受检
+mkdir -p "$TPFX.c225mod"
+printf 'const h = @mod("h.zx");\npub const main = fn () i32 {\n    h.run();\n    return 0;\n};\n' > "$TPFX.c225mod/main.zx"
+printf 'tag.enable;\nconst std = @mod("std");\npub const run = fn () void {\n    let p = std.heapAlloc(std.heap.page, i32, 4);\n    std.println("{}", p[0]);\n};\n' > "$TPFX.c225mod/h.zx"
+if ! ( cd "$TPFX.c225mod" && "$ZXCW" main.zx --check > "$TPFX.c225mod.log" 2>&1 ) \
+   && grep -q 'E0513' "$TPFX.c225mod.log"; then
+    printf "  ok   开关按模块独立（helper 开账才报）\n"
+else
+    printf "  FAIL §225 开关非按模块独立\n"; cat "$TPFX.c225mod.log"; fail=1
+fi
+
 # 用例会在仓库根留下自己的临时文件：io_fmt.zx 写 io_fmt.tmp，stdfs.zx 建
 # fs_t_dir / fs_t_dir2。跑完统一带走——测试不该往工作区里堆东西。
 rm -rf io_fmt.tmp fs_t_dir fs_t_dir2 2>/dev/null || true

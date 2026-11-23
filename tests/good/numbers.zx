@@ -10,6 +10,7 @@
 // comptime wrap: -56
 // shift mask: 2 0
 // f16/f32/f64: 1.5 3.4028235e+38 0.5
+// f16/f128 ct=rt: true true 16
 // ieee: inf -inf
 // MIN/-1: -128 0
 // neg shift: -2147483648 -4
@@ -17,6 +18,13 @@
 // f2i bounds: 3 -3 -128 2147483647 4294967295 -9223372036854775808
 
 const std = @mod("std");
+
+// R10：编译期常量和运行期每步舍入后必须是同一个值。
+const c16: f16 = 1.0 / 3.0;
+const c128: f128 = 1.0 / 3.0;
+const lit128: f128 = 0.1f128;
+const div16 = fn (a: f16, b: f16) f16 { return a / b; };
+const div128 = fn (a: f128, b: f128) f128 { return a / b; };
 
 const main = fn () void {
     // 128 位极值：字面量、打印、取负
@@ -57,6 +65,15 @@ const main = fn () void {
     let f: f32 = 3.4028235e38;
     let d: f64 = 0.25;
     std.println("f16/f32/f64: {} {} {}", (f32)h, f, d * 2.0);
+
+    // f16/f128：const 按目标精度落值，运行期逐次舍入得到同一个位型
+    var one16: f16 = 1.0;
+    var three16: f16 = 3.0;
+    var one128: f128 = 1.0;
+    var three128: f128 = 3.0;
+    std.println("f16/f128 ct=rt: {} {} {}", c16 == div16(one16, three16),
+               c128 == div128(one128, three128) and lit128 == 0.1f128,
+               @type(f128).size);
 
     // IEEE：浮点除零不是错，给 inf
     var z: f64 = 0.0;
