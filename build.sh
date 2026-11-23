@@ -88,6 +88,7 @@ else
     else
         echo "zxls 构建失败，日志：$ZXLS_LOG" >&2
         tail -6 "$ZXLS_LOG" >&2
+        exit 1
     fi
 fi
 

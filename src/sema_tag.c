@@ -1288,7 +1288,8 @@ static Module *alloc_factory_module(Node *e, int depth) {
 /* §187（用户裁定，通用规则）：建槽只有一个入口——std.heapAlloc /
  * std.heapSlice / std.stackAlloc 内建检查处，进了就建，不按容器/模块
  * 点名豁免。Allocator 接口的 alloc/free 函数指针是实现细节（std 实现
- * 层内部才允许直接碰，用户代码 E0527）。arena 这类「整批管理」的
+ * 层内部才允许直接碰（path_is_std_internal）；用户代码无豁免）。
+ * arena 这类「整批管理」的
  * 分配器，其内存的账由两条通用机制接住：
  *   1. 容器账——std 内部模块的 `.init` 调用点自动开账（不点名哪个
  *      容器：std 里叫 init 的构造器都是要 deinit 的资源，新增容器

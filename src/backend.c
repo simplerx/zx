@@ -773,8 +773,7 @@ static char *cnames(const char *s) {
  * 撞成 C 重定义（名字不会被任何引用点用到）。 */
 static char *ignored_cname(void) {
     static int n;
-    char *s = (char *)malloc(24);
-    if (!s) return NULL;
+    char *s = xmalloc(24);
     snprintf(s, 24, "_ignored_%d", n++);
     return s;
 }

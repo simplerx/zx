@@ -17,6 +17,13 @@ OUT="$REPO_ROOT/editor/zed/grammars/zx.wasm"
 
 ZIG="${1:-$REPO_ROOT/.toolchain/zig.exe}"
 
+# 本脚本只把 src/parser.c 编成 wasm，不跑 generate。改了 grammar.js 却忘了
+# 重新生成时，编出来的是旧语法（§234 踩过：parser.c 停在 §172，wasm 仍认
+# &&/||，而编译器已改成 and/or）。CI 的 grammar-sync job 会挡，本地先提醒。
+if [ grammar.js -nt src/parser.c ]; then
+    echo "WARNING: grammar.js is newer than src/parser.c -- run 'tree-sitter generate' first" >&2
+fi
+
 # 最小 libc stub（parser.c 只用 NULL/bool/stdint），避免拉入 wasi crt
 STUB="$(mktemp -d)"
 cat > "$STUB/stdbool.h" <<'EOF'

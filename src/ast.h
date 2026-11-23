@@ -142,7 +142,8 @@ struct Node {
      * 编译期信息，编译完擦除。 */
     unsigned char ptr_taint;
     /* §187：std.free / a.deinit(s) 变换产物（改写形状 a.free(...)）。
-     * 唯一入口拦截（E0527）要放行变换产物、只拦手写的 al.free(...)。 */
+     * 唯一入口拦截只认手写的 al.free(...)；std.free / a.deinit 的变换产物
+     * 带此标记，必须放行。 */
     unsigned char xform_free;
     /* §187：adopt / 容器开账 / 总清算三个钩子已在该调用节点跑过
      * （deps 拓扑会复检函数体，钩子必须节点级幂等）。 */

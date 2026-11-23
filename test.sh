@@ -679,7 +679,9 @@ rm -rf "$pdir" 2>/dev/null || true
 # 手册与离线文档站已删（std 还没定型），只留错误码参考。
 printf "\n== 错误码目录（zxc errors / explain / docs/errors.md 三方一致）\n"
 # 真源 = 编译器里实际会发出的码；文案表必须与它**相等**（多一个少一个都算漂移）
-codes=$(grep -ohE '"E[0-9]{4}"' src/zxc.c src/sema*.c src/parse.c src/lex.c src/backend.c | tr -d '"' | sort -u)
+# 扫整个 src/*.c 而不是点名几个文件：新加的 .c 里出现错误码字面量时，
+# 不能因为没被点名就悄悄跳出三方一致性检查。
+codes=$(grep -ohE '"E[0-9]{4}"' src/*.c | tr -d '"' | sort -u)
 codes_doc=$(grep -ohE '"E[0-9]{4}"' src/errors.c | tr -d '"' | sort -u)
 ncodes=$(printf "%s\n" "$codes" | grep -c '^E')
 $ZXC errors > "$TPFX.cli.codes" 2>&1 || true
@@ -1664,6 +1666,22 @@ if [ "$ndiff" = "0" ]; then
     printf "  ok   双前端对拍 0 差异\n"
 else
     printf "  FAIL 双前端对拍 %s 处差异（sh bootstrap/diff_ast.sh 看明细）\n" "$ndiff"
+    fail=1
+fi
+
+# §234：词法层对拍（C lexer vs Zx lexer）。此前 diff_lex.sh 是孤儿脚本，
+# 而且 lexdump.exe 从没有人构建——接进回归，与 AST 对拍互补：token 级
+# 漂移会在 AST 之前暴露。必须每次重建 lexdump（自带一份 Zx 词法器）。
+if $ZXC bootstrap/lexdump.zx -o bin/lexdump.exe > "$TPFX.lexdump.log" 2>&1; then
+    printf "  ok   构建 lexdump（词法对拍工具）\n"
+else
+    printf "  FAIL lexdump 构建失败\n"; cat "$TPFX.lexdump.log"; fail=1
+fi
+lexdiff=$(sh bootstrap/diff_lex.sh 2>/dev/null | tail -1)
+if printf '%s' "$lexdiff" | grep -q '^lex diff: [0-9]* identical, 0 differ'; then
+    printf "  ok   双前端词法对拍（%s）\n" "$lexdiff"
+else
+    printf "  FAIL 双前端词法对拍：%s（sh bootstrap/diff_lex.sh 看明细）\n" "$lexdiff"
     fail=1
 fi
 
