@@ -768,10 +768,8 @@ Type *check_block(Node *n) {
     return t;
 }
 
-void check_stmt(Node *n) {
-    if (!n) return;
-    switch (n->kind) {
-    case NK_DECL:
+/* §229: split from void check_stmt(Node *n) { -- one static helper per case group. */
+static void cs_00_nk_decl(Node *n) {
         /* 文件作用域的惰性模块声明：不急切解析（见 decl_is_lazy_module）。
          * 函数体里的 decl 不在此列——那是真正的运行时绑定，必须当场算。 */
         if (g_root_stmts && decl_is_lazy_module(n)) return;
@@ -817,7 +815,9 @@ void check_stmt(Node *n) {
         }
         return;
 
-    case NK_TAG_APPLY:
+}
+
+static void cs_01_nk_tag_apply(Node *n) {
         /* 语句位置：tag.enable / tag.batch / 独立贴标（§225：tag.close 已删） */
         if (!strcmp(n->name, "enable")) {
             /* §225：账本默认关闭，这一行才让本模块的标签系统生效——
@@ -871,7 +871,10 @@ void check_stmt(Node *n) {
         check_expr(n->b, NULL);
         return;
 
-    case NK_TAG_BIND: {
+}
+
+static void cs_02_nk_tag_bind(Node *n) {
+    {
         /* §174：语句位置（无 `= expr`）——已有变量的重绑/终结。
          *   tag v : tag.x;   已有变量续上 tag.x 的链（值必须无标签）
          *   tag v : null;    终结标记（释放责任自负，替代点形式） */
@@ -1062,12 +1065,17 @@ void check_stmt(Node *n) {
         return;
     }
 
-    case NK_FN:
+}
+
+static void cs_03_nk_fn(Node *n) {
         if (n->sym) ensure(n->sym);
         else { resolve_fn_type(n); if (!n->flag && n->b && !fn_is_generic(n)) schedule_body(n); }
         return;
 
-    case NK_RETURN: {
+}
+
+static void cs_04_nk_return(Node *n) {
+    {
         if (!g_fn_depth) { err_at(n->line, n->col, "`return` outside a function"); return; }
         if (g_in_defer) { err_at(n->line, n->col, "`return` is not allowed inside `defer`/`defer err`"); }
         Type *want = g_ret ? g_ret : ty_void();
@@ -1153,7 +1161,10 @@ void check_stmt(Node *n) {
         return;
     }
 
-    case NK_CONTINUE: {
+}
+
+static void cs_05_nk_continue(Node *n) {
+    {
         Label *l = label_find_loop(n->label);
         if (!l) {
             if (n->label) err_at(n->line, n->col, "no enclosing loop labeled '%s'", n->label);
@@ -1162,7 +1173,10 @@ void check_stmt(Node *n) {
         return;
     }
 
-    case NK_YIELD: {
+}
+
+static void cs_06_nk_yield(Node *n) {
+    {
         /* §213：label == NULL 是 `break`（脱糖成"最近外循环的收割"）。
          * 走 loop-only 查找：带标签的块/臂不吃 break，只认循环帧。 */
         bool is_break = n->label == NULL;
@@ -1196,8 +1210,10 @@ void check_stmt(Node *n) {
         return;
     }
 
-    case NK_DEFER:
-    case NK_ERRDEFER: {
+}
+
+static void cs_07_nk_defer(Node *n) {
+    {
         /* defer err 只在错误返回路径上执行——不返回错误的函数里它永远
          * 不会触发，几乎肯定是写错了（Zig 的 errdefer 同样拒绝）。 */
         if (n->kind == NK_ERRDEFER && (!g_ret || g_ret->kind != TY_ERR))
@@ -1235,7 +1251,10 @@ void check_stmt(Node *n) {
         return;
     }
 
-    default: {
+}
+
+static void cs_08_default(Node *n) {
+    {
         /* 顶层语句是裸 @error 时只查类型、不做投机折叠：check_expr
          * 会顺手 fold 填缓存，而 fold 到 @error 就是引爆——可这里的
          * 语句值是要丢弃的，前面一条 `if (…) { return …; }` 特化成恒真
@@ -1259,6 +1278,21 @@ void check_stmt(Node *n) {
                    ty_str(st));
         return;
     }
+}
+
+void check_stmt(Node *n) {
+    if (!n) return;
+    switch (n->kind) {
+    case NK_DECL: cs_00_nk_decl(n); return;
+    case NK_TAG_APPLY: cs_01_nk_tag_apply(n); return;
+    case NK_TAG_BIND: cs_02_nk_tag_bind(n); return;
+    case NK_FN: cs_03_nk_fn(n); return;
+    case NK_RETURN: cs_04_nk_return(n); return;
+    case NK_CONTINUE: cs_05_nk_continue(n); return;
+    case NK_YIELD: cs_06_nk_yield(n); return;
+    case NK_DEFER: cs_07_nk_defer(n); return;
+    case NK_ERRDEFER: cs_07_nk_defer(n); return;
+    default: cs_08_default(n); return;
     }
 }
 

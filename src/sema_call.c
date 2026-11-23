@@ -1109,11 +1109,8 @@ static Type *check_builtin(Node *n, Type *expect) {
     return BAD(n, "unknown builtin @%s", nm);
 }
 
-Type *check_expr_raw(Node *n, Type *expect) {
-    if (!n) return ty_void();
-
-    switch (n->kind) {
-    case NK_INT:
+/* §229: split from Type *check_expr_raw(Node *n, Type *expect) { -- one static helper per case group. */
+static Type *ce_00_nk_int(Node *n, Type *expect) {
         if (expect && (ty_is_int(expect) || ty_is_float(expect))) {
             if (ty_is_int(expect) && !lit_fits_expr(n, expect)) {
                 if (n->flag) {
@@ -1130,7 +1127,10 @@ Type *check_expr_raw(Node *n, Type *expect) {
             return type_of(n, expect->elem);
         return type_of(n, ty_comptime_int());
 
-    case NK_FLOAT: {
+}
+
+static Type *ce_01_nk_float(Node *n, Type *expect) {
+    {
         /* 显式后缀定型：f128 的十进制文本必须按 128 位解析，若先落回
          * comptime_float(double) 再转 f128，0.1f128 就只剩 53 位精度。 */
         Type *suf = NULL;
@@ -1147,7 +1147,9 @@ Type *check_expr_raw(Node *n, Type *expect) {
         return type_of(n, ty_comptime_float());
     }
 
-    case NK_CHAR:
+}
+
+static Type *ce_02_nk_char(Node *n, Type *expect) {
         /* char 字面量比整数字面量多一层含义：它既是"字节"（u8），也是
          * "这个字符的码位"。落点是整数类型时按落点定型——`switch (code)`
          * 的 subject 是 i32，`'a'` 就该是 i32；没有落点才是 u8。
@@ -1159,7 +1161,9 @@ Type *check_expr_raw(Node *n, Type *expect) {
         }
         return type_of(n, ty_u8());
 
-    case NK_STR:
+}
+
+static Type *ce_03_nk_str(Node *n) {
         /* 字符串字面量是**定长数组指针** `*[N]const u8`（N 是字节数，
          * 不含结尾 0），不是切片——长度挂在类型里，`.len` 是编译期常量，
          * 也挡得住把字面量当可写缓冲区。传给 `[]const u8` 形参时按
@@ -1167,10 +1171,14 @@ Type *check_expr_raw(Node *n, Type *expect) {
          * 用户 2026-11-09 定：字符串等于 zx 的数组 *[N]const u8。 */
         return type_of(n, ty_ptr(ty_u8(), true, true, (uint64_t)n->str_len));
 
-    case NK_BOOL:
+}
+
+static Type *ce_04_nk_bool(Node *n) {
         return type_of(n, ty_bool());
 
-    case NK_NULL:
+}
+
+static Type *ce_05_nk_null(Node *n, Type *expect) {
         /* 有落点就定型：`?T` 是原来的语义；`*T` / `*fn` 是 C 互操作——
          * C 的 NULL 就是 0 指针，没必要逼人写 `(*T)(0)`。没有落点仍然
          * 无类型（`let a = null;` 照旧报错），否则"null 是值"又活了。 */
@@ -1179,11 +1187,16 @@ Type *check_expr_raw(Node *n, Type *expect) {
             return type_of(n, expect);
         return type_of(n, ty_null());
 
-    case NK_UNDEF:
+}
+
+static Type *ce_06_nk_undef(Node *n, Type *expect) {
         if (expect) return type_of(n, expect);
         return type_of(n, ty_undef());
 
-    case NK_IDENT: {
+}
+
+static Type *ce_07_nk_ident(Node *n) {
+    {
         Symbol *s = lookup(n->name);
         if (!s) s = synthetic_fn_sym(n->name);   /* §150 合成直调目标 */
         if (!s) {
@@ -1256,13 +1269,22 @@ Type *check_expr_raw(Node *n, Type *expect) {
         return type_of(n, s->ty);
     }
 
-    case NK_BIN:      return check_binary(n, expect);
-    case NK_UN:       return check_unary(n, expect);
+}
+
+static Type *ce_08_nk_bin(Node *n, Type *expect) {
+    return check_binary(n, expect);
+}
+
+static Type *ce_09_nk_un(Node *n, Type *expect) {
+    return check_unary(n, expect);
+}
+
+static Type *ce_10_nk_unwrap(Node *n) {
 
     /* `e.?` —— 解包。空（?T 的 none）/ 出错（!T 的 err）在运行时 trap，
      * 与整数除零同一个处置方式：先 flush，再打一行说明，然后 abort。
      * 它只给值，不是左值——`x.? = 1` 会被 check_assign 拦掉。 */
-    case NK_UNWRAP: {
+    {
         Type *t = check_expr(n->a, NULL);
         if (!t || t->kind == TY_INVALID) return ty_invalid();
         if (t->kind == TY_NULL)
@@ -1299,7 +1321,10 @@ Type *check_expr_raw(Node *n, Type *expect) {
     /* `try e` —— 出错就带着同一个码往上返回，成功取载荷。
      * 它是明式的：调用点写着 `try`，读者就知道这个函数在这里可能退出；
      * 没有栈展开、没有 catch 块、类型也不变（还是那个 `!T`）。 */
-    case NK_TRY: {
+}
+
+static Type *ce_11_nk_try(Node *n) {
+    {
         Type *t = check_expr(n->a, NULL);
         if (!t || t->kind == TY_INVALID) return ty_invalid();
         /* `defer` / `defer err` 体里不能往外抛：两者都在返回路径上执行，
@@ -1349,7 +1374,10 @@ Type *check_expr_raw(Node *n, Type *expect) {
     /* §171 `try e err { … }` —— 捕获形式：出错不外抛，err 绑错误码，
      * 块产出兜底值 T；成功取载荷。两臂 unify，整体类型 T。
      * tag 臂账本挂在本节点上（helper 不会自动覆盖新分支）。 */
-    case NK_TRY_CAPTURE: {
+}
+
+static Type *ce_12_nk_try_capture(Node *n) {
+    {
         Type *t = check_expr(n->a, NULL);
         if (!t || t->kind == TY_INVALID) {
             check_block(n->b);             /* 别把块里的错漏掉 */
@@ -1396,7 +1424,10 @@ Type *check_expr_raw(Node *n, Type *expect) {
     }
 
     /* `a orelse b` —— 有值取载荷，空/错取 b。b 只在真的空/错时求值。 */
-    case NK_ORELSE: {
+}
+
+static Type *ce_13_nk_orelse(Node *n, Type *expect) {
+    {
         Type *t = check_expr(n->a, NULL);
         if (!t || t->kind == TY_INVALID) {
             check_expr(n->b, expect);      /* 右边照样检查，别把错漏过去 */
@@ -1429,12 +1460,27 @@ Type *check_expr_raw(Node *n, Type *expect) {
             coerce_node(n->b, alt, elem, "`orelse` alternative");
         return type_of(n, elem);
     }
-    case NK_CAST:     return check_cast(n);
-    case NK_FIELD:    return check_field(n);
-    case NK_INDEX:    return check_index(n);
-    case NK_SLICE:    return check_slice_expr(n);
+}
 
-    case NK_TAG_APPLY: {
+static Type *ce_14_nk_cast(Node *n) {
+    return check_cast(n);
+}
+
+static Type *ce_15_nk_field(Node *n) {
+    return check_field(n);
+}
+
+static Type *ce_16_nk_index(Node *n) {
+    return check_index(n);
+}
+
+static Type *ce_17_nk_slice(Node *n) {
+    return check_slice_expr(n);
+}
+
+static Type *ce_18_nk_tag_apply(Node *n, Type *expect) {
+
+    {
         /* 表达式位置：贴标（tag.x : expr）或裸引用。开关与批量声明
          * （tag.enable / tag.batch）是语句位置的事（check_stmt）。 */
         if (!strcmp(n->name, "enable") || !strcmp(n->name, "batch")) {
@@ -1457,7 +1503,10 @@ Type *check_expr_raw(Node *n, Type *expect) {
         return vt;
     }
 
-    case NK_TAG_BIND: {
+}
+
+static Type *ce_19_nk_tag_bind(Node *n, Type *expect) {
+    {
         
         /* §174 续链：tag newVar : tag.myTag = oldVar;（parse 降糖成
          * `let newVar = <本节点>`）。给**丢失了标签**的值重新绑回一个
@@ -1607,7 +1656,10 @@ Type *check_expr_raw(Node *n, Type *expect) {
         return vt;
     }
 
-    case NK_CALL: {
+}
+
+static Type *ce_20_nk_call(Node *n, Type *expect) {
+    {
         /* §189：std.move —— 编译期账本操作（所有权转移），std 里没有
          * 真实的 move 函数体，不走普通调用检查。 */
         if (call_is_std_move(n)) return type_of(n, check_std_move(n));
@@ -1631,12 +1683,27 @@ Type *check_expr_raw(Node *n, Type *expect) {
         region_handle_call(n);
         return r;
     }
-    case NK_STRUCT_LIT: return check_struct_lit(n, expect);
-    case NK_ARRAY_LIT:  return check_array_lit(n, n->items, n->nitems, expect);
-    case NK_TUPLE:    return check_tuple_lit(n, expect);
-    case NK_BUILTIN:  return check_builtin(n, expect);
+}
 
-    case NK_ANON_STRUCT: {
+static Type *ce_21_nk_struct_lit(Node *n, Type *expect) {
+    return check_struct_lit(n, expect);
+}
+
+static Type *ce_22_nk_array_lit(Node *n, Type *expect) {
+    return check_array_lit(n, n->items, n->nitems, expect);
+}
+
+static Type *ce_23_nk_tuple(Node *n, Type *expect) {
+    return check_tuple_lit(n, expect);
+}
+
+static Type *ce_24_nk_builtin(Node *n, Type *expect) {
+    return check_builtin(n, expect);
+}
+
+static Type *ce_25_nk_anon_struct(Node *n, Type *expect) {
+
+    {
         /* .{ .x = e } —— 匿名结构体值。
          *
          * 有期望类型时由期望类型驱动（R6）：`var v: Vec = .{ .x = 1 }` 里的
@@ -1669,7 +1736,10 @@ Type *check_expr_raw(Node *n, Type *expect) {
         return type_of(n, t);
     }
 
-    case NK_MODULE: {
+}
+
+static Type *ce_26_nk_module(Node *n) {
+    {
         n->type_val = ty_void();
         if (n->str && !strcmp(n->str, "std")) {
             Module *sm = module_load_std(n->line, n->col);
@@ -1690,7 +1760,10 @@ Type *check_expr_raw(Node *n, Type *expect) {
         return type_of(n, ty_type());
     }
 
-    case NK_FN: {
+}
+
+static Type *ce_27_nk_fn(Node *n) {
+    {
         if (n->flag) {                                  /* fn(…) T; 是类型 */
             Type *t = resolve_fn_type(n);
             n->ty = ty_type();
@@ -1709,46 +1782,99 @@ Type *check_expr_raw(Node *n, Type *expect) {
     }
 
     /* 类型表达式出现在值位置：`const S = struct{…}` / `*[3]i32` 等 */
-    case NK_TYPE_IDENT:
-    case NK_PTR_TYPE:
-    case NK_SLICE_TYPE:
-    case NK_TUPLE_TYPE:
-    case NK_STRUCT_TYPE:
-    case NK_UNION_TYPE:
-    case NK_ENUM_TYPE:
-    case NK_OPT_TYPE:
-    case NK_ERR_TYPE:
-    case NK_VEC_TYPE:
-    case NK_ERR_SET: {
+}
+
+static Type *ce_28_nk_type_ident(Node *n) {
+    {
         Type *t = resolve_type(n);
         n->type_val = t;
         return type_of(n, ty_type());
     }
 
-    case NK_BLOCK:
-    case NK_IF:
-    case NK_WHILE:
-    case NK_FOR:
-    case NK_SWITCH:
+}
+
+static Type *ce_29_nk_block(Node *n, Type *expect) {
         return sema_construct(n, expect);
 
-    case NK_RANGE:
+}
+
+static Type *ce_30_nk_range(Node *n) {
         return BAD(n, "a range `lo..hi` is only valid inside `for (...)`");
 
-    case NK_DEFER:
-    case NK_ERRDEFER:
-    case NK_RETURN:
-    case NK_CONTINUE:
-    case NK_YIELD:
-    case NK_DECL:
+}
+
+static Type *ce_31_nk_defer(Node *n) {
         check_stmt(n);
         return type_of(n, ty_void());
 
-    case NK_PAIR:
+}
+
+static Type *ce_32_nk_pair(Node *n, Type *expect) {
         return check_expr(n->a, expect);
 
-    default:
+}
+
+static Type *ce_33_default(Node *n) {
         return BAD(n, "unsupported expression here (node kind %d)", (int)n->kind);
+}
+
+Type *check_expr_raw(Node *n, Type *expect) {
+    if (!n) return ty_void();
+
+    switch (n->kind) {
+    case NK_INT: return ce_00_nk_int(n, expect);
+    case NK_FLOAT: return ce_01_nk_float(n, expect);
+    case NK_CHAR: return ce_02_nk_char(n, expect);
+    case NK_STR: return ce_03_nk_str(n);
+    case NK_BOOL: return ce_04_nk_bool(n);
+    case NK_NULL: return ce_05_nk_null(n, expect);
+    case NK_UNDEF: return ce_06_nk_undef(n, expect);
+    case NK_IDENT: return ce_07_nk_ident(n);
+    case NK_BIN: return ce_08_nk_bin(n, expect);
+    case NK_UN: return ce_09_nk_un(n, expect);
+    case NK_UNWRAP: return ce_10_nk_unwrap(n);
+    case NK_TRY: return ce_11_nk_try(n);
+    case NK_TRY_CAPTURE: return ce_12_nk_try_capture(n);
+    case NK_ORELSE: return ce_13_nk_orelse(n, expect);
+    case NK_CAST: return ce_14_nk_cast(n);
+    case NK_FIELD: return ce_15_nk_field(n);
+    case NK_INDEX: return ce_16_nk_index(n);
+    case NK_SLICE: return ce_17_nk_slice(n);
+    case NK_TAG_APPLY: return ce_18_nk_tag_apply(n, expect);
+    case NK_TAG_BIND: return ce_19_nk_tag_bind(n, expect);
+    case NK_CALL: return ce_20_nk_call(n, expect);
+    case NK_STRUCT_LIT: return ce_21_nk_struct_lit(n, expect);
+    case NK_ARRAY_LIT: return ce_22_nk_array_lit(n, expect);
+    case NK_TUPLE: return ce_23_nk_tuple(n, expect);
+    case NK_BUILTIN: return ce_24_nk_builtin(n, expect);
+    case NK_ANON_STRUCT: return ce_25_nk_anon_struct(n, expect);
+    case NK_MODULE: return ce_26_nk_module(n);
+    case NK_FN: return ce_27_nk_fn(n);
+    case NK_TYPE_IDENT: return ce_28_nk_type_ident(n);
+    case NK_PTR_TYPE: return ce_28_nk_type_ident(n);
+    case NK_SLICE_TYPE: return ce_28_nk_type_ident(n);
+    case NK_TUPLE_TYPE: return ce_28_nk_type_ident(n);
+    case NK_STRUCT_TYPE: return ce_28_nk_type_ident(n);
+    case NK_UNION_TYPE: return ce_28_nk_type_ident(n);
+    case NK_ENUM_TYPE: return ce_28_nk_type_ident(n);
+    case NK_OPT_TYPE: return ce_28_nk_type_ident(n);
+    case NK_ERR_TYPE: return ce_28_nk_type_ident(n);
+    case NK_VEC_TYPE: return ce_28_nk_type_ident(n);
+    case NK_ERR_SET: return ce_28_nk_type_ident(n);
+    case NK_BLOCK: return ce_29_nk_block(n, expect);
+    case NK_IF: return ce_29_nk_block(n, expect);
+    case NK_WHILE: return ce_29_nk_block(n, expect);
+    case NK_FOR: return ce_29_nk_block(n, expect);
+    case NK_SWITCH: return ce_29_nk_block(n, expect);
+    case NK_RANGE: return ce_30_nk_range(n);
+    case NK_DEFER: return ce_31_nk_defer(n);
+    case NK_ERRDEFER: return ce_31_nk_defer(n);
+    case NK_RETURN: return ce_31_nk_defer(n);
+    case NK_CONTINUE: return ce_31_nk_defer(n);
+    case NK_YIELD: return ce_31_nk_defer(n);
+    case NK_DECL: return ce_31_nk_defer(n);
+    case NK_PAIR: return ce_32_nk_pair(n, expect);
+    default: return ce_33_default(n);
     }
 }
 
