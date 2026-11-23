@@ -401,6 +401,18 @@ Value *ct_call(Node *n) {
 
     Value *callee = ct_eval(n->a);
     if (!callee || callee->kind != V_FN || !callee->fn) return NULL;
+    /* 泛型调用在 check_call 里已经单态化：n->inst 是绑定好 T 的实例，
+     * callee->fn 只是原始模板。模板签名里的 T 只在 specialize_raw 的临时
+     * 作用域里有意义，clone 后拿它在 ct_call 的模块作用域里重新解析必然
+     * 落空，报假的 E0401 unknown type 'T'——所以折叠泛型调用时绝不 clone
+     * 模板（也不 clone 实例：那会把实例体里的方法/局部重新检查一遍，报假的
+     * unused parameter）。实例在 specialize_raw 里已经算好签名并跑过体：
+     * 类型构造函数直接取它的返回值，其余泛型调用不参与编译期折叠。 */
+    if (fn_is_generic(callee->fn)) {
+        if (!n->inst) return NULL;
+        Type *tv = instance_result(n->inst);
+        return tv ? val_type(tv) : NULL;
+    }
 
     /* 正在检查这个函数自己的体，又要折叠对它的调用 → 交给运行时 */
     if (g_ct_checking && ct_on_stack(callee->fn)) return NULL;

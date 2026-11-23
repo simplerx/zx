@@ -1,0 +1,56 @@
+// §231：跨模块泛型函数在辅助函数（非 main）内实例化。
+// 曾误报 E0401 unknown type 'T'：ct_call 折叠泛型调用时拿未绑定的模板
+// 重新解析签名。守门确保任意调用层级都能正确单态化。
+const std = @mod("std");
+
+const lessI = fn (a: i32, b: i32) bool { return a < b; };
+const greaterI = fn (a: i32, b: i32) bool { return a > b; };
+
+// 一层辅助函数内的跨模块泛型函数调用
+const sortAsc = fn (xs: []i32) void {
+    std.sort.sort(i32, xs, lessI);
+};
+
+// 同一模块两个泛型函数，都在辅助函数内实例化
+const findIt = fn (xs: []i32, key: i32) ?usize {
+    return std.sort.binarySearch(i32, xs, key, lessI);
+};
+
+// 零参数辅助函数：局部变量全是编译期值，ct_call 会真的折叠它——
+// 旧编译器就是在这一层拿泛型模板重新解析签名，误报 E0401。
+const checkFoldable = fn () bool {
+    var xs: [4]i32 = .{ 9, 3, 7, 1 };
+    std.sort.sort(i32, xs[0..], lessI);
+    return xs[0] == 1 and xs[3] == 9;
+};
+
+// 两层辅助：main -> outer -> inner -> 泛型调用（触发 ct_call 折叠链）
+const inner = fn (xs: []i32) bool {
+    std.sort.sort(i32, xs, greaterI);
+    return xs[0] == 5;
+};
+const outer = fn (xs: []i32) bool {
+    return inner(xs);
+};
+
+const main = fn () i32 {
+    var a: [5]i32 = .{ 4, 1, 5, 2, 3 };
+    sortAsc(a[0..]);
+    if (a[0] != 1 or a[4] != 5) { return 1; }
+    if (findIt(a[0..], 3)) p {
+        if (p != 2) { return 2; }
+    } else { return 3; }
+    if (findIt(a[0..], 9)) _ { return 4; }
+
+    if (!checkFoldable()) { return 5; }
+
+    var b: [5]i32 = .{ 4, 1, 5, 2, 3 };
+    if (!outer(b[0..])) { return 6; }
+    if (b[0] != 5 or b[4] != 1) { return 7; }
+
+    std.println("crossmod generic helper ok");
+    return 0;
+};
+
+// expect-output
+// crossmod generic helper ok

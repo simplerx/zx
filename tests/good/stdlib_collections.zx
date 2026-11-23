@@ -1,9 +1,6 @@
 // 标准库集合/字符串 API 守门：sort / binarySearch、str 新增函数、
 // HashMap 新放出的 pub 方法。全是普通 Zx 代码，编译 + 运行 + 输出断言。
-//
-// 注意：跨模块泛型函数（std.sort.sort 等）的调用放在 main 里；编译器目前
-// 在辅助函数里实例化跨模块泛型函数时有作用域问题（T 解析失败），与本用例
-// 要守的 API 无关。
+// 跨模块泛型函数在辅助函数内的实例化另见 crossmod_generic_helper.zx (§231)。
 
 const std = @mod("std");
 

@@ -2266,6 +2266,23 @@ for fe in zx c; do
     fi
 done
 
+# §231：跨模块泛型函数在辅助函数里实例化——旧实现里 ct_call 折叠零参数
+# 辅助函数时会拿未绑定的泛型模板重新解析签名，误报 E0401 unknown type 'T'。
+# 新守门文件由 runner 自动发现并跑输出断言；这里双前端各编一次并核对。
+printf "\n== §231 跨模块泛型函数辅助函数内实例化\n"
+for fe in zx c; do
+    if $ZXC --fe=$fe tests/good/crossmod_generic_helper.zx -o "$TPFX.cg$fe.exe" \
+            > "$TPFX.cg$fe.log" 2>&1 \
+       && "$TPFX.cg$fe.exe" > "$TPFX.cg$fe.out" 2>&1 \
+       && grep -q '^crossmod generic helper ok$' "$TPFX.cg$fe.out"; then
+        printf "  ok   辅助函数内跨模块泛型函数（--fe=%s）\n" "$fe"
+    else
+        printf "  FAIL §231 辅助函数内跨模块泛型函数（--fe=%s）\n" "$fe"
+        cat "$TPFX.cg$fe.log" "$TPFX.cg$fe.out" 2>/dev/null
+        fail=1
+    fi
+done
+
 # 用例会在仓库根留下自己的临时文件：io_fmt.zx 写 io_fmt.tmp，stdfs.zx 建
 # fs_t_dir / fs_t_dir2。跑完统一带走——测试不该往工作区里堆东西。
 rm -rf io_fmt.tmp fs_t_dir fs_t_dir2 2>/dev/null || true
