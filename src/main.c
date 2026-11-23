@@ -1549,6 +1549,217 @@ static char *str_append(char *dst, const char *src) {
     return r;
 }
 
+/* ---- §233 token 间空格规范化 ----
+ * 原 fmt 只归一缩进/尾空白/尾逗号拆行，不碰 token 间空格（x=1 原样保留），
+ * 不算正式格式化工具。这里在最终行文本上做词法感知的空格归一：
+ *   二元/赋值/比较运算符两侧一个空格；, ; : 后一个空格、前不留；
+ *   关键字与开括号间一个空格（if ( / fn (），调用与类型构造紧贴（f( / T{）；
+ *   括号内侧、成员访问、一元前缀、@ 内建、数组类型 [N]T 不留空格；
+ *   字符串/字符/注释整体保护，内部一字不改。
+ * 纯 token 级变换：不改 token 序列，天然幂等，产物仍可编译。 */
+typedef enum {
+    FS_WORD, FS_LIT, FS_COMMENT,
+    FS_OPEN, FS_CLOSE, FS_LBRACE, FS_RBRACE,
+    FS_COMMA, FS_SEMI, FS_COLON, FS_DOT,
+    FS_PREFIX,                  /* @ ? ~ ! */
+    FS_UNARY,                   /* + - * &，unary 标记区分一元/二元 */
+    FS_BIN, FS_ARROW
+} FsKind;
+
+typedef struct { FsKind kind; const char *s; size_t n; bool unary; } FsTok;
+
+static bool fs_kw(const char *s, size_t n) {
+    static const char *const kws[] = {
+        "const","let","var","fn","type","null","undefined",
+        "if","else","while","for","inline","switch","continue",
+        "return","defer","break","struct","union","enum","error",
+        "pub","extern","orelse","try","and","or"
+    };
+    for (size_t i = 0; i < sizeof kws / sizeof *kws; i++)
+        if (strlen(kws[i]) == n && !memcmp(s, kws[i], n)) return true;
+    return false;
+}
+
+/* 把一行切成 token。返回动态数组与数量；调用方 free。 */
+static FsTok *fs_lex(const char *s, size_t *out_n) {
+    size_t cap = 32, n = 0;
+    FsTok *v = xmalloc(cap * sizeof *v);
+    const char *p = s;
+    while (*p) {
+        if (*p == ' ' || *p == '\t' || *p == '\r') { p++; continue; }
+        if (n == cap) { cap *= 2; v = xrealloc(v, cap * sizeof *v); }
+        FsTok t = {0};
+        t.s = p;
+        char c = *p;
+        if (c == '/' && p[1] == '/') {
+            while (*p) p++;
+            t.kind = FS_COMMENT;
+        } else if (c == '/' && p[1] == '*') {
+            p += 2;
+            while (*p && !(*p == '*' && p[1] == '/')) p++;
+            if (*p) p += 2;
+            t.kind = FS_COMMENT;
+        } else if (c == '"' || c == '\'') {
+            char q = c;
+            p++;
+            while (*p) {
+                if (*p == '\\') { p++; if (*p) p++; continue; }
+                if (*p == q) { p++; break; }
+                p++;
+            }
+            t.kind = FS_LIT;
+        } else if (c >= '0' && c <= '9') {
+            /* 数字 + 后缀（0x1f / 1e10 / 0.1f128）；遇 .. 范围符停。 */
+            while (*p) {
+                if (p[0] == '.' && p[1] == '.') break;
+                if (isalnum((unsigned char)*p) || *p == '.' || *p == '_') p++;
+                else break;
+            }
+            t.kind = FS_WORD;
+        } else if (isalnum((unsigned char)c) || c == '_') {
+            while (isalnum((unsigned char)*p) || *p == '_') p++;
+            t.kind = FS_WORD;
+        } else if (c == '.') {
+            if (p[1] == '{') p += 2;                       /* .{ 字面量 */
+            else if (p[1] == '.') p += 2;                  /* .. 范围 */
+            else if (p[1] >= '0' && p[1] <= '9') {        /* t.0 元组下标 */
+                p += 2;
+                while (*p >= '0' && *p <= '9') p++;
+            } else p++;
+            t.kind = FS_DOT;
+        } else {
+            static const char *const op3[] = {"<<=", ">>=", NULL};
+            static const char *const op2[] = {
+                "+=","-=","*=","/=","%=","^=","&=","|=","==","!=",
+                "<=",">=","<<",">>","->","..","&&","||",NULL
+            };
+            size_t ml = 0;
+            for (int i = 0; op3[i]; i++) if (!strncmp(p, op3[i], 3)) { ml = 3; break; }
+            if (!ml) for (int i = 0; op2[i]; i++) if (!strncmp(p, op2[i], 2)) { ml = 2; break; }
+            if (ml) {
+                p += ml;
+                t.kind = (ml == 2 && !strcmp(t.s, "->")) ? FS_ARROW : FS_BIN;
+            } else {
+                p++;
+                switch (c) {
+                case '(': case '[': t.kind = FS_OPEN; break;
+                case ')': case ']': t.kind = FS_CLOSE; break;
+                case '{': t.kind = FS_LBRACE; break;
+                case '}': t.kind = FS_RBRACE; break;
+                case ',': t.kind = FS_COMMA; break;
+                case ';': t.kind = FS_SEMI; break;
+                case ':': t.kind = FS_COLON; break;
+                case '@': case '?': case '~': case '!': t.kind = FS_PREFIX; break;
+                case '+': case '-': case '*': case '&': t.kind = FS_UNARY; break;
+                default: t.kind = FS_BIN; break;
+                }
+            }
+        }
+        t.n = (size_t)(p - t.s);
+        v[n++] = t;
+    }
+    /* + - * &：前一个 token 是「值」（非关键字标识符/字面量/闭括号/}）→ 二元，
+     * 否则一元。return -1 / var p: *T / &x 都是一元，不能加空格。 */
+    for (size_t i = 0; i < n; i++) {
+        if (v[i].kind != FS_UNARY) continue;
+        bool val_before = false;
+        if (i > 0) {
+            FsKind pk = v[i - 1].kind;
+            bool plain_word = (pk == FS_WORD && !fs_kw(v[i - 1].s, v[i - 1].n));
+            val_before = plain_word || pk == FS_LIT || pk == FS_CLOSE ||
+                         (pk == FS_RBRACE);
+        }
+        v[i].unary = !val_before;
+    }
+    *out_n = n;
+    return v;
+}
+
+/* 两个相邻 token（v[i], v[i+1]）之间是否留一个空格。
+ * 规则按「左邻优先」排：先看左邻是否要求后随空格（运算符/分隔符），
+ * 再看右邻是否要求紧贴（闭括号/点），最后处理括号的上下文特例。 */
+static bool fs_space(const FsTok *v, size_t i) {
+    const FsTok *a = &v[i], *b = &v[i + 1];
+    FsKind x = a->kind, y = b->kind;
+    if (y == FS_COMMENT || x == FS_COMMENT) return true;
+
+    /* 1. 左邻是运算符/分隔符 → 后随一个空格（含二元 + - * &）。 */
+    if (x == FS_COMMA || x == FS_SEMI || x == FS_COLON ||
+        x == FS_BIN || x == FS_ARROW || (x == FS_UNARY && !a->unary))
+        return true;
+
+    /* 2. 右邻是分隔符/闭圆方括号 → 紧贴左邻。 */
+    if (y == FS_COMMA || y == FS_SEMI || y == FS_COLON || y == FS_CLOSE)
+        return false;
+
+    /* 3. 闭花括号：空块 {} 紧贴，其余（如 `x; }`）留一格。 */
+    if (y == FS_RBRACE) return x != FS_LBRACE;
+
+    /* 4. 点 / 前缀符：值结尾或开括号后紧贴（a.b、t.0、?T、f(.{…)），
+     *    否则留一格（, .b）。 */
+    if (y == FS_DOT || y == FS_PREFIX) {
+        bool val_end = (x == FS_WORD && !fs_kw(a->s, a->n)) ||
+                       x == FS_LIT || x == FS_CLOSE || x == FS_RBRACE ||
+                       x == FS_OPEN;
+        return !val_end;
+    }
+
+    /* 5. 开圆/方括号：关键字后留一格（if ( / fn (），其余紧贴（f( / a[）。 */
+    if (y == FS_OPEN) return x == FS_WORD && fs_kw(a->s, a->n);
+
+    /* 6. 开花括号：关键字后留一格（struct { / else {），闭括号后留一格
+     *    （) {）；标识符后按 Zx 书写惯例区分——大写开头是类型名字面量
+     *    （Cfg{ … } / error{ … }）紧贴，小写是基本类型/变量后跟块（i32 { / v {）
+     *    留一格。跨行拆出的行看不到后面的字段，不能靠后继 '.' 判断
+     *    （曾误产 `const c = Cfg {` / `i32{` 导致收拢幂等失效）。 */
+    if (y == FS_LBRACE) {
+        if (x == FS_WORD && fs_kw(a->s, a->n)) {
+            return !(a->n == 5 && !memcmp(a->s, "error", 5));  /* error{a,b,} */
+        }
+        if (x == FS_CLOSE || x == FS_RBRACE) return true;
+        if (x == FS_WORD) {
+            char c0 = a->s[0];
+            bool upper = c0 >= 'A' && c0 <= 'Z';
+            if (upper) return false;                            /* Cfg{ … } */
+            if (a->n == 5 && !memcmp(a->s, "error", 5)) return false;
+            return true;                                        /* i32{ → i32 { */
+        }
+        return true;
+    }
+
+    /* 7. 左邻是开花括号：空块紧贴，{.a / { return 留一格。 */
+    if (x == FS_LBRACE) return y != FS_RBRACE;
+
+    /* 8. 左邻是闭圆/方括号：) 后留一格（) i32 / ) {）；
+     *    ] 后跟类型名紧贴（[]const u8 / [N]T），跟运算符照常。 */
+    if (x == FS_CLOSE) {
+        if (a->s[0] == ']') return y != FS_WORD;
+        return true;
+    }
+
+    /* 9. 左邻是一元前缀 / 开符号 / 点：紧贴。 */
+    if (x == FS_UNARY && a->unary) return false;
+    if (x == FS_OPEN || x == FS_DOT || x == FS_PREFIX) return false;
+
+    return true;                                 /* WORD / LIT / } 后留一格 */
+}
+
+/* 对单行文本做 token 空格规范化，返回新分配字符串。 */
+static char *fmt_spacing(const char *line) {
+    size_t n = 0;
+    FsTok *v = fs_lex(line, &n);
+    if (!n) { free(v); return xstrdup(""); }
+    Buf out;
+    buf_init(&out);
+    for (size_t i = 0; i < n; i++) {
+        if (i && fs_space(v, i - 1)) buf_putc(&out, ' ');
+        for (size_t k = 0; k < v[i].n; k++) buf_putc(&out, v[i].s[k]);
+    }
+    buf_putc(&out, 0);
+    free(v);
+    return out.data ? out.data : xstrdup("");
+}
+
 /* 递归拆行：首个可拆组自带尾逗号 → 展开成一行一项（项文本自带源逗号，
  * 递归到稳定形态）；没尾逗号 → 本组保持单行，但组内更浅位置与前缀/
  * 后缀里的尾逗号组照样展开（head/tail 拼接组合，见 keep-inline 段）。
@@ -1946,7 +2157,11 @@ static char *fmt_transform(const char *src) {
                 int rind = ind + rows[r].lvl;               /* 首末行 lvl=0，嵌套项递增 */
                 if (rind < 0) rind = 0;
                 for (int q = 0; q < rind; q++) buf_puts(&out, "    ");
-                buf_puts(&out, rows[r].text);
+                {   /* §233 token 空格规范化（不动 token 序列，只管间距） */
+                    char *sp = fmt_spacing(rows[r].text);
+                    buf_puts(&out, sp);
+                    free(sp);
+                }
                 buf_puts(&out, had_cr ? "\r\n" : "\n");
                 free(rows[r].text);
             }
@@ -1961,7 +2176,9 @@ static char *fmt_transform(const char *src) {
         }
         if (!st.in_block) {
             for (int k = 0; k < ind; k++) buf_puts(&out, "    ");
-            buf_puts(&out, raw + first);                    /* 原始前导空白丢弃 */
+            char *sp = fmt_spacing(raw + first);             /* 原始前导空白丢弃 */
+            buf_puts(&out, sp);
+            free(sp);
         } else {
             buf_puts(&out, raw);                            /* 块注释延续行保留原样 */
         }

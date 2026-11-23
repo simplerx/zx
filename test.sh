@@ -167,7 +167,7 @@ if ( cd "$pdir/tc" && "$ZXCW" fmt src/ml.zx > "$TPFX.tc.mlf" 2>&1 ) \
    && grep -qxF '        .name = "weo",' "$pdir/tc/src/ml.zx" \
    && grep -qxF '        .data = .{' "$pdir/tc/src/ml.zx" \
    && grep -qxF '            .b = 1,' "$pdir/tc/src/ml.zx" \
-   && grep -qxF '            .data = .{.b = 120},' "$pdir/tc/src/ml.zx" \
+   && grep -qxF '            .data = .{ .b = 120 },' "$pdir/tc/src/ml.zx" \
    && grep -qxF '        },' "$pdir/tc/src/ml.zx" \
    && grep -qxF '    });' "$pdir/tc/src/ml.zx" \
    && cp "$pdir/tc/src/ml.zx" "$TPFX.tc.ml1" \
@@ -2326,6 +2326,45 @@ grep -q 'zxc: out of memory' src/zxc.c \
     && grep -q 'exit(1)' src/zxc.c \
     && printf "  ok   OOM 统一诊断 + exit(1)\n" \
     || { printf "  FAIL §232 OOM 诊断缺失\n"; fail=1; }
+
+# §233：zxc fmt 的 token 间空格规范化（此前只归一缩进/尾空白/尾逗号，
+# x=1 原样保留，不算正式格式化工具）。写一份全粘死的源码 → fmt → 断言
+# 规范空格 + 双前端产物一致 + 幂等 + 产物可编译运行 + 字符串/注释内容不动。
+printf "\n== §233 fmt token 空格规范化 + Zed 缩进查询\n"
+mkdir -p "$pdir/fsp"
+printf 'const Cfg=struct{a:i32,b:i32};\nconst add=fn(a:i32,b:i32)i32{return a+b;};\nconst main=fn()i32{\nvar x:i32=1;\nlet y:i32=x*2+add(3,4);\nif(x==y){x=-x;}else{x=x+1;}\nconst s:[]const u8="a=1 // not comment";\nconst c=Cfg{.a=1,.b=2};\n_=s;\n_=c;\nreturn 0;\n};\n' > "$pdir/fsp/a.zx"
+cp "$pdir/fsp/a.zx" "$pdir/fsp/b.zx"
+if ( cd "$pdir/fsp" && "$ZXCW" fmt a.zx > "$TPFX.fsp.log" 2>&1 ) \
+   && grep -qxF 'const Cfg = struct { a: i32, b: i32 };' "$pdir/fsp/a.zx" \
+   && grep -qxF 'const add = fn (a: i32, b: i32) i32 { return a + b; };' "$pdir/fsp/a.zx" \
+   && grep -qxF '    let y: i32 = x * 2 + add(3, 4);' "$pdir/fsp/a.zx" \
+   && grep -qxF '    if (x == y) { x = -x; } else { x = x + 1; }' "$pdir/fsp/a.zx" \
+   && grep -qxF '    const s: []const u8 = "a=1 // not comment";' "$pdir/fsp/a.zx" \
+   && grep -qxF '    const c = Cfg{ .a = 1, .b = 2 };' "$pdir/fsp/a.zx" \
+   && grep -qxF '    _ = s;' "$pdir/fsp/a.zx" \
+   && cp "$pdir/fsp/a.zx" "$TPFX.fsp.once" \
+   && ( cd "$pdir/fsp" && "$ZXCW" fmt a.zx > /dev/null 2>&1 ) \
+   && cmp -s "$pdir/fsp/a.zx" "$TPFX.fsp.once" \
+   && ( cd "$pdir/fsp" && "$ZXCW" a.zx -o fsp.exe > "$TPFX.fsp.cc" 2>&1 ) \
+   && ( cd "$pdir/fsp" && ./fsp.exe ); then
+    printf "  ok   §233 token 空格规范化 + 幂等 + 产物可编译运行\n"
+else
+    printf "  FAIL §233 token 空格规范化\n"; cat "$TPFX.fsp.log" "$TPFX.fsp.cc" 2>/dev/null; fail=1
+fi
+# 字符串/注释内容一字不改（fmt 只动 token 间空白，绝不动字面量内部）。
+if grep -qF '"a=1 // not comment"' "$pdir/fsp/a.zx"; then
+    printf "  ok   §233 字符串内部保持原样\n"
+else
+    printf "  FAIL §233 字符串内容被改\n"; fail=1
+fi
+# Zed indents.scm：@end 必须嵌在 @indent 内（否则 `{}` 回车/vim o 回行首）。
+if grep -qE '\(block[^\n]*"}" @end\) @indent' editor/zed/languages/zx/indents.scm \
+   && ! grep -qE '^\] @end$' editor/zed/languages/zx/indents.scm \
+   && grep -q 'tab_size = 4' editor/zed/languages/zx/config.toml; then
+    printf "  ok   §233 Zed 缩进查询结构 + tab_size 4\n"
+else
+    printf "  FAIL §233 Zed indents 结构\n"; fail=1
+fi
 
 # 用例会在仓库根留下自己的临时文件：io_fmt.zx 写 io_fmt.tmp，stdfs.zx 建
 # fs_t_dir / fs_t_dir2。跑完统一带走——测试不该往工作区里堆东西。
