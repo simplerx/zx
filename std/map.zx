@@ -90,14 +90,14 @@ pub const HashMap = struct (V: type) {
             return null;
         };
 
-        const contains = fn (self: *Self, key: []const u8) bool {
+        pub const contains = fn (self: *Self, key: []const u8) bool {
             if (self.cap == 0) { return false; }
             let i = self.slotFor(key, Self.norm(fnv1a(key)));
             return (self.hashes + i).0 != 0;
         };
 
         // 取指针：已经存在就直接改它，省一次查找。
-        const getPtr = fn (self: *Self, key: []const u8) ?*V {
+        pub const getPtr = fn (self: *Self, key: []const u8) ?*V {
             if (self.cap == 0) { return null; }
             let i = self.slotFor(key, Self.norm(fnv1a(key)));
             if ((self.hashes + i).0 != 0) { return self.vals + i; }
@@ -122,7 +122,7 @@ pub const HashMap = struct (V: type) {
 
         // 只在键不存在时写入；已存在就返回它原来的值。
         // 一次探测同时完成"查旧"和"插入"，不像 get+put 那样哈希两遍。
-        const putNew = fn (self: *Self, key: []const u8, val: V) ?V {
+        pub const putNew = fn (self: *Self, key: []const u8, val: V) ?V {
             if (self.cap == 0 or (self.n + 1) * 4 > self.cap * 3) {
                 if (!self.grow()) { return val; }       // 扩容失败：写入没有发生
             }
@@ -136,7 +136,7 @@ pub const HashMap = struct (V: type) {
             return null;
         };
 
-        const clear = fn (self: *Self) void {
+        pub const clear = fn (self: *Self) void {
             if (self.cap > 0) {
                 @memset((*u8)self.hashes, 0, self.cap * @type(u64).size);
             }

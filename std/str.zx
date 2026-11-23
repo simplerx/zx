@@ -22,6 +22,22 @@ const matchAt = fn (hay: []const u8, i: usize, needle: []const u8) bool {
     return true;
 };
 
+// needle 在 hay 里非重叠出现的次数。空 needle 返回 0（避免无限循环）。
+pub const count = fn (hay: []const u8, needle: []const u8) usize {
+    if (needle.len == 0 or needle.len > hay.len) { return 0; }
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i + needle.len <= hay.len) {
+        if (matchAt(hay, i, needle)) {
+            n = n + 1;
+            i = i + needle.len;   // 非重叠：命中后跳过整段
+        } else {
+            i = i + 1;
+        }
+    }
+    return n;
+};
+
 pub const eq = fn (a: []const u8, b: []const u8) bool {
     if (a.len != b.len) { return false; }
     var i: usize = 0;
@@ -141,17 +157,7 @@ pub const concat = fn (alloc: Allocator, a: []const u8, b: []const u8) ?[]u8 {
 
 const countOf = fn (s: []const u8, sep: []const u8) usize {
     if (sep.len == 0) { return 1; }
-    var n: usize = 1;
-    var i: usize = 0;
-    while (i + sep.len <= s.len) {
-        if (matchAt(s, i, sep)) {
-            n = n + 1;
-            i = i + sep.len;
-        } else {
-            i = i + 1;
-        }
-    }
-    return n;
+    return count(s, sep) + 1;   // 段数 = 分隔符出现次数 + 1
 };
 
 // 按 sep 切开。结果和每段都指向原串（不复制），数组本身向分配器要。
@@ -183,4 +189,148 @@ pub const split = fn (alloc: Allocator, s: []const u8, sep: []const u8) ?[][]con
 // 释放 split 的结果
 pub const freeSplit = fn (alloc: Allocator, parts: [][]const u8) void {
     alloc.free(alloc.ctx, (*u8)parts.ptr, parts.len * @type([]const u8).size);
+};
+
+// ASCII 大小写转换。非 ASCII 字节原样保留（这里不做 Unicode）。
+// 结果末尾补 0，可以当 C 串用。
+const mapAscii = fn (alloc: Allocator, s: []const u8, upper: bool) ?[]u8 {
+    let raw = alloc.alloc(alloc.ctx, s.len + 1);
+    if (raw) p {
+        var dst = p[0..s.len];
+        var i: usize = 0;
+        while (i < s.len) {
+            let c = s[i];
+            if (upper and c >= 97 and c <= 122) {
+                dst[i] = c - 32;
+            } else if (!upper and c >= 65 and c <= 90) {
+                dst[i] = c + 32;
+            } else {
+                dst[i] = c;
+            }
+            i = i + 1;
+        }
+        var whole = p[0..s.len + 1];
+        whole[s.len] = 0;
+        return dst;
+    }
+    return null;
+};
+
+pub const toUpper = fn (alloc: Allocator, s: []const u8) ?[]u8 {
+    return mapAscii(alloc, s, true);
+};
+
+pub const toLower = fn (alloc: Allocator, s: []const u8) ?[]u8 {
+    return mapAscii(alloc, s, false);
+};
+
+// 把 parts 用 sep 连成一个新串。parts.len==0 返回空串（末尾补 0）。
+// 每段、sep 都按字节原样复制，结果末尾补 0。
+pub const join = fn (alloc: Allocator, parts: [][]const u8, sep: []const u8) ?[]u8 {
+    var total: usize = 0;
+    var i: usize = 0;
+    while (i < parts.len) {
+        total = total + parts[i].len;
+        if (i + 1 < parts.len) { total = total + sep.len; }
+        i = i + 1;
+    }
+    let raw = alloc.alloc(alloc.ctx, total + 1);
+    if (raw) p {
+        var dst = p[0..total];
+        var pos: usize = 0;
+        i = 0;
+        while (i < parts.len) {
+            var j: usize = 0;
+            while (j < parts[i].len) {
+                dst[pos] = parts[i][j];
+                pos = pos + 1;
+                j = j + 1;
+            }
+            if (i + 1 < parts.len) {
+                j = 0;
+                while (j < sep.len) {
+                    dst[pos] = sep[j];
+                    pos = pos + 1;
+                    j = j + 1;
+                }
+            }
+            i = i + 1;
+        }
+        var whole = p[0..total + 1];
+        whole[total] = 0;
+        return dst;
+    }
+    return null;
+};
+
+// 把 s 里所有非重叠的 old 换成 new。old 为空时原样返回（避免无限循环）。
+pub const replace = fn (alloc: Allocator, s: []const u8, old: []const u8, new: []const u8) ?[]u8 {
+    if (old.len == 0) {
+        let raw = alloc.alloc(alloc.ctx, s.len + 1);
+        if (raw) p {
+            var dst = p[0..s.len];
+            var i: usize = 0;
+            while (i < s.len) { dst[i] = s[i]; i = i + 1; }
+            var whole = p[0..s.len + 1];
+            whole[s.len] = 0;
+            return dst;
+        }
+        return null;
+    }
+    let hits = count(s, old);
+    if (hits == 0) {
+        let raw = alloc.alloc(alloc.ctx, s.len + 1);
+        if (raw) p {
+            var dst = p[0..s.len];
+            var i: usize = 0;
+            while (i < s.len) { dst[i] = s[i]; i = i + 1; }
+            var whole = p[0..s.len + 1];
+            whole[s.len] = 0;
+            return dst;
+        }
+        return null;
+    }
+    let total = s.len - hits * old.len + hits * new.len;
+    let raw = alloc.alloc(alloc.ctx, total + 1);
+    if (raw) p {
+        var dst = p[0..total];
+        var src: usize = 0;
+        var pos: usize = 0;
+        while (src + old.len <= s.len) {
+            if (matchAt(s, src, old)) {
+                var j: usize = 0;
+                while (j < new.len) { dst[pos] = new[j]; pos = pos + 1; j = j + 1; }
+                src = src + old.len;
+            } else {
+                dst[pos] = s[src];
+                pos = pos + 1;
+                src = src + 1;
+            }
+        }
+        while (src < s.len) { dst[pos] = s[src]; pos = pos + 1; src = src + 1; }
+        var whole = p[0..total + 1];
+        whole[total] = 0;
+        return dst;
+    }
+    return null;
+};
+
+// 把 s 重复 n 次。n==0 返回空串（末尾补 0）。
+pub const repeat = fn (alloc: Allocator, s: []const u8, n: usize) ?[]u8 {
+    let total = s.len * n;
+    let raw = alloc.alloc(alloc.ctx, total + 1);
+    if (raw) p {
+        var dst = p[0..total];
+        var pos: usize = 0;
+        var k: usize = 0;
+        while (k < n) {
+            var i: usize = 0;
+            while (i < s.len) { dst[pos] = s[i]; pos = pos + 1; i = i + 1; }
+            k = k + 1;
+        }
+        var whole = p[0..total + 1];
+        whole[total] = 0;
+        return dst;
+    }
+    return null;
 };

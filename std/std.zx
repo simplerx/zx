@@ -60,6 +60,11 @@ pub const task = @mod("task.zx");
 // 浮点函数 extern 到 C 运行时的 libm，整数工具是纯 Zx 代码。
 pub const math = @mod("math.zx");
 
+// 排序与搜索（sort.zx）。`std.sort.sort(i32, xs, less)` 原地堆排序，
+// `std.sort.binarySearch(i32, xs, key, less)` 在有序切片里查 key（重复取第一个）。
+// 比较器 `less(a,b)` 由调用方提供：a 严格排在 b 前面时为 true。
+pub const sort = @mod("sort.zx");
+
 // 网络（net.zx）。同步 IPv4 TCP / UDP，Windows Winsock2 先行；
 // 用 `std.net.init()` / `deinit()` 包住，句柄由 TcpListener/TcpStream/UdpSocket 拿。
 pub const net = @mod("net.zx");

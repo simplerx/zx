@@ -1,0 +1,76 @@
+// sort.zx —— 泛型排序与搜索。全是普通 Zx 代码，没有编译器魔法。
+//
+//   const std = @mod("std");
+//   var xs: [5]i32 = .{ 5, 2, 9, 1, 7 };
+//   std.sort.sort(i32, xs[0..], less);
+//   if (std.sort.binarySearch(i32, xs[0..], 7, less)) i { ... }
+//
+// 比较器 `less(a, b)` 返回 true 当且仅当 a 严格排在 b 前面（升序即 a < b）。
+// 二分查找要求切片已按同一个 less 排好序——找到了返回下标，没找到返回 null；
+// 有重复元素时返回**第一个**命中的位置（lower_bound）。
+//
+// 排序用堆排序：O(n log n) 最坏也是这个上界，原地、不递归、不额外分配。
+// 想用别的比较口径（降序、按字段）就传别的 less，函数本身不关心 T 是什么。
+
+// 把 root 为根的（以 size 为界的）最大堆向下调整。
+// 用 less 定义"更大"：a 不比 b 小即 a >= b。堆顶是最大元。
+const siftDown = fn (T: type, xs: []T, root: usize, size: usize,
+                     less: fn (T, T) bool) void {
+    var r = root;
+    while (true) {
+        let l = r * 2 + 1;
+        if (l >= size) { return; }
+        let right = l + 1;
+        var big = l;
+        if (right < size and less(xs[l], xs[right])) { big = right; }
+        // r 已经不小于两个孩子：子树已满足堆性质
+        if (!less(xs[r], xs[big])) { return; }
+        let tmp = xs[r];
+        xs[r] = xs[big];
+        xs[big] = tmp;
+        r = big;
+    }
+};
+
+// 原地升序排序（按 less）。len < 2 时什么都不做。
+pub const sort = fn (T: type, xs: []T, less: fn (T, T) bool) void {
+    let n = xs.len;
+    if (n < 2) { return; }
+
+    // 建堆：从最后一个非叶节点往回 sift。
+    var i = n / 2;
+    while (i > 0) {
+        i = i - 1;
+        siftDown(T, xs, i, n, less);
+    }
+
+    // 逐个把堆顶（最大元）换到末尾，堆缩小一。
+    var end = n - 1;
+    while (end > 0) {
+        let tmp = xs[0];
+        xs[0] = xs[end];
+        xs[end] = tmp;
+        siftDown(T, xs, 0, end, less);
+        end = end - 1;
+    }
+};
+
+// 在有序切片（按同一个 less 排好）里找 key。命中返回下标，否则 null。
+// 重复元素返回第一个。切片未排序时结果未定义。
+pub const binarySearch = fn (T: type, xs: []T, key: T,
+                             less: fn (T, T) bool) ?usize {
+    var lo: usize = 0;
+    var hi = xs.len;
+    // 先求 lower_bound：第一个 !less(xs[mid], key) 的位置。
+    while (lo < hi) {
+        let mid = lo + (hi - lo) / 2;
+        if (less(xs[mid], key)) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    // 落点越界，或 key 也小于落点元素，都说明 key 不存在。
+    if (lo < xs.len and !less(key, xs[lo])) { return lo; }
+    return null;
+};

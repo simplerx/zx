@@ -1,0 +1,89 @@
+// 标准库集合/字符串 API 守门：sort / binarySearch、str 新增函数、
+// HashMap 新放出的 pub 方法。全是普通 Zx 代码，编译 + 运行 + 输出断言。
+//
+// 注意：跨模块泛型函数（std.sort.sort 等）的调用放在 main 里；编译器目前
+// 在辅助函数里实例化跨模块泛型函数时有作用域问题（T 解析失败），与本用例
+// 要守的 API 无关。
+
+const std = @mod("std");
+
+const lessI = fn (a: i32, b: i32) bool { return a < b; };
+const greaterI = fn (a: i32, b: i32) bool { return a > b; };
+
+const main = fn () i32 {
+    let al = std.heap.page;
+
+    // ---- str 新增函数 ----
+    var okStr = true;
+    if (std.str.count("banana", "na") != 2) { okStr = false; }
+    if (std.str.count("aaaa", "aa") != 2) { okStr = false; }  // 非重叠
+    if (std.str.count("abc", "") != 0) { okStr = false; }
+    if (std.str.toUpper(al, "Hi-Zx 9")) u {
+        if (!std.str.eq(u, "HI-ZX 9")) { okStr = false; }
+    } else { okStr = false; }
+    if (std.str.toLower(al, "Hi-ZX 9")) l {
+        if (!std.str.eq(l, "hi-zx 9")) { okStr = false; }
+    } else { okStr = false; }
+    let parts: [3][]const u8 = .{ "a", "b", "c" };
+    if (std.str.join(al, parts[0..], "-")) j {
+        if (!std.str.eq(j, "a-b-c")) { okStr = false; }
+    } else { okStr = false; }
+    if (std.str.replace(al, "a-b-c", "-", "+")) r {
+        if (!std.str.eq(r, "a+b+c")) { okStr = false; }
+    } else { okStr = false; }
+    if (std.str.replace(al, "foofoo", "foo", "x")) r2 {
+        if (!std.str.eq(r2, "xx")) { okStr = false; }
+    } else { okStr = false; }
+    if (std.str.repeat(al, "ab", 3)) s {
+        if (!std.str.eq(s, "ababab")) { okStr = false; }
+    } else { okStr = false; }
+    if (std.str.repeat(al, "ab", 0)) s2 {
+        if (s2.len != 0) { okStr = false; }
+    } else { okStr = false; }
+    std.println("str {}", okStr);
+
+    // ---- std.sort：堆排序 + 二分查找 ----
+    var a: [8]i32 = .{ 5, 2, 9, 1, 7, 2, 9, 3 };
+    std.sort.sort(i32, a[0..], lessI);
+    var okSort = true;
+    var i: usize = 0;
+    while (i < a.len) {
+        if (i > 0 and a[i] < a[i - 1]) { okSort = false; }
+        i = i + 1;
+    }
+    if (std.sort.binarySearch(i32, a[0..], 2, lessI)) p {
+        if (p != 1) { okSort = false; }
+    } else { okSort = false; }
+    if (std.sort.binarySearch(i32, a[0..], 9, lessI)) p2 {
+        if (p2 != 6) { okSort = false; }
+    } else { okSort = false; }
+    if (std.sort.binarySearch(i32, a[0..], 8, lessI)) _ { okSort = false; }
+    std.sort.sort(i32, a[0..], greaterI);
+    if (a[0] != 9 or a[a.len - 1] != 1) { okSort = false; }
+    std.println("sort {}", okSort);
+
+    // ---- HashMap 新放出的 pub 方法 ----
+    var okMap = true;
+    var m = std.map.HashMap(i32).init(al);
+    if (!m.put("a", 10)) { okMap = false; }
+    if (!m.put("b", 20)) { okMap = false; }
+    if (!m.contains("a") or m.contains("z")) { okMap = false; }
+    if (m.getPtr("a")) mp { mp.0 = 99; } else { okMap = false; }
+    if (m.get("a")) v { if (v != 99) { okMap = false; } } else { okMap = false; }
+    if (m.putNew("a", 7)) old { if (old != 99) { okMap = false; } } else { okMap = false; }
+    if (m.get("a")) v2 { if (v2 != 99) { okMap = false; } } else { okMap = false; }
+    if (m.putNew("c", 30)) _ { okMap = false; }
+    if (m.count() != 3) { okMap = false; }
+    m.clear();
+    if (m.count() != 0 or m.contains("a")) { okMap = false; }
+    m.deinit();
+    std.println("map {}", okMap);
+
+    if (!okStr or !okSort or !okMap) { return 1; }
+    return 0;
+};
+
+// expect-output
+// str true
+// sort true
+// map true

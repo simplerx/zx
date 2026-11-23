@@ -2248,6 +2248,24 @@ else
     printf "  FAIL §225 开关非按模块独立\n"; cat "$TPFX.c225mod.log"; fail=1
 fi
 
+# §230：标准库 API 缺口——排序/搜索、str 新增、HashMap 放出 pub 方法。
+printf "\n== §230 std.sort / str / map 新 API\n"
+# 用仓库里的正式守门文件（runner 也跑它），双前端各编一次并核对输出。
+for fe in zx c; do
+    if $ZXC --fe=$fe tests/good/stdlib_collections.zx -o "$TPFX.coll$fe.exe" \
+            > "$TPFX.coll$fe.log" 2>&1 \
+       && "$TPFX.coll$fe.exe" > "$TPFX.coll$fe.out" 2>&1 \
+       && grep -q '^str true$' "$TPFX.coll$fe.out" \
+       && grep -q '^sort true$' "$TPFX.coll$fe.out" \
+       && grep -q '^map true$' "$TPFX.coll$fe.out"; then
+        printf "  ok   std 新 API（--fe=%s）\n" "$fe"
+    else
+        printf "  FAIL §230 std 新 API（--fe=%s）\n" "$fe"
+        cat "$TPFX.coll$fe.log" "$TPFX.coll$fe.out" 2>/dev/null
+        fail=1
+    fi
+done
+
 # 用例会在仓库根留下自己的临时文件：io_fmt.zx 写 io_fmt.tmp，stdfs.zx 建
 # fs_t_dir / fs_t_dir2。跑完统一带走——测试不该往工作区里堆东西。
 rm -rf io_fmt.tmp fs_t_dir fs_t_dir2 2>/dev/null || true
