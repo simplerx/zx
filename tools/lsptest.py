@@ -232,7 +232,23 @@ caps = r["result"]["capabilities"] if r and "result" in r else {}
 check("initialize.caps", all(k in caps for k in (
     "completionProvider", "definitionProvider", "hoverProvider",
     "signatureHelpProvider", "documentFormattingProvider",
-    "documentSymbolProvider", "referencesProvider")), str(sorted(caps.keys())))
+    "documentSymbolProvider", "referencesProvider",
+    "renameProvider", "foldingRangeProvider", "codeActionProvider",
+    "semanticTokensProvider")), str(sorted(caps.keys())))
+# §238：四项新能力的 provider 形态（rename 带 prepareProvider；semanticTokens
+# 带 legend + full），与 zxls.zig 的 initialize 声明一一对应。
+check("initialize.caps.rename.prepare",
+      (caps.get("renameProvider") or {}).get("prepareProvider") is True,
+      str(caps.get("renameProvider")))
+check("initialize.caps.codeAction.kinds",
+      "quickfix" in (caps.get("codeActionProvider") or {}).get("codeActionKinds", []),
+      str(caps.get("codeActionProvider")))
+_st = caps.get("semanticTokensProvider") or {}
+check("initialize.caps.semanticTokens.legend",
+      _st.get("full") is True
+      and len((_st.get("legend") or {}).get("tokenTypes", [])) == 17
+      and (_st.get("legend") or {}).get("tokenModifiers") == ["declaration", "defaultLibrary"],
+      str(_st)[:300])
 # §193 补丁：编辑触发符——逗号重新弹补全（用户 Ctrl+J 手动唤回的场景）、
 # 括号/逗号出签名且逗号可 retrigger（编辑实参时签名持续在屏）。
 check("initialize.caps.triggers",
@@ -645,7 +661,9 @@ ok_fmt = False
 if edits is not None:
     if len(edits) == 1:
         nt = edits[0]["newText"]
-        ok_fmt = "\n    let x=1;\n" in nt and "\n    return      x;\n" in nt and "\t" not in nt
+        # §233 起 fmt 归一 token 间空格（x=1 → x = 1），不再是"只动缩进"。
+        ok_fmt = "pub fn main() i32" in nt and "\n    let x = 1;\n" in nt \
+            and "\n    return x;\n" in nt and "\t" not in nt
     else:
         ok_fmt = len(edits) == 0  # 没变化=已格式化（不该发生，但也算合法应答）
 check("formatting.zxcFmt", ok_fmt, str(edits)[:200] if edits is not None else "None")
@@ -3781,7 +3799,8 @@ check("formatting.literalGroupRec",
       and '        .name = "weo",\n' in _tltext
       and "        .data = .{\n" in _tltext
       and "            .b = 1,\n" in _tltext
-      and "            .data = .{.b = 120},\n" in _tltext
+      # §233 token 空格规范化：`.{.b = 120}` → `.{ .b = 120 }`
+      and "            .data = .{ .b = 120 },\n" in _tltext
       and "    },\n" in _tltext
       and "    );\n" in _tltext,
       str(_tlres)[:400])
@@ -3811,7 +3830,7 @@ check("formatting.multilineTree",
       and '        .name = "weo",\n' in _mltext
       and "        .data = .{\n" in _mltext
       and "            .b = 1,\n" in _mltext
-      and "            .data = .{.b = 120},\n" in _mltext
+      and "            .data = .{ .b = 120 },\n" in _mltext  # §233 token 空格
       and "        },\n" in _mltext
       and "    });\n" in _mltext
       and "        10,\n" not in _mltext
@@ -3851,7 +3870,8 @@ _r, _ = recv_id("tyformat", _rid)
 _tyres = (_r or {}).get("result") or []
 _tytext = _tyres[0].get("newText", "") if isinstance(_tyres, list) and _tyres else ""
 check("formatting.tybodyKeep",
-      "const P = struct{\n    a: i32,\n    b: i32\n};" in _tytext,
+      # §233 token 空格：`struct{` → `struct {`
+      "const P = struct {\n    a: i32,\n    b: i32\n};" in _tytext,
       str(_tyres)[:300])
 # 影子（.zxls- / .zxls-f 前缀）用完即删。断言前先清掉历史跑留下的旧影子
 #（delete 与 zxc 子进程持句柄竞速失败会留下永久垃圾），再只看这次新增的。
@@ -5426,8 +5446,10 @@ def tag_completion_probe():
     return labels
 
 _tag_labels = tag_completion_probe()
-check("completion.tag.members", {"close", "buf"} <= _tag_labels
-      and not ({"len", "size", "0"} & _tag_labels), str(sorted(_tag_labels)))
+# §221/§225：tag.close 已删；文件级指令是 enable/batch，加上本文件出现过的
+# tag 名（buf）。旧断言还等着 close，是 §221 之后没同步的过期期望。
+check("completion.tag.members", {"enable", "batch", "buf"} <= _tag_labels
+      and not ({"close", "len", "size", "0"} & _tag_labels), str(sorted(_tag_labels)))
 
 perf = inlay_perf()
 if perf is None:
@@ -5747,6 +5769,158 @@ check("completion.argctx.values",
 _astm = {i.get("label") for i in (_ap["stmt"] or [])}
 check("completion.stmt.keywords",
       "const" in _astm and "al" in _astm, str(sorted(_astm))[:200])
+
+# ---------------------------------------------------------------------------
+# §238：rename / prepareRename / foldingRange / codeAction / semanticTokens。
+# 独立进程探针，源码固定，逐项校验返回结构，避免被前面 400+ 用例的共享文档干扰。
+def caps_probe():
+    d = os.path.join(TESTDIR, "caps238")
+    shutil.rmtree(d, ignore_errors=True)
+    os.makedirs(d)
+    src = (
+        'const alpha = 1;\n'
+        'const main = fn () i32 {\n'
+        '    let beta = alpha + 2; /* block\n'
+        '       comment */\n'
+        '    return beta;\n'
+        '};\n')
+    P = os.path.join(d, "main.zx")
+    open(P, "w", encoding="utf-8").write(src)
+    uri = "file:///" + P.replace("\\", "/")
+    out = {}
+    try:
+        pc = subprocess.Popen([ZXLS_BIN], stdin=subprocess.PIPE,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        def snd(o):
+            b = json.dumps(o).encode()
+            pc.stdin.write(("Content-Length: %d\r\n\r\n" % len(b)).encode() + b)
+            pc.stdin.flush()
+        def rcv(want):
+            # didOpen 之后诊断线程会发 publishDiagnostics 通知（无 id），
+            # 必须跳过、只取目标 id 的应答，否则整串请求会错位一格。
+            import time as _t
+            deadline = _t.time() + 30
+            while _t.time() < deadline:
+                h = b""
+                while not h.endswith(b"\r\n\r\n"):
+                    c = pc.stdout.read(1)
+                    if not c:
+                        return None
+                    h += c
+                n = int([l for l in h.split(b"\r\n")
+                         if l.lower().startswith(b"content-length")][0].split(b":")[1])
+                m = json.loads(pc.stdout.read(n))
+                if "id" in m and m["id"] == want:
+                    return m
+            return None
+        def ppos(off):
+            return {"line": src.count("\n", 0, off),
+                    "character": off - (src.rfind("\n", 0, off) + 1)}
+        snd({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+             "params": {"capabilities": {}, "rootUri": "file:///" + d.replace("\\", "/")}})
+        while True:
+            m = rcv(1)
+            if m is None or m.get("id") == 1:
+                break
+        snd({"jsonrpc": "2.0", "method": "initialized", "params": {}})
+        snd({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": {"uri": uri, "languageId": "zx", "version": 1, "text": src}}})
+        a_off = src.index("alpha")
+        # prepareRename
+        snd({"jsonrpc": "2.0", "id": 2, "method": "textDocument/prepareRename",
+             "params": {"textDocument": {"uri": uri}, "position": ppos(a_off)}})
+        out["prepare"] = rcv(2).get("result")
+        # rename
+        snd({"jsonrpc": "2.0", "id": 3, "method": "textDocument/rename",
+             "params": {"textDocument": {"uri": uri}, "position": ppos(a_off),
+                        "newName": "gamma"}})
+        out["rename"] = rcv(3).get("result")
+        # 关键字上 prepareRename 应返回 null
+        snd({"jsonrpc": "2.0", "id": 4, "method": "textDocument/prepareRename",
+             "params": {"textDocument": {"uri": uri}, "position": ppos(src.index("const"))}})
+        out["prepare_kw"] = rcv(4).get("result")
+        # 非法 newName（关键字）应返回 null
+        snd({"jsonrpc": "2.0", "id": 5, "method": "textDocument/rename",
+             "params": {"textDocument": {"uri": uri}, "position": ppos(a_off),
+                        "newName": "const"}})
+        out["rename_bad"] = rcv(5).get("result")
+        # foldingRange
+        snd({"jsonrpc": "2.0", "id": 6, "method": "textDocument/foldingRange",
+             "params": {"textDocument": {"uri": uri}}})
+        out["fold"] = rcv(6).get("result")
+        # codeAction：did you mean && + struct(packed)
+        diags = [
+            {"range": {"start": ppos(a_off), "end": ppos(a_off + 5)},
+             "code": "E0304", "message": "no field 'alpa'\n  help: did you mean `alpha`?"},
+            {"range": {"start": ppos(src.index("beta")), "end": ppos(src.index("beta") + 4)},
+             "code": "E0211", "message": "`&&` was removed: write `and`"},
+        ]
+        snd({"jsonrpc": "2.0", "id": 7, "method": "textDocument/codeAction",
+             "params": {"textDocument": {"uri": uri},
+                        "range": {"start": ppos(0), "end": ppos(len(src))},
+                        "context": {"diagnostics": diags}}})
+        out["action"] = rcv(7).get("result")
+        # semanticTokens
+        snd({"jsonrpc": "2.0", "id": 8, "method": "textDocument/semanticTokens/full",
+             "params": {"textDocument": {"uri": uri}}})
+        out["sem"] = rcv(8).get("result")
+        snd({"jsonrpc": "2.0", "id": 9, "method": "shutdown", "params": None})
+        rcv(9)
+        snd({"jsonrpc": "2.0", "method": "exit", "params": None})
+    finally:
+        try:
+            pc.kill()
+        except Exception:
+            pass
+        shutil.rmtree(d, ignore_errors=True)
+    return out
+
+_cp = caps_probe()
+# prepareRename：range 覆盖整个 alpha，placeholder 名字正确
+check("rename.prepare",
+      _cp["prepare"] is not None
+      and _cp["prepare"]["placeholder"] == "alpha"
+      and _cp["prepare"]["range"]["start"] == {"line": 0, "character": 6}
+      and _cp["prepare"]["range"]["end"] == {"line": 0, "character": 11},
+      str(_cp["prepare"]))
+# rename：两条 TextEdit（声明 + 引用），newText=gamma，range 覆盖整词
+_re = _cp["rename"] or {}
+_edits = (_re.get("changes") or {}).get("file:///" + os.path.join(TESTDIR, "caps238", "main.zx").replace("\\", "/"), [])
+if not _edits:
+    _edits = [e for es in (_re.get("changes") or {}).values() for e in es]
+check("rename.workspaceEdit",
+      len(_edits) == 2
+      and all(e["newText"] == "gamma" for e in _edits)
+      and any(e["range"]["start"] == {"line": 0, "character": 6} for e in _edits),
+      str(_edits))
+check("rename.reject.keyword", _cp["prepare_kw"] is None and _cp["rename_bad"] is None,
+      str(_cp["prepare_kw"]) + " / " + str(_cp["rename_bad"]))
+# foldingRange：一个 region（fn 块）+ 一个 comment（块注释）
+_fr = _cp["fold"] or []
+check("foldingRange.region",
+      any(f["kind"] == "region" and f["startLine"] == 1 and f["endLine"] == 5 for f in _fr),
+      str(_fr))
+check("foldingRange.comment",
+      any(f["kind"] == "comment" and f["startLine"] == 2 for f in _fr), str(_fr))
+# codeAction：两条 quickfix，did-you-mean 与 &&→and
+_ca = _cp["action"] or []
+check("codeAction.didYouMean",
+      len(_ca) >= 1
+      and any(a.get("kind") == "quickfix"
+              and any(e["newText"] == "alpha" for es in a["edit"]["changes"].values() for e in es)
+              for a in _ca), str(_ca)[:400])
+check("codeAction.andOr",
+      any(any(e["newText"] == "and" for es in a["edit"]["changes"].values() for e in es)
+          for a in _ca), str(_ca)[:400])
+# semanticTokens：data 是 5 的倍数，KEY/VAR/FUNC/TYPE/COMMENT 均出现
+_sem = (_cp["sem"] or {}).get("data") or []
+check("semanticTokens.data",
+      len(_sem) > 0 and len(_sem) % 5 == 0,
+      "len=" + str(len(_sem)))
+_types = {_sem[i + 3] for i in range(0, len(_sem), 5)}
+check("semanticTokens.cover",
+      set([11, 5, 8, 1, 13]) <= _types,
+      "types=" + str(sorted(_types)))
 
 # ---------------------------------------------------------------------------
 if fails:

@@ -4587,6 +4587,596 @@ fn referencesAt(doc: *const Document, line: u32, character: u32, include_decl: b
     return j.buf.items;
 }
 
+// ---------------------------------------------------------------- rename / prepareRename
+//
+// 文本级符号重命名：与 referencesAt 共用同一套词边界扫描（当前文档 +
+// 工作区 .zx 文件），但产出的是 LSP WorkspaceEdit——每处出现一条 TextEdit，
+// range 覆盖整个标识符（references 的 range 只指首字符，编辑时会漏字）。
+// 语义判别交给编译器的事后 --check：编辑器改完文本，诊断自然会报残留。
+
+/// 光标下的完整标识符 + 它在该行的 UTF-16 range。
+fn wordAt(doc: *const Document, line: u32, character: u32) ?struct {
+    word: []const u8,
+    start_line: u32,
+    start_col: u32,
+    end_col: u32,
+} {
+    const off = posToOffset(doc.text, line, character);
+    var s = off;
+    while (s > 0 and isIdentChar(doc.text[s - 1]) and doc.text[s - 1] != '\n') s -= 1;
+    var e = off;
+    while (e < doc.text.len and isIdentChar(doc.text[e])) e += 1;
+    if (e <= s) return null;
+    const ls = lineStartOffset(doc.text, s);
+    const start_col = utf16Len(doc.text[ls..s]);
+    const end_col = start_col + utf16Len(doc.text[s..e]);
+    return .{ .word = doc.text[s..e], .start_line = line, .start_col = start_col, .end_col = end_col };
+}
+
+/// 找 offset 所在行的行首字节偏移（rename 算 UTF-16 列用）。
+fn lineStartOffset(text: []const u8, off: usize) usize {
+    var i = @min(off, text.len);
+    while (i > 0 and text[i - 1] != '\n') i -= 1;
+    return i;
+}
+
+/// newName 合法性：非空、首字符非数字、只含标识符字符、不是关键字。
+fn validNewName(name: []const u8) bool {
+    if (name.len == 0) return false;
+    if (isKeywordWord(name)) return false;
+    if (name[0] >= '0' and name[0] <= '9') return false;
+    for (name) |c| if (!isIdentChar(c)) return false;
+    return true;
+}
+
+/// prepareRename：返回标识符的 range + placeholder；关键字/空白处返回 null。
+fn prepareRenameAt(doc: *const Document, line: u32, character: u32) ?[]const u8 {
+    const w = wordAt(doc, line, character) orelse return null;
+    if (isKeywordWord(w.word) or w.word[0] >= '0' and w.word[0] <= '9') return null;
+    var j = Json{};
+    j.buf.appendSlice(gpa, "{\"range\":{\"start\":{\"line\":") catch @panic("oom");
+    j.raw("{d},\"character\":{d}", .{ w.start_line, w.start_col });
+    j.buf.appendSlice(gpa, "},\"end\":{\"line\":") catch @panic("oom");
+    j.raw("{d},\"character\":{d}", .{ w.start_line, w.end_col });
+    j.buf.appendSlice(gpa, "}},\"placeholder\":") catch @panic("oom");
+    j.str(w.word);
+    j.buf.append(gpa, '}') catch @panic("oom");
+    return j.buf.items;
+}
+
+/// 一段文本里 word 的所有出现 → JSON TextEdit 数组；没有命中返回 null。
+const RenameSink = struct {
+    j: *Json,
+    word: []const u8,
+    new_name: []const u8,
+    first: bool = true,
+    count: usize = 0,
+
+    fn add(self: *RenameSink, ln: u32, col: usize) void {
+        if (self.count >= 500) return;
+        self.count += 1;
+        if (!self.first) self.j.buf.append(gpa, ',') catch {};
+        self.first = false;
+        const c: u32 = @intCast(col);
+        self.j.buf.appendSlice(gpa, "{\"range\":{\"start\":{\"line\":") catch {};
+        self.j.raw("{d},\"character\":{d}", .{ ln, c });
+        self.j.buf.appendSlice(gpa, "},\"end\":{\"line\":") catch {};
+        self.j.raw("{d},\"character\":{d}", .{ ln, c + @as(u32, @intCast(self.word.len)) });
+        self.j.buf.appendSlice(gpa, "}},\"newText\":") catch {};
+        self.j.str(self.new_name);
+        self.j.buf.append(gpa, '}') catch {};
+    }
+};
+
+fn renameEditsIn(text: []const u8, word: []const u8, new_name: []const u8) ?[]const u8 {
+    var j = Json{};
+    j.buf.append(gpa, '[') catch {};
+    var sink = RenameSink{ .j = &j, .word = word, .new_name = new_name };
+    eachWordUse(text, word, null, null, &sink, RenameSink.add);
+    if (sink.count == 0) return null;
+    j.buf.append(gpa, ']') catch {};
+    return j.buf.items;
+}
+
+/// rename：当前文档 + 工作区同目录/root（≤2 层）所有 .zx 的词命中 → WorkspaceEdit。
+fn renameAt(doc: *const Document, line: u32, character: u32, new_name: []const u8) ?[]const u8 {
+    if (!validNewName(new_name)) return null;
+    const w = wordAt(doc, line, character) orelse return null;
+    if (isKeywordWord(w.word) or w.word[0] >= '0' and w.word[0] <= '9') return null;
+    if (std.mem.eql(u8, w.word, new_name)) return null;
+
+    var j = Json{};
+    j.buf.appendSlice(gpa, "{\"changes\":{") catch @panic("oom");
+    var first_uri = true;
+    if (renameEditsIn(doc.text, w.word, new_name)) |edits| {
+        j.str(doc.uri);
+        j.buf.append(gpa, ':') catch @panic("oom");
+        j.buf.appendSlice(gpa, edits) catch @panic("oom");
+        first_uri = false;
+    }
+
+    const doc_dir = dirName(doc.path);
+    var searched: std.StringHashMapUnmanaged(void) = .empty;
+    defer searched.deinit(gpa);
+    var dirs: [2][]const u8 = undefined;
+    var nd: usize = 0;
+    dirs[nd] = doc_dir;
+    nd += 1;
+    if (root_path) |r| {
+        if (!std.mem.eql(u8, r, doc_dir)) {
+            dirs[nd] = r;
+            nd += 1;
+        }
+    }
+    const self_name = baseName(doc.path);
+    for (dirs[0..nd]) |d| {
+        if (searched.contains(d)) continue;
+        searched.put(gpa, d, {}) catch {};
+        var dir = Io.Dir.cwd().openDir(g_io, d, .{ .iterate = true }) catch continue;
+        defer dir.close(g_io);
+        var it = dir.iterate();
+        while (it.next(g_io) catch null) |entry| {
+            if (entry.kind != .file or std.mem.startsWith(u8, entry.name, ".zxls-") or !std.mem.endsWith(u8, entry.name, ".zx")) continue;
+            if (std.mem.eql(u8, entry.name, self_name)) continue;
+            var fp: std.ArrayList(u8) = .empty;
+            defer fp.deinit(gpa);
+            fp.appendSlice(gpa, d) catch continue;
+            fp.append(gpa, '/') catch continue;
+            fp.appendSlice(gpa, entry.name) catch continue;
+            const txt = readFileSmall(fp.items) orelse continue;
+            if (renameEditsIn(txt, w.word, new_name)) |edits| {
+                if (!first_uri) j.buf.append(gpa, ',') catch {};
+                first_uri = false;
+                j.str(pathToUri(fp.items));
+                j.buf.append(gpa, ':') catch @panic("oom");
+                j.buf.appendSlice(gpa, edits) catch @panic("oom");
+            }
+        }
+    }
+    j.buf.appendSlice(gpa, "}}") catch @panic("oom");
+    return j.buf.items;
+}
+
+// ---------------------------------------------------------------- foldingRange
+//
+// 词法级代码块折叠：花括号配对 + 多行块注释。跳过字符串/字符/行注释，
+// 避免把字面量或注释里的括号算进来。range 用 UTF-16 列，与诊断同口径。
+
+const LexPos = struct { i: usize = 0, line: u32 = 0, col: u32 = 0 };
+
+/// 消费一个 UTF-8 码点并推进 (line, UTF-16 col)。容错：非法字节按 1 列。
+fn bumpCp(text: []const u8, p: *LexPos) void {
+    if (p.i >= text.len) return;
+    const c = text[p.i];
+    if (c == '\n') {
+        p.i += 1;
+        p.line += 1;
+        p.col = 0;
+        return;
+    }
+    if (c < 0x80) {
+        p.i += 1;
+        p.col += 1;
+        return;
+    }
+    const n = std.unicode.utf8ByteSequenceLength(c) catch 1;
+    const end = @min(p.i + n, text.len);
+    var units: u32 = 1;
+    if (std.unicode.utf8Decode(text[p.i..end])) |cp| {
+        units = if (cp < 0x10000) 1 else 2;
+    } else |_| {}
+    p.i = end;
+    p.col += units;
+}
+
+fn foldEmit(j: *Json, first: *bool, sl: u32, sc: u32, el: u32, ec: u32, kind: []const u8) void {
+    if (!first.*) j.buf.append(gpa, ',') catch {};
+    first.* = false;
+    j.buf.appendSlice(gpa, "{\"startLine\":") catch {};
+    j.raw("{d}", .{sl});
+    j.buf.appendSlice(gpa, ",\"startCharacter\":") catch {};
+    j.raw("{d}", .{sc});
+    j.buf.appendSlice(gpa, ",\"endLine\":") catch {};
+    j.raw("{d}", .{el});
+    j.buf.appendSlice(gpa, ",\"endCharacter\":") catch {};
+    j.raw("{d}", .{ec});
+    j.buf.appendSlice(gpa, ",\"kind\":") catch {};
+    j.str(kind);
+    j.buf.append(gpa, '}') catch {};
+}
+
+fn foldingRanges(doc: *const Document) []const u8 {
+    const text = doc.text;
+    var j = Json{};
+    j.buf.append(gpa, '[') catch {};
+    var first = true;
+    var stack: std.ArrayList(struct { line: u32, col: u32 }) = .empty;
+    defer stack.deinit(gpa);
+    var p = LexPos{};
+    while (p.i < text.len) {
+        const c = text[p.i];
+        // 行注释：吃到换行前（换行交给主循环统一推进）
+        if (c == '/' and p.i + 1 < text.len and text[p.i + 1] == '/') {
+            while (p.i < text.len and text[p.i] != '\n') bumpCp(text, &p);
+            continue;
+        }
+        // 块注释：跨行时产出一条 comment 折叠（起点 = `/*` 所在行，终点 = `*/` 行）。
+        if (c == '/' and p.i + 1 < text.len and text[p.i + 1] == '*') {
+            const sl = p.line;
+            const sc = p.col;
+            bumpCp(text, &p);
+            bumpCp(text, &p);
+            while (p.i < text.len) {
+                if (text[p.i] == '*' and p.i + 1 < text.len and text[p.i + 1] == '/') {
+                    bumpCp(text, &p);
+                    bumpCp(text, &p);
+                    break;
+                }
+                bumpCp(text, &p);
+            }
+            if (p.line > sl) foldEmit(&j, &first, sl, sc, p.line, p.col, "comment");
+            continue;
+        }
+        // 字符串 / 字符字面量：带转义，整段跳过
+        if (c == '"' or c == '\'') {
+            const q = c;
+            bumpCp(text, &p);
+            while (p.i < text.len) {
+                if (text[p.i] == '\\' and p.i + 1 < text.len) {
+                    bumpCp(text, &p);
+                    bumpCp(text, &p);
+                    continue;
+                }
+                if (text[p.i] == q) {
+                    bumpCp(text, &p);
+                    break;
+                }
+                if (text[p.i] == '\n') break; // 未闭合字面量：交给编译器诊断
+                bumpCp(text, &p);
+            }
+            continue;
+        }
+        if (c == '{') {
+            stack.append(gpa, .{ .line = p.line, .col = p.col }) catch {};
+            bumpCp(text, &p);
+            continue;
+        }
+        if (c == '}') {
+            if (stack.items.len > 0) {
+                const open = stack.items[stack.items.len - 1];
+                stack.items.len -= 1;
+                if (p.line > open.line) foldEmit(&j, &first, open.line, open.col, p.line, p.col + 1, "region");
+            }
+            bumpCp(text, &p);
+            continue;
+        }
+        bumpCp(text, &p);
+    }
+    j.buf.append(gpa, ']') catch {};
+    return j.buf.items;
+}
+
+// ---------------------------------------------------------------- codeAction
+//
+// 基于客户端随请求带来的诊断（context.diagnostics）生成 quickfix。文本级：
+//   - E0211 的 `&&`/`||` → and/or；
+//   - "did you mean `X`?" → 把诊断 range 覆盖的 word 换成建议名；
+//   - "struct(packed) was removed" → 去掉 (packed)。
+// 每个 action 带 WorkspaceEdit，改完由诊断线程重新 --check 验证。
+
+fn caEdit(j: *Json, uri: []const u8, sl: u32, sc: u32, el: u32, ec: u32, new_text: []const u8) void {
+    j.buf.appendSlice(gpa, "\"edit\":{\"changes\":{") catch {};
+    j.str(uri);
+    j.buf.appendSlice(gpa, ":[{\"range\":{\"start\":{\"line\":") catch {};
+    j.raw("{d},\"character\":{d}", .{ sl, sc });
+    j.buf.appendSlice(gpa, "},\"end\":{\"line\":") catch {};
+    j.raw("{d},\"character\":{d}", .{ el, ec });
+    j.buf.appendSlice(gpa, "}},\"newText\":") catch {};
+    j.str(new_text);
+    j.buf.appendSlice(gpa, "}]}}") catch {};
+}
+
+fn codeActionsAt(doc: *const Document, diags_v: std.json.Value) []const u8 {
+    var j = Json{};
+    j.buf.append(gpa, '[') catch {};
+    var first = true;
+    if (diags_v == .array) {
+        for (diags_v.array.items) |dv| {
+            if (dv != .object) continue;
+            const msg_v = dv.object.get("message") orelse continue;
+            if (msg_v != .string) continue;
+            const msg = msg_v.string;
+            const rng = dv.object.get("range") orelse continue;
+            if (rng != .object) continue;
+            const st = rng.object.get("start") orelse continue;
+            const en = rng.object.get("end") orelse continue;
+            if (st != .object or en != .object) continue;
+            const slv = st.object.get("line") orelse continue;
+            const scv = st.object.get("character") orelse continue;
+            const elv = en.object.get("line") orelse continue;
+            const ecv = en.object.get("character") orelse continue;
+            if (slv != .integer or scv != .integer or elv != .integer or ecv != .integer) continue;
+            const sl: u32 = @intCast(slv.integer);
+            const sc: u32 = @intCast(scv.integer);
+            const el: u32 = @intCast(elv.integer);
+            const ec: u32 = @intCast(ecv.integer);
+
+            var title: ?[]const u8 = null;
+            var new_text: ?[]const u8 = null;
+            var wide: u32 = 0; // &&/|| 需覆盖两个字符
+
+            if (std.mem.indexOf(u8, msg, "&&")) |_| {
+                title = "改用 `and`";
+                new_text = "and";
+                wide = 2;
+            } else if (std.mem.indexOf(u8, msg, "||")) |_| {
+                title = "改用 `or`";
+                new_text = "or";
+                wide = 2;
+            } else if (std.mem.indexOf(u8, msg, "struct(packed) was removed")) |_| {
+                title = "去掉 packed";
+                new_text = "struct";
+            } else if (std.mem.indexOf(u8, msg, "did you mean `")) |mp| {
+                const rest = msg[mp + "did you mean `".len ..];
+                if (std.mem.indexOfScalar(u8, rest, '`')) |qend| {
+                    if (qend > 0) {
+                        title = "did-you-mean"; // 输出时按建议名拼真实标题
+                        new_text = rest[0..qend];
+                    }
+                }
+            }
+            if (title == null or new_text == null) continue;
+            if (!first) j.buf.append(gpa, ',') catch {};
+            first = false;
+            j.buf.appendSlice(gpa, "{\"title\":") catch {};
+            if (std.mem.eql(u8, title.?, "did-you-mean")) {
+                var tb: std.ArrayList(u8) = .empty;
+                defer tb.deinit(gpa);
+                tb.print(gpa, "改为 `{s}`", .{new_text.?}) catch {};
+                j.str(tb.items);
+            } else {
+                j.str(title.?);
+            }
+            j.buf.appendSlice(gpa, ",\"kind\":\"quickfix\",") catch {};
+            const ecol = if (wide > 0) sc + wide else ec;
+            caEdit(&j, doc.uri, sl, sc, el, ecol, new_text.?);
+            j.buf.append(gpa, '}') catch {};
+        }
+    }
+    j.buf.append(gpa, ']') catch {};
+    return j.buf.items;
+}
+
+// ---------------------------------------------------------------- semanticTokens
+//
+// 词法 + 轻量上下文语义分类，产出 LSP SemanticTokens（delta 编码）。
+// tokenTypes 索引必须与 initialize 里 legend 数组逐项一致：
+//   0 namespace 1 type 2 struct 3 enum 4 parameter 5 variable 6 property
+//   7 enumMember 8 function 9 method 10 macro 11 keyword 12 modifier
+//   13 comment 14 string 15 number 16 operator
+
+const SemTok = struct { line: u32, col: u32, len: u32, ty: u8, mods: u8 = 0 };
+
+fn isPrimType(w: []const u8) bool {
+    const prims = [_][]const u8{ "bool", "char", "void", "i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "isize", "usize", "f16", "f32", "f64", "f128" };
+    for (prims) |p| if (std.mem.eql(u8, w, p)) return true;
+    return false;
+}
+
+fn isBuiltinCall(w: []const u8) bool {
+    const b = [_][]const u8{ "@mod", "@type", "@shim", "@memcpy", "@memmove", "@memset", "@link", "@error", "@trap", "@tag", "@Vec" };
+    for (b) |x| if (std.mem.eql(u8, w, x)) return true;
+    return false;
+}
+
+fn semConsume(text: []const u8, p: *LexPos, toks: *std.ArrayList(SemTok), ty: u8, mods: u8, sl: u32, sc: u32) void {
+    const len = p.col - sc; // 单行 token；跨行由调用方按段处理
+    _ = text;
+    if (len > 0) toks.append(gpa, .{ .line = sl, .col = sc, .len = len, .ty = ty, .mods = mods }) catch {};
+}
+
+fn semanticTokensFull(doc: *const Document) []const u8 {
+    const text = doc.text;
+    var toks: std.ArrayList(SemTok) = .empty;
+    defer toks.deinit(gpa);
+    var p = LexPos{};
+
+    // 预收集所有声明名 → 分类（函数 / struct / enum / 类型别名），供引用点复用
+    var decls: std.StringHashMapUnmanaged(u8) = .empty;
+    defer decls.deinit(gpa);
+    // declaration 修饰只标在声明处；引用点复用同一分类但不带 declaration
+    var emitted_decl: std.StringHashMapUnmanaged(void) = .empty;
+    defer emitted_decl.deinit(gpa);
+    {
+        var lit = std.mem.splitScalar(u8, text, '\n');
+        while (lit.next()) |raw| {
+            const line = std.mem.trim(u8, raw, " \t\r");
+            var r = line;
+            if (std.mem.startsWith(u8, r, "pub ")) r = std.mem.trimStart(u8, r[4..], " \t");
+            if (std.mem.startsWith(u8, r, "extern ")) r = std.mem.trimStart(u8, r[7..], " \t");
+            if (std.mem.startsWith(u8, r, "const ") or std.mem.startsWith(u8, r, "let ") or std.mem.startsWith(u8, r, "var ")) {
+                const sp = std.mem.indexOfScalar(u8, r, ' ') orelse continue;
+                const rest = std.mem.trimStart(u8, r[sp + 1 ..], " \t");
+                var n: usize = 0;
+                while (n < rest.len and isIdentChar(rest[n])) n += 1;
+                if (n == 0) continue;
+                const name = rest[0..n];
+                const after = std.mem.trimStart(u8, rest[n..], " \t");
+                var ty: u8 = 5;
+                if (std.mem.startsWith(u8, after, "= fn") or std.mem.startsWith(u8, after, "fn ")) ty = 8
+                else if (std.mem.startsWith(u8, after, "= struct") or std.mem.startsWith(u8, after, "struct ")) ty = 2
+                else if (std.mem.startsWith(u8, after, "= enum") or std.mem.startsWith(u8, after, "enum ")) ty = 3
+                else if (std.mem.startsWith(u8, after, "= union") or std.mem.startsWith(u8, after, "= error") or std.mem.startsWith(u8, after, "= @Vec")) ty = 1;
+                decls.put(gpa, name, ty) catch {};
+            } else if (std.mem.startsWith(u8, r, "fn ")) {
+                const rest = std.mem.trimStart(u8, r[3..], " \t");
+                var n: usize = 0;
+                while (n < rest.len and isIdentChar(rest[n])) n += 1;
+                if (n > 0) decls.put(gpa, rest[0..n], 8) catch {};
+            }
+        }
+    }
+
+    while (p.i < text.len) {
+        const c = text[p.i];
+        // 空白
+        if (c == ' ' or c == '\t' or c == '\r' or c == '\n') {
+            bumpCp(text, &p);
+            continue;
+        }
+        // 行注释
+        if (c == '/' and p.i + 1 < text.len and text[p.i + 1] == '/') {
+            const sl = p.line;
+            const sc = p.col;
+            while (p.i < text.len and text[p.i] != '\n') bumpCp(text, &p);
+            semConsume(text, &p, &toks, 13, 0, sl, sc);
+            continue;
+        }
+        // 块注释：逐行分段
+        if (c == '/' and p.i + 1 < text.len and text[p.i + 1] == '*') {
+            var sl = p.line;
+            var sc = p.col;
+            bumpCp(text, &p);
+            bumpCp(text, &p);
+            while (p.i < text.len) {
+                if (text[p.i] == '*' and p.i + 1 < text.len and text[p.i + 1] == '/') {
+                    bumpCp(text, &p);
+                    bumpCp(text, &p);
+                    break;
+                }
+                if (text[p.i] == '\n') {
+                    semConsume(text, &p, &toks, 13, 0, sl, sc);
+                    bumpCp(text, &p);
+                    sl = p.line;
+                    sc = p.col;
+                    continue;
+                }
+                bumpCp(text, &p);
+            }
+            semConsume(text, &p, &toks, 13, 0, sl, sc);
+            continue;
+        }
+        // 字符串 / 字符
+        if (c == '"' or c == '\'') {
+            const q = c;
+            const sl = p.line;
+            const sc = p.col;
+            bumpCp(text, &p);
+            while (p.i < text.len and p.line == sl) {
+                if (text[p.i] == '\\' and p.i + 1 < text.len) {
+                    bumpCp(text, &p);
+                    bumpCp(text, &p);
+                    continue;
+                }
+                if (text[p.i] == q) {
+                    bumpCp(text, &p);
+                    break;
+                }
+                bumpCp(text, &p);
+            }
+            semConsume(text, &p, &toks, 14, 0, sl, sc);
+            continue;
+        }
+        // 数字：0x/0b/0o、数字、'.' 后跟数字、指数、类型后缀都按标识符字符吞
+        if (c >= '0' and c <= '9') {
+            const sl = p.line;
+            const sc = p.col;
+            while (p.i < text.len) {
+                const d = text[p.i];
+                if (isIdentChar(d) or (d == '.' and p.i + 1 < text.len and text[p.i + 1] >= '0' and text[p.i + 1] <= '9') or
+                    ((d == '+' or d == '-') and p.i > 0 and (text[p.i - 1] == 'e' or text[p.i - 1] == 'E')))
+                {
+                    bumpCp(text, &p);
+                } else break;
+            }
+            semConsume(text, &p, &toks, 15, 0, sl, sc);
+            continue;
+        }
+        // @ 内建 / @Vec
+        if (c == '@') {
+            const sl = p.line;
+            const sc = p.col;
+            while (p.i < text.len and isIdentChar(text[p.i])) bumpCp(text, &p);
+            if (p.col - sc <= 1) {
+                bumpCp(text, &p); // 孤立 @
+            }
+            semConsume(text, &p, &toks, 10, 0, sl, sc);
+            continue;
+        }
+        // 标识符
+        if (isIdentChar(c)) {
+            const sl = p.line;
+            const sc = p.col;
+            while (p.i < text.len and isIdentChar(text[p.i])) bumpCp(text, &p);
+            // 取词面：从 p 回溯到词首（Zx 标识符均为 ASCII）
+            var bs = p.i;
+            while (bs > 0 and isIdentChar(text[bs - 1])) bs -= 1;
+            const word = text[bs..p.i];
+
+            // 看右边是否紧跟 '('（调用/声明），左边是否 '.'（成员）
+            var k = p.i;
+            while (k < text.len and (text[k] == ' ' or text[k] == '\t')) k += 1;
+            const call_like = k < text.len and text[k] == '(';
+            var b = bs;
+            while (b > 0 and (text[b - 1] == ' ' or text[b - 1] == '\t')) b -= 1;
+            const member = b > 0 and text[b - 1] == '.';
+
+            var ty: u8 = 5; // variable
+            var mods: u8 = 0;
+            if (isKeywordWord(word)) {
+                if (std.mem.eql(u8, word, "pub") or std.mem.eql(u8, word, "extern") or std.mem.eql(u8, word, "inline")) ty = 12
+                else ty = 11;
+            } else if (isPrimType(word) or isBuiltinTy(word)) {
+                ty = 1;
+                if (isBuiltinTy(word)) mods = 2;
+            } else if (decls.get(word)) |dt| {
+                ty = dt;
+                if (!emitted_decl.contains(word)) {
+                    emitted_decl.put(gpa, word, {}) catch {};
+                    mods = 1;
+                }
+            } else if (member) {
+                ty = if (call_like) 9 else 6;
+            } else if (call_like) {
+                ty = 8;
+            } else if (isBuiltinCall(word)) {
+                ty = 10;
+            }
+            semConsume(text, &p, &toks, ty, mods, sl, sc);
+            continue;
+        }
+        // 运算符
+        if (std.mem.indexOfScalar(u8, "+-*/%=<>!&|^~?:", c) != null) {
+            const sl = p.line;
+            const sc = p.col;
+            while (p.i < text.len and std.mem.indexOfScalar(u8, "+-*/%=<>!&|^~?:", text[p.i]) != null) bumpCp(text, &p);
+            semConsume(text, &p, &toks, 16, 0, sl, sc);
+            continue;
+        }
+        bumpCp(text, &p);
+    }
+
+    var j = Json{};
+    j.buf.appendSlice(gpa, "{\"data\":[") catch {};
+    var prev_line: u32 = 0;
+    var prev_col: u32 = 0;
+    for (toks.items, 0..) |t, idx| {
+        if (idx > 0) j.buf.append(gpa, ',') catch {};
+        const dl = t.line - prev_line;
+        const ds = if (t.line == prev_line) t.col - prev_col else t.col;
+        j.raw("{d},{d},{d},{d},{d}", .{ dl, ds, t.len, t.ty, t.mods });
+        prev_line = t.line;
+        prev_col = t.col;
+    }
+    j.buf.appendSlice(gpa, "]}") catch {};
+    return j.buf.items;
+}
+
+/// (line, utf16col) → 字节偏移。仅用于上面取词面的兜底（当前不用）。
+fn offsetAt(text: []const u8, line: u32, col: u32) usize {
+    return posToOffset(text, line, col);
+}
+
 // ---------------------------------------------------------------- hover / signature
 
 fn trimSl(s: []const u8) []const u8 {
@@ -11041,7 +11631,10 @@ fn handle(v: std.json.Value) ?[]const u8 {
         writeId(&j, id);
         // KEEP: inlayHintProvider 不能删 —— Zed 靠这个声明决定要不要发
         // textDocument/inlayHint；删掉等于行内类型提示整条线失效。
-        j.buf.appendSlice(gpa, ",\"result\":{\"capabilities\":{\"textDocumentSync\":{\"openClose\":true,\"change\":1},\"completionProvider\":{\"triggerCharacters\":[\".\",\"@\",\",\"]},\"definitionProvider\":true,\"hoverProvider\":true,\"inlayHintProvider\":true,\"signatureHelpProvider\":{\"triggerCharacters\":[\"(\",\")\",\",\"],\"retriggerCharacters\":[\",\"]},\"documentFormattingProvider\":true,\"documentSymbolProvider\":true,\"referencesProvider\":true}}}") catch @panic("oom");
+        // KEEP: 新增能力必须在此声明，否则客户端（Zed）根本不会发对应请求。
+        // semanticTokens 的 tokenTypes 顺序同时是 semanticTokensFull 的类型索引，
+        // 改这张表必须同步 sem_* 常量。
+        j.buf.appendSlice(gpa, ",\"result\":{\"capabilities\":{\"textDocumentSync\":{\"openClose\":true,\"change\":1},\"completionProvider\":{\"triggerCharacters\":[\".\",\"@\",\",\"]},\"definitionProvider\":true,\"hoverProvider\":true,\"inlayHintProvider\":true,\"signatureHelpProvider\":{\"triggerCharacters\":[\"(\",\")\",\",\"],\"retriggerCharacters\":[\",\"]},\"documentFormattingProvider\":true,\"documentSymbolProvider\":true,\"referencesProvider\":true,\"renameProvider\":{\"prepareProvider\":true},\"foldingRangeProvider\":true,\"codeActionProvider\":{\"codeActionKinds\":[\"quickfix\"]},\"semanticTokensProvider\":{\"legend\":{\"tokenTypes\":[\"namespace\",\"type\",\"struct\",\"enum\",\"parameter\",\"variable\",\"property\",\"enumMember\",\"function\",\"method\",\"macro\",\"keyword\",\"modifier\",\"comment\",\"string\",\"number\",\"operator\"],\"tokenModifiers\":[\"declaration\",\"defaultLibrary\"]},\"full\":true}}}}") catch @panic("oom");
         // 工程根的 vendor/ 与 deps：补全/跳转/悬停都靠这张表找模块文件
         initModuleDirs();
         // 落一行能力协商结果：改了 codeDescription 相关逻辑后，看这条就知道
@@ -11393,6 +11986,148 @@ fn handle(v: std.json.Value) ?[]const u8 {
         if (result) |r| {
             j.buf.appendSlice(gpa, r) catch {};
         } else j.raw("[]", .{});
+        j.raw("}}", .{});
+        return j.buf.items;
+    }
+
+    if (std.mem.eql(u8, method, "textDocument/prepareRename")) {
+        var result: ?[]const u8 = null;
+        blk: {
+            const pm = params orelse break :blk;
+            if (pm != .object) break :blk;
+            const td = pm.object.get("textDocument") orelse break :blk;
+            const pos = pm.object.get("position") orelse break :blk;
+            if (td != .object or pos != .object) break :blk;
+            const uri_v = td.object.get("uri") orelse break :blk;
+            const ln_v = pos.object.get("line") orelse break :blk;
+            const ch_v = pos.object.get("character") orelse break :blk;
+            if (uri_v != .string or ln_v != .integer or ch_v != .integer) break :blk;
+            const path = uriToPath(uri_v.string);
+            docs_mu.lockUncancelable(g_io);
+            const doc_copy: ?Document = docs.get(path);
+            docs_mu.unlock(g_io);
+            if (doc_copy) |d| {
+                result = prepareRenameAt(&d, @intCast(ln_v.integer), @intCast(ch_v.integer));
+            }
+        }
+        var j = Json{};
+        j.raw("{{\"jsonrpc\":\"2.0\",\"id\":", .{});
+        writeId(&j, id);
+        j.raw(",\"result\":", .{});
+        if (result) |r| {
+            j.buf.appendSlice(gpa, r) catch {};
+        } else j.raw("null", .{});
+        j.raw("}}", .{});
+        return j.buf.items;
+    }
+
+    if (std.mem.eql(u8, method, "textDocument/rename")) {
+        var result: ?[]const u8 = null;
+        blk: {
+            const pm = params orelse break :blk;
+            if (pm != .object) break :blk;
+            const td = pm.object.get("textDocument") orelse break :blk;
+            const pos = pm.object.get("position") orelse break :blk;
+            const nn = pm.object.get("newName") orelse break :blk;
+            if (td != .object or pos != .object or nn != .string) break :blk;
+            const uri_v = td.object.get("uri") orelse break :blk;
+            const ln_v = pos.object.get("line") orelse break :blk;
+            const ch_v = pos.object.get("character") orelse break :blk;
+            if (uri_v != .string or ln_v != .integer or ch_v != .integer) break :blk;
+            const path = uriToPath(uri_v.string);
+            docs_mu.lockUncancelable(g_io);
+            const doc_copy: ?Document = docs.get(path);
+            docs_mu.unlock(g_io);
+            if (doc_copy) |d| {
+                result = renameAt(&d, @intCast(ln_v.integer), @intCast(ch_v.integer), nn.string);
+            }
+        }
+        var j = Json{};
+        j.raw("{{\"jsonrpc\":\"2.0\",\"id\":", .{});
+        writeId(&j, id);
+        j.raw(",\"result\":", .{});
+        if (result) |r| {
+            j.buf.appendSlice(gpa, r) catch {};
+        } else j.raw("null", .{});
+        j.raw("}}", .{});
+        return j.buf.items;
+    }
+
+    if (std.mem.eql(u8, method, "textDocument/foldingRange")) {
+        var result: ?[]const u8 = null;
+        blk: {
+            const pm = params orelse break :blk;
+            if (pm != .object) break :blk;
+            const td = pm.object.get("textDocument") orelse break :blk;
+            if (td != .object) break :blk;
+            const uri_v = td.object.get("uri") orelse break :blk;
+            if (uri_v != .string) break :blk;
+            const path = uriToPath(uri_v.string);
+            docs_mu.lockUncancelable(g_io);
+            const doc_copy: ?Document = docs.get(path);
+            docs_mu.unlock(g_io);
+            if (doc_copy) |d| result = foldingRanges(&d);
+        }
+        var j = Json{};
+        j.raw("{{\"jsonrpc\":\"2.0\",\"id\":", .{});
+        writeId(&j, id);
+        j.raw(",\"result\":", .{});
+        if (result) |r| j.buf.appendSlice(gpa, r) catch {} else j.raw("[]", .{});
+        j.raw("}}", .{});
+        return j.buf.items;
+    }
+
+    if (std.mem.eql(u8, method, "textDocument/codeAction")) {
+        var result: []const u8 = "[]";
+        blk: {
+            const pm = params orelse break :blk;
+            if (pm != .object) break :blk;
+            const td = pm.object.get("textDocument") orelse break :blk;
+            if (td != .object) break :blk;
+            const uri_v = td.object.get("uri") orelse break :blk;
+            if (uri_v != .string) break :blk;
+            const path = uriToPath(uri_v.string);
+            docs_mu.lockUncancelable(g_io);
+            const doc_copy: ?Document = docs.get(path);
+            docs_mu.unlock(g_io);
+            if (doc_copy) |d| {
+                const ctx = pm.object.get("context") orelse break :blk;
+                if (ctx != .object) break :blk;
+                const diags = ctx.object.get("diagnostics") orelse break :blk;
+                result = codeActionsAt(&d, diags);
+            }
+        }
+        var j = Json{};
+        j.raw("{{\"jsonrpc\":\"2.0\",\"id\":", .{});
+        writeId(&j, id);
+        j.raw(",\"result\":", .{});
+        j.buf.appendSlice(gpa, result) catch {};
+        j.raw("}}", .{});
+        return j.buf.items;
+    }
+
+    if (std.mem.eql(u8, method, "textDocument/semanticTokens/full") or
+        std.mem.eql(u8, method, "textDocument/semanticTokens/full/delta"))
+    {
+        var result: ?[]const u8 = null;
+        blk: {
+            const pm = params orelse break :blk;
+            if (pm != .object) break :blk;
+            const td = pm.object.get("textDocument") orelse break :blk;
+            if (td != .object) break :blk;
+            const uri_v = td.object.get("uri") orelse break :blk;
+            if (uri_v != .string) break :blk;
+            const path = uriToPath(uri_v.string);
+            docs_mu.lockUncancelable(g_io);
+            const doc_copy: ?Document = docs.get(path);
+            docs_mu.unlock(g_io);
+            if (doc_copy) |d| result = semanticTokensFull(&d);
+        }
+        var j = Json{};
+        j.raw("{{\"jsonrpc\":\"2.0\",\"id\":", .{});
+        writeId(&j, id);
+        j.raw(",\"result\":", .{});
+        if (result) |r| j.buf.appendSlice(gpa, r) catch {} else j.buf.appendSlice(gpa, "{\"data\":[]}") catch {};
         j.raw("}}", .{});
         return j.buf.items;
     }
