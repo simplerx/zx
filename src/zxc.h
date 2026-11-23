@@ -85,6 +85,18 @@ void zx_add_link_lib(const char *name);
 
 /* §192：C shim（@shim）通道已删除。 */
 
+/* ---------- allocation (§232) ----------
+ * 编译器是一次性进程：任何内部分配失败都没法恢复，返回 NULL 只会让后面
+ * 的解引用段错误（用户只看到 signal，不知道是 OOM）。统一走 x* 包装，
+ * 分配失败打印一条干净诊断后 exit(1)。
+ *
+ * 例外：确实把 NULL 当契约的调用点（文件读失败、路径扫描、解码坏输入）
+ * 继续用裸 malloc/strdup + 自己的判空，别换成 x*。 */
+void *xmalloc(size_t n);
+void *xcalloc(size_t n, size_t sz);
+void *xrealloc(void *p, size_t n);
+char *xstrdup(const char *s);
+
 /* ---------- growable byte buffer ---------- */
 
 typedef struct {

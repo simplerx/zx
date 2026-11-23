@@ -501,7 +501,7 @@ Type *resolve_type(Node *n) {
     }
 
     case NK_TUPLE_TYPE: {
-        Type **items = calloc((size_t)(n->nitems ? n->nitems : 1), sizeof(Type *));
+        Type **items = xcalloc((size_t)(n->nitems ? n->nitems : 1), sizeof(Type *));
         for (int i = 0; i < n->nitems; i++) items[i] = resolve_type(n->items[i]);
         Type *t = ty_tuple(items, n->nitems);
         free(items);
@@ -601,7 +601,7 @@ static void collect_methods(Node *n, Type *agg, const char *what) {
         if (n->items[i]->kind == NK_FN) nmeth++;
     if (!nmeth) return;
 
-    agg->methods = calloc((size_t)nmeth, sizeof(Method));
+    agg->methods = xcalloc((size_t)nmeth, sizeof(Method));
     for (int i = 0; i < n->nitems; i++) {
         Node *it = n->items[i];
         if (it->kind != NK_FN) continue;
@@ -818,7 +818,7 @@ static Type *resolve_struct_body(Node *n, Type *agg, bool is_union) {
         }
     }
 
-    Field *fs = calloc((size_t)(nfields ? nfields : 1), sizeof(Field));
+    Field *fs = xcalloc((size_t)(nfields ? nfields : 1), sizeof(Field));
     int k = 0;
     bool tagged = false;
     Type *tag_ty = NULL;
@@ -836,7 +836,7 @@ static Type *resolve_struct_body(Node *n, Type *agg, bool is_union) {
         int cnt = 0;
         for (int i = 0; i < n->nitems; i++)
             if (n->items[i]->kind == NK_PAIR) cnt++;
-        et->fields = calloc((size_t)(cnt ? cnt : 1), sizeof(Field));
+        et->fields = xcalloc((size_t)(cnt ? cnt : 1), sizeof(Field));
         et->nfields = cnt;
         tag_ty = et;
     }
@@ -983,9 +983,9 @@ static Type *resolve_enum_body(Node *n, Type *e) {
         }
     }
 
-    e->fields = calloc((size_t)(cnt ? cnt : 1), sizeof(Field));
+    e->fields = xcalloc((size_t)(cnt ? cnt : 1), sizeof(Field));
     e->nfields = cnt;
-    if (nst) e->statics = calloc((size_t)nst, sizeof(Field));
+    if (nst) e->statics = xcalloc((size_t)nst, sizeof(Field));
 
     uint64_t next = 0;
     int k = 0;
@@ -1039,7 +1039,7 @@ Type *resolve_fn_type(Node *fn) {
     if (fn->ty && fn->ty->kind == TY_TYPE && fn->type_val) return fn->type_val;
 
     int np = fn->nitems;
-    Type **ps = calloc((size_t)(np ? np : 1), sizeof(Type *));
+    Type **ps = xcalloc((size_t)(np ? np : 1), sizeof(Type *));
     for (int i = 0; i < np; i++) {
         Node *pm = fn->items[i];
         ps[i] = pm->a ? resolve_type(pm->a) : ty_invalid();

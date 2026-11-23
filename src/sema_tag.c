@@ -85,7 +85,7 @@ FieldTag *ft_subtree(FieldTag *list, const char *key) {
         if (!rest) continue;
         FieldTag *f = malloc(sizeof *f);
         if (!f) break;
-        f->name = strdup(*rest ? rest : key);
+        f->name = xstrdup(*rest ? rest : key);
         f->slot = list->slot; f->next = NULL;
         *tail = f; tail = &f->next;
     }
@@ -321,7 +321,7 @@ void pfs_add_ex(Symbol *ps, const char *key, int slot, Symbol *src_param) {
         g_pfs = p2; g_cpfs = nc;
     }
     g_pfs[g_npfs].psym = ps;
-    g_pfs[g_npfs].key = strdup(key);
+    g_pfs[g_npfs].key = xstrdup(key);
     g_pfs[g_npfs].slot = slot;
     g_pfs[g_npfs].src_param = src_param;
     g_npfs++;
@@ -853,7 +853,7 @@ void tag_auto_decl(Node *call, bool stack) {
     do {
         snprintf(namebuf, sizeof namebuf, "alloc%d", ++g_tag_auto_seq);
     } while (tag_by_name(namebuf));
-    char *nm = strdup(namebuf);
+    char *nm = xstrdup(namebuf);
     if (!nm) return;
     Node tmp; memset(&tmp, 0, sizeof tmp);
     tmp.line = call->line; tmp.col = call->col;
@@ -880,7 +880,7 @@ int tag_clone_site(TagSlot *src, Node *call, bool freed) {
     do {
         snprintf(namebuf, sizeof namebuf, "alloc%d", ++g_tag_auto_seq);
     } while (tag_by_name(namebuf));
-    char *nm = strdup(namebuf);
+    char *nm = xstrdup(namebuf);
     if (!nm) return 0;
     Node tmp; memset(&tmp, 0, sizeof tmp);
     tmp.line = call->line; tmp.col = call->col;

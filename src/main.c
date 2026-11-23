@@ -404,7 +404,7 @@ static bool write_file_if_changed(const char *path, const char *data, size_t len
     if (f) {
         char same = 1;
         size_t cap = 4096;
-        char *old = malloc(cap);
+        char *old = xmalloc(cap);
         size_t got = 0, n;
         while ((n = fread(old + got, 1, cap - got, f)) > 0) {
             got += n;
@@ -664,7 +664,7 @@ static int build_program(Node *root, const char *out, const char *cachedir, OutK
     buf_init(&rt);
     int nmods = sema_module_count();
     if (nmods <= 0) nmods = 1;
-    BUnit *units = calloc((size_t)nmods, sizeof(BUnit));
+    BUnit *units = xcalloc((size_t)nmods, sizeof(BUnit));
     int n = backend_emit_split(root, &header, &rt, units, nmods);
     if (n < 0) { free(units); return 1; }
 
@@ -672,7 +672,7 @@ static int build_program(Node *root, const char *out, const char *cachedir, OutK
     int need_jobs = n + 1;
     if (need_jobs > g_jobs_cap) {
         g_jobs_cap = need_jobs;
-        g_jobs = realloc(g_jobs, sizeof(CCJob) * (size_t)g_jobs_cap);
+        g_jobs = xrealloc(g_jobs, sizeof(CCJob) * (size_t)g_jobs_cap);
     }
 
     char hpath[2048];
@@ -1272,13 +1272,13 @@ static char **collect_zx_files(const char *dir, int *out_n) {
     int n = 0, cap = 0;
     do {
         if (fd.cFileName[0] == '.') continue;               /* 隐藏/.zxls- 影子 */
-        if (cap == n) { cap = cap ? cap * 2 : 16; list = realloc(list, cap * sizeof *list); }
+        if (cap == n) { cap = cap ? cap * 2 : 16; list = xrealloc(list, cap * sizeof *list); }
         if (dir && *dir) {
             char full[2048];
             snprintf(full, sizeof full, "%s/%s", dir, fd.cFileName);
-            list[n++] = strdup(full);
+            list[n++] = xstrdup(full);
         } else {
-            list[n++] = strdup(fd.cFileName);
+            list[n++] = xstrdup(fd.cFileName);
         }
     } while (FindNextFileA(h, &fd));
     FindClose(h);
@@ -1296,13 +1296,13 @@ static char **collect_zx_files(const char *dir, int *out_n) {
     while ((e = readdir(d))) {
         size_t l = strlen(e->d_name);
         if (e->d_name[0] == '.' || l < 3 || strcmp(e->d_name + l - 3, ".zx") != 0) continue;
-        if (cap == n) { cap = cap ? cap * 2 : 16; list = realloc(list, cap * sizeof *list); }
+        if (cap == n) { cap = cap ? cap * 2 : 16; list = xrealloc(list, cap * sizeof *list); }
         if (dir && *dir) {
             char full[2048];
             snprintf(full, sizeof full, "%s/%s", dir, e->d_name);
-            list[n++] = strdup(full);
+            list[n++] = xstrdup(full);
         } else {
-            list[n++] = strdup(e->d_name);
+            list[n++] = xstrdup(e->d_name);
         }
     }
     closedir(d);
@@ -1321,7 +1321,7 @@ static char **collect_zx_files_smart(int *out_n) {
     int n = *out_n, k = 0;
     char **sub = collect_zx_files("src/test", &k);
     if (!sub) return files;
-    files = realloc(files, (size_t)(n + k) * sizeof *files);
+    files = xrealloc(files, (size_t)(n + k) * sizeof *files);
     for (int i = 0; i < k; i++) files[n++] = sub[i];   /* 已带 src/test/ 前缀 */
     free(sub);
     *out_n = n;
@@ -1448,7 +1448,7 @@ typedef struct { char **v; size_t n, cap; } StrVec;
 static void rv_push(RowVec *rv, char *text, int lvl) {
     if (rv->n >= rv->cap) {
         rv->cap = rv->cap ? rv->cap * 2 : 16;
-        rv->v = realloc(rv->v, (size_t)rv->cap * sizeof *rv->v);
+        rv->v = xrealloc(rv->v, (size_t)rv->cap * sizeof *rv->v);
     }
     rv->v[rv->n].text = text;
     rv->v[rv->n].lvl = lvl;
@@ -1458,7 +1458,7 @@ static void rv_push(RowVec *rv, char *text, int lvl) {
 static void sv_push(StrVec *sv, char *s) {
     if (sv->n >= sv->cap) {
         sv->cap = sv->cap ? sv->cap * 2 : 64;
-        sv->v = realloc(sv->v, sv->cap * sizeof *sv->v);
+        sv->v = xrealloc(sv->v, sv->cap * sizeof *sv->v);
     }
     sv->v[sv->n++] = s;
 }
@@ -1536,7 +1536,7 @@ static bool fmt_first_group(const char *s, size_t *op, size_t *cl, bool *tc,
 }
 
 static char *dup_span(const char *s, size_t a, size_t b) {
-    char *r = malloc(b - a + 1);
+    char *r = xmalloc(b - a + 1);
     memcpy(r, s + a, b - a);
     r[b - a] = 0;
     return r;
@@ -1544,7 +1544,7 @@ static char *dup_span(const char *s, size_t a, size_t b) {
 
 static char *str_append(char *dst, const char *src) {
     size_t a = strlen(dst), b = strlen(src);
-    char *r = realloc(dst, a + b + 1);
+    char *r = xrealloc(dst, a + b + 1);
     memcpy(r + a, src, b + 1);
     return r;
 }
@@ -1601,7 +1601,7 @@ static FmtRow *fmt_rows_rec(const char *s, size_t start, int lvl, int *nr_out, i
             while (a < b && (s[a] == ' ' || s[a] == '\t')) a++;
             while (b > a && (s[b - 1] == ' ' || s[b - 1] == '\t')) b--;
             if (a == b) goto bail;                           /* 空项（foo(  ,)）放弃 */
-            char *item = malloc(b - a + 2);
+            char *item = xmalloc(b - a + 2);
             memcpy(item, s + a, b - a);
             item[b - a] = ','; item[b - a + 1] = 0;
             int snr = 0;
@@ -1698,7 +1698,7 @@ bail:
 static char *sv_join(StrVec *sv) {
     size_t total = 2;
     for (size_t i = 0; i < sv->n; i++) total += strlen(sv->v[i]) + 1;
-    char *buf = malloc(total);
+    char *buf = xmalloc(total);
     size_t k = 0;
     for (size_t i = 0; i < sv->n; i++) {
         if (i) {
@@ -1774,7 +1774,7 @@ static char **fmt_normalize(char **ls, size_t *out_n, const int *inds) {
                 reg.n = 0;
                 {   char *t = s;                 /* 去前导空白 */
                     while (*t == ' ' || *t == '\t') t++;
-                    sv_push(&reg, strdup(t));
+                    sv_push(&reg, xstrdup(t));
                 }
                 continue;                        /* 本行暂存，等区域闭合一起处理 */
             }
@@ -1811,7 +1811,7 @@ static char **fmt_normalize(char **ls, size_t *out_n, const int *inds) {
         }
         {   char *t = s;
             while (*t == ' ' || *t == '\t') t++;
-            sv_push(&reg, strdup(t));
+            sv_push(&reg, xstrdup(t));
         }
         if (spl == 0) {                          /* 区域闭合：并回一行再拆 */
             char *joined = sv_join(&reg);
@@ -1867,14 +1867,14 @@ static char *fmt_transform(const char *src) {
     bool had_cr = strstr(src, "\r\n") != NULL;
     /* 拆行（\n） */
     size_t cap = 64, n = 0;
-    char **ls = malloc(cap * sizeof *ls);
+    char **ls = xmalloc(cap * sizeof *ls);
     {
         const char *p = src;
         while (*p) {
             const char *q = strchr(p, '\n');
             size_t len = q ? (size_t)(q - p) : strlen(p);
-            if (n + 1 >= cap) { cap *= 2; ls = realloc(ls, cap * sizeof *ls); }
-            char *line = malloc(len + 1);
+            if (n + 1 >= cap) { cap *= 2; ls = xrealloc(ls, cap * sizeof *ls); }
+            char *line = xmalloc(len + 1);
             memcpy(line, p, len);
             line[len] = 0;
             ls[n++] = line;
@@ -1885,7 +1885,7 @@ static char *fmt_transform(const char *src) {
 
     /* 缩进预算 pass：先按开组栈算出每行归一后的缩进层。区域归一的
      * 宽度保护要用最终缩进（原始前导空白会被后面的缩进主循环改写）。 */
-    int *inds = malloc((n ? n : 1) * sizeof(int));
+    int *inds = xmalloc((n ? n : 1) * sizeof(int));
     {
         FmtState pst = {0};
         pst.top = -1;
@@ -1974,7 +1974,7 @@ static char *fmt_transform(const char *src) {
         free(raw);
     }
     free(ls);
-    return out.data ? out.data : strdup("");
+    return out.data ? out.data : xstrdup("");
 }
 
 /* ---- 子命令实现 ---- */
@@ -2513,7 +2513,7 @@ static VEntry *vendor_entries(int *nout) {
         if (fd.cFileName[0] == '.') continue;
         if (n == cap) {
             cap = cap ? cap * 2 : 16;
-            list = realloc(list, (size_t)cap * sizeof *list);
+            list = xrealloc(list, (size_t)cap * sizeof *list);
         }
         VEntry *e = &list[n++];
         snprintf(e->name, sizeof e->name, "%s", fd.cFileName);
@@ -2532,7 +2532,7 @@ static VEntry *vendor_entries(int *nout) {
         if (stat(full, &st) != 0) continue;
         if (n == cap) {
             cap = cap ? cap * 2 : 16;
-            list = realloc(list, (size_t)cap * sizeof *list);
+            list = xrealloc(list, (size_t)cap * sizeof *list);
         }
         VEntry *e = &list[n++];
         snprintf(e->name, sizeof e->name, "%s", de->d_name);
@@ -3170,8 +3170,8 @@ static int cmd_cbuild(int argc, char **argv, int argi) {
         char mf[1024];
         snprintf(mf, sizeof mf, "vendor/%s.clib", group);
         if (fexists(mf)) {
-            mans = malloc(sizeof *mans);
-            mans[0] = strdup(mf);
+            mans = xmalloc(sizeof *mans);
+            mans[0] = xstrdup(mf);
             nman = 1;
         }
     } else {
@@ -3192,8 +3192,8 @@ static int cmd_cbuild(int argc, char **argv, int argi) {
         }
         ncomp += mcomp;
         if (mr > 0 && clib[0]) {
-            extra = realloc(extra, (size_t)(nextra + 1) * sizeof *extra);
-            extra[nextra++] = strdup(clib);
+            extra = xrealloc(extra, (size_t)(nextra + 1) * sizeof *extra);
+            extra[nextra++] = xstrdup(clib);
         }
     }
     free(mans);
@@ -3322,7 +3322,7 @@ static int json_get_str_array(const char *text, const char *key,
             if (!e) break;
             size_t l = (size_t)(e - p);
             if (l > 0) {
-                char *s = malloc(l + 1);
+                char *s = xmalloc(l + 1);
                 memcpy(s, p, l);
                 s[l] = 0;
                 out[n++] = s;
@@ -3967,7 +3967,7 @@ static int cmd_fmt(int argc, char **argv, int argi, bool check_only) {
         fseek(f, 0, SEEK_END);
         long sz = ftell(f);
         fseek(f, 0, SEEK_SET);
-        char *src = malloc((size_t)sz + 1);
+        char *src = xmalloc((size_t)sz + 1);
         if (sz > 0 && fread(src, 1, (size_t)sz, f) != (size_t)sz) { fclose(f); free(src); bad++; continue; }
         src[sz] = 0;
         fclose(f);

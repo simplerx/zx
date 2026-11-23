@@ -48,7 +48,7 @@ static char *fe_exe_path(void) {
             char *s2 = strrchr(buf, '\\');
             if (s2) {
                 *s2 = '\0';
-                char *s = malloc(strlen(buf) + 1);
+                char *s = xmalloc(strlen(buf) + 1);
                 if (s) strcpy(s, buf);
                 return s;
             }

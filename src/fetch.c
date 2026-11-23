@@ -49,8 +49,8 @@ static const char *base_of(const char *p) {
 }
 static char *dupstr(const char *s) {
     size_t n = strlen(s) + 1;
-    char *p = malloc(n);
-    if (p) memcpy(p, s, n);
+    char *p = xmalloc(n);
+    memcpy(p, s, n);
     return p;
 }
 static int eqs(const char *a, const char *b) { return strcmp(a, b) == 0; }
@@ -170,7 +170,7 @@ static FEntry *list_entries(const char *dir, int *nout) {
     closedir(d);
 #endif
     *nout = n;
-    if (!v) { v = malloc(sizeof *v); }   /* 空目录：返回可 free 的非 NULL，n = 0 */
+    if (!v) { v = xmalloc(sizeof *v); }   /* 空目录：返回可 free 的非 NULL，n = 0 */
     return v;
 }
 
@@ -530,7 +530,7 @@ static int parse_decls(const char *block, FetchDecl **out, int *nout) {
         char url[1024];
         i = json_string(block, i, url, sizeof url);
         if (!url[0]) continue;
-        if (n == cap) { cap = cap ? cap * 2 : 8; v = realloc(v, (size_t)cap * sizeof *v); }
+        if (n == cap) { cap = cap ? cap * 2 : 8; v = xrealloc(v, (size_t)cap * sizeof *v); }
         decl_from_url(&v[n], url);
         n++;
     }
@@ -553,7 +553,7 @@ int fetch_decls_load(FetchDecl **out, char *err, size_t cap) {
     }
     int n = 0;
     if (ve > vs) {
-        char *block = malloc(ve - vs + 1);
+        char *block = xmalloc(ve - vs + 1);
         memcpy(block, t + vs, ve - vs);
         block[ve - vs] = 0;
         parse_decls(block, out, &n);
@@ -591,7 +591,7 @@ int fetch_decl_save(const char *url, char *err, size_t cap) {
     int n = 0;
     FetchDecl *old = NULL;
     if (ve > vs) {
-        char *block = malloc(ve - vs + 1);
+        char *block = xmalloc(ve - vs + 1);
         memcpy(block, t + vs, ve - vs);
         block[ve - vs] = 0;
         parse_decls(block, &old, &n);
@@ -683,7 +683,7 @@ int fetch_lock_load(FetchLock **out, char *err, size_t cap) {
             char *e = strchr(line, ']');
             if (!e) continue;
             *e = 0;
-            if (n == vcap) { vcap = vcap ? vcap*2 : 8; v = realloc(v, (size_t)vcap * sizeof *v); }
+            if (n == vcap) { vcap = vcap ? vcap*2 : 8; v = xrealloc(v, (size_t)vcap * sizeof *v); }
             cur = n++;
             memset(&v[cur], 0, sizeof v[cur]);
             snprintf(v[cur].d.name, sizeof v[cur].d.name, "%s", line + 1);

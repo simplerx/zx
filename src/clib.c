@@ -14,6 +14,7 @@
  * 不同子目录的同名 .c 不会撞车。
  */
 #include "clib.h"
+#include "zxc.h"        /* §232：xmalloc / xrealloc */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -84,8 +85,8 @@ static int mkdir_p(const char *path) {
 
 static char *dupstr(const char *s) {
     size_t n = strlen(s) + 1;
-    char *p = malloc(n);
-    if (p) memcpy(p, s, n);
+    char *p = xmalloc(n);
+    memcpy(p, s, n);
     return p;
 }
 
@@ -469,7 +470,7 @@ int clib_umbrella(const ClibManifest *m, const char *cache,
     /* 只留「入口头」：被别的公开头 #include 过的头不再单独进伞头。
      * 头文件没写 include guard 时，重复 include 会让 clang 直接报
      * redefinition；真实库里这种散装头并不少见。 */
-    char *redun = calloc((size_t)npub, 1);
+    char *redun = xcalloc((size_t)npub, 1);
     if (redun)
         for (int i = 0; i < npub; i++)
             for (int j = 0; j < npub; j++)
@@ -703,7 +704,7 @@ char **clib_scan_manifests(const char *dir, int *nout) {
         if (!has_ext(fd.cFileName, ".clib")) continue;
         char full[CPATH];
         snprintf(full, sizeof full, "%s/%s", dir, fd.cFileName);
-        list = realloc(list, (size_t)(n + 1) * sizeof *list);
+        list = xrealloc(list, (size_t)(n + 1) * sizeof *list);
         list[n++] = dupstr(full);
     } while (FindNextFileA(h, &fd));
     FindClose(h);
@@ -715,7 +716,7 @@ char **clib_scan_manifests(const char *dir, int *nout) {
         if (!has_ext(e->d_name, ".clib")) continue;
         char full[CPATH];
         snprintf(full, sizeof full, "%s/%s", dir, e->d_name);
-        list = realloc(list, (size_t)(n + 1) * sizeof *list);
+        list = xrealloc(list, (size_t)(n + 1) * sizeof *list);
         list[n++] = dupstr(full);
     }
     closedir(d);

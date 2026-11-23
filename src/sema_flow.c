@@ -444,7 +444,7 @@ static Type *check_inline_for(Node *n) {
         }
         check_block(body);
         scope_pop(&sc);
-        n->unroll = realloc(n->unroll, sizeof(Node *) * (size_t)(n->nunroll + 1));
+        n->unroll = xrealloc(n->unroll, sizeof(Node *) * (size_t)(n->nunroll + 1));
         n->unroll[n->nunroll++] = body;
     }
     n->ty = ty_void();

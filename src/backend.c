@@ -134,7 +134,7 @@ static void vfmt(Buf *b, const char *fmt, va_list ap) {
     int n = vsnprintf(NULL, 0, fmt, ap2);
     va_end(ap2);
     if (n < 0) return;
-    char *tmp = malloc((size_t)n + 1);
+    char *tmp = xmalloc((size_t)n + 1);
     vsnprintf(tmp, (size_t)n + 1, fmt, ap);
     buf_puts(b, tmp);
     free(tmp);
@@ -172,7 +172,7 @@ static int tslot(Type *t) {
     for (int i = 0; i < g_nts; i++) if (g_ts[i].t == t) return i;
     if (g_nts == g_cts) {
         g_cts = g_cts ? g_cts * 2 : 64;
-        g_ts = realloc(g_ts, sizeof(TEnt) * (size_t)g_cts);
+        g_ts = xrealloc(g_ts, sizeof(TEnt) * (size_t)g_cts);
     }
     g_ts[g_nts].t = t;
     g_ts[g_nts].state = 0;
@@ -893,7 +893,7 @@ static char *inst_name(Node *g, const char *base) {
         if (g_itab[i].fn == g) return g_itab[i].name;
     if (g_nitab == g_citab) {
         g_citab = g_citab ? g_citab * 2 : 16;
-        g_itab = realloc(g_itab, sizeof(InstEnt) * (size_t)g_citab);
+        g_itab = xrealloc(g_itab, sizeof(InstEnt) * (size_t)g_citab);
     }
     Buf b; buf_init(&b);
     cname(&b, base ? base : "gen");
@@ -1204,7 +1204,7 @@ static void idx_helper_add(Type *sl) {
     }
     if (g_idx_n == g_idx_cap) {
         g_idx_cap = g_idx_cap ? g_idx_cap * 2 : 8;
-        g_idx_types = realloc(g_idx_types, sizeof(Type *) * (size_t)g_idx_cap);
+        g_idx_types = xrealloc(g_idx_types, sizeof(Type *) * (size_t)g_idx_cap);
     }
     g_idx_types[g_idx_n++] = sl;
     Buf ct; buf_init(&ct); ctype(&ct, sl->elem);
@@ -2175,8 +2175,8 @@ static int any_desc(Type *t) {
     for (int i = 0; i < g_nad; i++) if (g_adt[i] == t) return i;
     if (g_nad == g_cad) {
         g_cad = g_cad ? g_cad * 2 : 32;
-        g_adt = realloc(g_adt, sizeof(Type *) * (size_t)g_cad);
-        g_anydef = realloc(g_anydef, sizeof(char *) * (size_t)g_cad);
+        g_adt = xrealloc(g_adt, sizeof(Type *) * (size_t)g_cad);
+        g_anydef = xrealloc(g_anydef, sizeof(char *) * (size_t)g_cad);
     }
     int idx = g_nad++;
     g_adt[idx] = t;
@@ -5362,7 +5362,7 @@ static void unwrap_need(Type *t) {
     }
     if (g_nuw == g_cuw) {
         g_cuw = g_cuw ? g_cuw * 2 : 8;
-        g_unw = realloc(g_unw, sizeof(Type *) * (size_t)g_cuw);
+        g_unw = xrealloc(g_unw, sizeof(Type *) * (size_t)g_cuw);
     }
     g_unw[g_nuw++] = t;
 }
@@ -6699,7 +6699,7 @@ static bool fn_is_generic(Node *fn);
 static char *localfn_impl_name(Node *d) {
     const char *cn = sym_cname(d);
     size_t n = strlen(cn ? cn : "anon");
-    char *s = malloc(n + 8);
+    char *s = xmalloc(n + 8);
     snprintf(s, n + 8, "%s_impl", cn ? cn : "anon");
     return s;
 }
@@ -7845,7 +7845,7 @@ static void gen_extern(Node *fn) {
     Type *ft = fn->type_val;
     Type *ret = (ft && ft->kind == TY_FN) ? ft->ret : ty_void();
     /* 标准头已经声明过的名字（malloc / gets / memcpy…）不再重复声明：
-     * C 里 `char* malloc(uint64_t)` 和 `void* malloc(size_t)` 是冲突类型。
+     * C 里 `char* xmalloc(uint64_t)` 和 `void* xmalloc(size_t)` 是冲突类型。
      * 用头里的声明，调用点仍按 Zx 这边的签名做转换。 */
     if (fn->name && libc_declared(fn->name)) return;
     Buf sig; buf_init(&sig);
@@ -8189,11 +8189,11 @@ static char *anonfn_cname(Node *fn) {
         if (g_anonfns[i].fn == fn) return (char *)g_anonfns[i].name;
     char buf[80];
     snprintf(buf, sizeof buf, "anonfn_%d_%d", g_cur_unit, g_nanon);
-    char *nm = malloc(strlen(buf) + 1);
+    char *nm = xmalloc(strlen(buf) + 1);
     strcpy(nm, buf);
     if (g_nanon == g_canon) {
         g_canon = g_canon ? g_canon * 2 : 8;
-        g_anonfns = realloc(g_anonfns, sizeof(AnonFn) * (size_t)g_canon);
+        g_anonfns = xrealloc(g_anonfns, sizeof(AnonFn) * (size_t)g_canon);
     }
     g_anonfns[g_nanon].fn = fn;
     g_anonfns[g_nanon].name = nm;
@@ -8389,7 +8389,7 @@ static void gen_global(Node *d, bool exported) {
         bline(&g_bglobals, "%s%s %s = {0};", st, cty(t), cn);
         if (g_nlate == g_clate) {
             g_clate = g_clate ? g_clate * 2 : 16;
-            g_late = realloc(g_late, sizeof(Node *) * (size_t)g_clate);
+            g_late = xrealloc(g_late, sizeof(Node *) * (size_t)g_clate);
         }
         g_late[g_nlate++] = d;
         return;
@@ -8547,13 +8547,13 @@ int backend_emit_split(Node *root, Buf *header, Buf *rt, BUnit *units, int maxun
      * 与 units 同为 bug 根因；改成按 nmods 动态扩容。 */
     if (nmods > g_init_cap) {
         g_init_cap = nmods;
-        g_initname = realloc(g_initname, sizeof(char *) * (size_t)g_init_cap);
+        g_initname = xrealloc(g_initname, sizeof(char *) * (size_t)g_init_cap);
     }
     g_ninit = 0;
     for (int mi = nmods - 1; mi >= 0; mi--) {
         char stem[64];
         unit_stem(mi, stem, sizeof stem);
-        char *nm = malloc(96);
+        char *nm = xmalloc(96);
         snprintf(nm, 96, "zx_init_%s", stem);
         g_initname[g_ninit++] = nm;
     }
@@ -8580,7 +8580,7 @@ int backend_emit_split(Node *root, Buf *header, Buf *rt, BUnit *units, int maxun
         g_cur_mod_path = sema_module_path(mi);
         char stem[64];
         unit_stem(mi, stem, sizeof stem);
-        units[mi].name = malloc(strlen(stem) + 1);
+        units[mi].name = xmalloc(strlen(stem) + 1);
         strcpy(units[mi].name, stem);
         buf_init(&units[mi].src);
 
@@ -8838,7 +8838,7 @@ void backend_emit(Node *root, Buf *out) {
     buf_init(&rt);
     int nmods = sema_module_count();
     if (nmods <= 0) nmods = 1;
-    BUnit *units = calloc((size_t)nmods, sizeof(BUnit));
+    BUnit *units = xcalloc((size_t)nmods, sizeof(BUnit));
     int n = backend_emit_split(root, &header, &rt, units, nmods);
     if (n < 0) return;
     buf_puts(out, header.data);

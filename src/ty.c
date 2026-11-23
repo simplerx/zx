@@ -136,7 +136,7 @@ Type *ty_slice(Type *elem, bool is_const) {
 Type *ty_tuple(Type **items, int n) {
     Type *t = ty_new(TY_TUPLE);
     t->nfields = n;
-    t->fields = n ? calloc((size_t)n, sizeof(Field)) : NULL;
+    t->fields = n ? xcalloc((size_t)n, sizeof(Field)) : NULL;
     for (int i = 0; i < n; i++) t->fields[i].ty = items[i];
     return intern(t);
 }
@@ -187,7 +187,7 @@ uint16_t ty_err_code(const char *name) {
      * 槽占了，顺序分配得绕开它们，不然两个名字挤一个码。 */
     for (int i = 0; i < ZX_ERRCODE_MAX; i++) {
         if (g_errnames[i]) continue;
-        g_errnames[i] = strdup(name);
+        g_errnames[i] = xstrdup(name);
         if (i + 1 > g_nerrcodes) g_nerrcodes = i + 1;
         return (uint16_t)(i + 1);
     }
@@ -201,7 +201,7 @@ uint16_t ty_err_code(const char *name) {
 void ty_err_code_at(const char *name, uint16_t code) {
     if (!name || !*name || code == 0 || code == 65535 || code >= ZX_ERRCODE_MAX) return;
     if (g_errnames[code - 1]) return;
-    g_errnames[code - 1] = strdup(name);
+    g_errnames[code - 1] = xstrdup(name);
     if ((int)code > g_nerrcodes) g_nerrcodes = code;
 }
 
@@ -354,7 +354,7 @@ void *ty_type_errset(Type *t) {
 Type *ty_fn(Type **params, int n, Type *ret) {
     Type *t = ty_new(TY_FN);
     t->nparams = n;
-    t->params = n ? malloc(sizeof(Type *) * (size_t)n) : NULL;
+    t->params = n ? xmalloc(sizeof(Type *) * (size_t)n) : NULL;
     for (int i = 0; i < n; i++) t->params[i] = params[i];
     t->ret = ret;
     return intern(t);

@@ -14,6 +14,7 @@
  *  - 全程 ASCII 控制台输出；第三方 C 的诊断只取首行、非 ASCII 字节过滤掉。
  */
 #include "csrc.h"
+#include "zxc.h"        /* §232：xmalloc / xrealloc */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -98,10 +99,10 @@ static char **collect_ext(const char *dir, const char *ext, int *out_n) {
         if (fd.cFileName[0] == '.') continue;
         size_t l = strlen(fd.cFileName), el = strlen(ext);
         if (l < el || strcmp(fd.cFileName + l - el, ext) != 0) continue;
-        if (n == cap) { cap = cap ? cap * 2 : 16; list = realloc(list, cap * sizeof *list); }
+        if (n == cap) { cap = cap ? cap * 2 : 16; list = xrealloc(list, cap * sizeof *list); }
         char full[CPATH];
         snprintf(full, sizeof full, "%s/%s", dir, fd.cFileName);
-        list[n++] = strdup(full);
+        list[n++] = xstrdup(full);
     } while (FindNextFileA(h, &fd));
     FindClose(h);
 #else
@@ -112,10 +113,10 @@ static char **collect_ext(const char *dir, const char *ext, int *out_n) {
         size_t l = strlen(e->d_name), el = strlen(ext);
         if (e->d_name[0] == '.' || l < el) continue;
         if (strcmp(e->d_name + l - el, ext) != 0) continue;
-        if (n == cap) { cap = cap ? cap * 2 : 16; list = realloc(list, cap * sizeof *list); }
+        if (n == cap) { cap = cap ? cap * 2 : 16; list = xrealloc(list, cap * sizeof *list); }
         char full[CPATH];
         snprintf(full, sizeof full, "%s/%s", dir, e->d_name);
-        list[n++] = strdup(full);
+        list[n++] = xstrdup(full);
     }
     closedir(d);
 #endif
@@ -343,9 +344,9 @@ int csrc_build(const char *cc, const char *cflags, const char *dir,
 
         if (nlibs == lcap) {
             lcap = lcap ? lcap * 2 : 8;
-            libs = realloc(libs, lcap * sizeof *libs);
+            libs = xrealloc(libs, lcap * sizeof *libs);
         }
-        libs[nlibs++] = strdup(libpath);
+        libs[nlibs++] = xstrdup(libpath);
     }
 
     free_list(srcs, nsrc);

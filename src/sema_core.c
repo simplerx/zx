@@ -219,7 +219,7 @@ Symbol *scope_add(Scope *sc, const char *name, int kind) {
         return s;
     }
     if (scope_find_here(sc, name)) return NULL;   /* 重复声明 */
-    Symbol *s = calloc(1, sizeof(Symbol));
+    Symbol *s = xcalloc(1, sizeof(Symbol));
     s->name = name;
     s->kind = kind;
     s->index = -1;
@@ -230,7 +230,7 @@ Symbol *scope_add(Scope *sc, const char *name, int kind) {
         scope_rehash(sc, sc->ntab ? sc->ntab * 2 : 16);   /* 重建时会把 s 一起收进去 */
     } else {
         unsigned b = hash_name(name) & (unsigned)(sc->ntab - 1);
-        HBucket *h = calloc(1, sizeof *h);
+        HBucket *h = xcalloc(1, sizeof *h);
         if (h) { h->sym = s; h->next = sc->tab[b]; sc->tab[b] = h; }
     }
     return s;
@@ -352,7 +352,7 @@ int   g_spec_depth;
 static Scope *snap_scope(Scope *sc) {
     if (!sc) return NULL;
     if (sc->is_module) return sc;
-    Scope *c = calloc(1, sizeof(Scope));
+    Scope *c = xcalloc(1, sizeof(Scope));
     c->parent = snap_scope(sc->parent);
     c->first  = sc->first;
     return c;
@@ -363,7 +363,7 @@ void schedule_body(Node *fn) {
     fn->body_checked = true;
     if (g_npending == g_cappending) {
         g_cappending = g_cappending ? g_cappending * 2 : 64;
-        g_pending = realloc(g_pending, sizeof(Pending) * (size_t)g_cappending);
+        g_pending = xrealloc(g_pending, sizeof(Pending) * (size_t)g_cappending);
     }
     g_pending[g_npending].fn    = fn;
     g_pending[g_npending].mod   = g_mod;
@@ -437,7 +437,7 @@ Type *sema_allocator_type(void) {
         Type *fp[3] = { ty_opt(ty_ptr(ty_u8(), false, false, 0)),
                         ty_ptr(ty_u8(), false, false, 0), ty_usize() };
         t->nfields = 3;
-        t->fields = calloc(3, sizeof(Field));
+        t->fields = xcalloc(3, sizeof(Field));
         t->fields[0].name = "ctx";
         t->fields[0].ty  = ty_opt(ty_ptr(ty_u8(), false, false, 0));
         t->fields[1].name = "alloc";
@@ -477,7 +477,7 @@ Type *sema_type_field_type(void) {
          * `ptr`（§118）：字段值指针，只在 @type(左值) 的描述符上有值——
          * 类型上的占位没人读（check_field / ct_field 都对它特判）。 */
         t->nfields = 4;
-        t->fields = calloc(4, sizeof(Field));
+        t->fields = xcalloc(4, sizeof(Field));
         t->fields[0].name = "name";   t->fields[0].ty = ty_slice(ty_u8(), true);
         t->fields[1].name = "ty";     t->fields[1].ty = ty_type();
         t->fields[2].name = "offset"; t->fields[2].ty = ty_usize();
@@ -497,7 +497,7 @@ Type *sema_type_type(void) {
     t = ty_agg(TY_STRUCT, &id, "Type");
     if (!t->fields) {
         t->nfields = 7;
-        t->fields = calloc(7, sizeof(Field));
+        t->fields = xcalloc(7, sizeof(Field));
         t->fields[0].name = "name";       t->fields[0].ty = ty_slice(ty_u8(), true);
         t->fields[1].name = "size";       t->fields[1].ty = ty_usize();
         t->fields[2].name = "align";      t->fields[2].ty = ty_usize();
@@ -1052,17 +1052,17 @@ Symbol *ns_member(Symbol *ns, const char *name, int line, int col) {
 char *path_dup_dir(const char *path) {    const char *s1 = strrchr(path, '/');
     const char *s2 = strrchr(path, '\\');
     const char *s = (!s1 || (s2 && s2 > s1)) ? s2 : s1;
-    if (!s) return strdup(".");
+    if (!s) return xstrdup(".");
     size_t n = (size_t)(s - path);
     if (n == 0) n = 1;                       /* "/x.zx" → "/" */
-    char *d = malloc(n + 1);
+    char *d = xmalloc(n + 1);
     memcpy(d, path, n);
     d[n] = '\0';
     return d;
 }
 
 char *path_join(const char *dir, const char *rel) {
-    if (rel[0] == '/' || rel[0] == '\\' || (rel[0] && rel[1] == ':')) return strdup(rel);
+    if (rel[0] == '/' || rel[0] == '\\' || (rel[0] && rel[1] == ':')) return xstrdup(rel);
     Buf b; buf_init(&b);
     if (dir && *dir && strcmp(dir, ".")) { buf_puts(&b, dir); buf_putc(&b, '/'); }
     buf_puts(&b, rel);
@@ -1075,10 +1075,10 @@ static char *path_stem(const char *path) {
     const char *b2 = strrchr(path, '\\');
     const char *b = (!b1 || (b2 && b2 > b1)) ? b2 : b1;
     b = b ? b + 1 : path;
-    char *s = strdup(b);
+    char *s = xstrdup(b);
     char *dot = strrchr(s, '.');
     if (dot && dot != s) *dot = '\0';
-    if (!*s) { free(s); s = strdup("mod"); }
+    if (!*s) { free(s); s = xstrdup("mod"); }
     return s;
 }
 
@@ -1109,9 +1109,9 @@ static bool has_zx_suffix(const char *p) {
  * 简写（README、init 生成的项目说明），但早期实现只认完整路径。补后缀
  * 是纯增量——显式写了 .zx 的老代码一个字都不用改。 */
 static char *find_module_file(const char *cand, bool allow_zx) {
-    if (file_exists(cand)) return strdup(cand);
+    if (file_exists(cand)) return xstrdup(cand);
     if (allow_zx) {
-        char *w = malloc(strlen(cand) + 4);
+        char *w = xmalloc(strlen(cand) + 4);
         sprintf(w, "%s.zx", cand);
         if (file_exists(w)) return w;
         free(w);
@@ -1153,7 +1153,7 @@ Module *module_load_full(const char *full_in, int line, int col) {
     }
     fclose(probe);
 
-    Module *m = calloc(1, sizeof(Module));
+    Module *m = xcalloc(1, sizeof(Module));
     m->path = full;
     m->stem = path_stem(full);
     m->loading = true;
@@ -1161,7 +1161,7 @@ Module *module_load_full(const char *full_in, int line, int col) {
     /* 同名文件（不同目录）要区分开，否则 C 名字会撞 */
     for (int i = 1; i < g_nmods; i++) {
         if (g_mods[i]->stem && !strcmp(g_mods[i]->stem, m->stem)) {
-            char *nn = malloc(strlen(m->stem) + 12);
+            char *nn = xmalloc(strlen(m->stem) + 12);
             sprintf(nn, "%s%d", m->stem, i + 1);
             m->stem = nn;
             break;
@@ -1170,7 +1170,7 @@ Module *module_load_full(const char *full_in, int line, int col) {
 
     if (g_nmods == g_cmods) {
         g_cmods = g_cmods ? g_cmods * 2 : 8;
-        g_mods = realloc(g_mods, sizeof(Module *) * (size_t)g_cmods);
+        g_mods = xrealloc(g_mods, sizeof(Module *) * (size_t)g_cmods);
     }
     g_mods[g_nmods++] = m;      /* 先登记：循环导入才检测得到 */
 
@@ -1209,7 +1209,7 @@ Module *module_load_full(const char *full_in, int line, int col) {
     g_scope = &m->scope;        /* parent 为空：模块之间不共享名字 */
     m->scope.is_module = true;
 
-    m->ns = calloc(1, sizeof(Symbol));
+    m->ns = xcalloc(1, sizeof(Symbol));
     m->ns->name = m->stem;
     m->ns->kind = SK_NS;
     m->ns->state = 2;

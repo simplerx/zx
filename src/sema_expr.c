@@ -1918,7 +1918,7 @@ Symbol *allocator_target(Node *e, bool want_alloc, int depth) {
 static void devirt_retry_add(Node *n, Node *field) {
     if (g_ndr == g_cdr) {
         g_cdr = g_cdr ? g_cdr * 2 : 64;
-        g_devirt_retry = realloc(g_devirt_retry,
+        g_devirt_retry = xrealloc(g_devirt_retry,
                                  sizeof(DevirtPending) * (size_t)g_cdr);
     }
     g_devirt_retry[g_ndr++] = (DevirtPending){ .call = n, .field = field };

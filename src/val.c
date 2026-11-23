@@ -8,7 +8,7 @@ extern bool g_ct_soft_div;   /* sema.c：投机折叠期间除零软失败 */
 static double rt_f64(Type *t, double v);   /* 下方定义：按目标精度收敛 */
 
 static Value *valloc(ValKind k, Type *t) {
-    Value *v = calloc(1, sizeof(Value));
+    Value *v = xcalloc(1, sizeof(Value));
     v->kind = k;
     v->ty = t;
     return v;
@@ -156,7 +156,7 @@ Value *val_type(Type *t) {
 Value *val_agg(Type *t, int n) {
     Value *r = valloc(V_AGG, t);
     r->nitems = n;
-    if (n) r->items = calloc((size_t)n, sizeof(Value *));
+    if (n) r->items = xcalloc((size_t)n, sizeof(Value *));
     return r;
 }
 

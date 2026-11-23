@@ -47,7 +47,7 @@ static long g_ct_calls;
  * 独立身份（ty_agg 用节点当键）。 */
 Node *clone_tree(Node *n) {
     if (!n) return NULL;
-    Node *c = calloc(1, sizeof(Node));
+    Node *c = xcalloc(1, sizeof(Node));
     *c = *n;
     c->ty = NULL; c->type_val = NULL; c->ct = NULL; c->sym = NULL;
     c->body_checked = false;
@@ -62,7 +62,7 @@ Node *clone_tree(Node *n) {
     c->c = clone_tree(n->c);
     c->d = clone_tree(n->d);
     if (n->nitems) {
-        c->items = calloc((size_t)n->nitems, sizeof(Node *));
+        c->items = xcalloc((size_t)n->nitems, sizeof(Node *));
         for (int i = 0; i < n->nitems; i++) c->items[i] = clone_tree(n->items[i]);
     }
     return c;
@@ -351,7 +351,7 @@ static Value *ct_struct_lit(Node *n) {
 
     int nf = t->nfields;
     Value *v = val_agg(t, nf);
-    bool *seen = calloc((size_t)(nf ? nf : 1), sizeof(bool));
+    bool *seen = xcalloc((size_t)(nf ? nf : 1), sizeof(bool));
 
     for (int i = 0; i < n->nitems; i++) {
         Node *p = n->items[i];
@@ -1245,7 +1245,7 @@ static Node *specialize_raw(Node *fn, Node *call, int *ncomp, Type **out_ft, Val
     int save_np = g_nident_params;
     const char **new_params = NULL;
     if (ret_type && nbind > 0) {
-        new_params = calloc((size_t)nbind, sizeof(const char *));
+        new_params = xcalloc((size_t)nbind, sizeof(const char *));
         for (int i = 0; i < nbind; i++)
             new_params[i] = fn->items[i]->name;
         g_ident_params = new_params;
@@ -1328,12 +1328,12 @@ static Node *specialize_raw(Node *fn, Node *call, int *ncomp, Type **out_ft, Val
 
     if (g_ninst == g_cinst) {
         g_cinst = g_cinst ? g_cinst * 2 : 32;
-        g_insts = realloc(g_insts, sizeof(Inst) * (size_t)g_cinst);
+        g_insts = xrealloc(g_insts, sizeof(Inst) * (size_t)g_cinst);
     }
     Inst *e = &g_insts[g_ninst++];
     e->fn = fn;
     e->nargs = nbind;
-    e->args = calloc((size_t)nbind, sizeof(Value *));
+    e->args = xcalloc((size_t)nbind, sizeof(Value *));
     for (int i = 0; i < nbind; i++) e->args[i] = args[i];
     e->clone = g;
     e->ty = gft;

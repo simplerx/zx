@@ -2283,6 +2283,50 @@ for fe in zx c; do
     fi
 done
 
+# §232：内存分配 OOM 一律干净报错——核心分配点必须走 xmalloc/xcalloc/
+# xrealloc/xstrdup（zxc.h 声明，zxc.c 统一打印 zxc: out of memory 后 exit）。
+# 静态守门：扫 src/*.c 里裸 malloc/calloc/realloc/strdup，只允许三种情况：
+#   ① 后端生成的 C 源码字符串（在字符串字面量里）
+#   ② 紧随判空的库 API / 解码路径（NULL 是契约，不是疏漏）
+#   ③ x* 包装自身的实现（zxc.c）
+printf "\n== §232 分配 OOM 统一报错\n"
+if python - <<'PY'
+import re, glob, os, sys
+pat = re.compile(r'\b(malloc|calloc|realloc|strdup)\s*\(')
+bad = []
+for f in sorted(glob.glob('src/*.c')):
+    lines = open(f, encoding='utf-8', errors='replace').read().split('\n')
+    for i, line in enumerate(lines):
+        m = pat.search(line)
+        if not m: continue
+        # ③ x* 实现自身
+        if os.path.basename(f)=='zxc.c' and ('void *xmalloc' in line or
+           'void *xcalloc' in line or 'void *xrealloc' in line or
+           'char *xstrdup' in line or 'char *p = strdup(s)' in line):
+            continue
+        # ① 字符串字面量里的（后端发射的 C 代码）
+        if '"' in line[:m.start()] and line[:m.start()].count('"')%2==1: continue
+        # ② 三行内有判空
+        ctx='\n'.join(lines[i+1:i+4])
+        if re.search(r'if\s*\(\s*!|==\s*NULL|!=\s*NULL',ctx): continue
+        bad.append(f'{f}:{i+1}: {line.strip()[:80]}')
+if bad:
+    print('Unguarded raw allocations:')
+    for x in bad[:20]: print('  '+x)
+    sys.exit(1)
+print('  ok   所有裸分配均有判空或契约保护')
+PY
+then
+    printf "  ok   §232 静态扫描\n"
+else
+    printf "  FAIL §232 裸分配逃逸\n"; fail=1
+fi
+# 运行时守门：x* 实现必须打印 OOM 诊断并以非零退出（不是 segfault/静默）。
+grep -q 'zxc: out of memory' src/zxc.c \
+    && grep -q 'exit(1)' src/zxc.c \
+    && printf "  ok   OOM 统一诊断 + exit(1)\n" \
+    || { printf "  FAIL §232 OOM 诊断缺失\n"; fail=1; }
+
 # 用例会在仓库根留下自己的临时文件：io_fmt.zx 写 io_fmt.tmp，stdfs.zx 建
 # fs_t_dir / fs_t_dir2。跑完统一带走——测试不该往工作区里堆东西。
 rm -rf io_fmt.tmp fs_t_dir fs_t_dir2 2>/dev/null || true

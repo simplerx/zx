@@ -76,7 +76,7 @@ static Type *check_method_call(Node *n) {
     if (nargs + 1 != mft->nparams)
         return BAD(n, "method takes %d argument(s), %d given", mft->nparams - 1, nargs);
 
-    Node **items = calloc((size_t)(nargs + 1), sizeof(Node *));
+    Node **items = xcalloc((size_t)(nargs + 1), sizeof(Node *));
     items[0] = arg0;
     for (int i = 0; i < nargs; i++) items[i + 1] = n->items[i];
     free(n->items);
@@ -102,7 +102,7 @@ static Type *check_method_call(Node *n) {
  * 但源码里已经没有任何位置内建可写了。 */
 static void debug_inject_loc(Node *n) {
     int old = n->nitems;
-    Node **items = calloc((size_t)(old + 4), sizeof(Node *));
+    Node **items = xcalloc((size_t)(old + 4), sizeof(Node *));
     for (int i = 0; i < old; i++) items[i] = n->items[i];
 
     const char *path = (g_mod && g_mod->path) ? g_mod->path
@@ -784,7 +784,7 @@ void tag_transform_deinit(Node *call) {
     Node *cf = node_new(NK_FIELD, f->line, f->col);
     cf->a = clone_expr_keep_syms(f->a); cf->name = "ctx";
     f->name = "free";
-    Node **items = calloc(3, sizeof(Node *));
+    Node **items = xcalloc(3, sizeof(Node *));
     items[0] = cf; items[1] = cast; items[2] = lenE;
     call->items = items;
     call->nitems = 3;
@@ -808,7 +808,7 @@ static bool ty_has_dup_fields(Type *t) {
 static Type *check_lit_fields(Node *n, Type *t) {
     bool broken = ty_has_dup_fields(t);
     if (t->kind == TY_UNION || t->kind == TY_STRUCT) {
-        bool *seen = calloc((size_t)(t->nfields ? t->nfields : 1), sizeof(bool));
+        bool *seen = xcalloc((size_t)(t->nfields ? t->nfields : 1), sizeof(bool));
         for (int i = 0; i < n->nitems; i++) {
             Node *p = n->items[i];
             int idx = ty_field_index(t, p->name);
@@ -926,7 +926,7 @@ static Type *check_tuple_lit(Node *n, Type *expect) {
         tuple_stamp_ftags(n);
         return type_of(n, expect);
     }
-    Type **items = calloc((size_t)(n->nitems ? n->nitems : 1), sizeof(Type *));
+    Type **items = xcalloc((size_t)(n->nitems ? n->nitems : 1), sizeof(Type *));
     for (int i = 0; i < n->nitems; i++) items[i] = check_expr(n->items[i], NULL);
     Type *t = ty_tuple(items, n->nitems);
     free(items);
@@ -1715,7 +1715,7 @@ static Type *ce_25_nk_anon_struct(Node *n, Type *expect) {
         Type *t = ty_agg(TY_STRUCT, n, NULL);
         if (!t->fields) {
             t->nfields = n->nitems;
-            t->fields = calloc((size_t)(n->nitems ? n->nitems : 1), sizeof(Field));
+            t->fields = xcalloc((size_t)(n->nitems ? n->nitems : 1), sizeof(Field));
             for (int i = 0; i < n->nitems; i++) {
                 Node *p = n->items[i];
                 t->fields[i].name = p->name;

@@ -16,7 +16,7 @@ void zx_add_link_lib(const char *name) {
     for (int i = 0; i < g_nlink_libs; i++)
         if (!strcmp(g_link_libs[i], name)) return;
     if (g_nlink_libs >= ZXC_MAX_LINK_LIBS) return;
-    g_link_libs[g_nlink_libs++] = strdup(name);
+    g_link_libs[g_nlink_libs++] = xstrdup(name);
 }
 
 /* §192：C shim（@shim）通道已删除——语义层对 @shim 报 E0211，
@@ -276,7 +276,7 @@ static SrcFile *src_file(const char *path) {
         g_nsrcs--;
     }
     SrcFile *sf = &g_srcs[g_nsrcs++];
-    sf->path = strdup(path);
+    sf->path = xstrdup(path);
     sf->lines = lines;
     sf->n = li;
     return sf;
@@ -487,6 +487,23 @@ void err_at(int line, int col, const char *fmt, ...) {
     va_start(ap, fmt);
     diag_v(PH_SEMA, line, col, fmt, ap);
     va_end(ap);
+}
+
+/* ---------- allocation (§232) ----------
+ * 一次性编译器：内部分配失败没有可恢复路径，一律干净报 OOM 退出。
+ * 统一在这里报，避免 90+ 处散落判空写法不一（有的 segfault、有的
+ * fprintf 后 exit、有的返回 NULL 又被解引用）。 */
+static void zx_oom(void) {
+    fputs("zxc: out of memory\n", stderr);
+    exit(1);
+}
+void *xmalloc(size_t n) { void *p = malloc(n ? n : 1); if (!p) zx_oom(); return p; }
+void *xcalloc(size_t n, size_t sz) { void *p = calloc(n ? n : 1, sz); if (!p) zx_oom(); return p; }
+void *xrealloc(void *p, size_t n) { void *q = realloc(p, n ? n : 1); if (!q) zx_oom(); return q; }
+char *xstrdup(const char *s) {
+    char *p = strdup(s);
+    if (!p) zx_oom();
+    return p;
 }
 
 void buf_init(Buf *b) { b->data = NULL; b->len = b->cap = 0; }

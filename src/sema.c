@@ -47,7 +47,7 @@ void deps_check_calls(Node *n, Scope *ps) {
 }
 
 void sema_check(Node *root) {
-    Module *m0 = calloc(1, sizeof(Module));
+    Module *m0 = xcalloc(1, sizeof(Module));
     m0->path = g_srcpath;
     m0->stem = "main";
     m0->root = root;
@@ -67,7 +67,7 @@ void sema_check(Node *root) {
     g_ntdefer = 0;              /* §184：延迟对账按轮清零（同上，节点指针悬垂） */
     stamp_mod(root, g_srcpath);
     g_cmods = 8;
-    g_mods = calloc((size_t)g_cmods, sizeof(Module *));
+    g_mods = xcalloc((size_t)g_cmods, sizeof(Module *));
     g_mods[g_nmods++] = m0;
     m0->loading = true;         /* 入口文件也在"加载中"：别人导入它就是循环 */
 

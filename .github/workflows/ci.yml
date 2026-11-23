@@ -1,0 +1,134 @@
+# zx CI —— 把本地那套回归搬到云端，不再全靠手动。
+#
+# 平台：windows-latest。理由：test.sh / bootstrap/diff_ast.sh 大量路径写死
+# `.exe`（bin/zxc.exe、runner.exe、临时产物.exe），Git Bash + Windows 是这套
+# 脚本的原生环境；换成 Linux 要先做一轮平台探测重构，风险与收益不成正比。
+#
+# 三个 job 并行，各自 setup-zig（缓存 zig.exe，避免每次下 190MB）：
+#   build-test   构建编译器 + 全量 test.sh（600+ 项，含 §232 OOM 守门）
+#   ast-diff     双前端 AST 对拍（test.sh 会顺带编 astdump.exe）
+#   robustness   fuzz 变异 + LSP smoke（编译器崩溃/协议异常）
+#
+# 触发：push / PR 到 main；也可在 Actions 页手动重跑。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# 同一分支的新 push 取消旧的在跑任务，省 runner 分钟数
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ZIG_VERSION: "0.17.0"
+
+jobs:
+  build-test:
+    name: 构建 + 全量回归
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 缓存 Zig 工具链
+        id: zigcache
+        uses: actions/cache@v4
+        with:
+          path: .toolchain/zig.exe
+          key: zig-${{ env.ZIG_VERSION }}-windows-x86_64
+
+      - name: 安装 Zig ${{ env.ZIG_VERSION }}
+        shell: pwsh
+        if: steps.zigcache.outputs.cache-hit != 'true'
+        run: |
+          New-Item -ItemType Directory -Force -Path .toolchain | Out-Null
+          $url = "https://ziglang.org/download/$env:ZIG_VERSION/zig-windows-x86_64-$env:ZIG_VERSION.zip"
+          Invoke-WebRequest -Uri $url -OutFile .toolchain/zig.zip
+          Expand-Archive -Path .toolchain/zig.zip -DestinationPath .toolchain -Force
+          Move-Item ".toolchain/zig-windows-x86_64-$env:ZIG_VERSION/zig.exe" .toolchain/zig.exe -Force
+          Remove-Item .toolchain/zig.zip -Recurse -Force
+          Remove-Item ".toolchain/zig-windows-x86_64-$env:ZIG_VERSION" -Recurse -Force
+
+      - name: 构建编译器（含自举 zxfe）
+        shell: bash
+        run: sh build.sh
+
+      - name: 全量回归 test.sh
+        shell: bash
+        run: sh test.sh
+
+  ast-diff:
+    name: 双前端 AST 对拍
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 缓存 Zig 工具链
+        id: zigcache
+        uses: actions/cache@v4
+        with:
+          path: .toolchain/zig.exe
+          key: zig-${{ env.ZIG_VERSION }}-windows-x86_64
+
+      - name: 安装 Zig ${{ env.ZIG_VERSION }}
+        shell: pwsh
+        if: steps.zigcache.outputs.cache-hit != 'true'
+        run: |
+          New-Item -ItemType Directory -Force -Path .toolchain | Out-Null
+          $url = "https://ziglang.org/download/$env:ZIG_VERSION/zig-windows-x86_64-$env:ZIG_VERSION.zip"
+          Invoke-WebRequest -Uri $url -OutFile .toolchain/zig.zip
+          Expand-Archive -Path .toolchain/zig.zip -DestinationPath .toolchain -Force
+          Move-Item ".toolchain/zig-windows-x86_64-$env:ZIG_VERSION/zig.exe" .toolchain/zig.exe -Force
+          Remove-Item .toolchain/zig.zip -Recurse -Force
+          Remove-Item ".toolchain/zig-windows-x86_64-$env:ZIG_VERSION" -Recurse -Force
+
+      - name: 构建编译器
+        shell: bash
+        run: sh build.sh
+
+      - name: 构建 astdump + 双前端对拍
+        shell: bash
+        run: |
+          ./bin/zxc.exe bootstrap/astdump.zx -o bin/astdump.exe
+          sh bootstrap/diff_ast.sh
+
+  robustness:
+    name: 健壮性（fuzz + LSP smoke）
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 缓存 Zig 工具链
+        id: zigcache
+        uses: actions/cache@v4
+        with:
+          path: .toolchain/zig.exe
+          key: zig-${{ env.ZIG_VERSION }}-windows-x86_64
+
+      - name: 安装 Zig ${{ env.ZIG_VERSION }}
+        shell: pwsh
+        if: steps.zigcache.outputs.cache-hit != 'true'
+        run: |
+          New-Item -ItemType Directory -Force -Path .toolchain | Out-Null
+          $url = "https://ziglang.org/download/$env:ZIG_VERSION/zig-windows-x86_64-$env:ZIG_VERSION.zip"
+          Invoke-WebRequest -Uri $url -OutFile .toolchain/zig.zip
+          Expand-Archive -Path .toolchain/zig.zip -DestinationPath .toolchain -Force
+          Move-Item ".toolchain/zig-windows-x86_64-$env:ZIG_VERSION/zig.exe" .toolchain/zig.exe -Force
+          Remove-Item .toolchain/zig.zip -Recurse -Force
+          Remove-Item ".toolchain/zig-windows-x86_64-$env:ZIG_VERSION" -Recurse -Force
+
+      - name: 构建编译器
+        shell: bash
+        run: sh build.sh
+
+      - name: 变异 fuzz（300 次快速冒烟）
+        shell: bash
+        run: python tools/fuzz.py 300 .tmp/ci-fuzz
+
+      - name: LSP smoke（ZXLS_BIN 指向构建产物）
+        shell: bash
+        run: ZXLS_BIN=bin/zxls.exe python tools/lsptest.py

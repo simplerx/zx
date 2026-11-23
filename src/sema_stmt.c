@@ -691,7 +691,7 @@ Type *check_fn_body(Node *fn) {
                 char nb[64];
                 snprintf(nb, sizeof nb, "param#%d:%s", ++g_tag_auto_seq,
                          pm->name ? pm->name : "?");
-                char *nm2 = strdup(nb);
+                char *nm2 = xstrdup(nb);
                 if (nm2) {
                     Node tmp2; memset(&tmp2, 0, sizeof tmp2);
                     tmp2.line = pm->line; tmp2.col = pm->col;

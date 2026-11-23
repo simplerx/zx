@@ -28,7 +28,7 @@ static Node *node_alloc(NodeKind k, int line, int col) {
 Node *node_new(NodeKind k, int line, int col) { return node_alloc(k, line, col); }
 
 static void push(Node *n, Node *item) {
-    n->items = realloc(n->items, sizeof(Node *) * (size_t)(n->nitems + 1));
+    n->items = xrealloc(n->items, sizeof(Node *) * (size_t)(n->nitems + 1));
     n->items[n->nitems++] = item;
 }
 
@@ -93,7 +93,7 @@ static Token *expect(P *p, TokKind k) {
 /* return interned-ish slice: we keep a pointer into source + length is lost,
  * so copy into a stable buffer. */
 static const char *dup_tok(Token *t) {
-    char *s = malloc((size_t)t->len + 1);
+    char *s = xmalloc((size_t)t->len + 1);
     memcpy(s, t->start, (size_t)t->len);
     s[t->len] = '\0';
     return s;
