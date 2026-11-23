@@ -13,7 +13,9 @@
 //   - 时间差全程 u128（频率换算 1e9 倍不溢出）；
 //   - formatUtc 固定 24 字节一次分配，天数→日期是 Hinnant 算法（无循环）。
 //
-// 平台：Windows 先行（kernel32）。POSIX 版等语言有条件编译后再补。
+// 平台：本文件是 Windows 版（kernel32）。POSIX 版在
+// src/platform_std/posix/time.zx，由 zxc build 的平台 std 镜像按目标替换；
+// 对外 pub API 与这里逐字一致（test.sh §236 守门）。
 
 extern fn QueryPerformanceCounter(lp: *i64) i32;
 extern fn QueryPerformanceFrequency(lp: *i64) i32;

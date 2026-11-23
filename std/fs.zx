@@ -11,8 +11,10 @@
 //   - 每次遍历/元数据查询只做一次固定 320 字节的分配（FindData 工作区），
 //     arena 分配器下一 pass 就没影。
 //
-// 平台：Windows 先行（extern 走 kernel32，zig cc 默认链接）。POSIX 版
-// 等语言有条件编译后再补——std 里没法写两份 extern。
+// 平台：本文件是 Windows 版（extern 走 kernel32）。POSIX（Linux / macOS）版
+// 在 src/platform_std/posix/fs.zx；`zxc build` 按 zx.json targets 生成平台
+// std 镜像时自动替换本文件，对外 pub API 与这里逐字一致（test.sh §236 守门）。
+// 不需要语言级条件编译——平台差异由构建期的 std 镜像切换解决。
 
 // ---- Win32 extern：Find*File 系列 + 目录/文件操作 ----------------------------
 //

@@ -133,6 +133,10 @@ jobs:
           ./bin/zxc.exe bootstrap/astdump.zx -o bin/astdump.exe
           sh bootstrap/diff_ast.sh
 
+      - name: 错误路径双前端对拍（bad / multibad 首诊断码）
+        shell: bash
+        run: sh bootstrap/diff_errors.sh
+
   robustness:
     name: 健壮性（fuzz + LSP + 词法对拍）
     needs: setup-zig

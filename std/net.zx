@@ -11,7 +11,8 @@
 //
 // 平台：Windows Winsock2 先行（和 time.zx 的平台策略一致）。`@link("ws2_32")`
 // 写在模块里，只有真正引用 std.net 的程序才会加载本模块、才会链这个库。
-// POSIX 版等语言有条件编译后再补：对外 API 不变，换掉下面这组 extern 即可。
+// POSIX（Linux / macOS）版在 src/platform_std/posix/net.zx，由 zxc build 的
+// 平台 std 镜像按目标替换；对外 pub API 与这里逐字一致（test.sh §236 守门）。
 //
 // 设计：句柄就是 u64，容器上只有 open/dial/read/write/close 这类实例方法；
 // C 符号一律不 pub，避免用户绕过封装直接调 bind/connect（两条平行路径）。

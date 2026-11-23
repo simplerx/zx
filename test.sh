@@ -1685,6 +1685,17 @@ else
     fail=1
 fi
 
+# §237：错误路径双前端对拍。每个 bad / multibad 用例分别喂 C 前端和 Zx 前端，
+# 比较首个诊断码——同一个根因两个前端必须报同一个码（后续恢复诊断允许不同）。
+# astdump 不能干这事：它不查 parser 错误状态，会产出残缺 AST 造成假差异。
+errdiff=$(sh bootstrap/diff_errors.sh 2>/dev/null | tail -1)
+if printf '%s' "$errdiff" | grep -q '^error-path diff: [0-9]* identical, 0 mismatched'; then
+    printf "  ok   %s\n" "$errdiff"
+else
+    printf "  FAIL 错误路径双前端对拍：%s（sh bootstrap/diff_errors.sh 看明细）\n" "$errdiff"
+    fail=1
+fi
+
 # §208：多平台目标（配置驱动 + 后台生成）。
 # 守三件事：targets 预设齐全、zx.json targets 能驱动三目标交叉构建、
 # 产物 magic 分别是 PE/ELF/Mach-O。运行需目标机，这里只验到编译+链接。
@@ -2395,6 +2406,30 @@ for fe in zx c; do
     else
         printf "  FAIL §235 --fe=%s 标准库新 API\n" "$fe"
         tail -8 "$TPFX.smore$fe.log"; fail=1
+    fi
+done
+
+# §236：平台 std 镜像的对外 API 一致性。§208 已经守了「按 target 生成镜像」，
+# 但没守两版 API 不漂移——Windows 上能编的跨平台代码，在 Linux 目标上可能
+# 因为 POSIX 版少了某个 pub 而编不过。三个平台相关模块逐一比对 pub 名集合。
+printf "\n== §236 平台 std 镜像 API 一致性（windows vs posix）\n"
+for m in fs net time; do
+    pfile="src/platform_std/posix/$m.zx"
+    if [ ! -f "$pfile" ]; then
+        printf "  FAIL §236 POSIX 实现缺失: %s\n" "$pfile"; fail=1
+        continue
+    fi
+    wapi=$(grep -oE '^pub const [A-Za-z_][A-Za-z0-9_]*' "std/$m.zx" \
+           | sed 's/pub const //' | sort -u)
+    papi=$(grep -oE '^pub const [A-Za-z_][A-Za-z0-9_]*' "$pfile" \
+           | sed 's/pub const //' | sort -u)
+    if [ "$wapi" = "$papi" ]; then
+        printf "  ok   §236 %s 两版 pub API 一致（%s 项）\n" "$m" "$(printf '%s\n' "$wapi" | grep -c .)"
+    else
+        printf "  FAIL §236 %s API 漂移\n" "$m"
+        printf "       只在 windows:%s\n" "$(printf '%s\n' "$wapi" | grep -vxF "$papi" | tr '\n' ' ')"
+        printf "       只在 posix:  %s\n" "$(printf '%s\n' "$papi" | grep -vxF "$wapi" | tr '\n' ' ')"
+        fail=1
     fi
 done
 
