@@ -1,0 +1,109 @@
+// std.map.HashMap(V).iter()：游标遍历。keyAt(i)/valueAt(i) 的 i 是底层槽
+// 下标；iter 把「扫槽 + 判空」包起来，next() 给键值、nextKey() 只给键。
+const std = @mod("std");
+
+const Pair = struct { a: i32, b: i32 };
+const WORDS = &.{ "alpha", "beta", "gamma", "delta", "epsilon" };
+const MANY = &.{ "a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8", "a9",
+                 "b0", "b1", "b2", "b3", "b4", "b5", "b6", "b7", "b8", "b9" };
+
+const main = fn () i32 {
+    let al = std.heap.page;
+    var m = std.map.HashMap(i32).init(al);
+
+    // 空表（cap == 0）：游标立即结束
+    var empty = m.iter();
+    if (empty.next()) _ { return 1; }
+    std.println("empty ok");
+
+    var i: usize = 0;
+    for (WORDS[0..]) k {
+        if (!m.put(k, (i32)(i + 1))) { return 2; }
+        i = i + 1;
+    }
+
+    // Entry：每个键的 value 都和 get() 一致
+    var sum: i32 = 0;
+    var cnt: usize = 0;
+    var it = m.iter();
+    while (it.next()) ent {
+        if (m.get(ent.key)) v {
+            if (v != ent.value) { return 3; }
+        } else { return 3; }
+        sum = sum + ent.value;
+        cnt = cnt + 1;
+    }
+    std.println("entry count {} sum {}", cnt, sum);
+    if (cnt != 5 or sum != 15) { return 4; }
+
+    // 两个游标独立推进：a 走完不影响只走一步的 b
+    var a = m.iter();
+    var b = m.iter();
+    var na: usize = 0;
+    while (a.next()) _ { na = na + 1; }
+    if (b.next()) _ {} else { return 5; }
+    var nb: usize = 1;
+    while (b.next()) _ { nb = nb + 1; }
+    std.println("cursors {} {}", na, nb);
+    if (na != 5 or nb != 5) { return 6; }
+
+    // nextKey：只要键，省掉 V 的拷贝
+    var ki = m.iter();
+    var nk: usize = 0;
+    while (ki.nextKey()) k {
+        if (!m.contains(k)) { return 7; }
+        nk = nk + 1;
+    }
+    std.println("keys {}", nk);
+    if (nk != 5) { return 8; }
+
+    // 删除留墓碑：遍历必须跳过，且不能吐出已删的键
+    if (!m.remove("beta")) { return 9; }
+    var di = m.iter();
+    var seen: usize = 0;
+    while (di.next()) ent {
+        if (m.get(ent.key)) v {
+            if (v != ent.value) { return 10; }
+        } else { return 10; }
+        seen = seen + 1;
+    }
+    std.println("after remove {}", seen);
+    if (seen != 4) { return 11; }
+
+    // 插入 20 个新键触发扩容；旧指针已换，新开的游标仍能遍历全部
+    for (MANY[0..]) k {
+        if (!m.put(k, 42)) { return 12; }
+    }
+    var gi = m.iter();
+    var gn: usize = 0;
+    while (gi.next()) _ { gn = gn + 1; }
+    std.println("grown cap {} seen {}", m.capacity(), gn);
+    if (gn != m.count() or gn != 24) { return 13; }
+
+    // V 是结构体：Entry.value 按值给出整个结构
+    var s = std.map.HashMap(Pair).init(al);
+    if (!s.put("p", Pair{ .a = 1, .b = 2 })) { return 14; }
+    var si = s.iter();
+    var sp: usize = 0;
+    while (si.next()) ent {
+        if (ent.value.a != 1 or ent.value.b != 2) { return 15; }
+        sp = sp + 1;
+    }
+    std.println("struct {}", sp);
+    if (sp != 1) { return 16; }
+
+    s.deinit();
+    m.deinit();
+    std.println("done");
+    return 0;
+};
+
+// expect-output
+// empty ok
+// entry count 5 sum 15
+// cursors 5 5
+// keys 5
+// after remove 4
+// grown cap 32 seen 24
+// struct 1
+// done

@@ -194,6 +194,46 @@ pub const HashMap = struct (V: type) {
             return (self.vals + i).0;
         };
 
+        // 一条记录：next() 按值返回，V 是拷贝；只要键时用 nextKey() 省拷贝，
+        // 要原地改值用 getPtr(key)。
+        pub const Entry = struct { pub key: []const u8, pub value: V };
+
+        // 游标持裸指针而不持 HashMap 引用：避开泛型自引用类型，且同一张表
+        // 可以同时开多个游标（可重入）。遍历顺序是槽下标升序，不是插入顺序。
+        // 遍历期间不得 put/remove——扩容/重排会让这里的指针失效。
+        pub const Iterator = struct {
+            keys: *[]const u8,
+            hashes: *u64,
+            vals: *V,
+            cap: usize,
+            i: usize,
+
+            pub const nextKey = fn (self: *Self) ?[]const u8 {
+                while (self.i < self.cap) {
+                    let k = self.i;
+                    self.i = k + 1;
+                    if ((self.hashes + k).0 >= 2) { return (self.keys + k).0; }
+                }
+                return null;
+            };
+
+            pub const next = fn (self: *Self) ?Entry {
+                while (self.i < self.cap) {
+                    let k = self.i;
+                    self.i = k + 1;
+                    if ((self.hashes + k).0 >= 2) {
+                        return Entry{ .key = (self.keys + k).0, .value = (self.vals + k).0 };
+                    }
+                }
+                return null;
+            };
+        };
+
+        pub const iter = fn (self: *Self) Iterator {
+            return Iterator{ .keys = self.keys, .hashes = self.hashes,
+                             .vals = self.vals, .cap = self.cap, .i = 0 };
+        };
+
         // ---- 扩容 ----
 
         const grow = fn (self: *Self) bool {
