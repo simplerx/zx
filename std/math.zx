@@ -103,23 +103,19 @@ pub const powI = fn (base: u32, n: u32) u32 {
 };
 
 pub const isPowerOfTwo = fn (x: u32) bool {
-    if (x == 0) { return false; }
-    var v = x;
-    while (v > 1) {
-        if (v % 2 == 1) { return false; }
-        v = v / 2;
-    }
-    return true;
+    return x != 0 and (x & (x - 1)) == 0;   // §248：O(1)，不再逐位循环
 };
 
 pub const nextPowerOfTwo = fn (x: u32) u32 {
     if (x <= 1) { return 1; }
-    var v: u32 = 1;
-    while (v < x) {
-        if (v > 2147483648) { return 0; }   // 再翻一倍就溢出 u32
-        v = v * 2;
-    }
-    return v;
+    var v = x - 1;                          // §248：位扩散一次成型
+    v = v | (v >> 1);
+    v = v | (v >> 2);
+    v = v | (v >> 4);
+    v = v | (v >> 8);
+    v = v | (v >> 16);
+    if (v == 0xffffffff) { return 0; }      // 再翻一倍就溢出 u32
+    return v + 1;
 };
 
 // ---- 纯 Zx 的浮点小工具 ----------------------------------------------------
@@ -154,30 +150,36 @@ pub const radToDeg = fn (r: f64) f64 { return r * 180.0 / pi; };
 
 // 置位数。x=0 返回 0。
 pub const popcount32 = fn (x: u32) u32 {
-    var v = x;
-    var n: u32 = 0;
-    while (v != 0) {
-        v = v & (v - 1);        // 清掉最低的 1
-        n = n + 1;
-    }
-    return n;
+    var v = x;                              // §248：SWAR 并行计数，5 步固定
+    v = v - ((v >> 1) & 0x55555555);
+    v = (v & 0x33333333) + ((v >> 2) & 0x33333333);
+    v = (v + (v >> 4)) & 0x0f0f0f0f;
+    return (v + (v >> 8) + (v >> 16) + (v >> 24)) & 0x3f;
 };
 
 // 末尾连续 0 的个数。x=0 返回 32（没有最低的 1）。
 pub const ctz32 = fn (x: u32) u32 {
     if (x == 0) { return 32; }
-    var v = x;
+    var v = x;                              // §248：折半定位，最多 5 步
     var n: u32 = 0;
-    while ((v & 1) == 0) { v = v >> 1; n = n + 1; }
+    if ((v & 0xffff) == 0) { v = v >> 16; n = n + 16; }
+    if ((v & 0xff) == 0) { v = v >> 8; n = n + 8; }
+    if ((v & 0xf) == 0) { v = v >> 4; n = n + 4; }
+    if ((v & 0x3) == 0) { v = v >> 2; n = n + 2; }
+    if ((v & 0x1) == 0) { n = n + 1; }
     return n;
 };
 
 // 开头连续 0 的个数。x=0 返回 32。
 pub const clz32 = fn (x: u32) u32 {
     if (x == 0) { return 32; }
-    var v = x;
+    var v = x;                              // §248：折半定位，最多 5 步
     var n: u32 = 0;
-    while ((v & 0x80000000) == 0) { v = v << 1; n = n + 1; }
+    if (v <= 0x0000ffff) { v = v << 16; n = n + 16; }
+    if (v <= 0x00ffffff) { v = v << 8; n = n + 8; }
+    if (v <= 0x0fffffff) { v = v << 4; n = n + 4; }
+    if (v <= 0x3fffffff) { v = v << 2; n = n + 2; }
+    if (v <= 0x7fffffff) { n = n + 1; }
     return n;
 };
 

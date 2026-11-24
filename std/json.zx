@@ -682,8 +682,7 @@ const Buf = struct {
         let raw = self.alloc.alloc(self.alloc.ctx, ncap);
         if (raw) r {
             let dst = (*u8)r;
-            var i: usize = 0;
-            while (i < self.len) { (dst + i).0 = (self.data + i).0; i = i + 1; }
+            @memcpy(dst, self.data, self.len);   // §248：扩容搬家一次拷贝，不逐字节循环
             if (self.cap > 0) { self.alloc.free(self.alloc.ctx, self.data, self.cap); }
             self.data = dst;
             self.cap = ncap;
@@ -702,11 +701,7 @@ const Buf = struct {
     const bytes = fn (self: *Self, s: []const u8) void {
         self.reserve(s.len);
         if (self.failed) { return; }
-        var i: usize = 0;
-        while (i < s.len) {
-            (self.data + self.len + i).0 = s[i];
-            i = i + 1;
-        }
+        @memcpy((*u8)(self.data + self.len), s.ptr, s.len);   // §248
         self.len = self.len + s.len;
     };
 
@@ -872,38 +867,34 @@ const writeFloat = fn (b: *Buf, v: f64) void {
         if (1.0 / v < 0.0) { b.bytes("-0.0"); } else { b.bytes("0.0"); }
         return;
     }
-    let raw = b.alloc.alloc(b.alloc.ctx, 48);                      // 候选串暂存（最长 ~26）
-    if (raw) r3 {
-        let cand = (*u8)r3;
-        var ndig: i32 = 1;
-        while (ndig <= 17) {
-            var decpt: i32 = 0;
-            var sign: i32 = 0;
-            let digits = _ecvt(v, ndig, &decpt, &sign);
-            // _ecvt 按请求位数补齐，剪尾零（"250" → "25"）
-            var n: usize = (usize)ndig;
-            while (n > 1 and (digits + n - 1).0 == '0') { n = n - 1; }
-            let len = fmtFloatInto(cand, digits, n, decpt, sign != 0);
-            // 回读验证：等于原值即最短表示
-            var endp: *const u8 = (*const u8)cand;
-            let back = strtod((*const u8)cand, &endp);
-            if (back == v and (usize)endp - (usize)cand == len) {
-                b.bytes(cand[0..len]);
-                b.alloc.free(b.alloc.ctx, cand, 48);
-                return;
-            }
-            ndig = ndig + 1;
-        }
-        // 理论到不了（17 位保证 round-trip）：保底交 17 位展开
+    // §248：候选串最长 ~26，栈上 48 字节足够。此前每个浮点都 alloc/free
+    // 一次 48B，数值密集的 JSON 会把分配器锁打成热点。
+    var cand_buf: [48]u8 = undefined;
+    let cand = cand_buf.ptr;
+    var ndig: i32 = 1;
+    while (ndig <= 17) {
         var decpt: i32 = 0;
         var sign: i32 = 0;
-        let digits = _ecvt(v, 17, &decpt, &sign);
-        let len = fmtFloatInto(cand, digits, 17, decpt, sign != 0);
-        b.bytes(cand[0..len]);
-        b.alloc.free(b.alloc.ctx, cand, 48);
-        return;
+        let digits = _ecvt(v, ndig, &decpt, &sign);
+        // _ecvt 按请求位数补齐，剪尾零（"250" → "25"）
+        var n: usize = (usize)ndig;
+        while (n > 1 and (digits + n - 1).0 == '0') { n = n - 1; }
+        let len = fmtFloatInto(cand, digits, n, decpt, sign != 0);
+        // 回读验证：等于原值即最短表示
+        var endp: *const u8 = (*const u8)cand;
+        let back = strtod((*const u8)cand, &endp);
+        if (back == v and (usize)endp - (usize)cand == len) {
+            b.bytes(cand[0..len]);
+            return;
+        }
+        ndig = ndig + 1;
     }
-    b.failed = true;
+    // 理论到不了（17 位保证 round-trip）：保底交 17 位展开
+    var decpt: i32 = 0;
+    var sign: i32 = 0;
+    let digits = _ecvt(v, 17, &decpt, &sign);
+    let len = fmtFloatInto(cand, digits, 17, decpt, sign != 0);
+    b.bytes(cand[0..len]);
 };
 
 // 递归写值。d = 嵌套深度（防环做不到——Value 树本来就该是无环的，

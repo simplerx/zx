@@ -1,0 +1,26 @@
+// pool 调度吞吐基准：不同 worker 数下 spawn + awaitAll 短任务的耗时。
+// 用法：zxc tools/poolbench.zx -o poolbench.exe && ./poolbench.exe
+// §248 优化后参考（4000 任务 / 12 核 Windows）：
+//   workers=1 ~50ms, 2 ~35ms, 4 ~40ms, 8 ~43ms, 16 ~44ms
+const std = @mod("std");
+const Task = std.task.Task;
+const work = fn (x: usize) !usize { return x + 1; };
+const N: usize = 4000;
+const WS: [5]usize = .{ 1, 2, 4, 8, 16 };
+
+pub const main = fn () !i32 {
+    var k: usize = 0;
+    while (k < WS.len) {
+        let nw = WS[k];
+        let t = Task.pool(nw);
+        let t0 = std.time.counter();
+        var i: usize = 0;
+        while (i < N) { _ = t.spawn(work, i); i = i + 1; }
+        try t.awaitAll();
+        let ms = std.time.nsBetween(t0, std.time.counter()) / 1000000;
+        std.println("workers={}: {} ms / {} tasks", nw, ms, N);
+        t.close();
+        k = k + 1;
+    }
+    return 0;
+};

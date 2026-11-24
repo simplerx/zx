@@ -1,0 +1,28 @@
+// §248：位运算工具改 O(1) 实现后的边界守门。
+// expect-output
+// bitfast ok
+// expect-exit: 0
+const std = @mod("std");
+const M = std.math;
+
+pub const main = fn () u8 {
+    if (M.isPowerOfTwo(0)) { return 1; }
+    if (!M.isPowerOfTwo(1) or !M.isPowerOfTwo(0x80000000)) { return 2; }
+    if (M.isPowerOfTwo(3) or M.isPowerOfTwo(0x80000001)) { return 3; }
+
+    if (M.nextPowerOfTwo(0) != 1 or M.nextPowerOfTwo(1) != 1) { return 4; }
+    if (M.nextPowerOfTwo(37) != 64 or M.nextPowerOfTwo(0x80000000) != 0x80000000) { return 5; }
+    if (M.nextPowerOfTwo(0x80000001) != 0) { return 6; }
+
+    if (M.popcount32(0) != 0 or M.popcount32(0xffffffff) != 32) { return 7; }
+    if (M.popcount32(0x80000001) != 2 or M.popcount32(0x0f0f0f0f) != 16) { return 8; }
+
+    if (M.ctz32(0) != 32 or M.ctz32(1) != 0 or M.ctz32(0x80000000) != 31) { return 9; }
+    if (M.ctz32(0x10000) != 16 or M.ctz32(0x0c) != 2) { return 10; }
+
+    if (M.clz32(0) != 32 or M.clz32(1) != 31 or M.clz32(0x80000000) != 0) { return 11; }
+    if (M.clz32(0x10000) != 15 or M.clz32(0x40000000) != 1) { return 12; }
+
+    std.println("bitfast ok");
+    return 0;
+};

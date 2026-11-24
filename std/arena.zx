@@ -50,7 +50,7 @@ const AdoptNode = struct {
 };
 
 const alignUp = fn (n: usize) usize {
-    return ((n + ALIGN - 1) / ALIGN) * ALIGN;
+    return (n + ALIGN - 1) & ~(ALIGN - 1);  // ALIGN 是 2 的幂，位掩码免除法
 };
 
 // ---- 两个函数指针：Allocator 的本体 ----

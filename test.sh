@@ -2543,6 +2543,20 @@ else
     printf "  FAIL §245 生成器/sema 静态断言\n"; fail=1
 fi
 
+# §248：pool 调度去惊群 + timer 空链快路径 + std 热点（math 边界由
+# tests/good/std-math-bitfast.zx 自动发现并运行）
+printf "\n== §248 pool 调度 / std 热点静态断言\n"
+if grep -A12 'static void zx_ready_push' src/backend.c | grep -q 'zx_cv_signal' \
+   && grep -A12 'static void zx_ready_push' src/backend.c | grep -q 'sleeping' \
+   && grep -A8 'static void zx_tm_poll' src/backend.c | grep -q 'ntimers' \
+   && grep -q 'WakeConditionVariable' src/backend.c \
+   && grep -Fq '@memcpy((*u8)(self.data + self.len), s.ptr, s.len)' std/json.zx \
+   && grep -Fq '(n + ALIGN - 1) & ~(ALIGN - 1)' std/arena.zx; then
+    printf "  ok   §248 signal + timer 快路径 + std memcpy/align\n"
+else
+    printf "  FAIL §248 静态断言\n"; fail=1
+fi
+
 # 用例会在仓库根留下自己的临时文件：io_fmt.zx 写 io_fmt.tmp，stdfs.zx 建
 # fs_t_dir / fs_t_dir2。跑完统一带走——测试不该往工作区里堆东西。
 rm -rf io_fmt.tmp fs_t_dir fs_t_dir2 2>/dev/null || true
