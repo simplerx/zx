@@ -1,7 +1,8 @@
 // pool 调度吞吐基准：不同 worker 数下 spawn + awaitAll 短任务的耗时。
 // 用法：zxc tools/poolbench.zx -o poolbench.exe && ./poolbench.exe
-// §248 优化后参考（4000 任务 / 12 核 Windows）：
-//   workers=1 ~50ms, 2 ~35ms, 4 ~40ms, 8 ~43ms, 16 ~44ms
+// 参考（4000 任务 / 12 核 Windows）：
+//   §248 去惊群：1 ~50ms, 2 ~35ms, 4 ~40ms, 8 ~43ms, 16 ~44ms（负伸缩）
+//   §249 纤程池化：1 ~15ms, 2 ~9ms, 4 ~4ms, 8 ~4ms, 16 ~4ms（正伸缩）
 const std = @mod("std");
 const Task = std.task.Task;
 const work = fn (x: usize) !usize { return x + 1; };

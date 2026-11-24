@@ -1,0 +1,37 @@
+// task_fiber_pool.zx —— §249 纤程池：完成后的栈/任务对象复用，且不误复用
+// 仍在挂起中的父任务纤程。parent 在池实例里 spawn 子任务并 await 自己挂起，
+// 子任务必须由别的 worker 在自己的纤程上跑完再唤醒父任务。
+// 20 轮 × 8 条深度 4 的链 = 160 个叶子；每轮 awaitAll 后池被回收再复用。
+// expect-output:recursive:160
+const std = @mod("std");
+const Task = std.task.Task;
+
+var leaves: usize = 0;
+const parent = fn (ctx: usize) !usize {
+    let depth = ctx & 255;
+    let id = ctx >> 8;
+    if (depth == 0) {
+        _ = std.atomic.atomicAdd(&leaves, 1);
+        return 7;
+    }
+    let t = Task.fromId(id);
+    let h = t.spawn(parent, ((id << 8) | (depth - 1))).?;
+    return (try t.await(h)) + 1;
+};
+
+const main = fn () !i32 {
+    let t = Task.pool(4);
+    var round: usize = 0;
+    while (round < 20) {
+        var i: usize = 0;
+        while (i < 8) {
+            _ = t.spawn(parent, (t.id << 8) | 3);
+            i = i + 1;
+        }
+        try t.awaitAll();
+        round = round + 1;
+    }
+    std.println("recursive:{}", std.atomic.atomicLoad(&leaves));
+    t.close();
+    return 0;
+};

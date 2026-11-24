@@ -2557,6 +2557,19 @@ else
     printf "  FAIL §248 静态断言\n"; fail=1
 fi
 
+# §249：纤程池化。fiber 完成后不销毁、循环等下一条任务；池受容量上限约束。
+# 递归/挂起场景由 tests/good/task_fiber_pool.zx 自动发现并运行。
+printf "\n== §249 纤程池静态断言\n"
+if grep -A12 'static void zx_task_main' src/backend.c | grep -q 'for (;;)' \
+   && grep -q 'struct ZxTask \*pool_next' src/backend.c \
+   && grep -q 'ZxTask \*fiber_pool' src/backend.c \
+   && grep -q 's->npool < s->pool_cap' src/backend.c \
+   && grep -Fq 'ZxTask *t = s->fiber_pool;' src/backend.c; then
+    printf "  ok   §249 fiber 循环 + 池复用 + 容量上限\n"
+else
+    printf "  FAIL §249 静态断言\n"; fail=1
+fi
+
 # 用例会在仓库根留下自己的临时文件：io_fmt.zx 写 io_fmt.tmp，stdfs.zx 建
 # fs_t_dir / fs_t_dir2。跑完统一带走——测试不该往工作区里堆东西。
 rm -rf io_fmt.tmp fs_t_dir fs_t_dir2 2>/dev/null || true
