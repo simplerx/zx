@@ -2364,6 +2364,16 @@ if grep -qF '"a=1 // not comment"' "$pdir/fsp/a.zx"; then
 else
     printf "  FAIL §233 字符串内容被改\n"; fail=1
 fi
+# §246：相邻标点 token 不得被 fmt 拆开——`.?`（unwrap）曾被切成 `. ?`，
+# Zed 保存时 zxls→zxc fmt 就把它写坏，语义虽不变但源码被破坏。
+printf 'const main=fn()i32{\nvar p:?i32=1;\nlet q=p.?;\nreturn q;\n};\n' > "$pdir/fsp/dot.zx"
+if ( cd "$pdir/fsp" && "$ZXCW" fmt dot.zx > "$TPFX.dot.log" 2>&1 ) \
+   && grep -qF 'let q = p.?;' "$pdir/fsp/dot.zx" \
+   && ! grep -qF '. ?' "$pdir/fsp/dot.zx"; then
+    printf "  ok   §246 .? 不被 fmt 拆成 '. ?'\n"
+else
+    printf "  FAIL §246 .? 空格\n"; cat "$TPFX.dot.log" 2>/dev/null; cat "$pdir/fsp/dot.zx"; fail=1
+fi
 # Zed indents.scm：@end 必须嵌在 @indent 内（否则 `{}` 回车/vim o 回行首）。
 if grep -qE '\(block[^\n]*"}" @end\) @indent' editor/zed/languages/zx/indents.scm \
    && ! grep -qE '^\] @end$' editor/zed/languages/zx/indents.scm \

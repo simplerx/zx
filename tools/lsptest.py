@@ -408,6 +408,13 @@ check("completion.snippet.fn", s_fn.get("fn", {}).get("insertText") == "fn ($1) 
 s_st = snip_at("struct {", "struct", 27)
 check("completion.snippet.struct", s_st.get("struct", {}).get("insertText")
       == "struct {\n    ${1:name}: ${2:i32},\n};", str(s_st.get("struct"))[:200])
+# §246：多行模板必须发 insertTextMode=2（adjustIndentation），否则 Zed
+# 只缩进首行、`};` 顶格，块尾比 for/while/if 关键字少一格。
+check("completion.snippet.insertTextMode",
+      i_if.get("insertTextMode") == 2
+      and s_fn.get("fn", {}).get("insertTextMode") == 2
+      and s_st.get("struct", {}).get("insertTextMode") == 2,
+      str(i_if)[:200])
 
 s_main = snip_at("pub const main", "main", 26)
 check("completion.snippet.main", s_main.get("main", {}).get("insertTextFormat") == 2,

@@ -1622,6 +1622,7 @@ static FsTok *fs_lex(const char *s, size_t *out_n) {
         } else if (c == '.') {
             if (p[1] == '{') p += 2;                       /* .{ 字面量 */
             else if (p[1] == '.') p += 2;                  /* .. 范围 */
+            else if (p[1] == '?') p += 2;                  /* .? unwrap：整 token 不拆，免得被 fmt 插入空格 */
             else if (p[1] >= '0' && p[1] <= '9') {        /* t.0 元组下标 */
                 p += 2;
                 while (*p >= '0' && *p <= '9') p++;

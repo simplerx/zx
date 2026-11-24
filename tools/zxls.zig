@@ -143,8 +143,9 @@ const Snip = struct { label: []const u8, body: []const u8, detail: []const u8 };
 /// KEEP — 常用代码片段（LSP snippet，insertTextFormat=2）。用户 2026-11-08
 /// 要求：写 if / fn 按 Tab 展开固定骨架，块尾带 `;`，块内换行缩进 4 空格。
 /// body 里的 $1/${1:默认值}/$0 是 LSP tabstop：确认后光标落在 $1，
-/// 再按 Tab 依次跳到 $2…$0。缩进写死 4 空格（Zed tab_size=4，且
-/// 不设 insertTextMode 以免客户端二次加缩进变成 8 空格）。
+/// 再按 Tab 依次跳到 $2…$0。缩进写死 4 空格（Zed tab_size=4）；
+/// §246 起多行模板发 insertTextMode=2（adjustIndentation），让块尾 `};`
+/// 与关键字行对齐——asIs 下 Zed 只缩进首行、`};` 顶格会少一格。
 /// 每条模板展开后的形态都过一遍 zxc 编译；lsptest.py 的
 /// completion.snippet.* 用例把 body 内容钉住，改坏会连挂。
 /// 关键字同名项由这段替换普通关键字补全；其余是额外的常用模板。
@@ -8750,6 +8751,12 @@ fn addSnippet(list: *Json, seen: *std.StringHashMapUnmanaged(void), s: Snip) voi
     list.raw(",\"insertText\":", .{});
     list.str(s.body);
     list.raw(",\"insertTextFormat\":2", .{});
+    // §246：adjustIndentation——多行模板按首行基准相对缩进展开。
+    // 缺省 asIs 时 Zed 只给首行套光标缩进、后续行按字面插：`for` 在
+    // 函数体里缩 4 格而 `};` 仍顶格，闭括号比关键字少一格（用户截图）。
+    // LSP 的 adjustIndentation 会剥掉 snippet 自身基准再加当前缩进，
+    // `for`/`    $0`/`};` 分别落在 N / N+4 / N，块尾与关键字对齐。
+    list.raw(",\"insertTextMode\":2", .{});
     list.raw("}}", .{});
 }
 
