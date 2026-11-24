@@ -1,0 +1,51 @@
+// §245（用户裁定）：判空是使用者的事，运行时绝不自行 abort。
+// heapAlloc 返回 ?*[N]T、heapSlice 返回 ?[]T；分配失败返回 null，
+// 由调用方用 if 捕获 / orelse / .? 自行决定处置。
+// expect-exit: 0
+// expect-output
+// heap OOM handled
+// slice OOM handled
+// ok: heap=42 slice=7 unwrap=9
+const std = @mod("std");
+
+// 恒失败的分配器：alloc 返回 null，free 空实现
+const fail_alloc = fn (_: ?*u8, _: usize) ?*u8 { return null; };
+const noop_free = fn (_: ?*u8, _: *u8, _: usize) void {};
+const oom: Allocator = .{ .ctx = null, .alloc = fail_alloc, .free = noop_free };
+
+const main = fn () u8 {
+    // ① 失败路径：if 捕获判空，不 abort
+    var p = std.heapAlloc(oom, i32, 4);
+    if (p) q {
+        std.println("unexpected heap success {}", q[0][0]);
+        return 1;
+    } else {
+        std.println("heap OOM handled");
+    }
+    var s = std.heapSlice(oom, i32, 3);
+    if (s) sl {
+        std.println("unexpected slice success {}", sl.len);
+        return 1;
+    } else {
+        std.println("slice OOM handled");
+    }
+    // ② 成功路径：if 捕获 + .? 解包都照常
+    var okp = std.heapAlloc(std.heap.page, i32, 4);
+    if (okp) q {
+        q[0][0] = 42;
+        std.println("ok: heap={d} slice={d} unwrap={d}", q[0][0], okslice()[0], unwrap()[0][0]);
+    }
+    return 0;
+};
+
+const okslice = fn () []i32 {
+    var s = std.heapSlice(std.heap.page, i32, 2).?;
+    s[0] = 7;
+    return s;
+};
+
+const unwrap = fn () *[2]u8 {
+    var r = std.heapAlloc(std.heap.page, u8, 2).?;
+    r[0][0] = 9;
+    return r;
+};

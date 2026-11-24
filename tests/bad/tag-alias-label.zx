@@ -6,7 +6,7 @@ const std = @mod("std");
 
 const main = fn () u8 {
     var n: i32 = 1;
-    var p = n : std.heapAlloc(std.heap.page, i32, 4);
+    var p = n : std.heapAlloc(std.heap.page, i32, 4).?;
     std.heap.page.deinit(p);
     return 0;
 };

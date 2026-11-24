@@ -6,7 +6,7 @@ tag.enable;
 // 新分配请用 `let p = tag.x : expr;`。
 const std = @mod("std");
 pub const main = fn () i32 {
-    let p = (*u8)std.heapAlloc(std.heap.page, u8, 10);
+    let p = (*u8)std.heapAlloc(std.heap.page, u8, 10).?;
     tag v : tag.alloc1 = p;
     return 0;
 };

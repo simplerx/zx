@@ -12,7 +12,7 @@ const Box = struct {
     };
 };
 pub const main = fn () i32 {
-    let p = (*u8)std.heapAlloc(std.heap.page, u8, 10);
+    let p = (*u8)std.heapAlloc(std.heap.page, u8, 10).?;
     var b = Box{.p = p};
     b.release();
     std.heap.page.free(std.heap.page.ctx, b.p, 10);

@@ -11,8 +11,8 @@ const Two = struct { a: [2]*u8, b: [2]*u8 };
 
 pub const main = fn () u8 {
     var s = Two{ .a = .{ undefined, undefined }, .b = .{ undefined, undefined } };
-    s.a[0] = std.heapAlloc(std.heap.page, u8, 8);
-    s.b[0] = std.heapAlloc(std.heap.page, u8, 8);
+    s.a[0] = std.heapAlloc(std.heap.page, u8, 8).?;
+    s.b[0] = std.heapAlloc(std.heap.page, u8, 8).?;
     std.heap.page.free(std.heap.page.ctx, s.a[0], 8);   // 只释放 a
     std.println("{}", s.a.len);
     return 0;

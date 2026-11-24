@@ -2,7 +2,7 @@
 // 词法器：`.0.0` 按两级下标切分（下标上下文不吞 float）。
 const std = @mod("std");
 pub const allocp = fn () *u8 {
-    return (*u8)std.heapAlloc(std.heap.page, u8, 10);
+    return (*u8)std.heapAlloc(std.heap.page, u8, 10).?;
 };
 pub const main = fn () i32 {
     var tt = { { allocp(), (*u8)"a" }, { (*u8)"b", allocp() } };

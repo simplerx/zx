@@ -4,7 +4,7 @@ tag.enable;
 const std = @mod("std");
 
 const main = fn () !i32 {
-    var p = tag.h : std.heapAlloc(std.heap.page, u8, 10);
+    var p = tag.h : std.heapAlloc(std.heap.page, u8, 10).?;
     p[0][0] = 42;
 
     var s = p[0..];              // 切片携带标签

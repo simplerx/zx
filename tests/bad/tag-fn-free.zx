@@ -9,7 +9,7 @@ const release = fn (p: *i32) void {
 };
 
 const main = fn () u8 {
-    var p = std.heapAlloc(std.heap.page, i32, 4);
+    var p = std.heapAlloc(std.heap.page, i32, 4).?;
     release(p);
     return (u8)p[0];                 // 释放后使用
 };

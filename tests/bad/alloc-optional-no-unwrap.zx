@@ -1,0 +1,9 @@
+// expect: cannot be indexed
+// expect-code: E0300
+// §245：heapAlloc 返回 ?*[N]T，必须先判空或 .? 解包——直接索引是类型错误。
+const std = @mod("std");
+const main = fn () u8 {
+    var p = std.heapAlloc(std.heap.page, i32, 4);
+    p[0][0] = 1;   // 未解包：?*[4]i32 不能索引
+    return 0;
+};

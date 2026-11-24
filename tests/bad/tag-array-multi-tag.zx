@@ -9,8 +9,8 @@ tag.enable;
 const std = @mod("std");
 pub const main = fn () i32 {
     var xs = std.stackAlloc(*u8, 4);
-    let p = (*u8)std.heapAlloc(std.heap.page, u8, 10);
-    let q = (*u8)std.heapAlloc(std.heap.page, u8, 10);
+    let p = (*u8)std.heapAlloc(std.heap.page, u8, 10).?;
+    let q = (*u8)std.heapAlloc(std.heap.page, u8, 10).?;
     let i = 0;
     let j = 1;
     xs[0][i] = p;

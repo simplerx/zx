@@ -5,7 +5,7 @@ tag.enable;
 const std = @mod("std");
 tag.buf;
 const main = fn () u8 {
-    var p = tag.buf : std.heapAlloc(std.heap.page, i32, 4);
+    var p = tag.buf : std.heapAlloc(std.heap.page, i32, 4).?;
     std.heap.page.free(std.heap.page.ctx, (*u8)p, 16);
     return 0;
 };

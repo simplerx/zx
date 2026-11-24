@@ -4,12 +4,12 @@ tag.enable;
 const std = @mod("std");
 
 const main = fn () u8 {
-    var p = tag.buf : std.heapAlloc(std.heap.page, i32, 4);
+    var p = tag.buf : std.heapAlloc(std.heap.page, i32, 4).?;
     p[0][0] = 7;
     var first = p[0][0];
     const h = tag.buf;                   // 一等 tag 值（模仿 error.foo）
     std.heap.page.free(std.heap.page.ctx, (*u8)p, 16);
-    var q = tag.h : std.heapAlloc(std.heap.page, i32, 4);  // 别名回退 → buf 的槽
+    var q = tag.h : std.heapAlloc(std.heap.page, i32, 4).?;  // 别名回退 → buf 的槽
     q[0][0] = first + 2;
     std.println("v={d}", q[0][0]);
     std.heap.page.free(std.heap.page.ctx, (*u8)q, 16);

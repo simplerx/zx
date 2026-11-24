@@ -5,10 +5,10 @@
 const std = @mod("std");
 const S = struct { p: *u8 };
 pub const main = fn () i32 {
-    let p = (*u8)std.heapAlloc(std.heap.page, u8, 10);
+    let p = (*u8)std.heapAlloc(std.heap.page, u8, 10).?;
     var s = S{.p = p};
     if ((i32)p[0] > 0) {
-        s = S{.p = (*u8)std.heapAlloc(std.heap.page, u8, 10)};
+        s = S{.p = (*u8)std.heapAlloc(std.heap.page, u8, 10).?};
         defer std.heap.page.free(std.heap.page.ctx, s.p, 10);
         tag s: null;
     } else {

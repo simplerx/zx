@@ -11,13 +11,13 @@ const std = @mod("std");
 
 const main = fn () u8 {
     let a = std.heap.page;
-    var fixed = std.heapAlloc(a, i32, 3);
+    var fixed = std.heapAlloc(a, i32, 3).?;
     fixed[0][0] = 1; fixed[0][1] = 2; fixed[0][2] = 3;
     const N = fixed[0].len;                  // 编译期常量
     const SZ = fixed[0].size;                // 编译期常量（3 × 4）
     std.println("fixed: {} {}", N, SZ);
 
-    let all = std.heapSlice(a, i32, 4);
+    let all = std.heapSlice(a, i32, 4).?;
     let s = all[2..];                    // 运行期长度 = 2
     std.println("slice: {} {} {}", s.len, s.size, all.size);
 

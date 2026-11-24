@@ -6,7 +6,7 @@ var need: bool = true;
 
 const main = fn () u8 {
     let p = ok: if (need) {
-        var b = tag.buf : std.heapAlloc(std.heap.page, i32, 4);
+        var b = tag.buf : std.heapAlloc(std.heap.page, i32, 4).?;
         b[0][0] = 5;
         ok: b;
     } else {

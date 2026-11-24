@@ -9,7 +9,7 @@ const g = @mod("lib.zx");
 
 pub const main = fn () !i32 {
     var w: g.Win = g.Win{ .buf = &.{} };
-    var tmp: *[10]u8 = std.heapAlloc(std.heap.page, u8, 10);
+    var tmp: *[10]u8 = std.heapAlloc(std.heap.page, u8, 10).?;
     std.heap.page.deinit(tmp[0..]);
     w.show(tmp[0..]);
     return 0;

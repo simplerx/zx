@@ -1204,8 +1204,10 @@ $ZXC tests/good/heap-slice.zx --emit-c > "$TPFX.hs.c" 2>/dev/null
 # count 只许求值一次：后端按 []T 生成一份特化助手，n 是唯一的函数实参。
 # 行为上 heap-slice.zx 的 `calls = 1` 已经守住；这里再钉住生成代码结构，
 # 免得哪天改回 { .ptr=..., .len=n } 那种把 n 发两遍的形状。
-if grep -q 'ZxSlice_i32 zx_heapslice_ZxSlice_i32(' "$TPFX.hs.c" \
-   && grep -q 'r.len = (size_t)n;' "$TPFX.hs.c" \
+# §245：助手返回 tagged ?[]T（ZxOpt_si32），载荷字段是 r.payload.len；
+# 调用点由 zx_unwrap_ 解包。count 仍只在助手实参里求值一次。
+if grep -q 'ZxOpt_si32 zx_heapslice_ZxSlice_i32(' "$TPFX.hs.c" \
+   && grep -q 'r.payload.len = (size_t)n;' "$TPFX.hs.c" \
    && grep -q 'zx_heapalloc(al, n \* sizeof' "$TPFX.hs.c"; then
     printf "  ok   heapSlice 按 []T 生成助手，count 只求值一次\n"
 else
@@ -2241,7 +2243,7 @@ fi
 # §225：标签账本默认关闭——tag.enable 才开账；tag.close 已删除。
 printf "\n== §225 标签账本默认关闭 + tag.enable\n"
 # ① 默认关闭：未贴标的堆分配泄漏不报 E0513（账本休眠）
-printf 'const std = @mod("std");\npub const main = fn () u8 {\n    let p = std.heapAlloc(std.heap.page, i32, 4);\n    std.println("{}", p[0]);\n    return 0;\n};\n' > "$TPFX.c225off.zx"
+printf 'const std = @mod("std");\npub const main = fn () u8 {\n    let p = std.heapAlloc(std.heap.page, i32, 4).?;\n    std.println("{}", p[0][0]);\n    return 0;\n};\n' > "$TPFX.c225off.zx"
 if $ZXC "$TPFX.c225off.zx" --check > "$TPFX.c225off.log" 2>&1 \
    && ! grep -q 'E0513' "$TPFX.c225off.log"; then
     printf "  ok   默认关闭：未贴标泄漏不报 E0513\n"
@@ -2249,7 +2251,7 @@ else
     printf "  FAIL §225 默认未关闭\n"; cat "$TPFX.c225off.log"; fail=1
 fi
 # ② tag.enable：同一份源码开账后必须报 E0513
-printf 'tag.enable;\nconst std = @mod("std");\npub const main = fn () u8 {\n    let p = std.heapAlloc(std.heap.page, i32, 4);\n    std.println("{}", p[0]);\n    return 0;\n};\n' > "$TPFX.c225on.zx"
+printf 'tag.enable;\nconst std = @mod("std");\npub const main = fn () u8 {\n    let p = std.heapAlloc(std.heap.page, i32, 4).?;\n    std.println("{}", p[0][0]);\n    return 0;\n};\n' > "$TPFX.c225on.zx"
 if ! $ZXC "$TPFX.c225on.zx" --check > "$TPFX.c225on.log" 2>&1 \
    && grep -q 'E0513' "$TPFX.c225on.log"; then
     printf "  ok   tag.enable 开账后泄漏报 E0513\n"
@@ -2269,7 +2271,7 @@ done
 # ④ 开关按模块独立：main 不开账、helper 开账——只有 helper 的分配受检
 mkdir -p "$TPFX.c225mod"
 printf 'const h = @mod("h.zx");\npub const main = fn () i32 {\n    h.run();\n    return 0;\n};\n' > "$TPFX.c225mod/main.zx"
-printf 'tag.enable;\nconst std = @mod("std");\npub const run = fn () void {\n    let p = std.heapAlloc(std.heap.page, i32, 4);\n    std.println("{}", p[0]);\n};\n' > "$TPFX.c225mod/h.zx"
+printf 'tag.enable;\nconst std = @mod("std");\npub const run = fn () void {\n    let p = std.heapAlloc(std.heap.page, i32, 4).?;\n    std.println("{}", p[0][0]);\n};\n' > "$TPFX.c225mod/h.zx"
 if ! ( cd "$TPFX.c225mod" && "$ZXCW" main.zx --check > "$TPFX.c225mod.log" 2>&1 ) \
    && grep -q 'E0513' "$TPFX.c225mod.log"; then
     printf "  ok   开关按模块独立（helper 开账才报）\n"
@@ -2501,6 +2503,34 @@ if ! grep -qE '^static const uint8_t zxS_[0-9]+\[\] = "";' "$TPFX.s243.c"; then
     printf "  ok   §243 空串退回内联（不发空池定义）\n"
 else
     printf "  FAIL §243 空串被错发成池定义\n"; fail=1
+fi
+
+# §245：分配失败交使用者判空，运行时绝不自行 abort。
+#   heapAlloc -> ?*[N]T（flat，C 里就是指针），heapSlice -> ?[]T（tagged）。
+#   守三件事：① 恒失败分配器下两条 API 都返回 null 且不 abort；
+#   ② 成功路径 unwrap 正常；③ 生成器里没有 zx_heapalloc 的 abort 残留。
+printf "\n== §245 分配 OOM 返回 optional（判空交使用者）\n"
+for fe in zx c; do
+    if $ZXC --fe=$fe tests/good/alloc-optional-oom.zx -o "$TPFX.aoo$fe.exe" \
+            > "$TPFX.aoo$fe.log" 2>&1 \
+       && "$TPFX.aoo$fe.exe" > "$TPFX.aoo$fe.out" 2>&1 \
+       && grep -q '^heap OOM handled$' "$TPFX.aoo$fe.out" \
+       && grep -q '^slice OOM handled$' "$TPFX.aoo$fe.out" \
+       && grep -q '^ok: heap=42 slice=7 unwrap=9$' "$TPFX.aoo$fe.out"; then
+        printf "  ok   §245 OOM 判空 + 成功路径（--fe=%s）\n" "$fe"
+    else
+        printf "  FAIL §245 OOM optional（--fe=%s）\n" "$fe"
+        cat "$TPFX.aoo$fe.log" "$TPFX.aoo$fe.out" 2>/dev/null
+        fail=1
+    fi
+done
+# 静态：zx_heapalloc 不再调用 zx_abort_reported；heapSlice 助手发 tag 字段
+if ! sed -n '/static void \*zx_heapalloc(/,/^}/p' src/backend.c | grep -q 'abort' \
+   && grep -q 'r.tag = false' src/backend.c \
+   && grep -q 'ty_opt(ty_slice' src/sema_call.c; then
+    printf "  ok   §245 运行时无 abort + sema 返回 optional\n"
+else
+    printf "  FAIL §245 生成器/sema 静态断言\n"; fail=1
 fi
 
 # 用例会在仓库根留下自己的临时文件：io_fmt.zx 写 io_fmt.tmp，stdfs.zx 建

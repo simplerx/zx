@@ -12,7 +12,7 @@ const Person = struct {
 };
 
 const alloc = fn () Person {
-    var p: *[10]u8 = std.heapAlloc(std.heap.page, u8, 10);
+    var p: *[10]u8 = std.heapAlloc(std.heap.page, u8, 10).?;
     return .{ .age = p[0..] };
 };
 

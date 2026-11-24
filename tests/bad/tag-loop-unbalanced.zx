@@ -5,7 +5,7 @@ tag.enable;
 const std = @mod("std");
 const main = fn () u8 {
     for (0..3) i {
-        var p = tag.buf : std.heapAlloc(std.heap.page, i32, 4);
+        var p = tag.buf : std.heapAlloc(std.heap.page, i32, 4).?;
         p[0] = (i32)(i) + 1;
         _ = p;
     }

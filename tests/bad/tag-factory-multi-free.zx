@@ -6,7 +6,7 @@ tag.enable;
 // E0509（实例化修的是"两次调用各自 free"的假阳，不是豁免双放）。
 const std = @mod("std");
 pub const allocp = fn () *u8 {
-    return (*u8)std.heapAlloc(std.heap.page, u8, 10);
+    return (*u8)std.heapAlloc(std.heap.page, u8, 10).?;
 };
 pub const main = fn () i32 {
     let a = allocp();

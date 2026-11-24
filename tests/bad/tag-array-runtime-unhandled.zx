@@ -8,7 +8,7 @@ tag.enable;
 // 终结的写法见 good/tag-rebind-chain 与新增 tag-arr 用例。
 const std = @mod("std");
 const mk = fn () *u8 {
-    return (*u8)std.heapAlloc(std.heap.page, u8, 10);
+    return (*u8)std.heapAlloc(std.heap.page, u8, 10).?;
 };
 pub const main = fn () i32 {
     var xs = std.stackAlloc(*u8, 4);

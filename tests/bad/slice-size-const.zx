@@ -3,7 +3,7 @@
 const std = @mod("std");
 
 const main = fn () u8 {
-    let xs = std.heapSlice(std.heap.page, i32, 4);
+    let xs = std.heapSlice(std.heap.page, i32, 4).?;
     const S = xs.size;         // 运行期 len × 元素大小，不能进 const
     std.println("{}", S);
     return 0;

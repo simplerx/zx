@@ -2692,13 +2692,12 @@ static void emit_diag_runtime(void) {
 /* std.file：就是几个 fopen 包装。它们是普通函数调用——sema 给的符号上
  * 挂着 C 名字，所以调用点不需要任何特判。 */
 /* std.heapAlloc 的运行时一端：穿过分配器的 alloc 函数指针。
- * 分配失败没有可选可返回（结果是非可选数组指针），直接 abort。 */
+ * §245：分配失败返回 NULL——判空是使用者的事，运行时不自行 abort。
+ * heapAlloc 返回 ?*[N]T（flat，C 里就是 T*），null 即分配失败。 */
 static void emit_heapalloc_runtime(void) {
     Type *al = sema_allocator_type();
-    Type *op8 = ty_opt(ty_ptr(ty_u8(), false, false, 0));
-    ensure_type(al); ensure_type(op8);
+    ensure_type(al);
     Buf an; buf_init(&an); tn(&an, al);
-    Buf on; buf_init(&on); tn(&on, op8);
     Buf un; buf_init(&un); ctype(&un, ty_usize());
 
     buf_printf(&g_bglobals, "static void *zx_heapalloc(%s al, %s n);\n\n",
@@ -2707,14 +2706,11 @@ static void emit_heapalloc_runtime(void) {
     int si = g_ind;
     g_out = &g_bbody;
     g_ind = 0;
-    Buf mt; buf_init(&mt); ctype(&mt, op8);   /* ?*u8 的 C 类型：指针 */
     buf_printf(g_out,
         "static void *zx_heapalloc(%s al, %s n) {\n"
-        "    %s r = al.alloc(al.ctx, n);\n"
-        "    if (!r) { zx_diagf(\"zx: out of memory\\n\"); zx_abort_reported(); }\n"
-        "    return r;\n"
+        "    return al.alloc(al.ctx, n);\n"
         "}\n\n",
-        an.data, un.data, mt.data);
+        an.data, un.data);
     /* §130 预分配的对称释放：一次 alloc 一块，区间末整体归还。
      * 字段名走 dotname，与定义侧 mname 的 C 关键字转义保持一致。 */
     Buf fr; buf_init(&fr); dotname(&fr, "free");
@@ -4993,7 +4989,11 @@ static bool g_need_heapalloc;   /* 用过 std.heapAlloc → 带上 zx_heapalloc 
 
 static void ex_heapalloc(Buf *b, Node *n) {
     g_need_heapalloc = true;
-    Type *et = (n->ty && n->ty->kind == TY_PTR) ? n->ty->elem : ty_u8();
+    /* §245：n->ty 现在是 ?*[N]T（flat optional）；元素类型取 opt 的载荷。
+     * ?*T 的 C 表示就是 T*，所以整段发射形状与旧的非 optional 完全一致。 */
+    Type *pt = n->ty;
+    if (pt && pt->kind == TY_OPT) pt = pt->elem;
+    Type *et = (pt && pt->kind == TY_PTR) ? pt->elem : ty_u8();
     /* §130 预分配：这个点不再单独申请，按编译期算好的静态偏移落位 */
     if (n->reg_gid > 0) {
         Buf t; buf_init(&t); ctype(&t, et);
@@ -5023,8 +5023,10 @@ static int   g_nhslice;
 
 static void ex_heapslice(Buf *b, Node *n) {
     g_need_heapalloc = true;
-    Type *sl = (n->ty && n->ty->kind == TY_SLICE) ? n->ty
-                                                  : ty_slice(ty_u8(), false);
+    /* §245：n->ty 是 ?[]T；助手内部仍按裸切片生成，外层 coerce 包 tag。 */
+    Type *ot = n->ty;
+    if (ot && ot->kind == TY_OPT) ot = ot->elem;
+    Type *sl = (ot && ot->kind == TY_SLICE) ? ot : ty_slice(ty_u8(), false);
     ensure_type(sl);
     Buf sn; buf_init(&sn); tn(&sn, sl);
     bool have = false;
@@ -5046,18 +5048,24 @@ static void emit_heapslice_runtime(void) {
     Buf an; buf_init(&an); tn(&an, al);
     for (int i = 0; i < g_nhslice; i++) {
         Type *sl = g_hslice_types[i];
+        Type *opt = ty_opt(sl);              /* §245：?[]T 是 tagged optional */
+        ensure_type(opt);                    /* 先发 ZxOpt_ZxSlice_* typedef */
         Buf sn; buf_init(&sn); tn(&sn, sl);
+        Buf on; buf_init(&on); tn(&on, opt);
         Buf ct; buf_init(&ct); ctype(&ct, sl->elem);
         buf_printf(&g_bglobals, "static %s zx_heapslice_%s(%s al, uint64_t n);\n",
-                   sn.data, sn.data, an.data);
+                   on.data, sn.data, an.data);
         buf_printf(g_out,
             "static %s zx_heapslice_%s(%s al, uint64_t n) {\n"
             "    %s r;\n"
-            "    r.ptr = (%s *)zx_heapalloc(al, n * sizeof(%s));\n"
-            "    r.len = (size_t)n;\n"
+            "    r.tag = false; r.payload.ptr = 0; r.payload.len = 0;\n"
+            "    r.payload.ptr = (%s *)zx_heapalloc(al, n * sizeof(%s));\n"
+            "    if (!r.payload.ptr) return r;\n"     /* §245：失败交使用者判空 */
+            "    r.payload.len = (size_t)n;\n"
+            "    r.tag = true;\n"
             "    return r;\n"
             "}\n\n",
-            sn.data, sn.data, an.data, sn.data, ct.data, ct.data);
+            on.data, sn.data, an.data, on.data, ct.data, ct.data);
     }
 }
 

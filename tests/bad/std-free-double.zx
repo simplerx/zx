@@ -4,7 +4,7 @@ tag.enable;
 // std.free 走同一条释放账本：重复释放报 E0509。
 const std = @mod("std");
 pub const main = fn () i32 {
-    var p = std.heapAlloc(std.heap.page, i32, 10);
+    var p = std.heapAlloc(std.heap.page, i32, 10).?;
     std.free(std.heap.page, p);
     std.free(std.heap.page, p);
     return 0;

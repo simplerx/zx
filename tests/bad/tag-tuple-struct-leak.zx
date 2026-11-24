@@ -7,7 +7,7 @@ tag.enable;
 const std = @mod("std");
 pub const P2 = struct { name: *u8 };
 pub const allocp = fn () *u8 {
-    return (*u8)std.heapAlloc(std.heap.page, u8, 10);
+    return (*u8)std.heapAlloc(std.heap.page, u8, 10).?;
 };
 pub const main = fn () i32 {
     var tup = { P2{ .name = (*u8)"a" }, P2{ .name = (*u8)"b" } };

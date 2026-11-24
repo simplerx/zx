@@ -17,7 +17,7 @@ const read = fn (p: *u8) void {
 };
 
 pub const main = fn () !i32 {
-    var p = std.heapAlloc(std.heap.page, u8, 10);
+    var p = std.heapAlloc(std.heap.page, u8, 10).?;
     defer read((*u8)p);       // 先登记 -> 最后执行
     defer release((*u8)p);    // 后登记 -> 先执行 -> read 时已释放
     return 0;

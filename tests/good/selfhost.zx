@@ -74,7 +74,7 @@ const Parser = struct {
     };
 
     const new_node = fn (self: *Parser, k: Kind) *Node {
-        var n: *Node = std.heapAlloc(self.al, Node, 1);
+        var n: *Node = std.heapAlloc(self.al, Node, 1).?;
         n.kind = k;
         n.lhs = null;
         n.rhs = null;

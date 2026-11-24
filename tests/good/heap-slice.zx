@@ -23,7 +23,7 @@ pub const main = fn () i32 {
     // count 是有副作用的表达式：生成的 C 里只许求值一次。后端按 []T
     // 生成一份特化助手，把 n 当唯一的函数实参传进去；直接发
     // { .ptr = ..., .len = n } 会把它算两遍。
-    let xs = std.heapSlice(a, i32, bump(n));
+    let xs = std.heapSlice(a, i32, bump(n)).?;
     xs[0] = 10;
     xs[2] = 37;
     xs[n - 1] = 40;
@@ -33,7 +33,7 @@ pub const main = fn () i32 {
     a.free(a.ctx, (*u8)xs.ptr, xs.len * @type(i32).size);
 
     // 编译期 N 的 heapAlloc 不受影响，仍返回 *[N]T。
-    var fixed = std.heapAlloc(a, i32, 3);
+    var fixed = std.heapAlloc(a, i32, 3).?;
     fixed[0][1] = 7;
     std.println("fixed = {}", fixed[0][1]);
     a.free(a.ctx, (*u8)fixed, 3 * @type(i32).size);

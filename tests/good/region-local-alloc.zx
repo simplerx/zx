@@ -9,8 +9,8 @@ const std = @mod("std");
 
 const main = fn () u8 {
     let al = std.heap.page;
-    var a = std.heapAlloc(al, i32, 4);
-    var b = std.heapAlloc(al, i32, 4);
+    var a = std.heapAlloc(al, i32, 4).?;
+    var b = std.heapAlloc(al, i32, 4).?;
     a[0][0] = 3;
     b[0][0] = 7;
     std.println("region: {} {}", a[0][0], b[0][0]);

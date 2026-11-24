@@ -5249,7 +5249,7 @@ def shadow_guard():
             '    return 0;\n'
             '};\n\n'
             'const later = fn () u8 {\n'
-            '    let p = std.heapSlice(std.heap.page, u8, 4);\n'
+            '    let p = std.heapSlice(std.heap.page, u8, 4).?;\n'
             '    _ = p;\n'
             '    return 0;\n'
             '};\n')
@@ -5656,7 +5656,7 @@ check("completion.nest.fnArgNamedParam", {"name", "data", "ptr"} <= _nf, str(sor
 _nn = {i.get("label") for i in _nres.get("fnArgNested") or []}
 check("completion.nest.fnArgNested", {"x", "y"} <= _nn, str(sorted(_nn)))
 _hlabels = [h["label"] for h in (_nres.get("inlay") or []) if h.get("kind") == 1]
-check("inlayHint.type.heapAlloc", ": *[10]u8" in _hlabels, str(_hlabels))
+check("inlayHint.type.heapAlloc", ": ?*[10]u8" in _hlabels, str(_hlabels))
 
 # §193 —— 函数别名（`const alloc = std.heapAlloc;`）的编辑器四件套：
 # 调用骨架 / hover 签名 / signatureHelp 与真身同一口径，链式别名
@@ -5761,15 +5761,15 @@ check("completion.alias.callSnippet",
       and _ahp[0].get("insertText") == "hp(${1:alloc}, ${2:T}, ${3:n})$0",
       str(_ahp))
 check("hover.alias.signature",
-      "hp(alloc: Allocator, T: type, n: usize) *[n]T" in _ap["hover"],
+      "hp(alloc: Allocator, T: type, n: usize) ?*[n]T" in _ap["hover"],
       _ap["hover"][:200])
 _asg = _ap["sig"] or []
 check("signatureHelp.alias",
-      bool(_asg) and _asg[0].get("label") == "hp(alloc: Allocator, T: type, n: usize) *[n]T"
+      bool(_asg) and _asg[0].get("label") == "hp(alloc: Allocator, T: type, n: usize) ?*[n]T"
       and len(_asg[0].get("parameters") or []) == 3,
       str(_asg)[:200])
 _ahint = [h.get("label") for h in (_ap["inlay"] or []) if h.get("kind") == 1]
-check("inlayHint.type.alias", ": *[2]i32" in _ahint, str(_ahint))
+check("inlayHint.type.alias", ": ?*[2]i32" in _ahint, str(_ahint))
 
 _aty = {i.get("label") for i in (_ap["argty"] or [])}
 check("completion.argctx.types",

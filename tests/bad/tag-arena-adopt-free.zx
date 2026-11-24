@@ -6,7 +6,7 @@ const std = @mod("std");
 const main = fn () u8 {
     var ar = std.arena.ArenaAllocator.init(std.heap.page);
     if (ar) a {
-        let p = std.heapAlloc(std.heap.page, u8, 10);
+        let p = std.heapAlloc(std.heap.page, u8, 10).?;
         std.arena.ArenaAllocator.adopt(a, p, 10);
         std.heap.page.free(std.heap.page.ctx, p, 10);
         std.arena.ArenaAllocator.deinit(a);

@@ -1,6 +1,6 @@
 // alloc.zx —— 统一分配 API（decisions §44）：申请的都是数组，返回的都是数组指针
 // std.stackAlloc(T, N) 栈帧存储，N 编译期已知；
-// std.heapAlloc(alloc, T, N) 走分配器，OOM 直接 abort；
+// std.heapAlloc(alloc, T, N) 走分配器 → ?*[N]T，OOM 返回 null（判空自己来）；
 // `var x: *[N]T = undefined` 不再分配存储，只是指针槽不初始化。
 const std = @mod("std");
 
@@ -17,7 +17,7 @@ const main = fn () u8 {
     std.println("stack {d} len={d}", total(sa), sa[0].len);
 
     // ② 堆分配：显式传分配器
-    var ha = std.heapAlloc(std.heap.page, u64, 4);
+    var ha = std.heapAlloc(std.heap.page, u64, 4).?;
     for (0..4) i { ha[0][i] = (i + 1) * 10; }
     std.println("heap {d} len={d}", total(ha), ha[0].len);
 

@@ -5,7 +5,7 @@ tag.enable;
 const std = @mod("std");
 
 const make = fn () *[4]i32 {
-    var p = std.heapAlloc(std.heap.page, i32, 4);   // 工厂体内自动建槽（*[4]i32 带长度）
+    var p = std.heapAlloc(std.heap.page, i32, 4).?;   // 工厂体内自动建槽（*[4]i32 带长度）
     p[0][0] = 20;
     return p;                        // 返回流：tag 随返回值转移
 };
@@ -21,7 +21,7 @@ const main = fn () u8 {
     std.heap.page.deinit(q);         // deinit(*[N]T)
 
     const buf = tag.buf;             // 一等 tag 值
-    var s = buf : std.heapSlice(std.heap.page, i32, 2);   // 别名贴标
+    var s = buf : std.heapSlice(std.heap.page, i32, 2).?;   // 别名贴标
     s[0] = 7;
     std.heap.page.deinit(s);         // deinit(slice)
 

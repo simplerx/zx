@@ -7,7 +7,7 @@ const take = fn (_p: *i32) void {
     _ = _p;
 };
 const main = fn () u8 {
-    var p = tag.buf : std.heapAlloc(std.heap.page, i32, 4);
+    var p = tag.buf : std.heapAlloc(std.heap.page, i32, 4).?;
     take(p);
     std.heap.page.free(std.heap.page.ctx, (*u8)p, 16);
     return (u8)p[0];

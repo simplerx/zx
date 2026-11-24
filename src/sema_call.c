@@ -191,9 +191,11 @@ Type *check_call(Node *n, Type *expect) {
             if (isfmt) return type_of(n, ty_err(ty_slice(ty_u8(), false)));
             return type_of(n, ty_void());
         }
-        /* 分配 API：stackAlloc/heapAlloc 返回 *[N]T（长度在类型里），
-         * heapSlice 返回 []T（长度在值里，n 可运行期）。§130 的编译期
-         * 合并依赖 N 是常量算静态布局，所以只有 heapAlloc 进 region。 */
+        /* 分配 API（§245）：stackAlloc 返回 *[N]T（栈，不会 OOM）；
+         * heapAlloc 返回 ?*[N]T、heapSlice 返回 ?[]T——判空是使用者的事，
+         * 运行时不再自行 abort（原 zx_heapalloc 的 abort 已删）。N 仍在
+         * 类型里（flat optional 的 C 表示就是那根指针），§130 的编译期
+         * 合并、tag 建槽、逃逸检查全部照旧，只是外面多一层 optional。 */
         if (m->builtin == BI_STACKALLOC || m->builtin == BI_HEAPALLOC ||
             m->builtin == BI_HEAPSLICE) {
             bool stack = (m->builtin == BI_STACKALLOC);
@@ -223,7 +225,8 @@ Type *check_call(Node *n, Type *expect) {
                 }
                 if (!allocator_exempt(n->items[0]))
                     tag_auto_decl(n, false);        /* §173：自动建槽 */
-                return type_of(n, ty_slice(elem, false));
+                /* §245：?[]T——分配失败返回 null，使用者自己判空 */
+                return type_of(n, ty_opt(ty_slice(elem, false)));
             }
             IntV c = ev_int(n->items[base + 1]);
             if (!c.ok)
@@ -246,8 +249,11 @@ Type *check_call(Node *n, Type *expect) {
                 tag_auto_decl(n, true);         /* §173：栈分配也建槽，
                                                  * 作用域退出自动标 free */
             }
-            /* §201：返回指向 [N]T 数组的指针（elem 就是 [N]T） */
-            return type_of(n, ty_ptr(ty_array(elem, c.v), false, true, c.v));
+            /* §201 + §245：heapAlloc 返回 ?*[N]T（flat optional，C 表示就是
+             * 那根指针），stackAlloc 不会失败仍返回 *[N]T。elem 就是 [N]T。 */
+            Type *ret = ty_ptr(ty_array(elem, c.v), false, true, c.v);
+            if (!stack) ret = ty_opt(ret);
+            return type_of(n, ret);
         }
         /* §177：std.free(a, s) —— 释放的对称面。改写成 a.deinit(s)
          * 再走 §173 的同一条变换（切片/定长指针两种形状、字节量计算、

@@ -6,7 +6,7 @@ const pass1 = fn (p: []u8) []u8 { return p; };
 const pass2 = fn (p: []u8) []u8 { return pass1(p); };
 
 pub const main = fn () !i32 {
-    var p = std.heapAlloc(std.heap.page, u8, 10);
+    var p = std.heapAlloc(std.heap.page, u8, 10).?;
     var q = pass2(p);
     q[0] = 42;
     std.heap.page.deinit(q);

@@ -20,20 +20,20 @@ pub const main = fn () u8 {
     var s = Bufs{ .arr = .{ undefined, undefined }, .tail = 0 };
 
     // 常索引：写进字段数组、读回、配对释放——全程该可追踪
-    s.arr[0] = std.heapAlloc(std.heap.page, u8, 8);
-    s.arr[1] = std.heapAlloc(std.heap.page, u8, 8);
+    s.arr[0] = std.heapAlloc(std.heap.page, u8, 8).?;
+    s.arr[1] = std.heapAlloc(std.heap.page, u8, 8).?;
     let q = s.arr[0];
     std.heap.page.free(std.heap.page.ctx, q, 8);
     std.heap.page.free(std.heap.page.ctx, s.arr[1], 8);
 
     // 再写一轮，覆盖"覆盖写入换账"路径
-    s.arr[0] = std.heapAlloc(std.heap.page, u8, 16);
+    s.arr[0] = std.heapAlloc(std.heap.page, u8, 16).?;
     std.heap.page.free(std.heap.page.ctx, s.arr[0], 16);
 
     // 运行期索引：用注解读取取出（群成员取出通路）
     var r = Bufs{ .arr = .{ undefined, undefined }, .tail = 1 };
     let i: usize = 0;
-    r.arr[i] = tag.buf2 : std.heapAlloc(std.heap.page, u8, 4);
+    r.arr[i] = tag.buf2 : std.heapAlloc(std.heap.page, u8, 4).?;
     tag v : tag.buf2 = r.arr[i];
     std.heap.page.free(std.heap.page.ctx, v, 4);
 

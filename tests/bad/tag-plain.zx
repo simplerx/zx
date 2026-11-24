@@ -4,7 +4,7 @@ tag.enable;
 // §173：分配自动建槽 —— 没贴标也是被追踪的；不 free 就是真泄漏。
 const std = @mod("std");
 const main = fn () u8 {
-    var p = std.heapAlloc(std.heap.page, i32, 4);
+    var p = std.heapAlloc(std.heap.page, i32, 4).?;
     p[0][0] = 1;
     return 0;
 };

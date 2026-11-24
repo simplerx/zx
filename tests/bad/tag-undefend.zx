@@ -8,7 +8,7 @@ const std = @mod("std");
 var drop: bool = false;
 
 const main = fn () u8 {
-    var p = tag.buf : std.heapAlloc(std.heap.page, i32, 4);
+    var p = tag.buf : std.heapAlloc(std.heap.page, i32, 4).?;
     p[0][0] = 9;
     let r = ok: if (drop) {
         std.heap.page.free(std.heap.page.ctx, (*u8)p, 16);

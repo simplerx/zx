@@ -5,8 +5,8 @@ const std = @mod("std");
 
 const main = fn () u8 {
     const al = std.heap.page;
-    var a = std.heapAlloc(al, u64, 4);
-    var b = std.heapAlloc(al, u64, 4);
+    var a = std.heapAlloc(al, u64, 4).?;
+    var b = std.heapAlloc(al, u64, 4).?;
     for (0..4) i { a[0][i] = (u64)(i + 1); }
     for (0..4) i { b[0][i] = (u64)(i + 10); }
     std.println("a={d} b={d}", a[0][3], b[0][3]);

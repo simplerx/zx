@@ -4,7 +4,7 @@ const std = @mod("std");
 
 const main = fn () u8 {
     const al = std.heap.page;
-    var p = std.heapAlloc(al, u8, 64);
+    var p = std.heapAlloc(al, u8, 64).?;
     p[0][0] = 7;
     let v = p[0][0];
     al.free(al.ctx, (*u8)p, 64);

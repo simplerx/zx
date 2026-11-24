@@ -129,10 +129,17 @@ void region_plan_block(Node *blk) {
     int n = 0;
     for (int i = 0; i < blk->nitems; i++) {
         Node *s = blk->items[i];
-        if (s->kind != NK_DECL || !s->b || s->b->kind != NK_CALL ||
-            !s->b->reg_slot || !s->sym) continue;
+        if (s->kind != NK_DECL || !s->sym) continue;
+        /* §245：heapAlloc 返回 ?*[N]T，调用点写 `alloc(...).?`，s->b 是
+         * NK_UNWRAP。穿透 unwrap/cast 取底层 alloc call——合并记在 call
+         * 节点上（后端 ex_heapalloc 从它读 reg_gid/reg_off），decl 的 b
+         * 保持原样不动。region_of_expr 早已同口径穿透。 */
+        Node *src = s->b;
+        while (src && (src->kind == NK_UNWRAP || src->kind == NK_CAST))
+            src = src->a;
+        if (!src || src->kind != NK_CALL || !src->reg_slot) continue;
         if (n >= 16) return;
-        sites[n] = s->b; syms[n] = s->sym; n++;
+        sites[n] = src; syms[n] = s->sym; n++;
     }
     if (n < 2) return;
     /* 同一分配器：只认同一个局部标识符，别把两个不同 arena 混在一块 */

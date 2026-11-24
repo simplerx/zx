@@ -20,7 +20,7 @@ const store_alias = fn(t: *[1]T1, p: *[1]i32) void {
 
 // ② 工厂：被调体内调工厂，把返回的新分配 store 进容器形参字段
 const mk = fn(al: Allocator) *[1]i32 {
-    return std.heapAlloc(al, i32, 1);
+    return std.heapAlloc(al, i32, 1).?;
 };
 const store_factory = fn(t: *[1]T1, al: Allocator) void {
     t[0][0].name = mk(al);
@@ -29,13 +29,13 @@ const store_factory = fn(t: *[1]T1, al: Allocator) void {
 const main = fn () u8 {
     const al = std.heap.page;
 
-    let t0: *[1]T1 = std.heapAlloc(al, T1, 1);
+    let t0: *[1]T1 = std.heapAlloc(al, T1, 1).?;
     defer std.free(al, t0[0..1]);
-    let p0: *[1]i32 = std.heapAlloc(al, i32, 1);
+    let p0: *[1]i32 = std.heapAlloc(al, i32, 1).?;
     store_alias(t0, p0);
     defer std.free(al, t0[0][0].name[0..1]);
 
-    let t1: *[1]T1 = std.heapAlloc(al, T1, 1);
+    let t1: *[1]T1 = std.heapAlloc(al, T1, 1).?;
     defer std.free(al, t1[0..1]);
     store_factory(t1, al);
     defer std.free(al, t1[0][0].name[0..1]);

@@ -6,7 +6,7 @@ tag.enable;
 // 同一槽的 FREED 事实跟到两个载体上。
 const std = @mod("std");
 pub const main = fn () i32 {
-    let p = std.heapAlloc(std.heap.page, u8, 10);
+    let p = std.heapAlloc(std.heap.page, u8, 10).?;
     let n = (u64)p;
     let r = (*u8)n;
     std.heap.page.free(std.heap.page.ctx, r, 10);

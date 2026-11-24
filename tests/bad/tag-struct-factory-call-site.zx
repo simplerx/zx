@@ -15,7 +15,7 @@ const Person = struct {
 };
 
 pub const alloc = fn () Person {
-    let p = std.heapAlloc(std.heap.page, i32, 10);
+    let p = std.heapAlloc(std.heap.page, i32, 10).?;
     return .{.age = (*u8)p, .child = .{.name = (*u8)"eoo"}};
 };
 

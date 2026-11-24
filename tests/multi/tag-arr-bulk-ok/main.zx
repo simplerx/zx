@@ -5,9 +5,9 @@ tag.enable;
 // （数组与元素不绑定，用户裁定）。
 const std = @mod("std");
 pub const main = fn () i32 {
-    var xs = std.heapSlice(std.heap.page, *u8, 4);
+    var xs = std.heapSlice(std.heap.page, *u8, 4).?;
     let i = 2;
-    var a = tag.m : std.heapAlloc(std.heap.page, u8, 16);
+    var a = tag.m : std.heapAlloc(std.heap.page, u8, 16).?;
     a[0][0] = 7;
     xs[i] = a;
     tag xs : null;

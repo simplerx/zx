@@ -16,12 +16,12 @@ const T2 = struct {
 
 const main = fn () void {
     const al = std.heap.page;
-    let t2: *[1]T2 = std.heapAlloc(al, T2, 1);
+    let t2: *[1]T2 = std.heapAlloc(al, T2, 1).?;
     defer std.free(al, t2);
-    t2[0][0].pt = std.heapAlloc(al, T1, 1);
-    t2[0][0].pt.name = std.heapAlloc(al, i32, 1);
+    t2[0][0].pt = std.heapAlloc(al, T1, 1).?;
+    t2[0][0].pt.name = std.heapAlloc(al, i32, 1).?;
     let mid = t2[0][0].pt;
-    mid.name = std.heapAlloc(al, i32, 1);
+    mid.name = std.heapAlloc(al, i32, 1).?;
     defer std.free(al, mid[0..1]);
     defer std.free(al, mid.name[0..1]);
 };

@@ -7,7 +7,7 @@ const std = @mod("std");
 const error_read = error { failed };
 const fail = fn () error_read!i32 { return error.failed; };
 const main = fn () u8 {
-    var p = tag.buf : std.heapAlloc(std.heap.page, i32, 4);
+    var p = tag.buf : std.heapAlloc(std.heap.page, i32, 4).?;
     let v = try fail() err {
         std.heap.page.free(std.heap.page.ctx, (*u8)p, 16);
         err: 0;

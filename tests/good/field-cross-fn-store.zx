@@ -16,12 +16,12 @@ const T1 = struct {
 
 // 被调函数经形参容器写入一份新分配（不返回、不 free）
 const fill = fn (t: *[1]T1, al: Allocator) void {
-    t[0][0].name = std.heapAlloc(al, i32, 1);
+    t[0][0].name = std.heapAlloc(al, i32, 1).?;
 };
 
 const main = fn () u8 {
     const al = std.heap.page;
-    let t1: *[1]T1 = std.heapAlloc(al, T1, 1);
+    let t1: *[1]T1 = std.heapAlloc(al, T1, 1).?;
     defer std.free(al, t1[0..1]);
 
     fill(t1, al);

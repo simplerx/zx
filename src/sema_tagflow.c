@@ -286,13 +286,21 @@ int tag_check_apply(Node *n, bool *bad) {
 
     int id, st;
     tag_of_expr(n->b, &id, &st);
-    int rid = (n->b && n->b->kind == NK_CALL) ? n->b->reg_slot : 0;
+    /* §245：heapAlloc 返回 ?*[N]T，贴标写法 `tag.x : alloc(...).?` 的
+     * n->b 是 NK_UNWRAP。判空是使用者的事——`.?` 只是使用者选择 trap，
+     * 底层 alloc 站点/自动槽不变，这里穿透 unwrap（含 coerce 插的空 cast）
+     * 取回它，否则 rid=0 会误报 E0514。 */
+    Node *alloc_src = n->b;
+    while (alloc_src && (alloc_src->kind == NK_UNWRAP || alloc_src->kind == NK_CAST))
+        alloc_src = alloc_src->a;
+    int rid = (alloc_src && alloc_src->kind == NK_CALL) ? alloc_src->reg_slot : 0;
 
     if (rid > 0) {
         /* §173：alloc 调用点已自动建槽 —— 显式贴标收编它：自动槽退回
-         * idle，分配事实记到具名槽上（自动建槽只剩兜底作用）。 */
-        if (n->b->tag_id) {
-            TagSlot *a = tag_slot(n->b->tag_id);
+         * idle，分配事实记到具名槽上（自动建槽只剩兜底作用）。
+         * §245：从穿透 .? 后的 alloc_src 取 tag_id，不是 n->b。 */
+        if (alloc_src->tag_id) {
+            TagSlot *a = tag_slot(alloc_src->tag_id);
             if (a && a->auto_n && a->state == TST_LIVE) {
                 a->state = TST_UNBOUND;
                 a->region = 0;
@@ -302,7 +310,7 @@ int tag_check_apply(Node *n, bool *bad) {
          * 形参借出槽不记分配事实：`tag.p : alloc` = 解除借用，p 改挂
          * 分配自己的自动槽。 */
         if (t->abstract) {
-            TagSlot *a = n->b->tag_id ? tag_slot(n->b->tag_id) : NULL;
+            TagSlot *a = alloc_src->tag_id ? tag_slot(alloc_src->tag_id) : NULL;
             if (a && a->auto_n) {
                 n->tag_id = (int)(a - g_tslots) + 1;
                 n->tag_state = TC_LIVE;

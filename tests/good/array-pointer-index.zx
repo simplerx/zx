@@ -13,7 +13,7 @@ const bumpAt = fn (p: *[8]i32, i: usize) void { p[0][i] = p[0][i] + 1; };
 
 pub const main = fn () i32 {
     let a = std.heap.page;
-    var ptr = std.heapAlloc(a, i32, 8);
+    var ptr = std.heapAlloc(a, i32, 8).?;
     let i = std.process.args().len + 3;         // 运行期下标
 
     ptr[0][0] = 1;

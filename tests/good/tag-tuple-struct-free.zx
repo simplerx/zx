@@ -8,7 +8,7 @@ pub const Person = struct {
     pub const Child = struct { name: *u8 };
 };
 pub const alloc = fn () Person {
-    let p = std.heapAlloc(std.heap.page, i32, 10);
+    let p = std.heapAlloc(std.heap.page, i32, 10).?;
     return .{.name = (*u8)"parent", .child = .{.name = (*u8)p}};
 };
 pub const release = fn (p: *u8) void {

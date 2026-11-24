@@ -23,7 +23,7 @@ const main = fn () void {
 };
 
 const make = fn () Person {
-    return .{.name = (*u8)std.heapAlloc(std.heap.page, u8, 10)};
+    return .{.name = (*u8)std.heapAlloc(std.heap.page, u8, 10).?};
 };
 
 const Person = struct {

@@ -271,9 +271,9 @@ const std_builtin_docs = [_]StdBuiltin{
 
     .{ .path = "std.stackAlloc", .sig = "stackAlloc(T: type, n: usize) *[n]T — 栈上分配（编译期 n）",
        .snip = "(${1:T}, ${2:n})$0" },
-    .{ .path = "std.heapAlloc", .sig = "heapAlloc(alloc: Allocator, T: type, n: usize) *[n]T — 堆分配，OOM abort",
+    .{ .path = "std.heapAlloc", .sig = "heapAlloc(alloc: Allocator, T: type, n: usize) ?*[n]T — 堆分配；OOM 返回 null，判空由使用者负责",
        .snip = "(${1:alloc}, ${2:T}, ${3:n})$0" },
-    .{ .path = "std.heapSlice", .sig = "heapSlice(alloc: Allocator, T: type, n: usize) []T — 堆分配，n 可运行期",
+    .{ .path = "std.heapSlice", .sig = "heapSlice(alloc: Allocator, T: type, n: usize) ?[]T — 堆分配，n 可运行期；OOM 返回 null",
        .snip = "(${1:alloc}, ${2:T}, ${3:n})$0" },
     .{ .path = "std.free", .sig = "free(alloc: Allocator, s: ([]T | *[n]T)) void — 释放（a.deinit(s) 的函数形式，自动算字节量）",
        .snip = "(${1:alloc}, ${2:p})$0" },
