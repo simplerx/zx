@@ -1,0 +1,13 @@
+// §239：`?T` 不许 while 的 else 捕获（与 if 同口径：值臂是 "?"、错误
+// 捕获臂是 "!"，同框就是被禁的 ?!T）。空值用不带名的 `else { … }`。
+// expect: a `?T` capture cannot have an `else e` capture
+// expect-count: 1
+const probe = fn (o: ?i32) i32 {
+    while (o) v {
+        return v;
+    } else e {
+        return (i32)e;
+    }
+    return 0;
+};
+const main = fn () i32 { return probe(null); };

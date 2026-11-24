@@ -1,0 +1,88 @@
+// while-else-err.zx —— §239：两件事一起守：
+//  ① 无标签 `while (…) { break v; }` 的结果类型：旧 sema 要求 n->label 非空
+//     才采纳收割类型，把 let 绑定算成 void → 后端不发存储 → B1001
+//     undeclared（首次编译还先报 E0410 unused）。
+//  ② `while (!T) v { … } else e { … }`：条件失败时进 else 臂、e 是错误码；
+//     体里的 break 跳过 else。?T 的条件用无捕获的 else {} 兜 null。
+// expect-output:c1:err=1 hit=0
+// expect-output:c1b:hit=1
+// expect-output:c2:brk=3
+// expect-output:c3:r1=20
+// expect-output:c3b:r2=-2
+// expect-output:c4:null
+// expect-output:c4b:nulls=9
+// expect-output:c5:times=3 last=2 err=2
+const std = @mod("std");
+const Err = enum(u16) { bad = 1, worse = 2 };
+
+const gen = fn (n: i32) !i32 {
+    if (n < 0) { return (error)Err.bad; }
+    if (n > 9) { return (error)Err.worse; }
+    return n;
+};
+
+const main = fn () i32 {
+    // ① 条件立刻 err：else 臂拿到码
+    var hit = 0;
+    while (gen(-1)) v {
+        hit = hit + 100;
+    } else e {
+        std.println("c1:err={} hit={}", e, hit);
+        hit = 1;
+    }
+    std.println("c1b:hit={}", hit);
+
+    // ② break 跳过 else
+    var brk = 0;
+    var k = 0;
+    while (gen(k)) v {
+        brk = v + 1;
+        k = k + 1;
+        if (k == 3) { break; }
+    } else e {
+        brk = -1;
+    }
+    std.println("c2:brk={}", brk);
+
+    // ③ 结果值：break 值与 else 臂 break 值统一
+    let r1 = while (gen(2)) v {
+        break v * 10;
+    } else e {
+        break -1;
+    };
+    std.println("c3:r1={}", r1);
+    let r2 = while (gen(-5)) v {
+        break v;
+    } else e {
+        break -2;
+    };
+    std.println("c3b:r2={}", r2);
+
+    // ④ ?T 的空值兜底（不许 else 捕获）
+    const maybe = fn (x: bool) ?i32 {
+        if (x) { return 7; }
+        return null;
+    };
+    var nulls = 0;
+    while (maybe(false)) q {
+        nulls = 10;
+    } else {
+        std.println("c4:null");
+        nulls = 9;
+    }
+    std.println("c4b:nulls={}", nulls);
+
+    // ⑤ 多轮成功后再 err：条件每轮求值，err 才进 else
+    var times = 0;
+    var last = 0;
+    var seq = 0;
+    while (gen(seq)) v {
+        times = times + 1;
+        seq = seq + 1;
+        if (seq == 3) { seq = 20; }
+        last = v;
+    } else e {
+        std.println("c5:times={} last={} err={}", times, last, e);
+    }
+    return 0;
+};

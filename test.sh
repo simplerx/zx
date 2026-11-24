@@ -2433,6 +2433,40 @@ for m in fs net time; do
     fi
 done
 
+# §239：while 的两个修复一起守——① 无标签循环 break 带值的结果类型
+# （旧代码把 let 算成 void → B1001 undeclared / E0410 unused）；
+# ② while 的 else 错误出口（条件失败绑码、break 跳过、?T 空值兜底）。
+# good 用例本身由上面的 runner 自动发现并跑（含 expect-output），这里额外
+# 钉住：两种条件失败路径 + 结果槽类型 + 双前端错误路径一致。
+printf "\n== §239 while break 值 / else 错误出口\n"
+for fe in zx c; do
+    if $ZXC tests/good/while-else-err.zx --fe=$fe -o "$TPFX.w239.$fe.exe" > "$TPFX.w239.$fe.log" 2>&1; then
+        "$TPFX.w239.$fe.exe" > "$TPFX.w239.$fe.out" 2>&1
+        wok=1
+        for want in "c1:err=1 hit=0" "c1b:hit=1" "c2:brk=3" "c3:r1=20" \
+                    "c3b:r2=-2" "c4:null" "c4b:nulls=9" \
+                    "c5:times=3 last=2 err=2"; do
+            grep -qxF "$want" "$TPFX.w239.$fe.out" || wok=0
+        done
+        if [ "$wok" -eq 1 ]; then
+            printf "  ok   §239 while-else 输出（--fe=%s）\n" "$fe"
+        else
+            printf "  FAIL §239 while-else 输出不符（--fe=%s）\n" "$fe"
+            cat "$TPFX.w239.$fe.out"; fail=1
+        fi
+    else
+        printf "  FAIL §239 while-else 编译失败（--fe=%s）\n" "$fe"
+        tail -12 "$TPFX.w239.$fe.log"; fail=1
+    fi
+done
+# break 带值必须落 C 存储（B1001 根因的直接静态断言）
+if $ZXC tests/good/while-else-err.zx --emit-c > "$TPFX.w239.c" 2>/dev/null \
+   && grep -qE 'int32_t +r1_[0-9]+_?[0-9]* *=' "$TPFX.w239.c"; then
+    printf "  ok   §239 break 值结果槽已声明\n"
+else
+    printf "  FAIL §239 break 值结果槽未声明（B1001 复发）\n"; fail=1
+fi
+
 # 用例会在仓库根留下自己的临时文件：io_fmt.zx 写 io_fmt.tmp，stdfs.zx 建
 # fs_t_dir / fs_t_dir2。跑完统一带走——测试不该往工作区里堆东西。
 rm -rf io_fmt.tmp fs_t_dir fs_t_dir2 2>/dev/null || true

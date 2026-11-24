@@ -1769,7 +1769,19 @@ static Node *parse_while(P *p, const char *label) {
         advance(p); advance(p);           /* 名字 + ':' */
     }
     n->b = parse_block(p);
-    if (accept(p, TOK_KW_ELSE)) n->c = at(p, TOK_LBRACE) ? parse_block(p) : parse_expr(p);
+    /* §239：while 的 else 臂是「条件出错/null 时的出口」，与 if 的 else 同形：
+     * `while (f()) v { … } else e { … }` 里 e 捕获错误码（绑到 n->d）。
+     * 复用 parse_if_arm 拿到捕获名；?T 的 else 捕获由 sema 拒绝。 */
+    if (accept(p, TOK_KW_ELSE)) {
+        const char *cap2 = NULL;
+        bool cap2ptr = false;
+        n->c = parse_if_arm(p, &cap2, &cap2ptr, false);
+        if (cap2) {
+            Node *id = node_new(NK_IDENT, t->line, t->col);
+            id->name = cap2;
+            n->d = id;
+        }
+    }
     return n;
 }
 

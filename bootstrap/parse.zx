@@ -2269,12 +2269,22 @@ pub const Parser = struct {
             return (error)Fail.f;
         }
         n.b = try self.parse_block();
+        /* §239：while 的 else 臂是「条件出错/null 时的出口」，与 if 的 else
+         * 同形：`while (f()) v { … } else e { … }` 里 e 捕获错误码（n->d）。
+         * 复用 parse_if_arm 拿捕获名；?T 的 else 捕获由 sema 拒绝。 */
         if (self.accept(lex.Kind.kw_else)) {
-            if (self.at(lex.Kind.lbrace)) {
-                n.c = try self.parse_block();
-            } else {
-                n.c = try self.parse_expr();
+            let saved_cap = self.cap;
+            let saved_cap_ptr = self.cap_ptr;
+            self.cap = null;
+            self.cap_ptr = false;
+            n.c = try self.parse_if_arm(false);
+            if (self.cap) c2 {
+                let id = self.new_at(NK.id, t);
+                id.name = c2;
+                n.d = id;
             }
+            self.cap = saved_cap;
+            self.cap_ptr = saved_cap_ptr;
         }
         return n;
     };

@@ -7394,28 +7394,41 @@ static void gen_loop_value(Node *n, const char *slot, Type *slot_ty) {
         bool is_opt = c && c->kind == TY_OPT;
         bool is_err = c && c->kind == TY_ERR;
         if (is_opt || is_err) {
-            line("for (;;) {");
-            g_ind++;
             static int cn;
             bool wflat = is_opt && ty_opt_flat(c);
             bool capptr = n->cap_ptr && n->name;   /* §221 */
+            /* §239：else 臂要在循环外读失败方向的 tag（绑错误码），所以
+             * 有 else 时把条件临时量提到循环外声明、循环内赋值；无 else 时
+             * 保持原样，少一次发射改动。 */
+            bool has_else = n->c != NULL;
             int my = cn++;
-            char tmp[64], ptr[72], tagref[80];
+            char tmp[64], ptr[72], tagref[80], fail[96];
             snprintf(tmp, sizeof tmp, "_w%d", my);
             snprintf(ptr, sizeof ptr, "_w%dp", my);
             if (capptr) {
-                Buf lv; buf_init(&lv);
-                lvalue(&lv, n->a);
-                line("%s *%s = &(%s);", cty(c), ptr, lv.data);
-                buf_free(&lv);
+                if (has_else) line("%s *%s;", cty(c), ptr);
                 snprintf(tagref, sizeof tagref, "%s->", ptr);
             } else {
-                line("%s %s = %s;", cty(c), tmp, cxs(n->a, c));
+                if (has_else) line("%s %s;", cty(c), tmp);
                 snprintf(tagref, sizeof tagref, "%s.", tmp);
             }
-            if (wflat)      line("if (!%s) break;", capptr ? ptr : tmp);
-            else if (is_opt) line("if (!%stag) break;", tagref);
-            else            line("if (%stag != 0) break;", tagref);
+            if (has_else) snprintf(fail, sizeof fail, "goto Lelse%d;", id);
+            else          snprintf(fail, sizeof fail, "break;");
+            line("for (;;) {");
+            g_ind++;
+            if (capptr) {
+                Buf lv; buf_init(&lv);
+                lvalue(&lv, n->a);
+                if (has_else) line("%s = &(%s);", ptr, lv.data);
+                else          line("%s *%s = &(%s);", cty(c), ptr, lv.data);
+                buf_free(&lv);
+            } else {
+                if (has_else) line("%s = %s;", tmp, cxs(n->a, c));
+                else          line("%s %s = %s;", cty(c), tmp, cxs(n->a, c));
+            }
+            if (wflat)       line("if (!%s) %s", capptr ? ptr : tmp, fail);
+            else if (is_opt) line("if (!%stag) %s", tagref, fail);
+            else             line("if (%stag != 0) %s", tagref, fail);
             CScope s; cscope_push(&s);
             if (n->name && c->elem->kind != TY_VOID) {
                 if (capptr && wflat)
@@ -7431,6 +7444,26 @@ static void gen_loop_value(Node *n, const char *slot, Type *slot_ty) {
             cscope_leave();
             g_ind--;
             line("}");
+            /* §239：else 臂只在「条件失败」路径上到达（fail 跳到这里）；
+             * 体里的 break 走 lab_find_loop(NULL) → Lend%d，不经过 else。 */
+            if (has_else) {
+                /* 真实 C 大括号：多个 while-else 的捕获名（都叫 e 等）必须
+                 * 各自成作用域，否则同一函数里重定义（B1001）。if 的 else
+                 * 靠 `} else {` 天然隔离，这里没有现成括号，自己补。 */
+                line("Lelse%d: ;", id);
+                line("{");
+                g_ind++;
+                CScope se; cscope_push(&se);
+                if (is_err && n->d && n->d->kind == NK_IDENT) {
+                    const char *cpt = (n->d->name && !strcmp(n->d->name, "_"))
+                                          ? ignored_cname() : cnames(n->d->name);
+                    line("%s %s = %stag;", cty(ty_error()), cpt, tagref);
+                }
+                gen_arm(n->c, slot, slot_ty);
+                cscope_leave();
+                g_ind--;
+                line("}");
+            }
         } else {
             line("while %s {", exs_cond(n->a));
             g_ind++;
@@ -7446,7 +7479,10 @@ static void gen_loop_value(Node *n, const char *slot, Type *slot_ty) {
         gen_for_body(n, id);
     }
 
-    if (n->c && slot) line("%s = %s;", slot, cxs(n->c, slot_ty));
+    /* §239：else 臂的值由上面的 gen_arm(n->c, slot, slot_ty) 直接写槽；
+     * 旧代码在这里把 n->c 当"循环后的值表达式"再发一次（那是 else 从不
+     * 发射时代的残留），现在会与新 else 臂重复发射，删掉。bool 条件与
+     * for 的 else 已被 sema 设为 NULL，走不到这里。 */
     g_nlabs--;
     line("Lend%d: ;", id);
 }

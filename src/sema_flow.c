@@ -327,20 +327,62 @@ static Type *check_while(Node *n, Type *expect) {
         scope_pop(&sc);
     }
 
-    /* `else` 是 zxfe 前端的历史残留：解析层收进 n->c，后端从不发射，
-     * 等于一句永远不跑的死代码。语言裁定：循环没有 else——收尾逻辑写在
-     * 循环后面；想区分"跑没跑过"用计数或标志位。 */
+    /* §239：`while ... else` 是「条件失败（err / null）时的出口」，与 if 的
+     * else 同形。旧裁定「循环没有 else」撤销——那时解析层收了 n->c 却从不
+     * 发射，是死代码；现在双前端都把 else 捕获名收进 n->d，sema 绑类型、
+     * 后端在条件 tag 失败时跳到 else 臂（break 跳过）。
+     *   while (f()) v { … } else e { … }   // !T：e 是错误码
+     *   while (o) v { … } else { … }       // ?T：空值兜底（不许 else e）
+     * bool 条件没有"失败载荷"，写了 else 只会是死代码，明确拒绝。 */
+    Type *et = NULL;
     if (n->c) {
-        err_at(n->c->line, n->c->col,
-               "`while` does not take an `else` branch; write that code after the loop");
-        n->c = NULL;
+        if (!is_opt && !is_err) {
+            err_at(n->c->line, n->c->col,
+                   "`while` with an `else` arm needs a `?T` or `!T` condition -- "
+                   "a bool condition has no failure value to handle");
+            n->c = NULL;
+        } else {
+            Scope sc;
+            scope_push(&sc);
+            /* `?T` 不许 else 捕获（与 if 同口径：值臂是"?"、错误捕获臂是"!"，
+             * 同框就是被禁的 ?!T）。?T 的空值用不带名的 `else { … }`。 */
+            if (is_opt && n->d && n->d->kind == NK_IDENT && !n->meth_done) {
+                n->meth_done = true;
+                err_at(n->line, n->col,
+                       "a `?T` capture cannot have an `else e` capture -- `?T` and `!T` "
+                       "do not nest (?!T is illegal); use plain `else { ... }` for the "
+                       "empty case");
+            }
+            if (n->d && n->d->kind == NK_IDENT) {
+                /* 报错后仍把捕获绑成 error 类型：只报上面那一条，别让 else
+                 * 臂里对 e 的引用级联成一串未知标识符。 */
+                Symbol *s = scope_add(&sc, n->d->name, SK_CAPTURE);
+                if (s) { s->ty = ty_error(); s->state = 2; }
+                n->d->sym = s;
+            }
+            TagSnap snapE; tag_snap(&snapE);
+            et = check_arm(n->c, expect);
+            tag_restore(&snapE);
+            scope_pop(&sc);
+        }
     }
 
-    Type *et = n->c ? check_arm(n->c, expect) : NULL;
     Type *r;
-    if (n->label && lb && lb->has) r = lb->ty;
-    else if (et)                   r = et;
-    else                           r = ty_void();
+    /* `break v`（label=NULL）经 label_find_loop(NULL) 写进的是「最近外循环」
+     * 那一帧，无标签循环也有帧（label_push 注释见上）。这里旧代码多要求
+     * `n->label` 非空才采纳 lb->ty，导致 `let e = while (...) { break v; };`
+     * 把 e 算成 void：后端见 TY_VOID 不发存储，引用点仍发标识符 → B1001
+     * undeclared；首次编译还会先用 E0410 报「unused e」。标签不是循环有值
+     * 的前提，只要收割帧记了类型就采纳。for 同理。 */
+    if (lb && lb->has) {
+        /* 有值收割与 else 臂都给值时取公共类型；void 臂不参与（空块不算一支）。 */
+        if (et && et->kind != TY_VOID && lb->ty && lb->ty->kind != TY_VOID)
+            r = unify(n, lb->ty, et);
+        else if (et && et->kind != TY_VOID) r = et;
+        else r = lb->ty;
+    }
+    else if (et)       r = et;
+    else               r = ty_void();
     label_pop();
     n->ty = r;
     return r;
@@ -557,9 +599,15 @@ static Type *check_for(Node *n, Type *expect) {
 
     Type *et = n->c ? check_arm(n->c, expect) : NULL;
     Type *r;
-    if (n->label && lb && lb->has) r = lb->ty;
-    else if (et)                   r = et;
-    else                           r = ty_void();
+    /* `break v`（label=NULL）经 label_find_loop(NULL) 写进的是「最近外循环」
+     * 那一帧，无标签循环也有帧（label_push 注释见上）。这里旧代码多要求
+     * `n->label` 非空才采纳 lb->ty，导致 `let e = while (...) { break v; };`
+     * 把 e 算成 void：后端见 TY_VOID 不发存储，引用点仍发标识符 → B1001
+     * undeclared；首次编译还会先用 E0410 报「unused e」。标签不是循环有值
+     * 的前提，只要收割帧记了类型就采纳。for 同理。 */
+    if (lb && lb->has) r = lb->ty;
+    else if (et)       r = et;
+    else               r = ty_void();
     label_pop();
     n->ty = r;
     return r;

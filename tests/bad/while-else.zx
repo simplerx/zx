@@ -1,5 +1,7 @@
-// expect: `while` does not take an `else` branch
-// 同 for-else：while 也不收 else 分支。
+// expect: `while` with an `else` arm needs a `?T` or `!T` condition
+// §239：while 的 else 是「条件失败出口」，只认 ?T / !T 条件；bool 条件
+// 没有失败载荷，写了 else 是死代码，报 E0405 类诊断。与 for-else 不同——
+// for 无条件收 else（那条仍由 for-else.zx 守）。
 const std = @mod("std");
 const main = fn () u8 {
     var n: u32 = 0;

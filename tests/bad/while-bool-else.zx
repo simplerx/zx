@@ -1,0 +1,12 @@
+// while 的 else 是「条件失败（err / null）时的出口」；bool 条件没有失败
+// 载荷，写了 else 只会是永远不跑的死代码，明确拒绝。
+// expect: `while` with an `else` arm needs a `?T` or `!T` condition
+const main = fn () i32 {
+    var n: i32 = 0;
+    while (n < 3) {
+        n = n + 1;
+    } else {
+        n = 100;
+    }
+    return n;
+};
