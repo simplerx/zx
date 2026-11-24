@@ -1,0 +1,7 @@
+// expect: cannot infer array length
+// §247：只有 `.{…}` / `&.{…}` 字面量能推导长度；拷贝已有数组不算。
+const main = fn () u8 {
+    let b: [2]u8 = .{ 1, 2 };
+    let a: [_]u8 = b;
+    return a[0];
+};

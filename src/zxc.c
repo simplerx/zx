@@ -141,6 +141,8 @@ static const DiagRule g_rules[] = {
     /* 类型形状：指针有没有数量、?T 能不能嵌套 */
     { "has no count",                     "E0305" },
     { "cannot nest",                      "E0305" },
+    /* §247：`[_]T` 只有在能推导出长度的位置才合法，属于类型形状约束 */
+    { "cannot infer array length",        "E0305" },
     /* 聚合字面量 */
     { "union literal must initialize",    "E0307" },
     /* 运算符与操作数 */

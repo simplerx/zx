@@ -263,6 +263,17 @@ void hoist(Scope *sc, Node *blk) {
     }
 }
 
+/* §247：`[_]T`（及 `*[_]T`）里那个 `_` 的长度槽。只在声明初值处推导；
+ * 别的地方（字段、形参、返回类型）遇到 `_` 仍由 resolve_type 报 E0501。 */
+static Node *infer_len_slot(Node *ty) {
+    if (!ty) return NULL;
+    if (ty->kind == NK_PTR_TYPE) ty = ty->a;
+    if (ty && ty->kind == NK_REPEAT_TYPE && ty->b &&
+        ty->b->kind == NK_IDENT && ty->b->name && !strcmp(ty->b->name, "_"))
+        return ty->b;
+    return NULL;
+}
+
 void ensure_raw(Symbol *s) {
     if (!s || s->kind == SK_NS) return;
     if (s->state == 2) return;
@@ -387,6 +398,25 @@ void ensure_raw(Symbol *s) {
         s->type_val = ty_agg(k, ident_decl(d->b), NULL);
         s->ty = ty_type();
         s->state = 3;
+    }
+
+    /* §247：[_]T 的长度从字面量初值推导：把 `_` 槽就地改写成整数，
+     * 后续 resolve_type / coerce / 后端都拿到同一个具体 [N]T。
+     * 不新增 Type 哨兵——那会污染 intern 表（多个声明共用一个未知类型）。 */
+    Node *len_slot = infer_len_slot(d->a);
+    if (len_slot) {
+        bool want_ptr = d->a->kind == NK_PTR_TYPE;
+        Node *lit = d->b;
+        bool ok = lit && lit->kind == NK_ARRAY_LIT &&
+                  lit->flag != want_ptr;   /* .{} → 数组值；&.{} → 数组指针 */
+        if (!ok) {
+            err_at(len_slot->line, len_slot->col,
+                   want_ptr
+                   ? "cannot infer array length: `*[_]T` needs an `&.{...}` initializer"
+                   : "cannot infer array length: `[_]T` needs a `.{...}` initializer");
+        }
+        len_slot->kind = NK_INT;
+        len_slot->ival = ok ? (uint64_t)lit->nitems : 1;  /* 失败也填 1，避免二次诊断 */
     }
 
     Type *ann = d->a ? resolve_type(d->a) : NULL;

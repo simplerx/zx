@@ -1,0 +1,4 @@
+// expect: cannot infer array length
+// §247：`[_]T` 没有可推导的字面量初值，必须写显式长度。
+var a: [_]u8;
+const main = fn () void {};

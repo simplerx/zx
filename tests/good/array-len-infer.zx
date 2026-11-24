@@ -1,0 +1,33 @@
+// §247：`[_]T` 的长度由数组字面量推导；`'a'` 字符字面量在推导出的
+// `[2]u8` / `*[3]u8` 里按 u8 存取。此前 `[_]` 会报 E0501。
+// expect-output
+// lens=2 3
+// chars=97 98 99
+// ptr=97
+// expect-exit: 0
+const std = @mod("std");
+
+const Top: [_]u8 = .{ 'x', 'y' };
+
+const check = fn (T: type, v: T) void {
+    let a: [_]T = .{ v, v };
+    if (a.len != 2) { @trap(); }
+    if (a[0] != v) { @trap(); }
+};
+
+pub const main = fn () u8 {
+    let a: [_]u8 = .{ 'a', 'b' };
+    let b: [_]u8 = .{ 1, 2, 3 };
+    var p: *[_]u8 = &.{'a', 'b', 'c'};
+
+    if (a.len != 2 or b.len != 3 or p[0].len != 3) { return 1; }
+    if (a[0] != 'a' or a[1] != 'b') { return 2; }
+    if (Top[1] != 'y') { return 3; }
+    check(u8, 'z');
+    check(i32, 7);
+
+    std.println("lens={} {}", a.len, b.len);
+    std.println("chars={} {} {}", (i32)a[0], (i32)a[1], (i32)p[0][2]);
+    std.println("ptr={}", (i32)p[0][0]);
+    return 0;
+};
