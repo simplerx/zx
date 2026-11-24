@@ -5853,6 +5853,10 @@ fn inferExprType(text: []const u8, doc: *const Document, expr: []const u8, depth
     if (std.mem.eql(u8, e, "std.heap.page")) return "Allocator";
     if (std.mem.startsWith(u8, e, "\"")) return "str";
     if (std.mem.eql(u8, e, "true") or std.mem.eql(u8, e, "false")) return "bool";
+    // §247：字符字面量默认 u8（对齐 sema_call.c 的 ce_02_nk_char）。
+    // 缺了这条，`.{'!', 'a'}` 的元素推不出来，整条数组字面量的行内
+    // 类型提示也跟着哑掉（用户 2026-11-24 截图）。
+    if (e.len >= 3 and e[0] == '\'' and e[e.len - 1] == '\'') return "u8";
     // 数字
     {
         var all_digit = e.len > 0;
@@ -6059,10 +6063,12 @@ fn inferExprType(text: []const u8, doc: *const Document, expr: []const u8, depth
     }
     // 匿名 struct 字面量 `.{ .a = 1, .b = "x" }`：没有期望类型时自成
     // 一个匿名结构体，字段类型由初值推（spec/decisions.md §33）。
-    // §146 起位置式 `.{…}` 已删除：`.{` 只接字段初始化，元组只有 `{…}`。
+    // §205 起位置式 `.{…}` 是 [N]T 数组值（§146 只删了"当元组用"的口径）；
+    // 元组仍只有裸 `{…}`。两种形态共用下面的分项解析。
     // 字段值递归推（depth < 4），嵌套拼成
     // `struct{pos:struct{x:i32,y:i32},tag:str}` 给行内类型提示用。
-    // KEEP — 裸 `{…}` 是唯一的元组写法（spec §4.1；§146 删掉 `.{1,2,3}`）。
+    // KEEP — 裸 `{…}` 是唯一的元组写法（§146 删掉 `.{1,2,3}` 当元组；
+    // §205 把它改成数组值，见下面的 [N]T 分支）。
     // 旧链只认前导点，`var tup = {1, 22, Person{…}};` 推不出类型，连带
     // `let person = tup.2;` 没有行内类型、`person.` 一个成员都不出
     //（用户 2026-11-13 截图 1）。元素式与字段式共用下面同一份解析，
@@ -6151,9 +6157,23 @@ fn inferExprType(text: []const u8, doc: *const Document, expr: []const u8, depth
         for (items.items) |it2| {
             if (it2.field) { any_field = true; break; }
         }
-        // §146：位置式 `.{…}` 不再是元组，别把 `.{1, 2.5}` 推成 `{i32,f64}`。
+        // §205：位置式 `.{…}` 是数组值 [N]T，元素必须同型；推不出来就
+        // 不给提示（不猜 `{T1,T2}` 元组，那套写法已经删除）。
         // `&.{…}` 走上面那条链（已去掉前导点），不会进这里。
-        if (ob == 1 and !any_field) return null;
+        if (ob == 1 and !any_field) {
+            var elem: ?[]const u8 = null;
+            var count: usize = 0;
+            for (items.items) |ai| {
+                const t = inferAnonFieldTy(text, doc, ai.val, depth) orelse return null;
+                if (t.len == 0 or t.len > 48) return null;
+                if (elem) |et| {
+                    if (!std.mem.eql(u8, et, t)) return null;
+                } else elem = t;
+                count += 1;
+            }
+            if (count == 0 or elem == null) return null;
+            return std.fmt.allocPrint(gpa, "[{d}]{s}", .{ count, elem.? }) catch null;
+        }
         var out: std.ArrayList(u8) = .empty;
         out.appendSlice(gpa, if (any_field) "struct{" else "{") catch return null;
         var count: usize = 0;

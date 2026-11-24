@@ -901,6 +901,37 @@ check("inlayHint.slice.array", shard("let aslice") == ": []i32", sdetail)
 check("inlayHint.slice.string", shard("let sslice") == ": str", sdetail)
 check("inlayHint.slice.const", shard("let cslice") == ": []const i32", sdetail)
 check("inlayHint.slice.indexNotSlice", shard("let pelem") == ": i32", sdetail)
+
+# §247：位置式 `.{…}` 是数组值 [N]T；字符字面量默认 u8。此前 LSP 还按
+# §146 旧口径把 `.{…}` 直接判 null，截图里 `let aa = .{'!', 'a'};` 没提示。
+ARR_INLAY = """const main = fn () i32 {
+    let aa = .{'!', 'a'};
+    let bb = .{1, 2, 3};
+    var cc = &.{'x', 'y'};
+    let dd: [_]u8 = .{'a', 'b'};
+    return 0;
+};
+"""
+arruri = "file:///" + os.path.join(TESTDIR, "inlay_array.zx").replace("\\", "/")
+open(os.path.join(TESTDIR, "inlay_array.zx"), "w", encoding="utf-8").write(ARR_INLAY)
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": arruri, "languageId": "zx", "version": 1, "text": ARR_INLAY}}})
+send({"jsonrpc": "2.0", "id": 129, "method": "textDocument/inlayHint", "params": {
+    "textDocument": {"uri": arruri},
+    "range": {"start": {"line": 0, "character": 0},
+              "end": {"line": ARR_INLAY.count("\n"), "character": 0}}}})
+r, _ = recv_id("inlayHint.arrayLiteral", 129)
+ahints = r["result"] if r and r.get("result") is not None else []
+aby = {(h["position"]["line"], h["position"]["character"]): h["label"] for h in ahints}
+def ahint(decl):
+    p = pos(ARR_INLAY, ARR_INLAY.index(decl) + len(decl))
+    return aby.get((p["line"], p["character"]))
+adetail = str(sorted(aby.items()))[:240]
+check("inlayHint.arrayLiteral.char", ahint("let aa") == ": [2]u8", adetail)
+check("inlayHint.arrayLiteral.number", ahint("let bb") == ": [3]i32", adetail)
+check("inlayHint.arrayLiteral.ptr", ahint("var cc") == ": *[2]u8", adetail)
+check("inlayHint.arrayLiteral.skipExplicit", ahint("let dd") is None, adetail)
+
 # 匿名 struct 当实参也有参数名提示：`push(info: .{…})`
 def label_at_call(call):
     p = pos(MAIN, MAIN.index(call) + len(call))
