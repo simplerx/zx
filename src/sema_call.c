@@ -1185,6 +1185,15 @@ static Type *ce_05_nk_null(Node *n, Type *expect) {
         if (expect && (expect->kind == TY_OPT || expect->kind == TY_PTR ||
                        expect->kind == TY_FN || expect->kind == TY_ERROR))
             return type_of(n, expect);
+        /* §240：`!T` 里 null 就是保留错误码 `error.null`（65535），不是
+         * 载荷的空值。定型成 error（不是 `!T` 本身）才能走既有的
+         * `error → !T` 提升与错误集检查；后端 coerce 的 NK_NULL 分支
+         * 按目标 `!T` 发 `.tag = 65535`。这样 `return null;` 与
+         * `return error.null;` 全程等价（含 E0901 声明集约束）。 */
+        if (expect && expect->kind == TY_ERR) {
+            n->ct = val_int(ty_error(), 65535, false);
+            return type_of(n, ty_error());
+        }
         return type_of(n, ty_null());
 
 }

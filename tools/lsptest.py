@@ -743,6 +743,18 @@ check("completion.errsetMembers", {"open", "read"} <= labels, str(sorted(labels)
 off = MAIN.index("return error.") + len("return error.")   # 光标贴在 error. 后
 labels = complete_at(MAIN, off, 31, doc_uri=uri)
 check("completion.errorMembers", "open" in labels and "read" in labels, str(sorted(labels))[:200])
+# §240：error.null 是保留码 65535（不是任何 error{ } 集合的成员，源码里
+# 通常也不写），必须无条件出现在 error. 补全里，标成关键字 kind=14 并带
+# 保留码说明；否则截图里 return error.; 的弹窗永远缺这一项。
+send({"jsonrpc": "2.0", "id": 310, "method": "textDocument/completion", "params": {
+    "textDocument": {"uri": uri}, "position": pos(MAIN, off)}})
+_r310, _ = recv_id("completion", 310)
+_enull_items = _r310["result"]["items"] if _r310 and _r310.get("result") else []
+_enull_hit = [i for i in _enull_items if i.get("label") == "null"]
+check("completion.errorNull.reserved",
+      len(_enull_hit) == 1 and _enull_hit[0].get("kind") == 14
+      and "65535" in _enull_hit[0].get("detail", ""),
+      str(_enull_hit)[:200])
 
 # 3c 集合合并的补全：AllErr 引用了 IOErr，成员要展开（M64）
 off = MAIN.index("AllErr.") + len("AllErr.")

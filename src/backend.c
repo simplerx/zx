@@ -1504,6 +1504,17 @@ static void coerce(Buf *b, Node *e, Type *to) {
         }
         /* 错误值：null 就是保留码 65535，和 `error.null` 同一个值 */
         if (to->kind == TY_ERROR) { buf_puts(b, "65535"); return; }
+        /* §240：`!T` 的 null 就是 `error.null`（保留码 65535）。发一条
+         * 错误联合初始化（`.tag = 65535`），不带载荷——与
+         * `return error.null;` 走 coerce 的 error→!T 分支同一形状。
+         * `!void` 只有 tag 一个字段，指定初始化同样安全。 */
+        if (to->kind == TY_ERR) {
+            ensure_type(to);
+            Buf n; buf_init(&n); tn(&n, to);
+            buf_printf(b, "((%s){ .tag = 65535 })", n.data);
+            buf_free(&n);
+            return;
+        }
         /* 裸指针 / 函数指针：null 就是 0（与 C 的 NULL 同一含义） */
         if (to->kind == TY_PTR || to->kind == TY_FN) { buf_puts(b, "0"); return; }
         buf_puts(b, "false");

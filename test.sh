@@ -2467,6 +2467,37 @@ else
     printf "  FAIL §239 break 值结果槽未声明（B1001 复发）\n"; fail=1
 fi
 
+# §240：`null` 是保留错误码 error.null（65535）。① `!T` 返回位置可直接写
+# `return null;`（双前端运行期等价 error.null）；② 声明错误集里报 E0901，
+# help 不再推荐写 error{..., null}（那会撞 E0508）。good/bad 由 runner 自动发现。
+printf "\n== §240 error.null 保留码 / return null\n"
+for fe in zx c; do
+    if $ZXC tests/good/retnull-error.zx --fe=$fe -o "$TPFX.rn240.$fe.exe" > "$TPFX.rn240.$fe.log" 2>&1; then
+        "$TPFX.rn240.$fe.exe" > "$TPFX.rn240.$fe.out" 2>&1
+       rok=1
+        for want in "v=65535" "eq=true" "void=65535"; do
+            grep -qxF "$want" "$TPFX.rn240.$fe.out" || rok=0
+        done
+        if [ "$rok" -eq 1 ]; then
+            printf "  ok   §240 return null == error.null（--fe=%s）\n" "$fe"
+        else
+            printf "  FAIL §240 return null 输出不符（--fe=%s）\n" "$fe"
+            cat "$TPFX.rn240.$fe.out"; fail=1
+        fi
+    else
+        printf "  FAIL §240 return null 编译失败（--fe=%s）\n" "$fe"
+        tail -12 "$TPFX.rn240.$fe.log"; fail=1
+    fi
+    # bad 用例本就编译失败（非 0），不能拿 && 串 grep——否则永远走 else 假红。
+    $ZXC tests/bad/retnull-set.zx --check --fe=$fe > "$TPFX.rn240bad.$fe.log" 2>&1 || true
+    if grep -q "null.*cannot be declared in an error set" "$TPFX.rn240bad.$fe.log"; then
+        printf "  ok   §240 声明集拒 null help（--fe=%s）\n" "$fe"
+    else
+        printf "  FAIL §240 声明集 help 不符（--fe=%s）\n" "$fe"
+        tail -12 "$TPFX.rn240bad.$fe.log"; fail=1
+    fi
+done
+
 # 用例会在仓库根留下自己的临时文件：io_fmt.zx 写 io_fmt.tmp，stdfs.zx 建
 # fs_t_dir / fs_t_dir2。跑完统一带走——测试不该往工作区里堆东西。
 rm -rf io_fmt.tmp fs_t_dir fs_t_dir2 2>/dev/null || true

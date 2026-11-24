@@ -1,0 +1,7 @@
+// expect: `null` is the reserved code 65535 and cannot be declared in an error set
+// §240：声明错误集（不含保留码）里 `return null;` 要报 E0901，且 help
+// 不再推荐写 `error{..., null}`（那是 E0508 的死路）。
+const E = error{open};
+const f = fn () E!i32 {
+    return null;
+};

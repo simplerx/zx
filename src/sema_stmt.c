@@ -1100,10 +1100,18 @@ static void cs_04_nk_return(Node *n) {
         if (want->kind == TY_ERR && want->eset) {
             void *gs = expr_errset(n->a, got);
             if (gs && !ty_errset_subset(gs, want->eset)) {
-                diag_help("add `%s` to the return type: `%s!%s`",
-                          errset_missing(gs, want->eset),
-                          ty_errset_str(ty_errset_union(want->eset, gs)),
-                          ty_str(want->elem));
+                /* §240：`null` 是固定码 65535，语法上不能写进 error{…}
+                 * （E0508），旧 help 让人加 `error{open, null}` 是死路。 */
+                if (!strcmp(errset_missing(gs, want->eset), "null"))
+                    diag_help("`null` is the reserved code 65535 and cannot be "
+                              "declared in an error set -- widen the return type "
+                              "to `!%s` or handle the null case here",
+                              ty_str(want->elem));
+                else
+                    diag_help("add `%s` to the return type: `%s!%s`",
+                              errset_missing(gs, want->eset),
+                              ty_errset_str(ty_errset_union(want->eset, gs)),
+                              ty_str(want->elem));
                 diag_code_at("E0901", n->a->line, n->a->col,
                     "this returns `%s`, which is not in the declared error set %s",
                     errset_missing(gs, want->eset), ty_errset_str(want->eset));

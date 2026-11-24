@@ -1043,6 +1043,10 @@ void *expr_errset(Node *e, Type *t) {
         if (e->a->name && !strcmp(e->a->name, "error"))
             return ty_errset_one(e->name);
     }
+    /* §240：`return null;` 在 !T 里已定型成 error（保留码 65535），集合
+     * 就是单元素 `null`——与 `return error.null;` 走同一条 E0901 检查。 */
+    if (e && e->kind == NK_NULL && t && t->kind == TY_ERROR)
+        return ty_errset_one("null");
     if (t && t->kind == TY_ERR) return t->eset;
     return NULL;
 }

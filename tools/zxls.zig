@@ -588,6 +588,10 @@ const Decl = struct {
     kind: DeclKind,
     ty: []const u8 = "",
     is_fn: bool = false,   // KEEP: extern "C" { pub fn ... } 的模块成员
+    // 补全项右侧的固定文案与 LSP kind 覆盖：内建/保留成员没有源码声明，
+    // detail 无从推导，由这里直接给（§240 error.null）。
+    detail: []const u8 = "",
+    lsp_kind: u32 = 0,
 };
 
 /// 从 ':' 之后读字段类型，直到顶层分隔符（, } ; 换行）。
@@ -846,7 +850,17 @@ fn harvestErrBlock(text: []const u8, brace: usize, out: *std.ArrayList(Decl)) us
 /// 错误码名在编译器侧是全局 intern 的（没有作用域），所以工作区一起扫，
 /// 见过的都端出来——这与容器分支的"宁缺毋滥"不同：码名来源可靠，
 /// 只认 error{ } 块与 error.x 用法，混不进局部变量。
+///
+/// §240：`null` 是语言保留字、也是保留错误码 65535（`?T` 被 `try` 时空值
+/// 抛出的那个码），它不是任何 `error{ }` 集合的成员，源码里通常也不会写
+/// `error.null`，纯靠扫描永远端不出来。所以无条件先塞一条：detail 写明
+/// 保留码语义，kind 用 14（CompletionItemKind.Keyword）与顶层 `null` 一致。
+/// 用户截图里 `return error.;` 补全只有 IOErr/extra/open/read，缺的正是这条。
 fn collectAllErrMembers(files: []const []const u8, out: *std.ArrayList(Decl)) bool {
+    out.append(gpa, .{
+        .name = "null", .kind = .variant,
+        .detail = "保留错误码 65535（?T 被 try 抛出的空值）", .lsp_kind = 14,
+    }) catch {};
     for (files) |ftext| {
         var idx: usize = 0;
         while (findErrBrace(ftext, idx)) |brace| idx = harvestErrBlock(ftext, brace, out);
@@ -10850,7 +10864,8 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                     }
                     // 类型项用类型 kind（struct/union=22、enum=13），弹窗里
                     // 一眼能看出这是类型而不是变量。
-                    const k: u32 = if (dcl.is_fn) 3 else switch (dcl.kind) {
+                    const k: u32 = if (dcl.lsp_kind != 0) dcl.lsp_kind
+                        else if (dcl.is_fn) 3 else switch (dcl.kind) {
                         .field => 5,
                         .variant => 20,
                         .value => if (cinit) |ci| containerKindOf(ci) else 6,
@@ -10879,6 +10894,7 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                     // union/enum；别名 → 初始化表达式。绝不落到绑定别名
                     //（`a.Cfg` 曾整列显示 `a`，用户看不出是类型——第 3 条）。
                     const detail: []const u8 = blk: {
+                        if (dcl.detail.len > 0) break :blk dcl.detail;
                         if (dcl.kind == .field and dcl.ty.len > 0) break :blk dcl.ty;
                         if (dcl.kind == .value and dcl.ty.len > 0) break :blk dcl.ty;
                         if (dcl.is_fn) {

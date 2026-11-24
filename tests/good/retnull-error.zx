@@ -1,0 +1,30 @@
+// retnull-error.zx —— §240：`null` 是保留错误码 error.null（65535），
+// 所以 !T 的返回位置可以直接写 `return null;`，与 `return error.null;`
+// 完全等价。覆盖 !i32 / !void 两种载荷形态，以及拿到码后的判定。
+// expect-output:v=65535
+// expect-output:eq=true
+// expect-output:void=65535
+const std = @mod("std");
+
+const faili = fn () !i32 {
+    return null;
+};
+
+const failvoid = fn () !void {
+    return null;
+};
+
+const main = fn () i32 {
+    if (faili()) v {
+        std.println("v={}", v);
+    } else e {
+        std.println("v={}", e);
+        std.println("eq={}", e == error.null);
+    }
+    if (failvoid()) {
+        std.println("void=0");
+    } else e2 {
+        std.println("void={}", e2);
+    }
+    return 0;
+};
