@@ -17,8 +17,23 @@
 
 typedef struct Value Value;
 
-/* f128 的编译期值容器。后端发的就是 __float128（zig cc 支持），两边同一精度。 */
+/* §244：f128 的编译期值容器。宿主编译器必须真有 IEEE-754 quad——
+ * `__SIZEOF_FLOAT128__` 在 zig cc 的 aarch64 目标上也报 16（宏不可信），
+ * 所以按"结构 + 该结构是否真为 quad"判：x86_64 且非 macOS。macOS 的
+ * long double 是 8 位宽的 IEEE-128double（对齐 8、双-double 实现），
+ * 不是 quad，拿它冒充 f128 会造成静默精度错误。
+ * 宿主不支持时 Zx 仍**能编译**（编译器自身可移植），但用到 f128 的程序
+ * 会被 §244 的能力门控挡下并给明确诊断——绝不悄悄降级成 f64，那正是
+ * R10 禁止的「两个答案」。 */
+#if (defined(__SIZEOF_FLOAT128__) && __SIZEOF_FLOAT128__ == 16 && \
+     defined(__LDBL_MANT_DIG__) && __LDBL_MANT_DIG__ == 113) || \
+    (defined(__x86_64__) && !defined(__APPLE__))
+#define ZX_HAVE_F128 1
 typedef __float128 ZxF128;
+#else
+#define ZX_HAVE_F128 0
+typedef long double ZxF128;   /* 占位：ZX_HAVE_F128=0 时永不参与运算 */
+#endif
 
 typedef enum {
     V_VOID,

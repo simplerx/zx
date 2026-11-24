@@ -67,6 +67,13 @@ bool target_init(Target *t, const char *name) {
     snprintf(t->lib_prefix, sizeof t->lib_prefix, "%s", p->lib_prefix);
     snprintf(t->lib_suffix, sizeof t->lib_suffix, "%s", p->lib_suffix);
     snprintf(t->default_libs, sizeof t->default_libs, "%s", p->default_libs);
+    /* §244：quad 只在 x86_64 的 Windows / Linux 上可用（实测 zig cc：
+     * linux-x86_64 连 __FLOAT128__ 宏都有，windows-x86_64 无宏但能编译
+     * 链接；aarch64-linux、macos-x86_64、macos-aarch64 一律
+     * "__float128 is not supported on this target"）。用结构式判据而不是
+     * __FLOAT128__ 宏——后者在 windows 上缺失，会误判成不支持。 */
+    t->f128 = (strcmp(p->arch, "x86_64") == 0 &&
+               (strcmp(p->os, "windows") == 0 || strcmp(p->os, "linux") == 0));
     /* 交叉编译才注入 --target：native 构建不写，避免 zig cc 选到与宿主
      * 不同的 libc 变体而找不到头文件（Windows 仓库默认就是 native）。 */
     if (strcmp(p->name, plat_host_name()) != 0)

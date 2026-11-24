@@ -1,0 +1,29 @@
+// §243：字符串字面量收敛成具名 static 常量池——相同内容在生成 C 里只发
+// 一份 `static const uint8_t zxS_k[]`，切片与 .ptr 形态共用同一份数据，
+// 数组常量初始化器也引用池符号（不再逐处内联字面量）。
+// 生成形状由 test.sh §243 断言钉死；这里跑运行行为，确认去重后语义不变。
+// expect-exit: 0
+// expect-output
+// eq=true ne=false
+// [0]=abc [1]=abc [2]=abc len=3 3 3
+// empty=true len=0
+const std = @mod("std");
+
+const REP: []const u8 = "hello";
+const ROWS: [3][]const u8 = .{ "abc", "abc", "abc" };
+
+pub const main = fn () u8 {
+    // 同一字面量出现在多处：常量绑定 + 表达式位置
+    let a = REP;
+    std.println("eq={} ne={}", std.str.eq(a, "hello"), std.str.eq(a, "world"));
+
+    // 数组常量里三个相同内容
+    std.println("[0]={s} [1]={s} [2]={s} len={} {} {}",
+                ROWS[0], ROWS[1], ROWS[2],
+                ROWS[0].len, ROWS[1].len, ROWS[2].len);
+
+    // 空串不进池（长度 0 没有数据要存），退回内联
+    let e: []const u8 = "";
+    std.println("empty={} len={}", std.str.eq(e, ""), e.len);
+    return 0;
+};

@@ -1,0 +1,28 @@
+// §241：数组常量里的字符串字面量——曾因 `ZxArr_…`（单成员结构体）的
+// 初始化器少发一层 `.v` 外壳，被 C 的花括号省略规则吃掉：第一个
+// `{ptr,len}` 被当成整个 v 数组的初始化器灌进 v[0]，后面的被静默丢弃
+// （beta/gamma 的指针成 NULL → 打印空值）。嵌套数组 `[[2]i32;2]` 同理
+// 只剩第一组。现在值路径统一发 `{ .v = { … } }`，与表达式路径一致。
+// expect-exit: 0
+// expect-output
+// [0] alpha
+// [1] beta
+// [2] gamma
+// nest: 1 2 3 4
+// ptr: xy
+// slice: s1 s2
+const std = @mod("std");
+
+const names: [3][]const u8 = .{ "alpha", "beta", "gamma" };
+const nest: [2][2]i32 = .{ .{ 1, 2 }, .{ 3, 4 } };
+const sl: [2][]const u8 = .{ "s1", "s2" };
+
+pub const main = fn () u8 {
+    std.println("[0] {s}", names[0]);
+    std.println("[1] {s}", names[1]);
+    std.println("[2] {s}", names[2]);
+    std.println("nest: {} {} {} {}", nest[0][0], nest[0][1], nest[1][0], nest[1][1]);
+    std.println("ptr: {s}", "xy");
+    std.println("slice: {s} {s}", sl[0], sl[1]);
+    return 0;
+};

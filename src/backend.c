@@ -36,6 +36,8 @@ static int  g_ind;
 
 static void cname(Buf *b, const char *s);   /* 成员名转义（定义在下方），ensure_type 先用到 */
 static void cstr(Buf *b, const char *s, int n);  /* C 字符串字面量：静态成员初始化先用 */
+/* §243：字符串字面量 → static 常量池（定义在 cstr 附近，先用先声明）。 */
+static const char *zx_str_expr(Buf *out, const char *s, int n);
 static void mname(Buf *b, const char *s);
 static void dotname(Buf *b, const char *s);
 static void arrowname(Buf *b, const char *s);
@@ -495,11 +497,12 @@ static void ensure_type(Type *t) {
                      * incompatible type）。这里显式发 {ptr, len}。 */
                     if (f->ty && f->ty->kind == TY_SLICE && f->dflt->kind == NK_STR) {
                         Buf c; buf_init(&c);
-                        cstr(&c, f->dflt->str ? f->dflt->str : "", f->dflt->str_len);
+                        /* §243：字符串本体走 static 池。 */
+                        const char *lit = zx_str_expr(&c, f->dflt->str, f->dflt->str_len);
                         Buf ts; buf_init(&ts);
                         ctype(&ts, f->ty);
                         buf_printf(&s, "((%s){ (uint8_t*)%s, %d })",
-                                   ts.data, c.data, f->dflt->str_len);
+                                   ts.data, lit, f->dflt->str_len);
                     } else if (f->ct && !val_has_fn(f->ct)) {
                         /* §117 值槽优先：关联常量的初值 sema 已折成编译期值
                          * （泛型容器里 `N * @type(T).size` 这类只活编译期的
@@ -1132,6 +1135,81 @@ static void cstr(Buf *b, const char *s, int n) {
         }
     }
     buf_putc(b, '"');
+}
+
+/* §243：字符串字面量 → 具名 static 常量池。
+ *
+ * 以前每个字面量在使用点内联发 `(uint8_t*)"…"`：同一个字符串在生成 C 里
+ * 出现 N 次（格式化串、错误消息、常量表都常见），C 层要不要合并是编译器
+ * 的自由，Zx 层没有任何"这是一份只读静态数据"的表达。现在收敛成
+ * `static const uint8_t zxS_<k>[] = "…";`，使用点只引用名字：
+ *   - 相同内容（按原始字节）只发一份，天然去重；
+ *   - 数据是显式 static const，文件作用域、只读、不占栈帧；
+ *   - `--emit-c` 里能一眼看出哪些是常量数据。
+ *
+ * 只在**逐单元发射**阶段启用（g_str_pool_on）。泛型实例与运行时助手在单元
+ * 循环之后才发射、追加到 units[0] 末尾，那时池定义早已随单元正文写走，
+ * 再往池里加就成"引用了不存在的名字"——那两处回退内联发射，宁可少去重
+ * 也不能断链。
+ *
+ * 去重按**原始字节**而非转义后的形态：`"\x41"` 与 `"A"` 内容相同、合并，
+ * 这是只读数据的地址合并（同 GCC -fmerge-constants / MSVC /merge，默认行为），
+ * Zx 的字符串字面量没有可观察的指针身份要求。 */
+typedef struct { char *bytes; int len; char name[16]; } StrEnt;
+static StrEnt *g_strpool;
+static int     g_nstrpool, g_cstrpool;
+static Buf     g_bstrpool;          /* 池定义，组装时插在 proto 与 globals 之间 */
+static bool    g_str_pool_on;       /* 只有逐单元发射阶段为真 */
+static int     g_str_pool_gen;      /* 名字序号：跨单元不复用，避免同名重定义 */
+
+/* 注册（并按需定义）一个字符串常量，返回可直接嵌入 C 的名字。
+ * 池关闭或空串时返回 NULL，调用方退回内联 cstr()。 */
+static const char *zx_str_lit(const char *s, int n) {
+    /* §243：只有真正写进**本单元正文**（g_bglobals / g_bbody）的字面量才
+     * 登记进池。ensure_type 把类型定义（含结构体默认字段值）发进
+     * g_btypes——那是所有单元都 include 的共享头，而池定义是某个单元内的
+     * static，头文件引用它就断链；泛型实例与运行时阶段池本就越关越紧
+     * （g_str_pool_on=false）。这些场合一律退回内联 (uint8_t*)"…"——
+     * 宁可少去重，也绝不能生成引用不到符号的 C。 */
+    if (!g_str_pool_on || n <= 0 || !s) return NULL;
+    if (g_out != &g_bglobals && g_out != &g_bbody) return NULL;
+    for (int i = 0; i < g_nstrpool; i++)
+        if (g_strpool[i].len == n && !memcmp(g_strpool[i].bytes, s, (size_t)n))
+            return g_strpool[i].name;
+    if (g_nstrpool == g_cstrpool) {
+        int nc = g_cstrpool ? g_cstrpool * 2 : 32;
+        StrEnt *p2 = realloc(g_strpool, (size_t)nc * sizeof(StrEnt));
+        if (!p2) return NULL;                    /* 分配失败：退回内联 */
+        g_strpool = p2; g_cstrpool = nc;
+    }
+    char *dup = xmalloc((size_t)n + 1);
+    if (!dup) return NULL;
+    memcpy(dup, s, (size_t)n); dup[n] = 0;
+    StrEnt *e = &g_strpool[g_nstrpool];
+    e->bytes = dup; e->len = n;
+    snprintf(e->name, sizeof e->name, "zxS_%d", g_str_pool_gen++);
+    Buf lit; buf_init(&lit);
+    cstr(&lit, s, n);
+    bline(&g_bstrpool, "static const uint8_t %s[] = %s;", e->name, lit.data);
+    buf_free(&lit);
+    g_nstrpool++;
+    return e->name;
+}
+
+/* 每个单元开始时复位（名字序号不复位：跨单元同名会被 header 与各单元
+ * 里的定义撞成重定义）。 */
+static void zx_str_pool_reset(void) {
+    buf_init(&g_bstrpool);
+    g_nstrpool = 0;
+}
+
+/* 可嵌入 C 的「指向该字面量首字节」片段：池里是名字 zxS_k，池外是转义后的
+ * 字面量本体。out 供内联回退用，生命期由调用方掌握。 */
+static const char *zx_str_expr(Buf *out, const char *s, int n) {
+    const char *nm = zx_str_lit(s, n);
+    if (nm) return nm;
+    cstr(out, s ? s : "", n);
+    return out->data;
 }
 
 /* ---- 运行时越界检查（R10 / §8.3）----
@@ -5621,9 +5699,10 @@ static bool ex_ct_scalar(Buf *b, Node *n) {
     case V_STR: {
         Buf s;  buf_init(&s);
         Buf ty; buf_init(&ty);
-        cstr(&s, v->sval ? v->sval : "", v->slen);
+        /* §243：字符串本体走 static 池，这里只发 {指针, 长度}。 */
+        const char *lit = zx_str_expr(&s, v->sval, v->slen);
         ctype(&ty, n->ty);
-        buf_printf(b, "((%s){ (uint8_t*)%s, %d })", ty.data, s.data, v->slen);
+        buf_printf(b, "((%s){ (uint8_t*)%s, %d })", ty.data, lit, v->slen);
         return true;
     }
     default: return false;      /* 聚合值仍按原路发（有自己的初始化逻辑） */
@@ -5671,18 +5750,19 @@ static void ex(Buf *b, Node *n) {
     }
     case NK_STR: {
         Buf s; buf_init(&s);
-        cstr(&s, n->str ? n->str : "", n->str_len);
+        /* §243：字面量本体走 static 池（同内容只发一份）。 */
+        const char *lit = zx_str_expr(&s, n->str, n->str_len);
         /* 字符串字面量的类型是 *[N]const u8（用户 2026-11-09）：C 侧就是
          * 指向字节的指针，长度留在 Zx 类型里（.len 编译期算）。落点要切片时
          * 由 coerce 的 "*[N]T → []T" 包装成 {ptr,len}。 */
         if (n->ty && n->ty->kind == TY_PTR) {
-            buf_printf(b, "((uint8_t*)%s)", s.data);
+            buf_printf(b, "((uint8_t*)%s)", lit);
             return;
         }
         /* 兜底：没有落点类型的字面量仍按切片发射（个别内建调用直接要
          * ZxSlice_u8），确保 typedef 已发射。 */
         ensure_type(ty_slice(ty_u8(), true));
-        buf_printf(b, "((ZxSlice_u8){ (uint8_t*)%s, %d })", s.data, n->str_len);
+        buf_printf(b, "((ZxSlice_u8){ (uint8_t*)%s, %d })", lit, n->str_len);
         return;
     }
     case NK_CHAR:
@@ -8089,13 +8169,16 @@ static void val_init(Buf *b, Value *v, Type *t) {
         return;
     case V_STR: {
         Buf s; buf_init(&s);
-        cstr(&s, v->sval ? v->sval : "", v->slen);
+        /* §243：字符串本体走 static 池——全局初始化器（`const NAMES:
+         * [3][]const u8 = .{…}`）正是从这里发射，头文件阶段（ensure_type
+         * 把 g_out 切去 g_btypes）由 zx_str_lit 的边界判据自动回退内联。 */
+        const char *lit = zx_str_expr(&s, v->sval, v->slen);
         /* 定长数组（*[N]u8）在 C 里就是 char 数组，只给指针；其余一律按
          * 切片（ptr+len）初始化——字符串在 Zx 里的类型就是 []const u8。 */
         if (t && t->kind == TY_PTR && t->has_len) {
-            buf_printf(b, "{ (uint8_t*)%s }", s.data);
+            buf_printf(b, "{ (uint8_t*)%s }", lit);
         } else {
-            buf_printf(b, "{ (uint8_t*)%s, %d }", s.data, v->slen);
+            buf_printf(b, "{ (uint8_t*)%s, %d }", lit, v->slen);
         }
         return;
     }
@@ -8113,9 +8196,19 @@ static void val_init(Buf *b, Value *v, Type *t) {
          * 容器了，所以下面取元素类型时不能靠 `t` 自己判断——否则
          * `&.{ "a", "b" }` 的每个元素都拿不到类型，字符串长度被丢掉。 */
         Type *arr_et = NULL;
-        if (t && t->kind == TY_ARRAY) arr_et = t->elem;
-        else if (ty_is_array_ptr(t)) { arr_et = t->elem->elem; t = t->elem; }
-        buf_puts(b, "{ ");
+        bool is_arr = false;               /* §241：目标是 [N]T（ZxArr 结构体） */
+        if (t && t->kind == TY_ARRAY) { arr_et = t->elem; is_arr = true; }
+        else if (ty_is_array_ptr(t)) { arr_et = t->elem->elem; t = t->elem; is_arr = true; }
+        /* §241：`[N]T` 的 C 表示是 `ZxArr_… = { T v[N]; }`——单成员结构体。
+         * 直接发 `{ e0, e1, ... }` 会被 C 的花括号省略规则吃掉：第一个
+         * `{...}`（元素本身是结构体形状时，如字符串的 `{ptr,len}`）被当成
+         * 整个 `v` 数组的初始化器、只灌进 `v[0]`，后面的 `{...}` 成了
+         * "多余的初始化元素"被**静默丢弃**（实测 `[3][]const u8{alpha,beta,
+         * gamma}` 只剩 alpha，beta/gamma 的 ptr 为 NULL → 打印空值；
+         * 嵌套数组 `[[2]i32;2]` 同理只剩第一组）。标量元素恰好因元素本身
+         * 不带内层花括号而侥幸正确。补回 `.v = { … }` 外壳，与 §201
+         * "发码统一走 .v" 及表达式路径（NK_ARRAY_LIT）一致。 */
+        buf_puts(b, is_arr ? "{ .v = { " : "{ ");
         bool first = true;
         for (int i = 0; i < v->nitems; i++) {
             Type *et = arr_et;
@@ -8131,7 +8224,7 @@ static void val_init(Buf *b, Value *v, Type *t) {
             first = false;
             val_init(b, v->items[i], et);
         }
-        buf_puts(b, " }");
+        buf_puts(b, is_arr ? " } }" : " }");
         return;
     }
     case V_PTR:
@@ -8142,12 +8235,13 @@ static void val_init(Buf *b, Value *v, Type *t) {
              * 类型是裸指针时就形状不匹配）。off 是子串偏移，按字节加。 */
             if (v->base->kind == V_STR) {
                 Buf s; buf_init(&s);
-                cstr(&s, v->base->sval ? v->base->sval : "", v->base->slen);
+                /* §243：与切片形态共用同一份 static 池数据。 */
+                const char *lit = zx_str_expr(&s, v->base->sval, v->base->slen);
                 if (v->off)
-                    buf_printf(b, "((uint8_t*)%s + %llu)", s.data,
+                    buf_printf(b, "((uint8_t*)%s + %llu)", lit,
                                (unsigned long long)v->off);
                 else
-                    buf_printf(b, "((uint8_t*)%s)", s.data);
+                    buf_printf(b, "((uint8_t*)%s)", lit);
                 return;
             }
             val_init(b, v->base, t && t->kind == TY_PTR ? t->elem : t);
@@ -8633,6 +8727,9 @@ int backend_emit_split(Node *root, Buf *header, Buf *rt, BUnit *units, int maxun
         buf_init(&g_bglobals);
         buf_init(&g_bproto);
         buf_init(&g_bbody);
+        /* §243：本单元开始——字符串池启用并清空定义（名字序号跨单元不复用）。 */
+        zx_str_pool_reset();
+        g_str_pool_on = true;
         g_out = &g_bbody;
         g_ind = 0;
         g_nlate = 0;
@@ -8681,14 +8778,17 @@ int backend_emit_split(Node *root, Buf *header, Buf *rt, BUnit *units, int maxun
         emit_init_fn(mi);
         flush_anon_fns();        /* §200：本单元 ex() 登记的匿名 fn 补发函数体 */
 
-        /* 组装顺序 (proto, globals, body) 决定三个缓冲在单元源文件里的
-         * 起始行；映射表里记的是"缓冲内行号"，这里换算成"单元内行号"
-         * （驱动层写 .c 时再补开头两行 include）。 */
+        /* 组装顺序 (proto, 字符串池, globals, body) 决定各缓冲在单元
+         * 源文件里的起始行；映射表里记的是"缓冲内行号"，这里换算成
+         * "单元内行号"（驱动层写 .c 时再补开头两行 include）。
+         * §243：池定义排在 globals 之前——全局初始化器就可能引用字面量，
+         * 定义必须先行；池行不参与映射（纯静态数据，无 zx 位置）。 */
         int nproto   = count_lines(g_bproto.data);
+        int nstrpool = count_lines(g_bstrpool.data);
         int nglobals = count_lines(g_bglobals.data);
         int base[3];
         base[0] = 1;
-        base[1] = base[0] + nproto + 1;
+        base[1] = base[0] + nproto + 1 + (nstrpool ? nstrpool + 1 : 0);
         base[2] = base[1] + nglobals + 1;
         for (int k = 0; k < g_nbmap; k++)
             if (g_bmap[k].unit == mi)
@@ -8696,9 +8796,14 @@ int backend_emit_split(Node *root, Buf *header, Buf *rt, BUnit *units, int maxun
 
         buf_puts(&units[mi].src, g_bproto.data ? g_bproto.data : "");
         buf_putc(&units[mi].src, '\n');
+        if (g_bstrpool.len) {
+            buf_puts(&units[mi].src, g_bstrpool.data);
+            buf_putc(&units[mi].src, '\n');
+        }
         buf_puts(&units[mi].src, g_bglobals.data ? g_bglobals.data : "");
         buf_putc(&units[mi].src, '\n');
         buf_puts(&units[mi].src, g_bbody.data ? g_bbody.data : "");
+        g_str_pool_on = false;            /* §243：本单元起池不再登记 */
     }
 
     /* 泛型实例：上面任何一处引用过它们，这里统一下饺子。

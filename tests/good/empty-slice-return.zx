@@ -1,0 +1,42 @@
+// §242（用户裁定）：空切片 `&.{}` 没有可逃逸的存储。
+//
+// `&.{1,2}` 这类**非空**数组字面量取址后落在当前帧的匿名存储上，返回它
+// 会悬垂（E0503）。但**空**的 `&.{}` 展开后切片长度恒为 0——任何下标都
+// 不可达（越界检查也进不去），根本没有可被读到的存储，因此不构成逃逸。
+// 豁免只针对"空"这一种形态：非空字面量、局部变量、stackAlloc 照旧拦。
+// expect-exit: 0
+// expect-output
+// direct: 0
+// via-var: 0
+// in-struct: 0
+// heap-len: 2
+const std = @mod("std");
+
+const S = struct { s: []const u8 };
+
+// ① 直接返回空切片
+const direct = fn (k: i32) []const u8 {
+    if (k == 0) { return &.{}; }
+    let p = std.heapAlloc(std.heap.page, u8, 2);
+    return ((*[2]u8)p)[0..2];
+};
+
+// ② 先绑到变量再返回（stack_val 传播也得认"空 = 非栈帧"）
+const viaVar = fn (k: i32) []const u8 {
+    if (k == 0) {
+        let e: []const u8 = &.{};
+        return e;
+    }
+    return &.{};
+};
+
+// ③ 空切片藏在聚合返回值里（frame_in_agg 路径）
+const inStruct = fn () S { return S{ .s = &.{} }; };
+
+pub const main = fn () u8 {
+    std.println("direct: {}", direct(0).len);
+    std.println("via-var: {}", viaVar(0).len);
+    std.println("in-struct: {}", inStruct().s.len);
+    std.println("heap-len: {}", direct(1).len);
+    return 0;
+};

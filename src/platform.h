@@ -43,6 +43,11 @@ typedef struct {
     char default_libs[256];  /* 平台默认链接参数 */
     char extra_cflags[256];  /* targetOverrides.<name>.cflags */
     char extra_link[256];    /* targetOverrides.<name>.link，如 "-lfoo" */
+    /* §244：该目标是否有真正的 IEEE-754 quad（`__float128`）。zig cc 只在
+     * x86_64 的 Windows / Linux 上提供；aarch64（Linux/macOS）与 macos-x86_64
+     * 一律 "is not supported on this target"。f128 相关代码按这个位决定
+     * 是生成还是给干净诊断。 */
+    bool f128;
     bool valid;
 } Target;
 
@@ -61,5 +66,9 @@ bool target_init(Target *t, const char *name);
 
 /* 是否交叉编译（triple 与宿主不同）。用于提示与缓存隔离。 */
 bool target_is_cross(const Target *t);
+
+/* §244：当前构建目标的 quad 能力（main.c 在 target 确定后置位，NULL
+ * 目标=宿主构建时按 ZX_HAVE_F128 决定）。语义层用它决定 f128 能否用。 */
+extern bool zx_target_f128;
 
 #endif

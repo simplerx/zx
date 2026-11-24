@@ -1609,8 +1609,8 @@ fi
 $ZXC tests/good/string-ptr-const.zx --emit-c > "$TPFX.s197.c" 2>/dev/null
 # §201 后全局 [N]T 也走 `struct { T v[N]; }`，不再是裸 C 数组；A 是指向
 # 静态 backing 的指针，backing 里装两个字符串首字节指针。
-if grep -qF 'static uint8_t * P = ((uint8_t*)"hello");' "$TPFX.s197.c" \
-   && grep -qF '((uint8_t*)"aa"), ((uint8_t*)"bb")' "$TPFX.s197.c" \
+if grep -Eq 'static uint8_t \* P = \(\(uint8_t\*\)(zxS_[0-9]+|"hello")\);' "$TPFX.s197.c" \
+   && grep -Eq '\(\(uint8_t\*\)(zxS_[0-9]+|"aa")\), \(\(uint8_t\*\)(zxS_[0-9]+|"bb")\)' "$TPFX.s197.c" \
    && grep -qF 'static ZxArr_apu8_2 * A = &' "$TPFX.s197.c" \
    && ! grep -qE '^[[:space:]]+P = ' "$TPFX.s197.c"; then
     printf "  ok   §197 字符串 .ptr 静态初始化（非 g_late 运行期赋值）\n"
@@ -2319,36 +2319,12 @@ done
 #   ② 紧随判空的库 API / 解码路径（NULL 是契约，不是疏漏）
 #   ③ x* 包装自身的实现（zxc.c）
 printf "\n== §232 分配 OOM 统一报错\n"
-if python - <<'PY'
-import re, glob, os, sys
-pat = re.compile(r'\b(malloc|calloc|realloc|strdup)\s*\(')
-bad = []
-for f in sorted(glob.glob('src/*.c')):
-    lines = open(f, encoding='utf-8', errors='replace').read().split('\n')
-    for i, line in enumerate(lines):
-        m = pat.search(line)
-        if not m: continue
-        # ③ x* 实现自身
-        if os.path.basename(f)=='zxc.c' and ('void *xmalloc' in line or
-           'void *xcalloc' in line or 'void *xrealloc' in line or
-           'char *xstrdup' in line or 'char *p = strdup(s)' in line):
-            continue
-        # ① 字符串字面量里的（后端发射的 C 代码）
-        if '"' in line[:m.start()] and line[:m.start()].count('"')%2==1: continue
-        # ② 三行内有判空
-        ctx='\n'.join(lines[i+1:i+4])
-        if re.search(r'if\s*\(\s*!|==\s*NULL|!=\s*NULL',ctx): continue
-        bad.append(f'{f}:{i+1}: {line.strip()[:80]}')
-if bad:
-    print('Unguarded raw allocations:')
-    for x in bad[:20]: print('  '+x)
-    sys.exit(1)
-print('  ok   所有裸分配均有判空或契约保护')
-PY
-then
-    printf "  ok   §232 静态扫描\n"
+if bash tools/check_alloc.sh > "$TPFX.s241.log" 2>&1; then
+    printf "  ok   §232 静态扫描（bash/awk 版——python 在部分机器是商店占位符，原断言假红）\n"
 else
-    printf "  FAIL §232 裸分配逃逸\n"; fail=1
+    printf "  FAIL §232 裸分配逃逸\n"
+    cat "$TPFX.s241.log"
+    fail=1
 fi
 # 运行时守门：x* 实现必须打印 OOM 诊断并以非零退出（不是 segfault/静默）。
 grep -q 'zxc: out of memory' src/zxc.c \
@@ -2497,6 +2473,35 @@ for fe in zx c; do
         tail -12 "$TPFX.rn240bad.$fe.log"; fail=1
     fi
 done
+
+
+# §243：字符串字面量 → 具名 static 常量池。钉四件事：
+#   ① 字面量发成 `static const uint8_t zxS_<k>[] = "…"`（不是内联）；
+#   ② 相同内容只发一份（去重：abc 出现三次只一条定义）；
+#   ③ 池定义行号 < 引用它的 ROWS 定义行号（C 要求先定义后使用）；
+#   ④ 不再有内联 (uint8_t*)"abc" 残留。
+printf "\n== §243 字符串字面量 static 常量池\n"
+$ZXC tests/good/str-static-pool.zx --emit-c > "$TPFX.s243.c" 2>/dev/null
+_s243def=$(grep -nE '^static const uint8_t zxS_' "$TPFX.s243.c" | head -1 | cut -d: -f1)
+_s243ref=$(grep -nE '^static ZxArr_asu8_3 ROWS' "$TPFX.s243.c" | head -1 | cut -d: -f1)
+if grep -Eq '^static const uint8_t zxS_[0-9]+\[\] = "hello";' "$TPFX.s243.c" \
+   && [ "$(grep -cE '^static const uint8_t zxS_[0-9]+\[\] = "abc";' "$TPFX.s243.c")" = 1 ] \
+   && [ "$(grep -cE 'zxS_[0-9]+' "$TPFX.s243.c")" -ge 5 ] \
+   && [ -n "$_s243def" ] && [ -n "$_s243ref" ] && [ "$_s243def" -lt "$_s243ref" ] \
+   && ! grep -qF '(uint8_t*)"abc"' "$TPFX.s243.c"; then
+    printf "  ok   §243 字面量入池 + 同内容去重 + 定义先于引用\n"
+else
+    printf "  FAIL §243 字符串 static 池形状\n"
+    grep -nE 'zxS_|^static ZxArr_asu8_3 ROWS|\(uint8_t\*\)"' "$TPFX.s243.c" | head -12
+    fail=1
+fi
+# 空串不进池（没有数据要存），但仍要能编译运行——上面 good 用例已覆盖运行，
+# 这里钉"没为它发 zxS_ 空定义"。
+if ! grep -qE '^static const uint8_t zxS_[0-9]+\[\] = "";' "$TPFX.s243.c"; then
+    printf "  ok   §243 空串退回内联（不发空池定义）\n"
+else
+    printf "  FAIL §243 空串被错发成池定义\n"; fail=1
+fi
 
 # 用例会在仓库根留下自己的临时文件：io_fmt.zx 写 io_fmt.tmp，stdfs.zx 建
 # fs_t_dir / fs_t_dir2。跑完统一带走——测试不该往工作区里堆东西。

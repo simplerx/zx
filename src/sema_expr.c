@@ -85,7 +85,10 @@ bool expr_frame(Node *e) {
     case NK_IDENT: return e->sym && e->sym->stack_val;
     case NK_UN:    return e->op == TOK_AMP && addr_frame(e->a);
     case NK_ARRAY_LIT:                /* &.{…}：值本身就是当前帧的匿名存储 */
-        return true;
+        /* §242（用户裁定）：**空**数组字面量 `&.{}` 展开后切片长度恒为 0，
+         * 任何下标都不可达（越界检查也进不去），不存在可逃逸的存储——
+         * 不判栈帧来源。非空 `&.{1,2}` 照旧是当前帧的匿名存储。 */
+        return e->nitems != 0;
     case NK_FIELD: case NK_INDEX: case NK_SLICE:
         return expr_frame(e->a);
     case NK_UNWRAP:                   /* `x.?`：载荷来源跟着 optional 走 */

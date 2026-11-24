@@ -1,0 +1,10 @@
+// expect: cannot return a pointer into the current function's stack frame
+// expect-code: E0503
+// §242 豁免的反面：只有**空**的 `&.{}` 不算逃逸（长度恒 0、无可达存储）。
+// 非空数组字面量 `&.{1,2}` 取址后落在当前帧的匿名存储上，返回必悬垂，
+// 必须继续报 E0503——这条钉住豁免没有被放宽到非空形态。
+const two = fn () []i32 { return &.{ 1, 2 }; };
+const main = fn () i32 {
+    const r = two();
+    return r[0];
+};
