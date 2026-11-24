@@ -1,0 +1,69 @@
+// logbench.zx —— std.log 吞吐基准（可复跑）。
+//   zxc tools/logbench.zx -o logbench.exe && ./logbench.exe
+// 对比：逐条 fs.appendAll（每次 fopen/fwrite/fclose）vs Logger 缓冲攒批
+// vs SyncLogger 四线程并发。数字因机器/磁盘而异，看重的是倍率。
+const std = @mod("std");
+const Task = std.task.Task;
+
+const PATH = "zx-log-bench.log";
+const N: usize = 5000;
+const NW: usize = 4;
+
+var g_log: *std.log.SyncLogger = undefined;
+
+const worker = fn (_: u64) !u64 {
+    var i: usize = 0;
+    while (i < N / NW) {
+        if (!g_log.info("a short log line")) { return 1; }
+        i = i + 1;
+    }
+    return 0;
+};
+
+const main = fn () !i32 {
+    let al = std.heap.page;
+    _ = std.fs.removeFile(al, PATH);
+
+    // A：逐条 appendAll——每次都是一次完整的 fopen + write + fclose
+    let t0 = std.time.counter();
+    var i: usize = 0;
+    while (i < N) {
+        if (!std.fs.appendAll(PATH, "a short log line\n")) { return 1; }
+        i = i + 1;
+    }
+    let msAppend = std.time.nsBetween(t0, std.time.counter()) / 1000000;
+
+    // B：Logger 持句柄 + 64KB 缓冲攒批
+    _ = std.fs.removeFile(al, PATH);
+    if (std.log.Logger.initCap(al, PATH, 65536, 0)) lv {
+        var l = lv;
+        let t1 = std.time.counter();
+        i = 0;
+        while (i < N) {
+            if (!l.info("a short log line")) { return 2; }
+            i = i + 1;
+        }
+        if (!l.flush()) { return 3; }
+        let msLog = std.time.nsBetween(t1, std.time.counter()) / 1000000;
+        l.deinit();
+        // C：SyncLogger 四线程
+        _ = std.fs.removeFile(al, PATH);
+        if (std.log.SyncLogger.initCap(al, PATH, 65536, 0)) sv {
+            var s = sv;
+            g_log = &s;
+            let t2 = std.time.counter();
+            let t = Task.pool(NW);
+            var k: u64 = 0;
+            while (k < NW) { _ = t.spawn(worker, k).?; k = k + 1; }
+            try t.awaitAll();
+            t.close();
+            if (!g_log.flush()) { return 4; }
+            let msSync = std.time.nsBetween(t2, std.time.counter()) / 1000000;
+            g_log.deinit();
+            std.println("{} lines: appendAll {} ms / Logger {} ms / SyncLogger({}) {} ms",
+                        N, msAppend, msLog, NW, msSync);
+        } else { return 5; }
+    } else { return 6; }
+    _ = std.fs.removeFile(al, PATH);
+    return 0;
+};

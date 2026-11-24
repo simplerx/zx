@@ -2570,9 +2570,23 @@ else
     printf "  FAIL §249 静态断言\n"; fail=1
 fi
 
+# §251：std.log 高性能落盘日志。并发正确性（4 worker × 200 条不丢不交错）
+# 由 tests/good/stdlog.zx 自动发现并运行；这里只钉住设计红线。
+printf "\n== §251 std.log 静态断言\n"
+if grep -Fq 'pub const log = @mod("log.zx");' std/std.zx \
+   && grep -Fq 'std.io.flush(self.writer.h)' std/log.zx \
+   && grep -Fq 'std.atomic.atomicCAS(w, 0, 1)' std/log.zx \
+   && grep -Fq 'pub const SyncLogger = struct' std/log.zx \
+   && grep -Fq 'std.stackAlloc(u8, 40)' std/log.zx; then
+    printf "  ok   §251 log 落盘 + 栈缓冲时间戳 + SyncLogger 自旋锁\n"
+else
+    printf "  FAIL §251 静态断言\n"; fail=1
+fi
+
 # 用例会在仓库根留下自己的临时文件：io_fmt.zx 写 io_fmt.tmp，stdfs.zx 建
 # fs_t_dir / fs_t_dir2。跑完统一带走——测试不该往工作区里堆东西。
 rm -rf io_fmt.tmp fs_t_dir fs_t_dir2 2>/dev/null || true
+rm -f zx-log-single.log zx-log-concurrent.log zx-log-bench.log 2>/dev/null || true
 rm -rf "$TPFX.lspbin" 2>/dev/null || true
 rm -f "$TPFX"* 2>/dev/null || true
 

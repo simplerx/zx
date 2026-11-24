@@ -49,6 +49,11 @@ pub const debug_alloc = @mod("debug_alloc.zx");
 // 时间（time.zx）。QPC 单调钟（nsBetween 测耗时）、墙钟、ISO 8601 格式化。
 pub const time = @mod("time.zx");
 
+// 日志（log.zx）。高性能落盘：持句柄 + 大缓冲攒批，热路径零分配（时间戳
+// 直接写栈缓冲）。Logger 单线程无锁；SyncLogger 多线程安全（堆上共享锁字）。
+// 只依赖跨平台的 std.io/std.time/std.atomic，不需要 POSIX 镜像。
+pub const log = @mod("log.zx");
+
 // 任务（task.zx）。对外只有 Task 一个类型：它是接口，coro/single/pool/
 // fromId 生成实例，其余能力全是 `t.` 实例方法（分发）。接口只保留任务
 // 调度、实例自带的默认通道、select 与内核线程组；作用域 / 命名通道 /

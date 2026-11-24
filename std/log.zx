@@ -1,0 +1,212 @@
+// log.zx —— 高性能本地日志（落盘）。
+//
+//   const std = @mod("std");
+//   if (std.log.Logger.init(std.heap.page, "app.log", 0)) lg {
+//       var l = lg;
+//       l.info("server started");
+//       l.flush();          // 确定性落盘（deinit 也会 flush）
+//       l.deinit();
+//   }
+//
+// 多线程用 SyncLogger（另一个类型，不是构造器开关）：
+//   if (std.log.SyncLogger.init(std.heap.page, "app.log", 0)) sl { … }
+//
+// 性能约定：
+//   - 持打开文件句柄 + 大缓冲（std.BufWriter），攒满 cap 才 write 一次；
+//     每条日志不是 fopen/fwrite/fclose。
+//   - 热路径零分配：时间戳逐字节写进栈缓冲，消息是 []const u8 直接 memcpy
+//     进 BufWriter；不走 std.format（它每次都分配）。
+//   - 级别过滤在最前面，被过滤的级别连钟都不读。
+//   - SyncLogger 的锁字在堆上、所有副本共享；临界区只做 memcpy 和级别比较。
+//
+// 跨平台：只用 std.io / std.time / std.atomic 三个已跨平台封装的入口，
+// 不直接 extern，所以不需要像 fs/net/time 那样维护 POSIX 镜像。
+
+const std = @mod("std");
+
+pub const DEBUG: u8 = 0;
+pub const INFO: u8 = 1;
+pub const WARN: u8 = 2;
+pub const ERROR: u8 = 3;
+pub const OFF: u8 = 4;
+
+pub const DEFAULT_CAP: usize = 65536;
+
+// 固定 5 字节：日志前缀对齐，读起来不用在脑子里数列。
+const LEVEL_NAMES = &.{ "DEBUG", "INFO ", "WARN ", "ERROR" };
+
+// 级别名写进调用方 buf（至少 5 字节），返回字节数。不返回切片——
+// LEVEL_NAMES 是栈上数组字面量，return 它的切片会撞 E0503。
+pub const levelName = fn (level: u8, buf: *u8) usize {
+    if (level > ERROR) { @memcpy(buf, "?????", 5); return 5; }
+    let name = LEVEL_NAMES[0..][level];
+    @memcpy(buf, name.ptr, 5);
+    return 5;
+};
+
+// ---- 时间戳：栈上格式化，零分配 ---------------------------------------------
+//
+// 格式 "[2026-11-25T01:35:31.123Z INFO ] "，固定 33 字节。
+// 不用 time.formatUtc——那个每次分配 24 字节，日志热路径付不起。
+
+const put2 = fn (b: *u8, off: usize, v: u64) void {
+    (b + off).0 = 48 + (u8)(v / 10);
+    (b + off + 1).0 = 48 + (u8)(v % 10);
+};
+const put4 = fn (b: *u8, off: usize, v: u64) void {
+    put2(b, off, v / 100);
+    put2(b, off + 2, v % 100);
+};
+
+const stamp = fn (b: *u8, level: u8) usize {
+    let dt = std.time.fromUnixMs(std.time.unixMs());
+    (b + 0).0 = '[';
+    put4(b, 1, dt.year);
+    (b + 5).0 = '-';
+    put2(b, 6, dt.month);
+    (b + 8).0 = '-';
+    put2(b, 9, dt.day);
+    (b + 11).0 = 'T';
+    put2(b, 12, dt.hour);
+    (b + 14).0 = ':';
+    put2(b, 15, dt.min);
+    (b + 17).0 = ':';
+    put2(b, 18, dt.sec);
+    (b + 20).0 = '.';
+    put2(b, 21, dt.ms / 10);
+    (b + 23).0 = 48 + (u8)(dt.ms % 10);
+    (b + 24).0 = 'Z';
+    (b + 25).0 = ' ';
+    @memcpy(b + 26, LEVEL_NAMES[0..][level].ptr, 5);
+    (b + 31).0 = ']';
+    (b + 32).0 = ' ';
+    return 33;
+};
+
+// ---- Logger：单线程、无锁 ----------------------------------------------------
+//
+// 值类型，别复制（BufWriter 的缓冲指针会被复制出两个 len）。是不是线程
+// 安全看类型就知道：要跨线程用 SyncLogger。
+
+pub const Logger = struct {
+    writer: std.BufWriter,
+    min: u8,
+
+    pub const init = fn (alloc: Allocator, path: []const u8, min: u8) ?Logger {
+        return initCap(alloc, path, DEFAULT_CAP, min);
+    };
+
+    // cap == 0 用默认值。文件以追加方式打开，已有日志不会被清空。
+    pub const initCap = fn (alloc: Allocator, path: []const u8, cap: usize, min: u8) ?Logger {
+        let n = if (cap == 0) DEFAULT_CAP else cap;
+        if (std.BufWriter.appendTo(alloc, path, n)) w {
+            return Logger{ .writer = w, .min = min };
+        }
+        return null;
+    };
+
+    pub const deinit = fn (self: *Logger) void { self.writer.deinit(); };
+
+    // 给 SyncLogger 归还锁字用；与 BufWriter 的分配器是同一个。
+    pub const allocator = fn (self: *Logger) Allocator { return self.writer.alloc; };
+
+    pub const enabled = fn (self: *Logger, level: u8) bool {
+        return level >= self.min and level <= ERROR;
+    };
+
+    // 核心热路径。msg 不带换行——库负责补 \n。被过滤时直接返回 true。
+    pub const log = fn (self: *Logger, level: u8, msg: []const u8) bool {
+        if (!self.enabled(level)) { return true; }
+        var pre = std.stackAlloc(u8, 40);
+        let n = stamp(pre, level);
+        if (!self.writer.write(pre[0..n])) { return false; }
+        if (!self.writer.write(msg)) { return false; }
+        return self.writer.write("\n");
+    };
+
+    pub const debug = fn (self: *Logger, msg: []const u8) bool { return self.log(DEBUG, msg); };
+    pub const info = fn (self: *Logger, msg: []const u8) bool { return self.log(INFO, msg); };
+    pub const warn = fn (self: *Logger, msg: []const u8) bool { return self.log(WARN, msg); };
+    // `error` 是语言关键字，方法名叫 err。
+    pub const err = fn (self: *Logger, msg: []const u8) bool { return self.log(ERROR, msg); };
+
+    // 显式落盘：先倒空自己的缓冲，再 fflush 到磁盘。deinit 也会做第一步；
+    // 进程崩溃前想确保已写出的日志在盘上，就调这个。
+    pub const flush = fn (self: *Logger) bool {
+        if (!self.writer.flush()) { return false; }
+        std.io.flush(self.writer.h);
+        return true;
+    };
+
+    pub const pending = fn (self: *Logger) usize { return self.writer.pending(); };
+};
+
+// ---- SyncLogger：多线程安全 --------------------------------------------------
+//
+// 与 SyncPool 同款红线：锁字单独从 gpa 分配（值类型复制时共享同一把锁），
+// deinit 不加锁，调用方必须保证所有线程已经收工。自旋锁只适合极短临界区，
+// 别在持锁时跑长任务。
+
+const guardTake = fn (w: *u64) void {
+    while (true) {
+        if (std.atomic.atomicLoad(w) == 0) {
+            if (std.atomic.atomicCAS(w, 0, 1)) { return; }
+        }
+    }
+};
+const guardGive = fn (w: *u64) void { std.atomic.atomicStore(w, 0); };
+
+pub const SyncLogger = struct {
+    inner: Logger,
+    guard: *u64,
+
+    pub const init = fn (alloc: Allocator, path: []const u8, min: u8) ?SyncLogger {
+        return initCap(alloc, path, DEFAULT_CAP, min);
+    };
+
+    pub const initCap = fn (alloc: Allocator, path: []const u8, cap: usize, min: u8) ?SyncLogger {
+        if (Logger.initCap(alloc, path, cap, min)) l {
+            if (alloc.alloc(alloc.ctx, @type(u64).size)) w {
+                let wp = (*u64)w;
+                std.atomic.atomicStore(wp, 0);
+                return SyncLogger{ .inner = l, .guard = wp };
+            }
+            var lp = l;
+            lp.deinit();               // 锁字没拿到：把刚打开的文件收掉
+        }
+        return null;
+    };
+
+    pub const deinit = fn (self: *SyncLogger) void {
+        let a = self.inner.allocator();
+        self.inner.deinit();
+        a.free(a.ctx, (*u8)self.guard, @type(u64).size);
+    };
+
+    // min 是常量，读它不用加锁。
+    pub const enabled = fn (self: *SyncLogger, level: u8) bool { return self.inner.enabled(level); };
+    pub const pending = fn (self: *SyncLogger) usize {
+        guardTake(self.guard);
+        let r = self.inner.pending();
+        guardGive(self.guard);
+        return r;
+    };
+
+    pub const log = fn (self: *SyncLogger, level: u8, msg: []const u8) bool {
+        guardTake(self.guard);
+        let r = self.inner.log(level, msg);
+        guardGive(self.guard);
+        return r;
+    };
+    pub const debug = fn (self: *SyncLogger, msg: []const u8) bool { return self.log(DEBUG, msg); };
+    pub const info = fn (self: *SyncLogger, msg: []const u8) bool { return self.log(INFO, msg); };
+    pub const warn = fn (self: *SyncLogger, msg: []const u8) bool { return self.log(WARN, msg); };
+    pub const err = fn (self: *SyncLogger, msg: []const u8) bool { return self.log(ERROR, msg); };
+
+    pub const flush = fn (self: *SyncLogger) bool {
+        guardTake(self.guard);
+        let r = self.inner.flush();
+        guardGive(self.guard);
+        return r;
+    };
+};
