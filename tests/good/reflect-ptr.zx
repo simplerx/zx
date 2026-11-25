@@ -4,7 +4,7 @@
 // 编译期两头都已知。`@type(左值)` 的描述符才有 ptr；`f.ptr.0` 取值 /
 // 写值（var 实例）、传给 *T 形参都是普通指针语义。
 // statics：容器静态成员（const/var 数据，不含方法与类型成员）的切片，
-// `@type(T)` 与 `@type(左值)` 都有；`info.statics.len` / `statics[i].name/.ty`。
+// `@type(T)` 与 `@type(左值)` 都有；`info.kind.Struct.statics.len` / `statics[i].name/.ty`。
 const std = @mod("std");
 
 const Point = struct { x: i32, y: i32 };
@@ -41,8 +41,8 @@ const bump = fn (p: *i32) void { p.0 = p.0 + 1; };
 // 不知道字段名，遍历拿到所有字段的值（i32/i64 混合）
 const dump = fn (T: type, v: T) void {
     const info = @type(v);
-    inline for (0..info.fieldCount) i {
-        const f = info.fields[i];
+    inline for (0..info.kind.Struct.fieldCount) i {
+        const f = info.kind.Struct.fields[i];
         std.println("  {} = {}", f.name, f.ptr.0);
     }
 };
@@ -50,9 +50,18 @@ const dump = fn (T: type, v: T) void {
 // 不知道静态成员名，遍历打印名字与类型
 const dumpStatics = fn (T: type) void {
     const info = @type(T);
-    inline for (0..info.statics.len) i {
-        const s = info.statics[i];
-        std.println("  static {} : {}", s.name, @type(s.ty).name);
+    if (info.kind.tag == TypeInfo.Struct) {
+        const ss = info.kind.Struct.statics;
+        inline for (0..ss.len) i {
+            const s = ss[i];
+            std.println("  static {} : {}", s.name, @type(s.ty).name);
+        }
+    } else {
+        const ss = info.kind.Enum.statics;
+        inline for (0..ss.len) i {
+            const s = ss[i];
+            std.println("  static {} : {}", s.name, @type(s.ty).name);
+        }
     }
 };
 
@@ -65,16 +74,16 @@ pub const main = fn () u8 {
     // 写字段：var 实例通过 ptr 改值
     var pt = Outer{ .name = 1, .inner = Inner{ .n = 5, .m = 6 } };
     const io = @type(pt);
-    io.fields[0].ptr.0 = 42;
-    std.println("name={} (expect 42)", io.fields[0].ptr.0);
+    io.kind.Struct.fields[0].ptr.0 = 42;
+    std.println("name={} (expect 42)", io.kind.Struct.fields[0].ptr.0);
 
     // 嵌套基址：@type(p.inner) 的字段指针
     const ii = @type(pt.inner);
-    ii.fields[1].ptr.0 = 77;
+    ii.kind.Struct.fields[1].ptr.0 = 77;
     std.println("m={} (expect 77)", pt.inner.m);
 
     // 字段指针传给 *T 形参（真指针语义）
-    bump(ii.fields[0].ptr);
+    bump(ii.kind.Struct.fields[0].ptr);
     std.println("n={} (expect 6)", pt.inner.n);
 
     // 静态成员切片：P3 的 const 数据（方法 make 不是数据成员，不进 statics）
@@ -86,17 +95,17 @@ pub const main = fn () u8 {
 
     // §118 续：statics[i].ptr —— @type(T) 形态（无实例）也能取值
     const ci = @type(Cnt);
-    std.println("lim={} count={}", ci.statics[0].ptr.0, ci.statics[1].ptr.0);
-    ci.statics[1].ptr.0 = 9;                    // var 静态可写
+    std.println("lim={} count={}", ci.kind.Struct.statics[0].ptr.0, ci.kind.Struct.statics[1].ptr.0);
+    ci.kind.Struct.statics[1].ptr.0 = 9;                    // var 静态可写
     std.println("count={} (expect 9)", Cnt.count);
-    bumpS(ci.statics[1].ptr);                   // 裸 ptr 传 *T 形参
+    bumpS(ci.kind.Struct.statics[1].ptr);                   // 裸 ptr 传 *T 形参
     std.println("count={} (expect 10)", Cnt.count);
-    let p = ci.statics[0].ptr;                  // const 静态：&全局 真指针
+    let p = ci.kind.Struct.statics[0].ptr;                  // const 静态：&全局 真指针
     std.println("via-ptr={} (expect 100)", p.0);
     // @type(左值) 形态：statics.ptr 同样在（不与 fields.ptr 互斥）
     var c2 = Cnt{ .hits = 3 };
     const c2i = @type(c2);
-    std.println("hits={} lim={}", c2i.fields[0].ptr.0, c2i.statics[0].ptr.0);
+    std.println("hits={} lim={}", c2i.kind.Struct.fields[0].ptr.0, c2i.kind.Struct.statics[0].ptr.0);
 
     return 0;
 };

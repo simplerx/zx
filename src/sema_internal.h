@@ -150,6 +150,9 @@ Type *base_type(const char *n);
 Type *sema_allocator_type(void);
 Type *sema_type_field_type(void);
 Type *sema_type_type(void);
+Type *sema_type_info_type(void);   /* §257: TypeInfo 编译期 union(enum) */
+Type *sema_param_type(void);       /* §257: Function 载荷的 Param */
+Type *sema_method_info_type(void); /* §257: 容器载荷的 Method */
 bool sema_ty_ct_only(Type *t);
 Value *type_desc_value(Type *t, Node *inst);
 Symbol *std_builtin(const char *name);

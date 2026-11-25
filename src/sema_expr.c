@@ -1244,6 +1244,11 @@ Type *check_field(Node *n) {
             }
             if (deny_member(n, tv, f->is_pub, n->name)) return type_of(n, ty_invalid());
             if (tv->kind == TY_ENUM && !f->is_static) return type_of(n, tv);
+            /* union(enum) 类型值上的变体名就是 tag 值（`TypeInfo.Function`），
+             * 和 switch 里的 `.Function` 模式同一枚枚举——ct_field 会折成
+             * 该 tag 的整数值。 */
+            if (tv->kind == TY_UNION && tv->is_tagged && f->has_tag)
+                return type_of(n, tv->tag_ty ? tv->tag_ty : tv);
             if (!f->is_static)
                 return BAD(n, "'%s' is an instance field; construct a value first", n->name);
             /* 嵌套类型成员（`const Inner = struct { … };`）：成员的值就是这个

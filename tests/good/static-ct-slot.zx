@@ -30,7 +30,7 @@ pub const main = fn () u8 {
     std.println("S.sz={} S2.sz={} S.dcap={} S2.dcap={}",
                 S.sz, S2.sz, S.dcap, S2.dcap);
     // 值槽里的描述符再取一层
-    std.println("info: {} {} {}", S.info.name, S.info.size, S2.info.fields[1].name);
+    std.println("info: {} {} {}", S.info.name, S.info.size, S2.info.kind.Struct.fields[1].name);
     return 0;
 };
 

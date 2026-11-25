@@ -4,7 +4,7 @@
 const P5 = struct { x: i32 };
 const info = @type(P5);
 const main = fn () void {
-    const f = info.fields[0];
+    const f = info.kind.Struct.fields[0];
     let v = f.ptr.0;
     _ = v;
 };

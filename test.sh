@@ -2605,12 +2605,10 @@ fi
 # 运行期覆盖由 tests/good/array-fill-in-struct.zx 自动发现。
 printf "\n== §253 编辑器体验静态断言\n"
 if grep -Fq 'fs_cast_close(v, i - 1)' src/main.c \
-   && grep -Fq 'if (fs_cast_close(v, i)' src/main.c \
+   && grep -Fq 't->cast_close = fs_cast_close(v, i);' src/main.c \
    && grep -Fq '"[N]",' tools/zxls.zig \
    && grep -Fq '.label = "[N]", .body = "[${1:N}]${2:0}"' tools/zxls.zig \
    && grep -Fq 'return std.fmt.allocPrint(gpa, "[{s}]{s}"' tools/zxls.zig \
-   && grep -Fq 'last_pub_has_diags.store(diags.len > 0, .seq_cst);' tools/zxls.zig \
-   && grep -Fq 'if (last_pub_has_diags.load(.seq_cst))' tools/zxls.zig \
    && [ -f tests/good/array-fill-in-struct.zx ]; then
     printf "  ok   §253 cast 格式 + [N]v inlay/snippet + 诊断即时清除\n"
 else
@@ -2630,6 +2628,75 @@ if grep -Fq '{ "unwrap with `.?`",                 "E0533" },' src/zxc.c \
     printf '  ok   §254 E0533 专用码 + .?.0 / [N]v 空格规则\n'
 else
     printf "  FAIL §254 静态断言\n"; fail=1
+fi
+
+# §259 — 格式化空格根治：error 可作命名空间值(error.null 不插空格)，
+# fn 参数列表的 ')' 后返回类型前缀 !T/?T 要留一格。行为守门而非源码 grep：
+# 直接跑 zxc fmt，比对输出并确认幂等。fs_annotate 一次标注语义角色，
+# fs_space 只查标记，不再靠 token 文本偷看——同类形态自动覆盖。
+printf "\n== §259 命名空间点 / 返回类型前缀格式\n"
+FMT_DIR="$PWD/.tmp/fmt259-$$"
+mkdir -p "$FMT_DIR"
+printf '%s\n' \
+  'const err = fn (b: bool)!i32 {' \
+  '    if (b) { return error .null; }' \
+  '    return 110;' \
+  '};' \
+  'const opt = fn (b: bool)?i32 { return null; };' \
+  > "$FMT_DIR/in.zx"
+if "$ZXC" fmt "$FMT_DIR/in.zx" >/dev/null 2>&1 \
+   && grep -Fq 'fn (b: bool) !i32' "$FMT_DIR/in.zx" \
+   && grep -Fq 'fn (b: bool) ?i32' "$FMT_DIR/in.zx" \
+   && grep -Fq 'error.null' "$FMT_DIR/in.zx" \
+   && ! grep -Fq 'error .null' "$FMT_DIR/in.zx" \
+   && "$ZXC" fmt --check "$FMT_DIR/in.zx" >/dev/null 2>&1 \
+   && grep -Fq 'static void fs_annotate' src/main.c; then
+    printf '  ok   §259 error.null + /fn(...) !T 空格 + 幂等\n'
+else
+    printf '  FAIL §259 命名空间点 / 返回类型前缀格式\n'; fail=1
+fi
+rm -rf "$FMT_DIR"
+# §255 capability retained: function values bind to `type` generic params,
+# nested @type reflection folds through ct_eval (now under kind.Function).
+printf "\n== §255 generic fn-value + nested reflection static assertions\n"
+if grep -Fq 'if (is_type_param(pm) && v->kind == V_FN && v->fn)' src/sema_ct.c \
+   && grep -Fq 'Value *tv = ct_eval(n->items[0]);' src/sema_call.c \
+   && grep -Fq 'if (t->elem && t->elem->kind == TY_TYPE) return true;' src/sema_core.c \
+   && grep -Fq 'canParallel(moveSys, fuelSys)' tests/good/ecs-system-signature.zx \
+   && [ -f tests/bad/type-params-runtime.zx ]; then
+    printf '  ok   §255 fn-value generic + nested reflection\n'
+else
+    printf "  FAIL §255 static assertions\n"; fail=1
+fi
+# §257: type reflection via `kind` union(enum); @type keeps only 5 fields.
+# Runtime coverage: tests/good/type-reflection.zx + ecs-system-signature.zx.
+printf "\n== §257 union(enum) type reflection static assertions\n"
+if grep -Fq 't->nfields = 5;' src/sema_core.c \
+   && grep -Fq 't->fields[4].name = "kind";  t->fields[4].ty = sema_type_info_type();' src/sema_core.c \
+   && grep -Fq 'Type *sema_type_info_type(void)' src/sema_core.c \
+   && grep -Fq 'id.kind = NK_UNION_TYPE;' src/sema_core.c \
+   && grep -Fq 't->fields[i].ty = type_info_payload(i);' src/sema_core.c \
+   && grep -Fq '"Struct",        /* TY_STRUCT */' src/sema_core.c \
+   && grep -Fq '"Function",      /* TY_FN */' src/sema_core.c \
+   && grep -Fq 'v->items[4] = kv;' src/sema_core.c \
+   && grep -Fq 'kind.tag != TypeInfo.Function' tests/good/ecs-system-signature.zx \
+   && grep -Fq 'st.fieldCount != 2' tests/good/type-reflection.zx \
+   && grep -Fq 'const char *tname = ty_str(t);' src/sema_core.c \
+   && grep -Fq 'pname.len != 5' tests/good/type-reflection.zx \
+   && grep -Fq 'fn switchCaptureTy' tools/zxls.zig \
+   && grep -Fq 'fn switchPatternVariants' tools/zxls.zig \
+   && grep -Fq '.{ .name = "kind", .ty = "TypeInfo' tools/zxls.zig \
+   && grep -Fq 'cleanupStaleShadows(dirName(doc.path));' tools/zxls.zig \
+   && grep -Fq 'has_diags: bool = false,' tools/zxls.zig \
+   && ! grep -Fq 'last_pub_has_diags' tools/zxls.zig \
+   && grep -Fq 'fn collectTypeInfoMembers' tools/zxls.zig \
+   && grep -Fq 'fn typeInfoDetail' tools/zxls.zig \
+   && grep -Fq "std.mem.startsWith(u8, e, \"@type\") and e.len > 5" tools/zxls.zig \
+   && [ -f tests/good/type-reflection.zx ] \
+   && [ -f tests/bad/type-kind-runtime.zx ]; then
+    printf '  ok   §257 kind union(enum) + fieldCount/fields/statics in Struct\n'
+else
+    printf "  FAIL §257 static assertions\n"; fail=1
 fi
 # 用例会在仓库根留下自己的临时文件：io_fmt.zx 写 io_fmt.tmp，stdfs.zx 建
 # fs_t_dir / fs_t_dir2。跑完统一带走——测试不该往工作区里堆东西。

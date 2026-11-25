@@ -1,0 +1,7 @@
+// §257: TypeInfo is a compile-time-only tagged union, no runtime storage.
+// expect: E0501
+pub const main = fn () u8 {
+    var k: TypeInfo = @type(i32).kind;
+    _ = k;
+    return 0;
+};

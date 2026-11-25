@@ -34,11 +34,11 @@ const main = fn () u8 {
 
     // ---- 标量四样 ----
     if (tp.size != 8 or tp.align != 4) { return 3; }
-    if (tp.fieldCount != 2) { return 4; }
+    if (tp.kind.Struct.fieldCount != 2) { return 4; }
 
     // ---- 字段：名字 / 类型 / 偏移 ----
-    const f0 = tp.fields[0];
-    const f1 = tp.fields[1];
+    const f0 = tp.kind.Struct.fields[0];
+    const f1 = tp.kind.Struct.fields[1];
     if (f0.name[0] != 'x' or f1.name[0] != 'y') { return 5; }
     if (f0.ty != i32 or f1.ty != i32) { return 6; }
     if (f1.offset != @type(i32).size) { return 7; }
@@ -52,6 +52,6 @@ const main = fn () u8 {
     let d2 = dispatch(f64, 1.5);
     if (d2 != 3.0) { return 10; }
 
-    std.println("type ok: {} {} {} {}", tp.name[0], tp.fieldCount, f1.offset, sizeOfT(Point));
+    std.println("type ok: {} {} {} {}", tp.name[0], tp.kind.Struct.fieldCount, f1.offset, sizeOfT(Point));
     return 0;
 };

@@ -1,0 +1,82 @@
+// §257: compile-time type reflection via `kind` union(enum) (ECS is one consumer)
+// expect-exit: 0
+const std = @mod("std");
+
+const Pos = struct { x: i32, y: i32 };
+const Vel = struct { dx: i32, dy: i32 };
+const Health = struct { hp: i32 };
+const Fuel = struct { amount: i32 };
+
+const moveSys = fn (pos: *Pos, vel: *const Vel) void {
+    pos.x += vel.dx;
+    pos.y += vel.dy;
+};
+
+const fuelSys = fn (fuel: *Fuel, hp: *const Health) void {
+    fuel.amount -= hp.hp;
+};
+
+const readPosSys = fn (pos: *const Pos) void { _ = pos; };
+const writeVelSys = fn (vel: *Vel) void { _ = vel; };
+
+// `info.kind.tag` says what the type is; `info.kind.Function.params[i]` carries
+// the parameter type and whether it is a read-only view. No guessing.
+const canParallel = fn (A: type, B: type) bool {
+    const ai = @type(A);
+    const bi = @type(B);
+    if (ai.kind.tag != TypeInfo.Function or bi.kind.tag != TypeInfo.Function) return false;
+    const af = ai.kind.Function;
+    const bf = bi.kind.Function;
+    inline for (0..af.paramCount) i {
+        const pa = af.params[i];
+        inline for (0..bf.paramCount) j {
+            const pb = bf.params[j];
+            const at = @type(pa.ty);
+            const bt = @type(pb.ty);
+            if (at.kind.tag == TypeInfo.Ptr and bt.kind.tag == TypeInfo.Ptr and
+                at.kind.Ptr.elem == bt.kind.Ptr.elem and
+                (!pa.isConst or !pb.isConst)) return false;
+        }
+    }
+    return true;
+};
+
+const dumpSig = fn (S: type) void {
+    const info = @type(S);
+    const f = info.kind.Function;
+    std.println("sig {s}: n={} ret={s}", info.name, f.paramCount, @type(f.ret).name);
+    inline for (0..f.paramCount) i {
+        const p = f.params[i];
+        std.println("  [{s}] const={s} elem={s}", @type(p.ty).name,
+            if (p.isConst) "yes" else "no", @type(@type(p.ty).kind.Ptr.elem).name);
+    }
+};
+
+pub const main = fn () u8 {
+    const mi = @type(moveSys);
+    if (mi.kind.tag != TypeInfo.Function) return 1;
+    const mf = mi.kind.Function;
+    if (mf.paramCount != 2) return 2;
+    if (mf.params[0].ty != *Pos) return 3;
+    if (mf.params[0].isConst) return 4;
+    if (mf.params[1].ty != *const Vel) return 5;
+    if (!mf.params[1].isConst) return 6;
+    if (mf.ret != void) return 7;
+
+    // A zero-argument function is still a function: kind is authoritative.
+    const zi = @type(fn () void);
+    if (zi.kind.tag != TypeInfo.Function or zi.kind.Function.paramCount != 0) return 8;
+    if (@type(Pos).kind.tag != TypeInfo.Struct) return 9;
+
+    // Function values bind directly to `type` generic params (§255).
+    if (!canParallel(moveSys, fuelSys)) return 10;
+    if (canParallel(moveSys, readPosSys)) return 11;
+    if (canParallel(moveSys, writeVelSys)) return 12;
+    if (!canParallel(readPosSys, writeVelSys)) return 13;
+
+    // The explicit function-type spelling must behave identically.
+    if (!canParallel(@type(moveSys).ty, @type(fuelSys).ty)) return 14;
+
+    dumpSig(moveSys);
+    return 0;
+};

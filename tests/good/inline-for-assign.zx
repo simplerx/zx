@@ -4,7 +4,7 @@
 // 旧实现浅拷贝了 FOR 节点的 unroll 指针与 nunroll——克隆体重新展开时
 // realloc 挪块，源节点的 unroll 数组悬垂，后端预扫描读到已释放内存段错误。
 // 修复：clone_tree 重置 unroll/nunroll（克隆体不带展开结果）。
-// 踩中形态：`inline for` 体里给局部 var 赋 `@type(T).size` / `d.fields[i].offset`。
+// 踩中形态：`inline for` 体里给局部 var 赋 `@type(T).size` / `d.kind.Struct.fields[i].offset`。
 const std = @mod("std");
 
 const Point = struct { x: i32, y: i32 };
@@ -13,7 +13,7 @@ const Point = struct { x: i32, y: i32 };
 const size_sum = fn () i32 {
     const d = @type(Point);
     var off: u64 = 0;
-    inline for (0..2) i { off = d.fields[i].offset; }
+    inline for (0..2) i { off = d.kind.Struct.fields[i].offset; }
     return (i32)off + (i32)d.size;
 };
 
@@ -21,7 +21,7 @@ const size_sum = fn () i32 {
 const off_sum = fn () i32 {
     const d = @type(Point);
     var off: u64 = 0;
-    inline for (0..2) i { off = off + d.fields[i].offset; }
+    inline for (0..2) i { off = off + d.kind.Struct.fields[i].offset; }
     return (i32)off;
 };
 
@@ -30,7 +30,7 @@ const via_let = fn () i32 {
     const d = @type(Point);
     var acc: u64 = 0;
     inline for (0..2) i {
-        const v = d.fields[i].offset;
+        const v = d.kind.Struct.fields[i].offset;
         acc = acc + v;
     }
     return (i32)acc;

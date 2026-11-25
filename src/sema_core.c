@@ -68,7 +68,7 @@ const char *suggest_member(const char *bad, Type *t) {
  * 漂移的代价只是"少一条建议"，不会出错，别为它建机制。 */
 static const char *suggest_std_member(const char *ns, const char *bad) {
     static const char *const std_top[] = { "print", "println", "format", "heap",
-        "file", "io", "Allocator", "Type", "Field",
+        "file", "io", "Allocator", "Type", "Field", "TypeInfo", "Param", "Method",
         "stackAlloc", "heapAlloc", "heapSlice", "free", "process", NULL };
     static const char *const io_m[] = { "read", "write", "openRead", "openWrite",
         "openAppend", "seek", "tell", "close", "flush", "stdin", "stdout",
@@ -397,6 +397,12 @@ Type *base_type(const char *n) {
      * （和 Allocator 一样）。LSP 的行内提示会写 `: Type` / `: Field`。 */
     if (!strcmp(n, "Type"))  return sema_type_type();
     if (!strcmp(n, "Field")) return sema_type_field_type();
+    /* §257：反射的附属描述符类型。TypeInfo 是编译期 union(enum)，
+     * Param/Method 是各变体载荷里的结构。
+     * Desc 里切片元素的类型；都只活在编译期，但名字要能写出来做标注。 */
+    if (!strcmp(n, "TypeInfo"))  return sema_type_info_type();
+    if (!strcmp(n, "Param"))    return sema_param_type();
+    if (!strcmp(n, "Method"))   return sema_method_info_type();
     return NULL;
 }
 
@@ -448,21 +454,41 @@ Type *sema_allocator_type(void) {
     return t;
 }
 
-/* ---------------- @type 的两种描述符 ----------------
+/* ---------------- @type 的反射描述符（§257） ----------------
  *
- * Type  = { name, size, align, ty, fieldCount, fields: []Field }
- * Field = { name, ty, offset }
+ * Type = { name, size, align, ty, kind }          —— 只留通用五字段
+ * kind : TypeInfo = union(enum) {                  —— 泛型入口，按种类分派
+ *     Invalid/Void/NoReturn/Bool/ErrorCode/TypeId/ComptimeInt/
+ *     ComptimeFloat/NullValue/Undef/Tag : void,
+ *     Int    : { bits, isSigned },
+ *     Float  : { bits },
+ *     Ptr    : { elem: type, isConst: bool },
+ *     Slice  : { elem: type, isConst: bool },
+ *     Array  : { len, elem: type },
+ *     Vec    : { len, elem: type },
+ *     Tuple  : { len, elements: []type },
+ *     Struct : { fieldCount, fields: []Field, statics: []Field,
+ *                methodCount, methods: []Method },
+ *     Union  : { fieldCount, fields: []Field, isTagged, tagTy: type,
+ *                methodCount, methods: []Method },
+ *     Enum   : { bits, isSigned, fieldCount, fields: []Field,
+ *                statics: []Field, methodCount, methods: []Method },
+ *     Opt    : { elem: type },  Err : { elem: type },
+ *     ErrorSet : { errorCount, errors: [][]const u8 },
+ *     Function : { paramCount, params: []Param, ret: type },
+ * }
+ *
+ * §255/§256 的扁平 22 字段已整体废弃：专属信息只在对应变体里出现，
+ * `info.kind.Function.params` 一眼可见它的归属，`fieldCount/fields/statics`
+ * 移到 `Struct`（枚举/联合体变体各自带自己的那一份）。
  *
  * 只此一个内建（2026-11-10 用户拍板两次：先把 @sizeOf/@alignOf/@typeName
  * 并进来，再把 @typeInfo 也并进来——反射就剩 `@type(x)` 一个名字）。
  * 为什么要并：这三个答案编译器本来就知道，分成三个以 `@` 打头的关键字
  * 逼人背名字；`@type(T).size` 读起来就是"T 这个类型的大小"。
  *
- * 两个类型都只当"身份证"用，不进任何作用域；@type 返回的值全部是
- * 编译期值——Field.offset 让 @offsetOf 不再需要单独的内建，
- * Type.ty 让 @typeOf 不再需要单独的内建。
- * x 既可以是类型（@type(Point)、@type([]const u8)）也可以是表达式
- * （@type(p.x)），二合一走同一条路。 */
+ * 所有描述符类型都只活在编译期，不进任何作用域；@type 返回的值全部是
+ * 编译期值。x 既可以是类型（@type(Point)）也可以是表达式（@type(p.x)）。 */
 Type *sema_type_field_type(void) {
     static Type *t;
     if (t) return t;
@@ -486,6 +512,192 @@ Type *sema_type_field_type(void) {
     return t;
 }
 
+/* §257：TypeInfo 的变体名 —— 与 ty.h 的 TyKind **同序**。
+ * TypeInfo 是 union(enum) 而不是裸枚举：变体 i 的 tag=i、payload 在
+ * `type_desc_value` 里按同一索引填进 V_AGG。首字母大写避开关键字，
+ * 变体名即 tag 枚举成员（`TypeInfo.Function`）。 */
+static const char *const type_info_names[] = {
+    "Invalid",       /* TY_INVALID */
+    "Void",          /* TY_VOID */
+    "NoReturn",      /* TY_NORETURN */
+    "Bool",          /* TY_BOOL */
+    "ErrorCode",     /* TY_ERROR */
+    "TypeId",        /* TY_TYPE */
+    "Int",           /* TY_INT */
+    "Float",         /* TY_FLOAT */
+    "ComptimeInt",   /* TY_COMPTIME_INT */
+    "ComptimeFloat", /* TY_COMPTIME_FLOAT */
+    "NullValue",     /* TY_NULL */
+    "Undef",         /* TY_UNDEF */
+    "Ptr",           /* TY_PTR */
+    "Slice",         /* TY_SLICE */
+    "Array",         /* TY_ARRAY */
+    "Tuple",         /* TY_TUPLE */
+    "Struct",        /* TY_STRUCT */
+    "Union",         /* TY_UNION */
+    "Enum",          /* TY_ENUM */
+    "Opt",           /* TY_OPT */
+    "Err",           /* TY_ERR */
+    "ErrorSet",      /* TY_ERRORSET */
+    "Function",      /* TY_FN */
+    "Vec",           /* TY_VEC */
+    "Tag",           /* TY_TAG */
+};
+#define ZX_TYPE_INFO_COUNT ((int)(sizeof type_info_names / sizeof type_info_names[0]))
+
+/* 载荷类型的小工厂：名字相同的 TY_STRUCT 由 ty_agg 按 decl 身份缓存，
+ * 这里每个都用独立 static Node，保证同名字只建一次。 */
+static Type *info_payload(const char *name, const char **fns, Type **fts, int n) {
+    static Node ids[16];
+    static int next_id = 0;
+    static Type *cached[16];
+    for (int i = 0; i < next_id; i++)
+        if (cached[i]->name && !strcmp(cached[i]->name, name)) return cached[i];
+    Node *id = &ids[next_id];
+    memset(id, 0, sizeof *id);
+    id->kind = NK_STRUCT_TYPE;
+    id->name = name;
+    Type *t = ty_agg(TY_STRUCT, id, name);
+    if (!t->fields) {
+        t->nfields = n;
+        t->fields = xcalloc((size_t)(n ? n : 1), sizeof(Field));
+        for (int i = 0; i < n; i++) {
+            t->fields[i].name = fns[i];
+            t->fields[i].ty = fts[i];
+        }
+    }
+    cached[next_id++] = t;
+    return t;
+}
+
+/* Function.params[i]：类型 + 视图只读性（`*const T`/`[]const T`）。
+ * 形参槽位本身在 zx 里一律只读（E0403），isConst 说的是被指数据。 */
+Type *sema_param_type(void) {
+    const char *fn[] = { "ty", "isConst" };
+    Type *ft[] = { ty_type(), ty_bool() };
+    return info_payload("Param", fn, ft, 2);
+}
+
+/* 容器/枚举体里的方法：名字 / 函数类型 / 可见性 / 是否带 self。 */
+Type *sema_method_info_type(void) {
+    const char *fn[] = { "name", "ty", "isPub", "hasSelf" };
+    Type *ft[] = { ty_slice(ty_u8(), true), ty_type(), ty_bool(), ty_bool() };
+    return info_payload("Method", fn, ft, 4);
+}
+
+/* 各变体的载荷类型。普通无载荷种类回 ty_void()——union(enum) 允许
+ * void 载荷（reference §5.4），`info.kind.Void` 读出来就是空值。 */
+static Type *type_info_payload(int kind) {
+    Type *us = ty_usize(), *bo = ty_bool(), *ty = ty_type();
+    switch (kind) {
+    case TY_INT: {
+        const char *fn[] = { "bits", "isSigned" };
+        Type *ft[] = { us, bo };
+        return info_payload("IntInfo", fn, ft, 2);
+    }
+    case TY_FLOAT: {
+        const char *fn[] = { "bits", "isSigned" };
+        Type *ft[] = { us, bo };
+        return info_payload("FloatInfo", fn, ft, 2);
+    }
+    case TY_ENUM: {
+        const char *fn[] = { "bits", "isSigned", "fieldCount", "fields",
+                             "statics", "methodCount", "methods" };
+        Type *ft[] = { us, bo, us, ty_slice(sema_type_field_type(), true),
+                       ty_slice(sema_type_field_type(), true), us,
+                       ty_slice(sema_method_info_type(), true) };
+        return info_payload("EnumInfo", fn, ft, 7);
+    }
+    case TY_PTR: case TY_SLICE: {
+        const char *fn[] = { "elem", "isConst" };
+        Type *ft[] = { ty, bo };
+        return info_payload("PtrInfo", fn, ft, 2);
+    }
+    case TY_ARRAY: case TY_VEC: {
+        const char *fn[] = { "len", "elem" };
+        Type *ft[] = { us, ty };
+        return info_payload("ArrayInfo", fn, ft, 2);
+    }
+    case TY_TUPLE: {
+        const char *fn[] = { "len", "elements" };
+        Type *ft[] = { us, ty_slice(ty, true) };
+        return info_payload("TupleInfo", fn, ft, 2);
+    }
+    case TY_STRUCT: {
+        const char *fn[] = { "fieldCount", "fields", "statics", "methodCount", "methods" };
+        Type *ft[] = { us, ty_slice(sema_type_field_type(), true),
+                       ty_slice(sema_type_field_type(), true), us,
+                       ty_slice(sema_method_info_type(), true) };
+        return info_payload("StructInfo", fn, ft, 5);
+    }
+    case TY_UNION: {
+        const char *fn[] = { "fieldCount", "fields", "isTagged", "tagTy",
+                             "methodCount", "methods" };
+        Type *ft[] = { us, ty_slice(sema_type_field_type(), true), bo, ty, us,
+                       ty_slice(sema_method_info_type(), true) };
+        return info_payload("UnionInfo", fn, ft, 6);
+    }
+    case TY_OPT: case TY_ERR: {
+        const char *fn[] = { "elem" };
+        Type *ft[] = { ty };
+        return info_payload("ElemInfo", fn, ft, 1);
+    }
+    case TY_ERRORSET: {
+        const char *fn[] = { "errorCount", "errors" };
+        Type *ft[] = { us, ty_slice(ty_slice(ty_u8(), true), true) };
+        return info_payload("ErrorSetInfo", fn, ft, 2);
+    }
+    case TY_FN: {
+        const char *fn[] = { "paramCount", "params", "ret" };
+        Type *ft[] = { us, ty_slice(sema_param_type(), true), ty };
+        return info_payload("FunctionInfo", fn, ft, 3);
+    }
+    default: return ty_void();
+    }
+}
+
+Type *sema_type_info_type(void) {
+    static Type *t;
+    if (t) return t;
+    static Node id;
+    memset(&id, 0, sizeof id);
+    id.kind = NK_UNION_TYPE;
+    id.name = "TypeInfo";
+    t = ty_agg(TY_UNION, &id, "TypeInfo");
+    if (!t->fields) {
+        /* 标签枚举：变体名即成员，switch (info.kind.tag) 用它穷尽分派。 */
+        static Node tid;
+        memset(&tid, 0, sizeof tid);
+        tid.kind = NK_ENUM_TYPE;
+        tid.name = "TypeInfoTag";
+        Type *et = ty_agg(TY_ENUM, &tid, "TypeInfoTag");
+        if (!et->fields) {
+            et->elem = ty_int(32, false);
+            et->nfields = ZX_TYPE_INFO_COUNT;
+            et->fields = xcalloc((size_t)ZX_TYPE_INFO_COUNT, sizeof(Field));
+            for (int i = 0; i < ZX_TYPE_INFO_COUNT; i++) {
+                et->fields[i].name = type_info_names[i];
+                et->fields[i].ty = et;
+                et->fields[i].has_tag = true;
+                et->fields[i].is_pub = true;
+                et->fields[i].tag = (uint64_t)i;
+            }
+        }
+        t->is_tagged = true;
+        t->tag_ty = et;
+        t->nfields = ZX_TYPE_INFO_COUNT;
+        t->fields = xcalloc((size_t)ZX_TYPE_INFO_COUNT, sizeof(Field));
+        for (int i = 0; i < ZX_TYPE_INFO_COUNT; i++) {
+            t->fields[i].name = type_info_names[i];
+            t->fields[i].ty = type_info_payload(i);
+            t->fields[i].has_tag = true;
+            t->fields[i].is_pub = true;
+            t->fields[i].tag = (uint64_t)i;
+        }
+    }
+    return t;
+}
+
 Type *sema_type_type(void) {
     static Type *t;
     if (t) return t;
@@ -496,15 +708,15 @@ Type *sema_type_type(void) {
 
     t = ty_agg(TY_STRUCT, &id, "Type");
     if (!t->fields) {
-        t->nfields = 7;
-        t->fields = xcalloc(7, sizeof(Field));
-        t->fields[0].name = "name";       t->fields[0].ty = ty_slice(ty_u8(), true);
-        t->fields[1].name = "size";       t->fields[1].ty = ty_usize();
-        t->fields[2].name = "align";      t->fields[2].ty = ty_usize();
-        t->fields[3].name = "ty";         t->fields[3].ty = ty_type();
-        t->fields[4].name = "fieldCount"; t->fields[4].ty = ty_usize();
-        t->fields[5].name = "fields";     t->fields[5].ty = ty_slice(sema_type_field_type(), true);
-        t->fields[6].name = "statics";    t->fields[6].ty = ty_slice(sema_type_field_type(), true);
+        /* §257：只留通用字段；fieldCount/fields/statics 已移进 kind.Struct，
+         * 函数签名移进 kind.Function，位宽/长度/只读性各归其变体。 */
+        t->nfields = 5;
+        t->fields = xcalloc(5, sizeof(Field));
+        t->fields[0].name = "name";  t->fields[0].ty = ty_slice(ty_u8(), true);
+        t->fields[1].name = "size";  t->fields[1].ty = ty_usize();
+        t->fields[2].name = "align"; t->fields[2].ty = ty_usize();
+        t->fields[3].name = "ty";    t->fields[3].ty = ty_type();
+        t->fields[4].name = "kind";  t->fields[4].ty = sema_type_info_type();
     }
     return t;
 }
@@ -514,49 +726,76 @@ Type *sema_type_type(void) {
  * 它的用法。（ast.h 里的声明保留：后端将来物化声明时也用它跳过。） */
 bool sema_ty_ct_only(Type *t) {
     if (!t) return false;
-    if (t == sema_type_type() || t == sema_type_field_type()) return true;
+    if (t == sema_type_type() || t == sema_type_field_type() ||
+        t == sema_type_info_type() || t == sema_param_type() ||
+        t == sema_method_info_type()) return true;
+    /* 各变体载荷里含 `type` / []Field 等无运行时表示的成员，整体 ct-only。 */
+    Type *info = sema_type_info_type();
+    if (info && info->tag_ty == t) return true;
+    for (int i = 0; info && i < info->nfields; i++)
+        if (info->fields[i].ty == t) return true;
     if (t->kind == TY_TAG) return true;          /* §172：标签句柄只活在编译期 */
-    if (t->kind == TY_SLICE || t->kind == TY_PTR || t->kind == TY_OPT)
+    if (t->kind == TY_SLICE || t->kind == TY_PTR || t->kind == TY_OPT) {
+        /* `[]type` / []Field / []Param 和类型值本身没有运行时表示；
+         * 落进 var/let 会让后端发出无效 C，在检查期就拦住。 */
+        if (t->elem && t->elem->kind == TY_TYPE) return true;
         return sema_ty_ct_only(t->elem);
+    }
     return false;
 }
 
-/* @type(x) 的值：6 个字段全是编译期值。fields 是"切片视图"：
- * V_PTR 指向一块 V_AGG 数组值，nitems 记长度——`.len` / 下标 / 切片
- * 在 ct_eval 里都走 ct_view_len / ct_index 那条路。
- * fields 只装数据字段（关联常量/嵌套类型这些静态成员不是实例布局，
- * offset 对它们没有意义）。 */
+/* @type(x) 的值：5 个通用字段 + kind（TypeInfo union 的编译期值）。
+ * kind 的 V_AGG 只有一个变体槽非 NULL：槽索引 == TyKind == Field.tag，
+ * 载荷本身就是该变体的 struct Value。`info.kind.Function.params` 走
+ * ct_field 两次取字段（先按变体名取载荷，再按载荷字段名取值）。
+ * fields/statics 是"切片视图"：V_PTR 指向 V_AGG 数组值，nitems 记长度。 */
+static Value *field_slice(Type *fit, int n, Node *inst, bool statics) {
+    Value *arr = val_agg(ty_slice(fit, true), n);
+    Value *sv = val_ptr(ty_slice(fit, true), arr, 0);
+    sv->nitems = n;
+    (void)inst; (void)statics;
+    return sv;
+}
+
+/* 构造一个 Field 值的公共部分（name/ty/offset）。 */
+static Value *field_value(Type *fit, const char *name, Type *fty, uint64_t off) {
+    Value *fv = val_agg(fit, 4);
+    fv->items[0] = val_str(name, (int)strlen(name));
+    fv->items[1] = val_type(fty);
+    fv->items[2] = val_int(ty_usize(), off, false);
+    fv->items[3] = NULL;
+    return fv;
+}
+
 Value *type_desc_value(Type *t, Node *inst) {
-    Value *v = val_agg(sema_type_type(), 7);
+    Value *v = val_agg(sema_type_type(), 5);
     int sz = ty_size(t);
     int al = ty_align(t);
-    v->items[0] = val_str(ty_str(t), (int)strlen(ty_str(t)));
+    /* ty_str 的串保留到进程结束（ty.c 的进程期缓冲），描述符只存
+     * 这个指针 + 长度；后端 val_init 的 V_STR 分支再把它发进静态字符串池。
+     * 因此 `@type(T).name` 在运行期不是临时缓冲，取到就能直接用。 */
+    const char *tname = ty_str(t);
+    v->items[0] = val_str(tname, (int)strlen(tname));
     v->items[1] = val_int(ty_usize(), (uint64_t)(sz < 0 ? 0 : sz), false);
     v->items[2] = val_int(ty_usize(), (uint64_t)(al < 0 ? 1 : al), false);
     v->items[3] = val_type(t);
-    bool has_fields = t->kind == TY_STRUCT || t->kind == TY_UNION;
+
+    /* ---- kind：先建好各变体可能用到的切片视图 ---- */
+    Type *fit = sema_type_field_type();
+    bool has_fields = t->kind == TY_STRUCT || t->kind == TY_UNION ||
+                      t->kind == TY_ENUM;
     int nf = 0;
     if (has_fields)
         for (int i = 0; i < t->nfields; i++)
             if (!t->fields[i].is_static) nf++;
-    v->items[4] = val_int(ty_usize(), (uint64_t)nf, false);
-
-    Type *fit = sema_type_field_type();
-    Value *arr = val_agg(ty_slice(fit, true), nf);
+    Value *fields = field_slice(fit, nf, inst, false);
+    Value *farr = fields->base;
     int k = 0;
     if (has_fields)
         for (int i = 0; i < t->nfields; i++) {
             if (t->fields[i].is_static) continue;
-            Value *fv = val_agg(fit, 4);
-            fv->items[0] = val_str(t->fields[i].name, (int)strlen(t->fields[i].name));
-            fv->items[1] = val_type(t->fields[i].ty);
-            fv->items[2] = val_int(ty_usize(), (uint64_t)t->fields[i].offset, false);
-            /* §118 字段值指针（用户 2026-11-11 拍板"使用指针取值"）：inst 是
-             * 有存储的左值（@type(v) / @type(p.inner)）时，ptr = 基址 + offset，
-             * 编译期两头都已知。类型 *(f.ty)；只读性跟基址走（const 实例的
-             * 字段不可写）。运行期地址折不成编译期常量——ct 折值在 ct_field
-             * 里特判返回 NULL，发码时后端现拼。 */
-            fv->items[3] = NULL;
+            Value *fv = field_value(fit, t->fields[i].name, t->fields[i].ty,
+                                    (uint64_t)t->fields[i].offset);
             if (inst) {
                 Value *pv = val_undef(ty_ptr(t->fields[i].ty,
                                              !lvalue_mutable(inst), false, 0));
@@ -564,19 +803,9 @@ Value *type_desc_value(Type *t, Node *inst) {
                 pv->off = (uint64_t)t->fields[i].offset;
                 fv->items[3] = pv;
             }
-            arr->items[k++] = fv;
+            farr->items[k++] = fv;
         }
-    Value *sv = val_ptr(ty_slice(fit, true), arr, 0);
-    sv->nitems = nf;
-    v->items[5] = sv;
 
-    /* statics（§118 续，用户 2026-11-11："@type(T) 还应该有静态成员的切片"；
-     * 二次拍板：ptr 两种形态都有——它不依赖实例）。范围：struct/union 的
-     * is_static 非 类型 成员在 fields 里，enum 的在 statics 里（ty.h：
-     * "结构体的在 fields 里（is_static），枚举的在 statics 里"——上一版
-     * 只扫 fields，枚举体的 const 成员漏收）。每个元素都带 ptr：后端把
-     * 静态成员全部物化成 C 全局（var/const 都有存储），所以 ptr 就是
-     * &全局 的真指针——const 成员 *const T，var 成员 *T。 */
     int ns = 0;
     if (t->kind == TY_STRUCT || t->kind == TY_UNION)
         for (int i = 0; i < t->nfields; i++)
@@ -585,41 +814,159 @@ Value *type_desc_value(Type *t, Node *inst) {
     if (t->kind == TY_ENUM)
         for (int i = 0; i < t->nstatics; i++)
             if (!(t->statics[i].ty && t->statics[i].ty->kind == TY_TYPE)) ns++;
-    Value *sarr = val_agg(ty_slice(fit, true), ns);
+    Value *statics = field_slice(fit, ns, inst, true);
+    Value *sarr = statics->base;
     int sk = 0;
     if (t->kind == TY_STRUCT || t->kind == TY_UNION)
         for (int i = 0; i < t->nfields; i++) {
-            if (t->fields[i].is_static &&
-                !(t->fields[i].ty && t->fields[i].ty->kind == TY_TYPE)) {
-                Value *fv = val_agg(fit, 4);
-                fv->items[0] = val_str(t->fields[i].name, (int)strlen(t->fields[i].name));
-                fv->items[1] = val_type(t->fields[i].ty);
-                fv->items[2] = val_int(ty_usize(), 0, false);
-                Value *pv = val_undef(ty_ptr(t->fields[i].ty,
-                                             !t->fields[i].is_var, false, 0));
-                pv->xt = t;
-                pv->off = (uint64_t)i;
-                fv->items[3] = pv;
-                sarr->items[sk++] = fv;
-            }
+            if (!t->fields[i].is_static ||
+                (t->fields[i].ty && t->fields[i].ty->kind == TY_TYPE)) continue;
+            Value *fv = field_value(fit, t->fields[i].name, t->fields[i].ty, 0);
+            Value *pv = val_undef(ty_ptr(t->fields[i].ty,
+                                         !t->fields[i].is_var, false, 0));
+            pv->xt = t; pv->off = (uint64_t)i;
+            fv->items[3] = pv;
+            sarr->items[sk++] = fv;
         }
     if (t->kind == TY_ENUM)
         for (int i = 0; i < t->nstatics; i++) {
             if (t->statics[i].ty && t->statics[i].ty->kind == TY_TYPE) continue;
-            Value *fv = val_agg(fit, 4);
-            fv->items[0] = val_str(t->statics[i].name, (int)strlen(t->statics[i].name));
-            fv->items[1] = val_type(t->statics[i].ty);
-            fv->items[2] = val_int(ty_usize(), 0, false);
+            Value *fv = field_value(fit, t->statics[i].name, t->statics[i].ty, 0);
             Value *pv = val_undef(ty_ptr(t->statics[i].ty,
                                          !t->statics[i].is_var, false, 0));
-            pv->xt = t;
-            pv->off = (uint64_t)i;
+            pv->xt = t; pv->off = (uint64_t)i;
             fv->items[3] = pv;
             sarr->items[sk++] = fv;
         }
-    Value *ssv = val_ptr(ty_slice(fit, true), sarr, 0);
-    ssv->nitems = ns;
-    v->items[6] = ssv;
+
+    int np = (t->kind == TY_FN) ? t->nparams : 0;
+    Type *pty = ty_slice(sema_param_type(), true);
+    Value *parr = val_agg(pty, np);
+    for (int i = 0; i < np; i++) {
+        Type *pa = t->params[i] ? t->params[i] : ty_void();
+        Value *pv = val_agg(sema_param_type(), 2);
+        pv->items[0] = val_type(pa);
+        pv->items[1] = val_bool((pa->kind == TY_PTR || pa->kind == TY_SLICE) &&
+                                pa->is_const);
+        parr->items[i] = pv;
+    }
+    Value *params = val_ptr(pty, parr, 0);
+    params->nitems = np;
+
+    int nm = t->nmethods > 0 ? t->nmethods : 0;
+    Type *mty = ty_slice(sema_method_info_type(), true);
+    Value *marr = val_agg(mty, nm);
+    for (int i = 0; i < nm; i++) {
+        Method *m = &t->methods[i];
+        Value *mv = val_agg(sema_method_info_type(), 4);
+        const char *mn = m->name ? m->name : "";
+        mv->items[0] = val_str(mn, (int)strlen(mn));
+        mv->items[1] = val_type(m->fnty ? m->fnty : ty_void());
+        mv->items[2] = val_bool(m->is_pub);
+        mv->items[3] = val_bool(m->has_self);
+        marr->items[i] = mv;
+    }
+    Value *methods = val_ptr(mty, marr, 0);
+    methods->nitems = nm;
+
+    void *es = ty_type_errset(t);
+    int ne = es ? ty_errset_size(es) : 0;
+    Type *sty = ty_slice(ty_slice(ty_u8(), true), true);
+    Value *earr = val_agg(sty, ne);
+    for (int i = 0; i < ne; i++) {
+        const char *en = ty_errset_name_at(es, i) ? ty_errset_name_at(es, i) : "";
+        earr->items[i] = val_str(en, (int)strlen(en));
+    }
+    Value *errors = val_ptr(sty, earr, 0);
+    errors->nitems = ne;
+
+    Type *kt = sema_type_info_type();
+    Value *kv = val_agg(kt, kt->nfields);
+    Value *p = NULL;
+    switch (t->kind) {
+    case TY_INT: case TY_FLOAT: {
+        p = val_agg(kt->fields[t->kind].ty, 2);
+        p->items[0] = val_int(ty_usize(), (uint64_t)(t->bits > 0 ? t->bits : 0), false);
+        p->items[1] = val_bool(t->is_signed);
+        break;
+    }
+    case TY_ENUM: {
+        p = val_agg(kt->fields[t->kind].ty, 7);
+        Type *bt = t->elem ? t->elem : t;
+        p->items[0] = val_int(ty_usize(), (uint64_t)(bt->bits > 0 ? bt->bits : 0), false);
+        p->items[1] = val_bool(bt->is_signed);
+        p->items[2] = val_int(ty_usize(), (uint64_t)nf, false);
+        p->items[3] = fields;
+        p->items[4] = statics;
+        p->items[5] = val_int(ty_usize(), (uint64_t)nm, false);
+        p->items[6] = methods;
+        break;
+    }
+    case TY_PTR: case TY_SLICE: {
+        p = val_agg(kt->fields[t->kind].ty, 2);
+        p->items[0] = val_type(t->elem ? t->elem : t);
+        p->items[1] = val_bool(t->is_const);
+        break;
+    }
+    case TY_ARRAY: case TY_VEC: {
+        p = val_agg(kt->fields[t->kind].ty, 2);
+        p->items[0] = val_int(ty_usize(), t->len, false);
+        p->items[1] = val_type(t->elem ? t->elem : t);
+        break;
+    }
+    case TY_TUPLE: {
+        p = val_agg(kt->fields[t->kind].ty, 2);
+        p->items[0] = val_int(ty_usize(), (uint64_t)t->nfields, false);
+        Type *ety = ty_slice(ty_type(), true);
+        Value *ta = val_agg(ety, t->nfields);
+        for (int i = 0; i < t->nfields; i++) ta->items[i] = val_type(t->fields[i].ty);
+        Value *tv = val_ptr(ety, ta, 0); tv->nitems = t->nfields;
+        p->items[1] = tv;
+        break;
+    }
+    case TY_STRUCT: {
+        p = val_agg(kt->fields[t->kind].ty, 5);
+        p->items[0] = val_int(ty_usize(), (uint64_t)nf, false);
+        p->items[1] = fields; p->items[2] = statics;
+        p->items[3] = val_int(ty_usize(), (uint64_t)nm, false);
+        p->items[4] = methods;
+        break;
+    }
+    case TY_UNION: {
+        p = val_agg(kt->fields[t->kind].ty, 6);
+        p->items[0] = val_int(ty_usize(), (uint64_t)nf, false);
+        p->items[1] = fields;
+        p->items[2] = val_bool(t->is_tagged);
+        p->items[3] = val_type(t->tag_ty ? t->tag_ty : ty_void());
+        p->items[4] = val_int(ty_usize(), (uint64_t)nm, false);
+        p->items[5] = methods;
+        break;
+    }
+    case TY_OPT: case TY_ERR: {
+        p = val_agg(kt->fields[t->kind].ty, 1);
+        p->items[0] = val_type(t->elem ? t->elem : t);
+        break;
+    }
+    case TY_ERRORSET: {
+        p = val_agg(kt->fields[t->kind].ty, 2);
+        p->items[0] = val_int(ty_usize(), (uint64_t)ne, false);
+        p->items[1] = errors;
+        break;
+    }
+    case TY_FN: {
+        p = val_agg(kt->fields[t->kind].ty, 3);
+        p->items[0] = val_int(ty_usize(), (uint64_t)np, false);
+        p->items[1] = params;
+        p->items[2] = val_type(t->ret ? t->ret : ty_void());
+        break;
+    }
+    default:
+        p = val_void();
+        break;
+    }
+    if (t->kind >= 0 && t->kind < kt->nfields)
+        kv->items[t->kind] = p;
+    v->items[4] = kv;
     return v;
 }
 
@@ -628,6 +975,7 @@ Value *type_desc_value(Type *t, Node *inst) {
 Symbol *std_builtin(const char *name) {
     static Symbol print_s, println_s, format_s, heap_s, page_s, file_s, alloc_s;
     static Symbol type_s, field_s;
+    static Symbol typeinfo_s, param_s, method_s;
     static Symbol salloc_s, halloc_s, hslice_s;
     static Symbol free_s;
     static Symbol f_read, f_write, f_append, f_exists, f_remove;
@@ -699,6 +1047,22 @@ Symbol *std_builtin(const char *name) {
         field_s.state = 2;
         field_s.ty = ty_type();
         field_s.type_val = sema_type_field_type();
+        /* §257：TypeInfo / Param / Method 同样是编译器内建名字。 */
+        typeinfo_s.name = "TypeInfo";
+        typeinfo_s.kind = SK_CONST;
+        typeinfo_s.state = 2;
+        typeinfo_s.ty = ty_type();
+        typeinfo_s.type_val = sema_type_info_type();
+        param_s.name = "Param";
+        param_s.kind = SK_CONST;
+        param_s.state = 2;
+        param_s.ty = ty_type();
+        param_s.type_val = sema_param_type();
+        method_s.name = "Method";
+        method_s.kind = SK_CONST;
+        method_s.state = 2;
+        method_s.ty = ty_type();
+        method_s.type_val = sema_method_info_type();
         /* std.file：普通函数调用，C 那边是编译器生成的运行时函数 */
         Type *s8 = ty_slice(ty_u8(), true);
         Type *p1[1] = { s8 };
@@ -874,6 +1238,9 @@ Symbol *std_builtin(const char *name) {
     if (!strcmp(name, "Allocator")) return &alloc_s;
     if (!strcmp(name, "Type"))      return &type_s;
     if (!strcmp(name, "Field"))     return &field_s;
+    if (!strcmp(name, "TypeInfo"))  return &typeinfo_s;
+    if (!strcmp(name, "Param"))     return &param_s;
+    if (!strcmp(name, "Method"))    return &method_s;
 
     if (!strcmp(name, "stackAlloc")) return &salloc_s;
     if (!strcmp(name, "heapAlloc"))  return &halloc_s;
@@ -918,7 +1285,8 @@ Symbol *std_builtin(const char *name) {
 /* 挂进 std 模块作用域的那些名字（std.zx 自己的声明另外由 hoist 加进来） */
 const char *g_std_seeded[] = {
     "print", "println", "format", "heap", "file", "io", "Allocator",
-    "Type", "Field", "stackAlloc", "heapAlloc", "heapSlice", "free", "process",
+    "Type", "Field", "TypeInfo", "Param", "Method",
+    "stackAlloc", "heapAlloc", "heapSlice", "free", "process",
     "debug", "atomic", NULL
 };
 

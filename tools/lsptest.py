@@ -2509,10 +2509,9 @@ TYUSE = """const std = @mod("std");
 const TyMake = fn (T: type) type {
     return struct{
         const info = @type(T);
-        const tField = info.fields[0];
-        const tCount = info.fieldCount;
+        const tCount = info.kind.Struct.fieldCount;
         info.
-        info.fields[0].
+        info.kind.Struct.
     };
 };
 """
@@ -2533,17 +2532,15 @@ if _r and _r.get("result"):
             _tih[_h["position"]["line"]] = _lbx
 for _need, _want, _tag in (
         ("const info = @type", ": Type", "descriptor.infoType"),
-        ("const tField = ", ": Field", "descriptor.fieldElem"),
-        ("const tCount = ", ": usize", "descriptor.fieldCount")):
+):
     _ln = TYUSE[:TYUSE.index(_need)].count("\n")
     check("inlayHint." + _tag, _tih.get(_ln) == _want, str(_tih))
 
 for _recv, _want, _tag in (
-        ("info.", {"name", "size", "align", "ty", "fieldCount", "fields",
-                   "statics"},
+        ("info.", {"name", "size", "align", "ty", "kind"},
          "descriptor.typeMembers"),
-        ("info.fields[0].", {"name", "ty", "offset", "ptr"},
-         "descriptor.fieldMembers")):
+        ("info.kind.Struct.", {"fieldCount", "fields", "statics", "methodCount", "methods"},
+         "descriptor.kindStructMembers")):
     _rid += 1
     _offt = TYUSE.index("        %s\n" % _recv) + 8 + len(_recv)
     send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/completion", "params": {
@@ -2551,6 +2548,135 @@ for _recv, _want, _tag in (
     _r, _ = recv_id("typeuse", _rid)
     _labt = sorted({i["label"] for i in ((_r or {}).get("result") or {}).get("items") or []})
     check("completion." + _tag, set(_labt) == _want, str(_labt))
+
+# §256：`@type (x)`（内建名与 `(` 之间有空白）在 zx 里合法，Zed 格式化
+# 也会留下这个空格。旧版 zxls 只认 `@type(`，`const info = @type (func);`
+# 推不出 Type，`info.` 补全全空（用户 2026-11-26 截图）。
+TYSPC = """const call = fn (func: type) void {
+    const info = @type (func);
+    info.
+};
+"""
+tyspcuri = "file:///" + os.path.join(SRC_DIR, "typespace.zx").replace("\\", "/")
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": tyspcuri, "languageId": "zx", "version": 1, "text": TYSPC}}})
+_rid += 1
+_offt = TYSPC.index("    info.\n") + len("    info.")
+send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/completion", "params": {
+    "textDocument": {"uri": tyspcuri}, "position": pos(TYSPC, _offt)}})
+_r, _ = recv_id("typespace", _rid)
+_labt = sorted({i["label"] for i in ((_r or {}).get("result") or {}).get("items") or []})
+check("completion.descriptor.typeSpaceAfterBuiltin",
+      "kind" in _labt and "name" in _labt and "size" in _labt, str(_labt))
+
+# §257：TypeInfo 是编译器内建 union(enum)（没有源码声明），写
+# `info.kind.` / `TypeInfo.` 必须能补出全部 25 个变体，hover 也要列出。
+TKUSE = """const call = fn (func: type) void {
+    const info = @type(func);
+    if (info.kind.tag == TypeInfo.) {}
+};
+"""
+tkuri = "file:///" + os.path.join(SRC_DIR, "typeinfo.zx").replace("\\", "/")
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": tkuri, "languageId": "zx", "version": 1, "text": TKUSE}}})
+_rid += 1
+_tkoff = TKUSE.index("TypeInfo.") + len("TypeInfo.")
+send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/completion", "params": {
+    "textDocument": {"uri": tkuri}, "position": pos(TKUSE, _tkoff)}})
+_r, _ = recv_id("typeinfo", _rid)
+_tklab = sorted({i["label"] for i in ((_r or {}).get("result") or {}).get("items") or []})
+_tkwant = {"Invalid","Void","NoReturn","Bool","ErrorCode","TypeId","Int","Float",
+           "ComptimeInt","ComptimeFloat","NullValue","Undef","Ptr","Slice","Array",
+           "Tuple","Struct","Union","Enum","Opt","Err","ErrorSet","Function","Vec","Tag"}
+check("completion.descriptor.typeKindMembers", set(_tklab) == _tkwant, str(_tklab))
+
+_rid += 1
+_tkhoff = TKUSE.index("TypeInfo") + 3
+send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/hover", "params": {
+    "textDocument": {"uri": tkuri}, "position": pos(TKUSE, _tkhoff)}})
+_r, _ = recv_id("typeinfoHover", _rid)
+_hv = str(((_r or {}).get("result") or {}).get("contents") or "")
+check("hover.descriptor.typeKindMembers",
+      "TypeInfo" in _hv and "Function" in _hv and "Struct" in _hv, _hv[:200])
+
+# `info.kind.` 链式补全变体；`info.kind.Function.` 补载荷字段
+IKUSE = """const call = fn (func: type) void {
+    const info = @type(func);
+    info.kind.
+    info.kind.Function.
+};
+"""
+ikuri = "file:///" + os.path.join(SRC_DIR, "infokind.zx").replace("\\", "/")
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": ikuri, "languageId": "zx", "version": 1, "text": IKUSE}}})
+for _tag, _needle, _want in (
+        ("kindVariants", "info.kind.", _tkwant),
+        ("kindFunctionFields", "info.kind.Function.",
+         {"paramCount", "params", "ret"})):
+    _rid += 1
+    _ioff = IKUSE.index(_needle) + len(_needle)
+    send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/completion", "params": {
+        "textDocument": {"uri": ikuri}, "position": pos(IKUSE, _ioff)}})
+    _r, _ = recv_id("infokind" + _tag, _rid)
+    _ilab = {i["label"] for i in ((_r or {}).get("result") or {}).get("items") or []}
+    check("completion.descriptor." + _tag, _want.issubset(_ilab), str(sorted(_ilab)))
+
+# §257 — 有类型才有提示：`const f = info.kind.Function;` 的别名、switch
+# 臂的载荷捕获 / tag 捕获都必须按推断出的类型给成员，不能只剩关键字。
+ALIASUSE = """const target = fn (a: i32) bool { return a > 0; };
+const use = fn () void {
+    const info: Type = @type(target);
+    const f = info.kind.Function;
+    f.
+    switch (info.kind) {
+        TypeInfo.Function: cap { cap. },
+        else: {},
+    }
+    switch (info.kind.tag) {
+        .Function: tagv { tagv. },
+        else: {},
+    }
+};
+const use2 = fn () void {
+    const info: Type = @type(target);
+    switch (info.kind) {
+        .Array: a {};
+        .
+        else: {};
+    }
+    switch (info.kind) {
+        .Array: b {};
+        TypeInfo.Function: cc { cc. },
+        else: {};
+    }
+};
+"""
+auri = "file:///" + os.path.join(SRC_DIR, "kindalias.zx").replace("\\", "/")
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": auri, "languageId": "zx", "version": 1, "text": ALIASUSE}}})
+for _tag, _needle, _want in (
+        ("aliasPayloadFields", "f.\n", {"paramCount", "params", "ret"}),
+        ("switchCaptureFields", "cap.", {"paramCount", "params", "ret"}),
+        ("switchTagVariants", "tagv.", _tkwant),
+        ("secondArmPattern", "        .\n", _tkwant),
+        ("secondArmCapture", "cc.", {"paramCount", "params", "ret"})):
+    _rid += 1
+    _finder = ALIASUSE.rindex if _tag.startswith("secondArm") else ALIASUSE.index
+    _aoff = _finder(_needle) + (9 if _tag == "secondArmPattern" else (2 if _needle.endswith("\n") else len(_needle)))
+    send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/completion", "params": {
+        "textDocument": {"uri": auri}, "position": pos(ALIASUSE, _aoff)}})
+    _r, _ = recv_id("kindalias" + _tag, _rid)
+    _alab = {i["label"] for i in ((_r or {}).get("result") or {}).get("items") or []}
+    check("completion.descriptor." + _tag, _want.issubset(_alab), str(sorted(_alab)))
+
+_rid += 1
+_aoff = ALIASUSE.rindex(".Function:") + 1
+send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/completion", "params": {
+    "textDocument": {"uri": auri}, "position": pos(ALIASUSE, _aoff)}})
+_r, _ = recv_id("kindaliasPattern", _rid)
+_alab = {i["label"] for i in ((_r or {}).get("result") or {}).get("items") or []}
+check("completion.descriptor.switchPatternVariants", "Function" in _alab,
+      str(sorted(_alab)))
 
 # 类型值链的**源头**解析不到（`t` 不是模块绑定、模块文件不在扫描集里）：
 # `resolveContainerPathLoose` 从末段往前退（`LsP1.LsP2` → `LsP2`），
@@ -4979,6 +5105,53 @@ try:
 except Exception:
     pass
 
+# §258 — old diagnostics must be cleared per URI; stale .zxls-*.zx reclaimed.
+# Diagnostics are published asynchronously: wait for publishDiagnostics itself
+# instead of using hover's response as a barrier (it arrives earlier).
+def _wait_diag(_tag, _uri, _want_empty, _timeout=15):
+    import time as _wt
+    _end = _wt.time() + _timeout
+    while _wt.time() < _end:
+        try:
+            _m = out_q.get(timeout=0.5)
+        except queue.Empty:
+            continue
+        if _m is None:
+            print("FAIL " + _tag + ": server died")
+            return []
+        if (_m.get("method") == "textDocument/publishDiagnostics"
+                and _m["params"].get("uri") == _uri):
+            _ds = _m["params"].get("diagnostics", [])
+            if (len(_ds) == 0) == _want_empty:
+                return [_m]
+    return []
+
+BADCLR = """const f = fn () void {
+    let arr = [10]'';
+    _ = arr;
+};
+"""
+GOODCLR = BADCLR.replace("[10]''", "[10]'0'")
+open(os.path.join(SRC_DIR, "staleclr.zx"), "w", encoding="utf-8").write(BADCLR)
+zuri = "file:///" + os.path.join(SRC_DIR, "staleclr.zx").replace("\\", "/")
+_stale = os.path.join(SRC_DIR, ".zxls-deadbeef.zx")
+open(_stale, "w", encoding="utf-8").write("stale\n")
+import time as _tm258
+_old = _tm258.time() - 3600
+os.utime(_stale, (_old, _old))
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": zuri, "languageId": "zx", "version": 1, "text": BADCLR}}})
+_open_diags = _wait_diag("staleDiag.open", zuri, False)
+_had = bool(_open_diags) and _open_diags[0]["params"].get("version") == 1
+check("diagnostics.staleExists", _had, str(_open_diags)[:200])
+
+send({"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {
+    "textDocument": {"uri": zuri, "version": 2},
+    "contentChanges": [{"text": GOODCLR}]}})
+_clr_diags = _wait_diag("staleDiag.change", zuri, True)
+check("diagnostics.clearOnEveryChange", bool(_clr_diags), str(_clr_diags)[:200])
+check("shadows.staleRemoved", not os.path.exists(_stale), _stale)
+
 # 9 shutdown/exit
 send({"jsonrpc": "2.0", "id": 8, "method": "shutdown", "params": None})
 recv_id("shutdown", 8)
@@ -5972,6 +6145,9 @@ _types = {_sem[i + 3] for i in range(0, len(_sem), 5)}
 check("semanticTokens.cover",
       set([11, 5, 8, 1, 13]) <= _types,
       "types=" + str(sorted(_types)))
+
+# §258 — 旧诊断必须随每次编辑清掉；上一进程遗留的 .zxls-*.zx 要被回收。
+# 全局"上次有诊断"标志会被别的文件清零，不能拿它当清空条件。
 
 # ---------------------------------------------------------------------------
 if fails:

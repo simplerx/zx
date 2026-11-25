@@ -161,6 +161,12 @@ Value *ct_field(Node *n) {
             Field *f = ty_field(t, n->name);
             if (f) return val_int(t, f->tag, false);
         }
+        /* union(enum) 类型值上的变体名 → tag 值（TypeInfo.Function 等）。 */
+        if (t->kind == TY_UNION && t->is_tagged) {
+            Field *f = ty_field(t, n->name);
+            if (f && f->has_tag)
+                return val_int(t->tag_ty ? t->tag_ty : t, f->tag, false);
+        }
         /* 体里的常量成员（`Color.LIMIT` / `Vec.ZERO`）：值就是它的初值 */
         Field *st = ty_static_member(t, n->name);
         if (st && st->is_static && !st->is_var && st->dflt) return ct_eval(st->dflt);
@@ -192,6 +198,22 @@ Value *ct_field(Node *n) {
     }
 
     if (base->kind != V_AGG) return NULL;
+
+    /* 编译期 union(enum) 值的 .tag：唯一非 NULL 的载荷槽就是当前变体。
+     * 反射的 TypeInfo 值靠这条在 const/if 里比较种类；普通 const union
+     * 值也受益（之前折不出、留到运行期，现在编译期直接得整数）。 */
+    if (n->name && !strcmp(n->name, "tag") && base->ty &&
+        base->ty->kind == TY_UNION && base->ty->is_tagged) {
+        for (int i = 0; i < base->nitems && i < base->ty->nfields; i++) {
+            /* 未选中的变体被 ct_struct_lit 填成 V_UNDEF（占位）；选中的那个
+             * 才有真实载荷。跳过 undef 才拿得到正确 tag——否则永远命中 0。 */
+            Value *it = base->items[i];
+            if (it && it->kind != V_UNDEF)
+                return val_int(base->ty->tag_ty ? base->ty->tag_ty : ty_int(32, false),
+                               base->ty->fields[i].tag, false);
+        }
+        return NULL;
+    }
 
     if (!n->name) {                                /* .N */
         int64_t k = o + (int64_t)n->ival;
@@ -1034,6 +1056,12 @@ static CtFlow ct_run_raw(Node *n) {
                 if (p->kind == NK_FIELD && !p->a && p->name) {
                     /* .some / .none / .ok / .err：只有 null 能用值比 */
                     if (s->kind == V_NULL && !strcmp(p->name, "none")) hit = true;
+                    /* 编译期枚举模式（TypeInfo.Function 等）：subject 是枚举
+                     * tag 整数，变体名 → tag 值再比。 */
+                    if (s->kind == V_INT && s->ty && s->ty->kind == TY_ENUM) {
+                        Field *ef = ty_field(s->ty, p->name);
+                        if (ef && ef->tag == s->ival) hit = true;
+                    }
                     continue;
                 }
                 Value *pv = ct_eval(p);
@@ -1210,6 +1238,12 @@ static Node *specialize_raw(Node *fn, Node *call, int *ncomp, Type **out_ft, Val
             err_at(call->items[i]->line, call->items[i]->col,
                    "generic argument %d must be known at compile time", i + 1);
             return NULL;
+        }
+        /* §255：`type` 泛型参数也接受函数值——取其函数类型当类型实参。
+         * `schedule(move)` 与 `schedule(@type(move).ty)` 走同一个实例。 */
+        if (is_type_param(pm) && v->kind == V_FN && v->fn) {
+            Type *ft = resolve_fn_type(v->fn);
+            if (ft && ft->kind == TY_FN) v = val_type(ft);
         }
         if (is_type_param(pm) && v->kind != V_TYPE) {
             err_at(call->items[i]->line, call->items[i]->col,

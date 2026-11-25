@@ -64,6 +64,8 @@ const Document = struct {
     path: []const u8,
     text: []const u8,
     version: i64,
+    // §258: 该 URI 上一次 publishDiagnostics 是否带了诊断。
+    has_diags: bool = false,
 };
 
 var docs_mu: Io.Mutex = .init;
@@ -71,9 +73,6 @@ var docs_cond: Io.Condition = .init;
 var docs: std.StringHashMapUnmanaged(Document) = .empty;
 var dirty: std.StringHashMapUnmanaged(void) = .empty;
 var quitting = false;
-// §253：上次 publishDiagnostics 是否带了诊断。编辑时先撤掉旧波浪线，
-// 免得 zxc 重查的空档里 stale 诊断赖着不走（重启 LSP 才清）。
-var last_pub_has_diags = std.atomic.Value(bool).init(false);
 
 var root_path: ?[]const u8 = null;
 var zxc_path: []const u8 = "zxc.exe";
@@ -398,7 +397,7 @@ fn sigOfStmtIn(text: []const u8, stmt: []const u8, depth: u8) FnSig {
 /// 1.2.2 反射只剩一个 @type：Type/Field 描述符仍只在编译期存在，
 /// 不许进 std. 补全列表（去污染）。
 fn isCtBuiltin(name: []const u8) bool {
-    const ct = [_][]const u8{ "Type", "Field" };
+    const ct = [_][]const u8{ "Type", "Field", "TypeInfo", "Param", "Method" };
     for (ct) |c| {
         if (std.mem.eql(u8, name, c)) return true;
     }
@@ -409,6 +408,7 @@ fn isCtBuiltin(name: []const u8) bool {
 const std_seeded = [_][]const u8{
     "print",     "println", "format",   "heap",     "file",
     "io",        "Allocator", "stackAlloc", "heapAlloc", "heapSlice", "free", "process",
+    "Type",      "Field",    "TypeInfo", "Param",    "Method",
 };
 
 const BuiltinDoc = struct {
@@ -423,7 +423,7 @@ const BuiltinDoc = struct {
 // @ 内建（与 src/sema.c check_builtin() 逐字对齐，1.2.2 反射只剩 @type）：
 // 类型转换统一写 `(T)value`；描述符全在编译期。全部内建都带调用骨架。
 const builtin_docs = [_]BuiltinDoc{
-    .{ .name = "type", .detail = "@type(x) 编译期描述符：.name/.size/.align/.ty/.fieldCount/.fields[i]{.name,.ty,.offset,.ptr}/.statics[i]；x 是左值时 ptr 指向该实例的字段，f.ptr.0 取值",
+    .{ .name = "type", .detail = "@type(x) 编译期描述符：通用 .name/.size/.align/.ty + .kind（union(enum)）。先 switch .kind.tag 或比 TypeInfo.Function 等变体，再读变体载荷：.Int{bits,isSigned} / .Ptr{elem,isConst} / .Array{len,elem} / .Struct{fieldCount,fields,statics,methodCount,methods} / .Function{paramCount,params[i]{ty,isConst},ret} / .Union{fieldCount,fields,isTagged,tagTy} / .Enum{bits,fields,statics} / .ErrorSet{errorCount,errors} 等；x 是左值时字段的 ptr 指向该实例，f.ptr.0 取值",
        .snip = "type(${1:x})$0" },
     .{ .name = "memcpy", .detail = "@memcpy(dest, src, count) 内存复制",
        .snip = "memcpy(${1:dest}, ${2:src}, ${3:count})$0" },
@@ -861,6 +861,55 @@ fn harvestErrBlock(text: []const u8, brace: usize, out: *std.ArrayList(Decl)) us
 /// `error.null`，纯靠扫描永远端不出来。所以无条件先塞一条：detail 写明
 /// 保留码语义，kind 用 14（CompletionItemKind.Keyword）与顶层 `null` 一致。
 /// 用户截图里 `return error.;` 补全只有 IOErr/extra/open/read，缺的正是这条。
+/// §257：TypeInfo 编译期 union(enum) 的变体表（与
+/// sema_core.c 的 type_info_names 同序同名）。TypeInfo 没有源码声明，
+/// 写 `info.kind.` / `TypeInfo.` 时必须在这里列出才能补全。
+const TypeInfoMember = struct { name: []const u8, detail: []const u8 };
+const type_info_members = [_]TypeInfoMember{
+    .{ .name = "Invalid", .detail = "错误哨兵类型" },
+    .{ .name = "Void", .detail = "空类型" },
+    .{ .name = "NoReturn", .detail = "不返回（@trap）" },
+    .{ .name = "Bool", .detail = "布尔" },
+    .{ .name = "ErrorCode", .detail = "错误码 error ≡ u16" },
+    .{ .name = "TypeId", .detail = "类型值本身（type）" },
+    .{ .name = "Int", .detail = "整数：读 .bits / .isSigned" },
+    .{ .name = "Float", .detail = "浮点：读 .bits" },
+    .{ .name = "ComptimeInt", .detail = "未定型整数字面量" },
+    .{ .name = "ComptimeFloat", .detail = "未定型浮点字面量" },
+    .{ .name = "NullValue", .detail = "null 字面量" },
+    .{ .name = "Undef", .detail = "undefined" },
+    .{ .name = "Ptr", .detail = "指针：读 .elem / .isConst" },
+    .{ .name = "Slice", .detail = "切片：读 .elem / .isConst" },
+    .{ .name = "Array", .detail = "定长数组：读 .len / .elem" },
+    .{ .name = "Tuple", .detail = "元组：读 .len / .elements" },
+    .{ .name = "Struct", .detail = "结构体：读 .fieldCount / .fields / .statics / .methods" },
+    .{ .name = "Union", .detail = "联合体：读 .fieldCount / .isTagged / .tagTy" },
+    .{ .name = "Enum", .detail = "枚举：读 .bits / .fields / .statics" },
+    .{ .name = "Opt", .detail = "可选 ?T：读 .elem" },
+    .{ .name = "Err", .detail = "错误联合 !T：读 .elem" },
+    .{ .name = "ErrorSet", .detail = "错误集：读 .errorCount / .errors" },
+    .{ .name = "Function", .detail = "函数：读 .paramCount / .params[i]{.ty,.isConst} / .ret" },
+    .{ .name = "Vec", .detail = "向量 @Vec(T,N)：读 .len / .elem" },
+    .{ .name = "Tag", .detail = "标签句柄（编译期-only）" },
+};
+
+fn typeInfoDetail(name: []const u8) ?[]const u8 {
+    for (type_info_members) |m| {
+        if (std.mem.eql(u8, m.name, name)) return m.detail;
+    }
+    return null;
+}
+
+fn collectTypeInfoMembers(out: *std.ArrayList(Decl)) bool {
+    for (type_info_members) |m| {
+        out.append(gpa, .{
+            .name = m.name, .kind = .variant,
+            .detail = m.detail, .lsp_kind = 14,
+        }) catch {};
+    }
+    return out.items.len > 0;
+}
+
 fn collectAllErrMembers(files: []const []const u8, out: *std.ArrayList(Decl)) bool {
     out.append(gpa, .{
         .name = "null", .kind = .variant,
@@ -5832,8 +5881,17 @@ fn inferExprType(text: []const u8, doc: *const Document, expr: []const u8, depth
     // 必须在下面"调用"分支之前拦住——那边会把 @type 当普通函数、查不到
     // 返回类型就返回 null，于是 `const info = …` 没有 `: Type`、`info.` 空列表
     //（用户 2026-11-11 第 2 张截图）。
-    if (std.mem.startsWith(u8, e, "@type(")) {
-        var i: usize = 6;
+    // §256：`@type (x)`（内建名与 `(` 之间有空白）在 zx 里合法，编译器
+    // 也照常解析；Zed 的格式化/用户手写都可能留下这个空格。旧版只认
+    // `@type(`，于是 `const info = @type (func);` 推不出 Type，`info.` 补全
+    // 全空（用户 2026-11-26 截图）。这里容忍 `@type` 后的任意空白。
+    if (std.mem.startsWith(u8, e, "@type") and e.len > 5 and
+        (e[5] == ' ' or e[5] == '\t' or e[5] == '\r' or e[5] == '\n' or e[5] == '('))
+    {
+        var i: usize = 5;
+        while (i < e.len and (e[i] == ' ' or e[i] == '\t' or e[i] == '\r' or e[i] == '\n')) i += 1;
+        if (i >= e.len or e[i] != '(') return null;
+        i += 1;
         var d: usize = 0;
         var rb: ?usize = null;
         while (i < e.len) : (i += 1) {
@@ -6858,15 +6916,107 @@ const builtin_ty_table = [_]BuiltinTyDef{
         .{ .name = "free", .ty = "fn (?*u8, *u8, usize) void" },
         .{ .name = "deinit", .ty = "fn (s: []T | *[n]T) void — 释放，自动算字节量（std.free(a, s) 的方法形式）" },
     } },
-    // Type  = { name, size, align, ty, fieldCount, fields: []Field, statics: []Field }
+    // Type = { name, size, align, ty, kind } (§257). kind is a union(enum);
+    // per-kind members live in its variant payload (the *Info tables below).
     .{ .name = "Type", .fields = &.{
         .{ .name = "name", .ty = "[]const u8" },
         .{ .name = "size", .ty = "usize" },
         .{ .name = "align", .ty = "usize" },
         .{ .name = "ty", .ty = "type" },
+        .{ .name = "kind", .ty = "TypeInfo: union(enum); .tag dispatches, then read the variant payload" },
+    } },
+    .{ .name = "TypeInfo", .fields = &.{
+        .{ .name = "Invalid", .ty = "void" },
+        .{ .name = "Void", .ty = "void" },
+        .{ .name = "NoReturn", .ty = "void" },
+        .{ .name = "Bool", .ty = "void" },
+        .{ .name = "ErrorCode", .ty = "void" },
+        .{ .name = "TypeId", .ty = "void" },
+        .{ .name = "Int", .ty = "IntInfo" },
+        .{ .name = "Float", .ty = "FloatInfo" },
+        .{ .name = "ComptimeInt", .ty = "void" },
+        .{ .name = "ComptimeFloat", .ty = "void" },
+        .{ .name = "NullValue", .ty = "void" },
+        .{ .name = "Undef", .ty = "void" },
+        .{ .name = "Ptr", .ty = "PtrInfo" },
+        .{ .name = "Slice", .ty = "PtrInfo" },
+        .{ .name = "Array", .ty = "ArrayInfo" },
+        .{ .name = "Tuple", .ty = "TupleInfo" },
+        .{ .name = "Struct", .ty = "StructInfo" },
+        .{ .name = "Union", .ty = "UnionInfo" },
+        .{ .name = "Enum", .ty = "EnumInfo" },
+        .{ .name = "Opt", .ty = "ElemInfo" },
+        .{ .name = "Err", .ty = "ElemInfo" },
+        .{ .name = "ErrorSet", .ty = "ErrorSetInfo" },
+        .{ .name = "Function", .ty = "FunctionInfo" },
+        .{ .name = "Vec", .ty = "ArrayInfo" },
+        .{ .name = "Tag", .ty = "void" },
+    } },
+    .{ .name = "IntInfo", .fields = &.{
+        .{ .name = "bits", .ty = "usize: bit width" },
+        .{ .name = "isSigned", .ty = "bool: signed?" },
+    } },
+    .{ .name = "FloatInfo", .fields = &.{
+        .{ .name = "bits", .ty = "usize: bit width" },
+        .{ .name = "isSigned", .ty = "bool" },
+    } },
+    .{ .name = "PtrInfo", .fields = &.{
+        .{ .name = "elem", .ty = "type: pointee / element type" },
+        .{ .name = "isConst", .ty = "bool: read-only view (*const T / []const T)" },
+    } },
+    .{ .name = "ArrayInfo", .fields = &.{
+        .{ .name = "len", .ty = "usize: length" },
+        .{ .name = "elem", .ty = "type: element type" },
+    } },
+    .{ .name = "TupleInfo", .fields = &.{
+        .{ .name = "len", .ty = "usize" },
+        .{ .name = "elements", .ty = "[]type" },
+    } },
+    .{ .name = "StructInfo", .fields = &.{
+        .{ .name = "fieldCount", .ty = "usize" },
+        .{ .name = "fields", .ty = "[]Field: name/ty/offset/ptr" },
+        .{ .name = "statics", .ty = "[]Field" },
+        .{ .name = "methodCount", .ty = "usize" },
+        .{ .name = "methods", .ty = "[]Method: name/ty/isPub/hasSelf" },
+    } },
+    .{ .name = "UnionInfo", .fields = &.{
         .{ .name = "fieldCount", .ty = "usize" },
         .{ .name = "fields", .ty = "[]Field" },
+        .{ .name = "isTagged", .ty = "bool" },
+        .{ .name = "tagTy", .ty = "type" },
+        .{ .name = "methodCount", .ty = "usize" },
+        .{ .name = "methods", .ty = "[]Method" },
+    } },
+    .{ .name = "EnumInfo", .fields = &.{
+        .{ .name = "bits", .ty = "usize: underlying bit width" },
+        .{ .name = "isSigned", .ty = "bool" },
+        .{ .name = "fieldCount", .ty = "usize" },
+        .{ .name = "fields", .ty = "[]Field: variants" },
         .{ .name = "statics", .ty = "[]Field" },
+        .{ .name = "methodCount", .ty = "usize" },
+        .{ .name = "methods", .ty = "[]Method" },
+    } },
+    .{ .name = "ElemInfo", .fields = &.{
+        .{ .name = "elem", .ty = "type: contained type (?T / !T)" },
+    } },
+    .{ .name = "ErrorSetInfo", .fields = &.{
+        .{ .name = "errorCount", .ty = "usize" },
+        .{ .name = "errors", .ty = "[]const []const u8: error names" },
+    } },
+    .{ .name = "FunctionInfo", .fields = &.{
+        .{ .name = "paramCount", .ty = "usize" },
+        .{ .name = "params", .ty = "[]Param: .ty + .isConst (view constness)" },
+        .{ .name = "ret", .ty = "type: return type" },
+    } },
+    .{ .name = "Param", .fields = &.{
+        .{ .name = "ty", .ty = "type：参数类型" },
+        .{ .name = "isConst", .ty = "bool：视图只读性（*const T / []const T）；形参槽位本身一律只读，按值参数恒 false" },
+    } },
+    .{ .name = "Method", .fields = &.{
+        .{ .name = "name", .ty = "[]const u8" },
+        .{ .name = "ty", .ty = "type：函数类型" },
+        .{ .name = "isPub", .ty = "bool" },
+        .{ .name = "hasSelf", .ty = "bool：第一参数是不是接收者" },
     } },
     // Field = { name, ty, offset, ptr }（字段叫 ty，type 是关键字）。
     // ptr 是字段值指针（§118）：@type(左值) 的描述符才有，`f.ptr.0` 取值 /
@@ -6894,6 +7044,8 @@ fn isBuiltinTy(ty0: []const u8) bool {
 
 /// 内建类型的字段类型：`Type` + `fields` → "[]Field"。推断
 /// `const n = info.fieldCount` / `info.fields[0].offset` 用它。
+/// 表里的 ty 带人类说明（`usize: bit width`），推断只取冒号前的类型串，
+/// 否则 `containerNameOf` 遇到 ':' 直接返回空，链式补全全断。
 fn builtinFieldTy(ty0: []const u8, member: []const u8) ?[]const u8 {
     // §162：向量的 .len / .size 都写在类型里，是 usize 常量。
     if (vecElemOf(ty0) != null and
@@ -6904,10 +7056,28 @@ fn builtinFieldTy(ty0: []const u8, member: []const u8) ?[]const u8 {
     // 推断返回 null（不出 inlay/hover 类型）；表里的文案只给补全 detail。
     if (std.mem.eql(u8, b.name, "Field") and std.mem.eql(u8, member, "ptr"))
         return null;
+    // §257：`kind` 的补全文案是长说明，但类型链必须是干净的 `TypeInfo`——
+    // 否则 `const f = info.kind.Function;` 推不出 FunctionInfo，`f.` 空列表。
+    if (std.mem.eql(u8, b.name, "Type") and std.mem.eql(u8, member, "kind"))
+        return "TypeInfo";
+    // union(enum) 的变体名也是可访问的槽：载荷类型就是变体字段的类型。
+    // `info.kind.Function` → FunctionInfo → `f.` 补 .params/.ret。
+    if (std.mem.eql(u8, b.name, "TypeInfo")) {
+        for (b.fields) |f| {
+            if (!std.mem.eql(u8, f.name, member)) continue;
+            if (std.mem.eql(u8, f.ty, "void")) return "void";
+            return canonicalBuiltinTy(f.ty);
+        }
+    }
     for (b.fields) |f| {
-        if (std.mem.eql(u8, f.name, member)) return f.ty;
+        if (std.mem.eql(u8, f.name, member)) return canonicalBuiltinTy(f.ty);
     }
     return null;
+}
+
+fn canonicalBuiltinTy(ty: []const u8) []const u8 {
+    if (std.mem.indexOfScalar(u8, ty, ':')) |c| return trimSl(ty[0..c]);
+    return trimSl(ty);
 }
 
 fn builtinTyMembers(ty0: []const u8, out: *std.ArrayList(Decl)) bool {
@@ -7456,6 +7626,28 @@ fn hoverAt(doc: *const Document, line: u32, character: u32) ?[]const u8 {
         if (stdBuiltinDoc(path)) |bd| {
             var b: std.ArrayList(u8) = .empty;
             b.print(gpa, "```zx\n{s}\n```", .{bd.sig}) catch return null;
+            return hoverPayload(b.items);
+        }
+    }
+
+    // §257：TypeInfo（union(enum)）自身与变体的 hover。编译器内建、没有
+    // 源码声明文本，只能从这里给说明——否则用户只知道 `info.kind` 却
+    // 不知道有哪些变体、各自带什么成员。
+    if (std.mem.eql(u8, path, "TypeInfo")) {
+        var b: std.ArrayList(u8) = .empty;
+        b.appendSlice(gpa, "```zx\nunion(enum) TypeInfo\n```\n") catch return null;
+        b.appendSlice(gpa, "`info.kind` 的种类（先 .tag 分派，再读变体载荷）：\n") catch return null;
+        b.appendSlice(gpa, "Invalid · Void · NoReturn · Bool · ErrorCode · TypeId · Int · Float · ") catch return null;
+        b.appendSlice(gpa, "ComptimeInt · ComptimeFloat · NullValue · Undef · Ptr · Slice · Array · ") catch return null;
+        b.appendSlice(gpa, "Tuple · Struct · Union · Enum · Opt · Err · ErrorSet · Function · Vec · Tag\n") catch return null;
+        b.appendSlice(gpa, "写 `TypeInfo.` 或 `info.kind.` 可补全全部变体（每个带用途说明）。") catch return null;
+        return hoverPayload(b.items);
+    }
+    if (std.mem.startsWith(u8, path, "TypeInfo.")) {
+        const member = path["TypeInfo.".len..];
+        if (typeInfoDetail(member)) |d| {
+            var b: std.ArrayList(u8) = .empty;
+            b.print(gpa, "```zx\nTypeInfo.{s}\n```\n{s}", .{ member, d }) catch return null;
             return hoverPayload(b.items);
         }
     }
@@ -9471,7 +9663,119 @@ fn captureBindTy(text: []const u8, doc: *const Document, name: []const u8) ?[]co
             if (t.len > 0) return t;
         }
     }
+    // §257 — switch 臂捕获（`.Function: f { … }` / `TypeInfo.Function: f { … }`）：
+    // 捕获变量没有声明语句，按主语类型 + 臂上的变体名推载荷类型。用户
+    // 2026-11-26："switch 里也没有"——之前只有 if/while 捕获有类型链。
+    if (switchCaptureTy(text, doc, name)) |t| return t;
     return null;
+}
+
+/// `switch (subject) { pattern: cap { … } }` 的捕获变量类型。
+/// 联合体取变体载荷类型；`?T`/`!T` 去一层包装；枚举/整数/bool 捕获主语值本身。
+/// TypeInfo 的变体载荷查内建表（没有任何源码声明）。
+fn switchCaptureTy(text: []const u8, doc: *const Document, name: []const u8) ?[]const u8 {
+    if (name.len == 0) return null;
+    var from: usize = 0;
+    while (std.mem.indexOfPos(u8, text, from, "switch (")) |kp| {
+        from = kp + 8;
+        if (inLineComment(text, kp)) continue;
+        var d: usize = 1;
+        var i = kp + 8;
+        var in_str = false;
+        while (i < text.len and d > 0) : (i += 1) {
+            const c = text[i];
+            if (in_str) {
+                if (c == '\\') { i += 1; continue; }
+                if (c == '"') in_str = false;
+                continue;
+            }
+            if (c == '"') { in_str = true; continue; }
+            if (c == '(') d += 1;
+            if (c == ')' and d > 0) d -= 1;
+        }
+        if (d != 0) continue;
+        const subject = trimSl(text[kp + 8 .. i - 1]);
+        var k = i;
+        while (k < text.len and (text[k] == ' ' or text[k] == '\t' or
+            text[k] == '\r' or text[k] == '\n')) k += 1;
+        if (k >= text.len or text[k] != '{') continue;
+        var subj_ty = inferExprType(text, doc, subject, 0) orelse "";
+        // `switch (info.kind.tag)` 捕获的是 tag 值，不是变体载荷：
+        var tag_subject = false;
+        if (std.mem.endsWith(u8, subject, ".tag") and subject.len > 4) {
+            const base = trimSl(subject[0 .. subject.len - 4]);
+            if (inferExprType(text, doc, base, 0)) |bt| {
+                subj_ty = trimSl(bt);
+                tag_subject = true;
+            }
+        }
+        // 扫臂：只在 body 的顶层找 ':'，嵌套块里的冒号不算。
+        var q = k + 1;
+        var depth: usize = 1;
+        while (q < text.len and depth > 0) : (q += 1) {
+            const c = text[q];
+            if (c == '{') { depth += 1; continue; }
+            if (c == '}') { depth -= 1; continue; }
+            if (depth != 1 or c != ':') continue;
+            var a = q + 1;
+            while (a < text.len and (text[a] == ' ' or text[a] == '\t' or
+                text[a] == '\r' or text[a] == '\n')) a += 1;
+            if (!std.mem.startsWith(u8, text[a..], name)) continue;
+            const ae = a + name.len;
+            if (ae < text.len and isIdentChar(text[ae])) continue;
+            var be = ae;
+            while (be < text.len and (text[be] == ' ' or text[be] == '\t')) be += 1;
+            // `pattern: cap { … }` 才是捕获；`pattern: expr;` 不是。
+            if (be >= text.len or text[be] != '{') continue;
+            var ps = q;
+            while (ps > 0) {
+                const pc = text[ps - 1];
+                if (pc == ';' or pc == '{' or pc == '}' or pc == '\n') break;
+                ps -= 1;
+            }
+            const pat = trimSl(text[ps..q]);
+            if (pat.len == 0) continue;
+            var variant = pat;
+            if (std.mem.lastIndexOfScalar(u8, variant, '.')) |dd| variant = variant[dd + 1 ..];
+            variant = trimSl(variant);
+            if (variant.len > 1 and variant[0] == '*') variant = trimSl(variant[1..]);
+            if (tag_subject) {
+                if (subj_ty.len > 0) return subj_ty;
+            } else if (switchPayloadTy(text, doc, subj_ty, variant)) |t| {
+                if (t.len > 0) return t;
+            }
+        }
+    }
+    return null;
+}
+
+fn switchPayloadTy(text: []const u8, doc: *const Document, subj0: []const u8,
+                   variant: []const u8) ?[]const u8 {
+    const subj = trimSl(subj0);
+    if (subj.len == 0 or variant.len == 0) return null;
+    if (std.mem.eql(u8, subj, "TypeInfo")) return builtinFieldTy(subj, variant);
+    if (subj[0] == '?') {
+        if (std.mem.eql(u8, variant, "some")) return trimSl(subj[1..]);
+        return null;
+    }
+    if (subj[0] == '!') {
+        if (std.mem.eql(u8, variant, "ok")) return trimSl(subj[1..]);
+        if (std.mem.eql(u8, variant, "err")) return "error";
+        return null;
+    }
+    var files = scanFiles(doc, text);
+    defer files.deinit(gpa);
+    const cn = containerNameOf(subj);
+    if (cn.len > 0) {
+        if (findContainerBody(files.items, cn)) |h| {
+            if (fieldTypeIn(h.body, variant)) |ft| return ft;
+        }
+        if (genericBodyOf(files.items, cn)) |bod| {
+            if (fieldTypeIn(bod, variant)) |ft| return ft;
+        }
+    }
+    // 枚举 / 整数 / bool 的臂捕获主语值本身。
+    return subj;
 }
 
 /// 接收者的声明类型是可选值（`?T`）时，返回解包后的内层类型串。
@@ -9646,6 +9950,133 @@ fn typeValuedContainer(files: []const []const u8, doc: *const Document,
     return null;
 }
 
+/// switch 臂的模式位补变体：`switch (info.kind) { .` / `TypeInfo.`。
+/// "都要有类型才有提示"——变体集来自主语类型，不是扫全文猜名字。
+fn switchPatternVariants(text: []const u8, doc: *const Document, off: usize,
+                         list: *Json, seen: *std.StringHashMapUnmanaged(void),
+                         prefix: []const u8) bool {
+    if (off == 0 or off > text.len) return false;
+    const sp = std.mem.lastIndexOf(u8, text[0..off], "switch (") orelse return false;
+    var d: usize = 1;
+    var i = sp + 8;
+    var in_str = false;
+    while (i < text.len and d > 0) : (i += 1) {
+        const c = text[i];
+        if (in_str) {
+            if (c == '\\') { i += 1; continue; }
+            if (c == '"') in_str = false;
+            continue;
+        }
+        if (c == '"') { in_str = true; continue; }
+        if (c == '(') d += 1;
+        if (c == ')' and d > 0) d -= 1;
+    }
+    if (d != 0) return false;
+    const subject = trimSl(text[sp + 8 .. i - 1]);
+    var b = i;
+    while (b < text.len and (text[b] == 32 or text[b] == 9 or text[b] == 13 or text[b] == 10)) b += 1;
+    if (b >= text.len or text[b] != '{') return false;
+    // 先找 switch 体的右括号；光标在体外就直接放弃。旧版往回扫会把体外
+    // 的花括号当成臂体，inferExprType 顺着半截路径递归，ReleaseSafe 下
+    // 直接 Stack overflow（枚举补全处必崩）。
+    var e = b + 1;
+    var close_depth: usize = 1;
+    var q_str = false;
+    var q_ch = false;
+    while (e < text.len and close_depth > 0) : (e += 1) {
+        const c = text[e];
+        if (q_str) {
+            if (c == '\\') { e += 1; continue; }
+            if (c == '"') q_str = false;
+            continue;
+        }
+        if (q_ch) {
+            if (c == '\\') { e += 1; continue; }
+            if (c == '\'') q_ch = false;
+            continue;
+        }
+        if (c == '"') { q_str = true; continue; }
+        if (c == '\'') { q_ch = true; continue; }
+        if (c == '{') close_depth += 1;
+        if (c == '}') close_depth -= 1;
+    }
+    if (close_depth != 0 or off >= e) return false;
+    // 正向走本臂：顶层 ':' 结束模式位，`;` / `,` 开启下一臂的模式位；
+    // 若在模式位结束前撞上臂体 '{'，说明光标已在表达式里。
+    var q = b + 1;
+    var depth: usize = 1;
+    var in_pattern = true;
+    q_str = false;
+    q_ch = false;
+    while (q < off) : (q += 1) {
+        const c = text[q];
+        if (q_str) {
+            if (c == '\\') { q += 1; continue; }
+            if (c == '"') q_str = false;
+            continue;
+        }
+        if (q_ch) {
+            if (c == '\\') { q += 1; continue; }
+            if (c == '\'') q_ch = false;
+            continue;
+        }
+        if (c == '"') { q_str = true; continue; }
+        if (c == '\'') { q_ch = true; continue; }
+        // 前序臂的臂体（`.Array: a {};` 里的 `{}`）也会被扫到，必须整段按
+        // 深度跳过，不能一见 '{' 就判定"光标已在表达式里"——否则第二臂
+        // 及之后的模式位全部拿不到补全。只有走到`光标`时仍在模式段
+        //（in_pattern==true）才算模式位；臂体内光标 kept in_pattern=false。
+        if (depth == 1) {
+            if (c == ';' or c == ',') { in_pattern = true; continue; }
+            if (c == ':') { in_pattern = false; continue; }
+        }
+        if (c == '{') depth += 1;
+        if (c == '}' and depth > 0) depth -= 1;
+    }
+    if (!in_pattern) return false;
+    var ty = inferExprType(text, doc, subject, 0) orelse "";
+    var tag_subject = false;
+    if (std.mem.endsWith(u8, subject, ".tag") and subject.len > 4) {
+        const base = trimSl(subject[0 .. subject.len - 4]);
+        if (inferExprType(text, doc, base, 0)) |bt| {
+            ty = trimSl(bt);
+            tag_subject = true;
+        }
+    }
+    if (std.mem.eql(u8, ty, "TypeInfo")) {
+        for (type_info_members) |m| {
+            if (prefix.len > 0 and !std.mem.startsWith(u8, m.name, prefix)) continue;
+            addItem(list, seen, m.name, 20, m.detail, 0);
+        }
+        return true;
+    }
+    if (ty.len > 0 and (ty[0] == '?' or ty[0] == '!')) {
+        const names = if (ty[0] == '?') [_][]const u8{ "some", "none" }
+                      else [_][]const u8{ "ok", "err" };
+        for (names) |nm| {
+            if (prefix.len > 0 and !std.mem.startsWith(u8, nm, prefix)) continue;
+            addItem(list, seen, nm, 20, "switch 臂变体", 0);
+        }
+        return true;
+    }
+    var files = scanFiles(doc, text);
+    defer files.deinit(gpa);
+    const cn = containerNameOf(ty);
+    if (cn.len == 0) return false;
+    if (findContainerBody(files.items, cn)) |hit| {
+        var decls: std.ArrayList(Decl) = .empty;
+        defer decls.deinit(gpa);
+        extractBraceMembers(hit.body, hit.is_enum, &decls);
+        for (decls.items) |dc| {
+            if (dc.name.len == 0) continue;
+            if (prefix.len > 0 and !std.mem.startsWith(u8, dc.name, prefix)) continue;
+            addItem(list, seen, dc.name, 20, dc.detail, 0);
+        }
+        return decls.items.len > 0;
+    }
+    return false;
+}
+
 fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
     const t0 = Io.Clock.now(.real, g_io).nanoseconds;
     defer {
@@ -9700,6 +10131,12 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
             list.raw("]}}", .{});
             return list.buf.items;
         }
+    }
+    // §257 — switch 臂模式补变体：`switch (info.kind) { .` 必须按主语的
+    // 类型给候选（TypeInfo 的 25 个变体 / 用户 union、?T、!T 各自成员）。
+    if (dotted and switchPatternVariants(text, doc, off, &list, &seen, prefix)) {
+        list.raw("]}}", .{});
+        return list.buf.items;
     }
     // KEEP — 匿名 struct 字面量刚开括号 `.{` 就要给字段：Zed 在 `{` 后
     // 立刻弹补全时，光标前是 '{' 不是 '.'，旧链落到全局标识符（用户
@@ -10177,6 +10614,59 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
             // 成员所属容器名：方法签名里 `Self` 要换成真实类型名
             // （`next(self: *Self) ?[]const u8` → `next() ?[]const u8`）。
             var owner: []const u8 = "";
+            // §257：反射的 kind 链必须最先拦截——`info.kind.Struct.` 的
+            // `Struct` 会被后面的"类型名/实例变量"分支抢走（handled 后
+            // 这里就进不来），所以按 path 形态在最前面给补全。
+            {
+                var kind_handled = false;
+                if (std.mem.eql(u8, path, "TypeInfo") or std.mem.eql(u8, path, "kind") or
+                    std.mem.endsWith(u8, path, ".kind")) {
+                    for (type_info_members) |m|
+                        addItem(&list, &seen, m.name, 14, m.detail, 0);
+                    kind_handled = true;
+                } else if (std.mem.lastIndexOf(u8, path, ".kind.")) |dot| {
+                    const variant = path[dot + ".kind.".len..];
+                    var payload: ?[]const u8 = null;
+                    if (std.mem.eql(u8, variant, "Int")) payload = "IntInfo"
+                    else if (std.mem.eql(u8, variant, "Float")) payload = "FloatInfo"
+                    else if (std.mem.eql(u8, variant, "Ptr") or std.mem.eql(u8, variant, "Slice")) payload = "PtrInfo"
+                    else if (std.mem.eql(u8, variant, "Array") or std.mem.eql(u8, variant, "Vec")) payload = "ArrayInfo"
+                    else if (std.mem.eql(u8, variant, "Tuple")) payload = "TupleInfo"
+                    else if (std.mem.eql(u8, variant, "Struct")) payload = "StructInfo"
+                    else if (std.mem.eql(u8, variant, "Union")) payload = "UnionInfo"
+                    else if (std.mem.eql(u8, variant, "Enum")) payload = "EnumInfo"
+                    else if (std.mem.eql(u8, variant, "Opt") or std.mem.eql(u8, variant, "Err")) payload = "ElemInfo"
+                    else if (std.mem.eql(u8, variant, "ErrorSet")) payload = "ErrorSetInfo"
+                    else if (std.mem.eql(u8, variant, "Function")) payload = "FunctionInfo";
+                    if (payload) |pn| {
+                        if (builtinTyDefOf(pn)) |pd| {
+                            for (pd.fields) |f|
+                                addItem(&list, &seen, f.name, 5, f.ty, 0);
+                            kind_handled = true;
+                        }
+                    }
+                }
+                if (kind_handled) {
+                    handled = true;
+                    recv_kind = .ty;
+                }
+            }
+            // §257 — 类型已知的接收者直接按类型取成员：内建反射类型没有
+            // 声明文本，旧的"实例变量兜底"链在 switch 臂/别名绑定里会被
+            // 前面的分支抢走（f. 只剩关键字、g. 全空）。inferExprType 已经
+            // 能把 `const f = info.kind.Function` 推成 FunctionInfo，这里
+            // 就按推出来的类型出字段，不依赖接收者写成什么形态。
+            if (!handled) {
+                if (inferExprType(text, doc, path, 0)) |ity| {
+                    const cn = containerNameOf(ity);
+                    if (builtinTyDefOf(cn) != null and
+                        builtinTyMembers(cn, &decls))
+                    {
+                        handled = decls.items.len > 0;
+                        if (handled) recv_kind = .instance;
+                    }
+                }
+            }
             // KEEP — 方法体内 `self.`：容器取光标所在最内层带 self 方法的体。
             if (!handled and self_body != null) {
                 const sc = self_body.?;
@@ -11178,6 +11668,52 @@ fn unhideFile(sub_path: []const u8) void {
 }
 extern "kernel32" fn SetFileAttributesW(lpFileName: [*:0]const u16, dwFileAttributes: u32) i32;
 
+/// 清理上一进程遗留的影子文件。旧版本会把 .zxls-*.zx 标成
+/// HIDDEN|TEMPORARY 后进程被宿主杀掉，文件永远留在项目里（用户截图里
+/// src/ 下两个点文件）。只删 60 秒前的、名字是工具自己生成的影子；
+/// 当前正在用的影子 mtime 很新，绝不会被误删。
+fn cleanupStaleShadows(dir: []const u8) void {
+    if (dir.len == 0) return;
+    var d = Io.Dir.cwd().openDir(g_io, dir, .{ .iterate = true }) catch return;
+    defer d.close(g_io);
+    const now = Io.Clock.now(.real, g_io).nanoseconds;
+    // 先收集再删：Windows 下边遍历边删会让目录迭代器读到半截条目，
+    // 曾把整个 LSP 进程带走（枚举补全处静默退出、stderr 一个字都没有）。
+    var stale: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (stale.items) |p| gpa.free(p);
+        stale.deinit(gpa);
+    }
+    var it = d.iterate();
+    while (it.next(g_io) catch null) |entry| {
+        if (entry.kind != .file) continue;
+        const name = entry.name;
+        if (!std.mem.startsWith(u8, name, ".zxls-") or
+            !std.mem.endsWith(u8, name, ".zx")) continue;
+        // 名字形状必须是 .zxls[<f>]<hex>.zx，避免误删用户自己的点文件。
+        var body = name[6 .. name.len - 3];
+        if (body.len > 0 and body[0] == 'f') body = body[1..];
+        if (body.len == 0) continue;
+        var hex = true;
+        for (body) |c| {
+            if (!std.ascii.isHex(c)) { hex = false; break; }
+        }
+        if (!hex) continue;
+        var fp: std.ArrayList(u8) = .empty;
+        defer fp.deinit(gpa);
+        fp.appendSlice(gpa, dir) catch continue;
+        fp.append(gpa, '/') catch continue;
+        fp.appendSlice(gpa, name) catch continue;
+        const st = Io.Dir.cwd().statFile(g_io, fp.items, .{}) catch continue;
+        if (now - st.mtime.nanoseconds < 60 * std.time.ns_per_s) continue;
+        stale.append(gpa, gpa.dupe(u8, fp.items) catch continue) catch continue;
+    }
+    for (stale.items) |p| {
+        unhideFile(p);
+        Io.Dir.cwd().deleteFile(g_io, p) catch {};
+    }
+}
+
 const Diag = struct {
     line: u32,
     col: u32,
@@ -11255,7 +11791,9 @@ fn formatDoc(doc: *const Document) ?[]const u8 {
     return j.buf.items;
 }
 
-fn runCheck(doc: *const Document, out_diags: *std.ArrayList(Diag)) void {    // 影子文件：把缓冲内容写到与源文件同目录的隐藏 .zx，zxc 检查它——
+fn runCheck(doc: *const Document, out_diags: *std.ArrayList(Diag)) void {
+    cleanupStaleShadows(dirName(doc.path));
+    // 影子文件：把缓冲内容写到与源文件同目录的隐藏 .zx，zxc 检查它——
     // 诊断反映的是编辑器缓冲，而不是磁盘旧状态；同目录保证 @mod(...)
     // 的解析路径与真实文件一致。
     const dir = dirName(doc.path);
@@ -11440,7 +11978,6 @@ fn inlayMsg(code: []const u8, msg: []const u8) []const u8 {
 }
 
 fn publishDiags(doc: *const Document, diags: []const Diag) void {
-    last_pub_has_diags.store(diags.len > 0, .seq_cst);
     var j = Json{};
     // 所有含字面花括号的片段用 appendSlice 写入，绕开 fmt 的 {{ }} 转义；
     // {d} 只出现在不含花括号的最小片段里。
@@ -11478,6 +12015,9 @@ fn publishDiags(doc: *const Document, diags: []const Diag) void {
     j.buf.appendSlice(gpa, "]}}") catch @panic("oom");
     logLine("publish");
     sendRaw(j.buf.items);
+    docs_mu.lockUncancelable(g_io);
+    if (docs.getPtr(doc.path)) |d| d.has_diags = diags.len > 0;
+    docs_mu.unlock(g_io);
 }
 
 /// zxc.exe 的 mtime：编译器被重编替换后，已打开文档的旧诊断就过时了，
@@ -11756,8 +12296,10 @@ fn handle(v: std.json.Value) ?[]const u8 {
                 }
             }
             const path = uriToPath(uri_v.string);
-            const doc = Document{ .uri = dupe(uri_v.string), .path = path, .text = dupe(text), .version = version };
+            const doc = Document{ .uri = dupe(uri_v.string), .path = path, .text = dupe(text), .version = version, .has_diags = false };
             docs_mu.lockUncancelable(g_io);
+            var had_diags = false;
+            if (docs.get(path)) |old| had_diags = old.has_diags;
             // KEEP：脏表先摘，再释放旧文档。脏表的键指向 docs 里那份 path，
             // 先 free 就会留下悬垂键——下一次 put 触发扩容重哈希，或者
             // diagnosticsWorker 拿它去 docs.get，读到的是已释放内存。
@@ -11773,10 +12315,10 @@ fn handle(v: std.json.Value) ?[]const u8 {
             dirty.put(gpa, doc.path, {}) catch {};
             docs_cond.signal(g_io);
             docs_mu.unlock(g_io);
-            // §253：编辑后立刻撤掉上一轮诊断，不等 zxc 重查——
-            // 否则改正后旧波浪线一直挂在屏幕上，要重启 LSP 才消失。
-            if (last_pub_has_diags.load(.seq_cst)) {
-                last_pub_has_diags.store(false, .seq_cst);
+            // §253/§258：编辑后只清掉「这个 URI 的」旧波浪线。
+            // 不能用全局标志：别的文件一编辑就会把它清零，本文件随后改正时不再发空诊断，旧错误就一直挂着。
+            // 也不能无条件发：批量 didOpen 会灌满 stdout 管道，客户端写请求与服务端发通知互等死锁。
+            if (had_diags) {
                 var j = Json{};
                 j.raw("{{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{{\"uri\":", .{});
                 j.str(uri_v.string);

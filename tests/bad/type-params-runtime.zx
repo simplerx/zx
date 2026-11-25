@@ -1,0 +1,9 @@
+// §257: descriptor slices ([]Param under kind.Function) are compile-time only
+// expect: E0501
+const move = fn (p: *i32) void { _ = p; };
+
+pub const main = fn () u8 {
+    var ps = @type(move).kind.Function.params;
+    _ = ps;
+    return 0;
+};

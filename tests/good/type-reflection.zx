@@ -1,0 +1,93 @@
+// §257: general compile-time type reflection — `kind` union(enum), each variant
+// carries only its own members. No ECS special case, no flat neutral values.
+// expect-exit: 0
+const std = @mod("std");
+
+const Point = struct {
+    x: i32,
+    y: i32,
+
+    const sum = fn (self: *const Point) i32 { return self.x + self.y; };
+    const zero = fn () Point { return .{ .x = 0, .y = 0 }; };
+};
+
+const Shape = union(enum) {
+    circle: f64,
+    rect: struct { w: f64, h: f64 },
+};
+
+const Color = enum(u8) { red, green, blue };
+const Err = error{ bad, worse };
+const Pair = struct { a: u8, b: u8 };
+
+pub const main = fn () u8 {
+    // numeric shape
+    const si = @type(i32);
+    if (si.kind.tag != TypeInfo.Int) return 1;
+    const ii = si.kind.Int;
+    if (ii.bits != 32 or !ii.isSigned) return 2;
+    const ui = @type(u8);
+    if (ui.kind.Int.bits != 8 or ui.kind.Int.isSigned) return 3;
+    const fi = @type(f64);
+    if (fi.kind.tag != TypeInfo.Float or fi.kind.Float.bits != 64) return 4;
+
+    // fixed-length containers
+    const ar = @type([3]u8);
+    if (ar.kind.tag != TypeInfo.Array or ar.kind.Array.len != 3) return 5;
+    if (ar.kind.Array.elem != u8) return 6;
+    const vec = @type(@Vec(f32, 4));
+    if (vec.kind.tag != TypeInfo.Vec or vec.kind.Vec.len != 4) return 7;
+
+    // views
+    const sp = @type([]const u8);
+    if (sp.kind.tag != TypeInfo.Slice or !sp.kind.Slice.isConst or
+        sp.kind.Slice.elem != u8) return 8;
+    const op = @type(?Point);
+    if (op.kind.tag != TypeInfo.Opt or op.kind.Opt.elem != Point) return 9;
+    const eu_val: !u8 = 7;
+    const eu = @type(eu_val);
+    if (eu.kind.tag != TypeInfo.Err or eu.kind.Err.elem != u8) return 10;
+
+    // struct: fieldCount / fields / statics live in kind.Struct
+    const pi = @type(Point);
+    if (pi.kind.tag != TypeInfo.Struct) return 11;
+    const st = pi.kind.Struct;
+    if (st.fieldCount != 2) return 12;
+    if (st.fields[0].name.len != 1 or st.fields[0].ty != i32) return 13;
+    if (st.fields[1].offset != 4) return 14;
+    if (st.methodCount != 2) return 15;
+    if (st.methods[0].name.len != 3 or !st.methods[0].hasSelf) return 16;
+    if (st.methods[1].hasSelf) return 17;
+    if (st.statics.len != 0) return 18;
+
+    // tagged union carries its tag type
+    const un = @type(Shape);
+    if (un.kind.tag != TypeInfo.Union or !un.kind.Union.isTagged) return 19;
+    if (@type(un.kind.Union.tagTy).kind.tag != TypeInfo.Enum) return 20;
+    if (un.kind.Union.fieldCount != 2) return 21;
+
+    // enum and error set
+    const en = @type(Color);
+    if (en.kind.tag != TypeInfo.Enum or en.kind.Enum.bits != 8) return 22;
+    const er = @type(Err);
+    if (er.kind.tag != TypeInfo.ErrorSet or er.kind.ErrorSet.errorCount != 2) return 23;
+    if (er.kind.ErrorSet.errors[0].len != 3 or er.kind.ErrorSet.errors[1].len != 5) return 24;
+
+    // tag value comparison is authoritative; no flat fields to guess from
+    if (si.kind.tag == TypeInfo.Function) return 25;
+    if (si.kind.tag == TypeInfo.Struct) return 26;
+
+    // runtime values still reflect through their type
+    const p: Point = .{ .x = 1, .y = 2 };
+    const pv = @type(p);
+    if (pv.kind.tag != TypeInfo.Struct or pv.size != 8) return 27;
+    if (pv.kind.Struct.fields[0].ptr == null) return 28;
+
+    // `.name` 是编译期静态串：绑到运行期 const 后仍非空、内容不变。
+    if (si.name.len != 3 or si.name[0] != 'i' or si.name[2] != '2') return 29;
+    const pname = pi.name;
+    if (pname.len != 5 or pname[0] != 'P' or pname[4] != 't') return 30;
+
+    std.println("type reflection ok");
+    return 0;
+};

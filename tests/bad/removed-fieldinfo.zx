@@ -1,4 +1,4 @@
-// expect: @hasField was removed: use @type(T) and look through `.fields`
+// expect: @hasField was removed: use @type(T).kind.Struct.fields
 // 1.2.1 反射收敛成一个 @typeInfo：字段查询全部走描述符。
 const main = fn () u8 {
     return (u8)@hasField(i32, "x");

@@ -949,7 +949,7 @@ static Type *check_builtin(Node *n, Type *expect) {
 
     if (!strcmp(nm, "type")) {
         /* 唯一的内建：@type(x) → 编译期描述符
-         *   { .name, .size, .align, .ty, .fieldCount, .fields }
+         *   { .name, .size, .align, .ty, .kind }  (kind: union(enum), §257)
          * x 是类型时就是那个类型，是表达式时取它的类型（原 @typeOf）。
          * `@type(T).size/.align/.name` 顶替了 @sizeOf/@alignOf/@typeName
          * 三个老内建（1.2.2 合并，见下面 gone[] 的提示）。 */
@@ -960,6 +960,12 @@ static Type *check_builtin(Node *n, Type *expect) {
              * 泛型实参 T 都走这。 */
             t = n->items[0]->type_val;
             if (!t && n->items[0]->sym) t = n->items[0]->sym->type_val;
+        }
+        /* §255：`@type(info.params[i])` 这种「从编译期类型值切片里取元素」
+         * 的节点没有 type_val，只有编译期 V_TYPE。折一次再取，反射才能嵌套。 */
+        if (!t || t->kind == TY_INVALID) {
+            Value *tv = ct_eval(n->items[0]);
+            if (tv && tv->kind == V_TYPE) t = tv->tval;
         }
         if (!t || t->kind == TY_INVALID)
             return BAD(n, "@type: the type is not known at compile time");
@@ -1087,11 +1093,11 @@ static Type *check_builtin(Node *n, Type *expect) {
             { "typeName", "use @type(T).name" },
             { "typeInfo", "use @type(x) -- same descriptor, shorter name" },
             { "typeOf",   "use @type(x) -- its `.ty` is the type" },
-            { "hasField", "use @type(T) and look through `.fields`" },
-            { "fieldCount","use @type(T).fieldCount" },
-            { "fieldType","use @type(T).fields[i].ty" },
-            { "fieldName","use @type(T).fields[i].name" },
-            { "offsetOf", "use @type(T).fields[i].offset" },
+            { "hasField", "use @type(T).kind.Struct.fields" },
+            { "fieldCount","use @type(T).kind.Struct.fieldCount" },
+            { "fieldType","use @type(T).kind.Struct.fields[i].ty" },
+            { "fieldName","use @type(T).kind.Struct.fields[i].name" },
+            { "offsetOf", "use @type(T).kind.Struct.fields[i].offset" },
             { "field",    "reflection has no dynamic member access; use `v.name`" },
             { "embedFile","embed the bytes yourself (a literal or std.fs)" },
             { "file",     "source-location builtins are gone" },

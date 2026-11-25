@@ -1566,7 +1566,15 @@ typedef enum {
     FS_BIN, FS_ARROW
 } FsKind;
 
-typedef struct { FsKind kind; const char *s; size_t n; bool unary; } FsTok;
+typedef struct {
+    FsKind kind;
+    const char *s;
+    size_t n;
+    bool unary;       /* + - * & : 一元(true) / 二元(false) */
+    bool ns_kw;       /* error / type : 关键字但可作命名空间值 (error.null) */
+    bool fn_close;    /* fn (...) 的 ')' : 返回类型前缀前要留空格 */
+    bool cast_close;  /* (T)v 的 ')' : 后面跟值时紧贴 */
+} FsTok;
 
 static bool fs_kw(const char *s, size_t n) {
     static const char *const kws[] = {
@@ -1739,6 +1747,49 @@ static FsTok *fs_lex(const char *s, size_t *out_n) {
     return v;
 }
 
+/* §257/§258: 一次性给 token 标注语义角色，空格决策只查这些标记，
+ * 不再在 fs_space 里靠 a->s[1] / memcmp(a->s,"error") 偷看文本。
+ * 三类上下文：
+ *   ns_kw      —— error / type 虽在关键字表里，但可作命名空间值，点号前紧贴
+ *   fn_close   —— 与 fn 的 '(' 配对的 ')'，返回类型 `!T` / `?T` 前要留空格
+ *   cast_close —— `(T)v` 的 ')'，后面跟值时紧贴
+ * 括号用栈配对；cast 复用 fs_cast_close（它对每个 ')' 线性回溯，token 数量小）。 */
+static void fs_annotate(FsTok *v, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        FsTok *t = &v[i];
+        if (t->kind == FS_WORD && (
+                (t->n == 5 && !memcmp(t->s, "error", 5)) ||
+                (t->n == 4 && !memcmp(t->s, "type", 4))))
+            t->ns_kw = true;
+        if (t->kind == FS_CLOSE && t->s[0] == ')')
+            t->cast_close = fs_cast_close(v, i);
+    }
+    /* 括号配对：记录每个 '(' 是否属于 fn 参数列表。
+     * fn ( ... ) / extern fn name ( ... ) 都算；嵌套 fn 类型由同一栈处理。 */
+    size_t *stack = n ? xmalloc(n * sizeof *stack) : NULL;
+    size_t sp = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (v[i].kind == FS_OPEN && v[i].s[0] == '(') {
+            bool is_fn = false;
+            size_t q = i;
+            /* 向前看：紧邻 'fn'，或 'fn' + 一个标识符（extern fn name(...)）。 */
+            if (q > 0 && v[q - 1].kind == FS_WORD && v[q - 1].n == 2 &&
+                !memcmp(v[q - 1].s, "fn", 2)) {
+                is_fn = true;
+            } else if (q > 1 && v[q - 1].kind == FS_WORD &&
+                       v[q - 2].kind == FS_WORD && v[q - 2].n == 2 &&
+                       !memcmp(v[q - 2].s, "fn", 2)) {
+                is_fn = true;
+            }
+            stack[sp++] = is_fn ? i + 1 : 0;   /* +1 避免与 0 哨兵冲突 */
+        } else if (v[i].kind == FS_CLOSE && v[i].s[0] == ')' && sp > 0) {
+            size_t open = stack[--sp];
+            if (open > 0) v[i].fn_close = true;
+        }
+    }
+    free(stack);
+}
+
 /* 两个相邻 token（v[i], v[i+1]）之间是否留一个空格。
  * 规则按「左邻优先」排：先看左邻是否要求后随空格（运算符/分隔符），
  * 再看右邻是否要求紧贴（闭括号/点），最后处理括号的上下文特例。 */
@@ -1762,17 +1813,28 @@ static bool fs_space(const FsTok *v, size_t i) {
     /* 4. 点 / 前缀符：值结尾或开括号后紧贴（a.b、t.0、?T、f(.{…)），
      *    否则留一格（, .b）。 */
     if (y == FS_DOT || y == FS_PREFIX) {
-        bool val_end = (x == FS_WORD && !fs_kw(a->s, a->n)) ||
-                       x == FS_LIT || x == FS_CLOSE || x == FS_RBRACE ||
-                       x == FS_OPEN;
+        bool val_end = (x == FS_WORD && (!fs_kw(a->s, a->n) || a->ns_kw)) ||
+                       x == FS_LIT || x == FS_RBRACE || x == FS_OPEN;
+        /* 普通 ')' 后跟前缀（`if (!b) !x` 里的 `!x`）紧贴；
+         * 但 fn 参数列表的 ')' 后是返回类型 `!T` / `?T`，要留一格。
+         * 这类 token 已由 fs_annotate 标好，不再靠文本/位置猜。 */
+        if (x == FS_CLOSE) val_end = !a->fn_close;
         /* `.?.0` / `p.x.y`：点后缀紧贴。`.{` 是字面量开头，后面字段要留
          * 一格（`.{ .a = 1 }`），不能算 val_end。 */
         if (x == FS_DOT && !(a->n == 2 && a->s[1] == '{')) val_end = true;
         return !val_end;
     }
 
-    /* 5. 开圆/方括号：关键字后留一格（if ( / fn (），其余紧贴（f( / a[）。 */
-    if (y == FS_OPEN) return x == FS_WORD && fs_kw(a->s, a->n);
+    /* 5. 开圆/方括号：关键字后留一格（if ( / fn (），其余紧贴（f( / a[）。
+     * §256：内建名恰好是关键字时（@type / @error —— `type`、`error` 在
+     * 关键字表里）不能加空格：`@type(` / `@error(` 紧贴。前面紧邻 `@`
+     * 前缀 token 就是内建调用，与 `if (` / `fn (` 区分开。 */
+    if (y == FS_OPEN) {
+        if (x == FS_WORD && fs_kw(a->s, a->n) && i > 0 &&
+            v[i - 1].kind == FS_PREFIX && v[i - 1].s[0] == '@')
+            return false;
+        return x == FS_WORD && fs_kw(a->s, a->n);
+    }
 
     /* 6. 开花括号：关键字后留一格（struct { / else {），闭括号后留一格
      *    （) {）；标识符后按 Zx 书写惯例区分——大写开头是类型名字面量
@@ -1780,15 +1842,13 @@ static bool fs_space(const FsTok *v, size_t i) {
      *    留一格。跨行拆出的行看不到后面的字段，不能靠后继 '.' 判断
      *    （曾误产 `const c = Cfg {` / `i32{` 导致收拢幂等失效）。 */
     if (y == FS_LBRACE) {
-        if (x == FS_WORD && fs_kw(a->s, a->n)) {
-            return !(a->n == 5 && !memcmp(a->s, "error", 5));  /* error{a,b,} */
-        }
+        if (x == FS_WORD && fs_kw(a->s, a->n))
+            return !a->ns_kw;                                   /* error{a,b,} 紧贴 */
         if (x == FS_CLOSE || x == FS_RBRACE) return true;
         if (x == FS_WORD) {
             char c0 = a->s[0];
             bool upper = c0 >= 'A' && c0 <= 'Z';
-            if (upper) return false;                            /* Cfg{ … } */
-            if (a->n == 5 && !memcmp(a->s, "error", 5)) return false;
+            if (upper || a->ns_kw) return false;                /* Cfg{ / error{ */
             return true;                                        /* i32{ → i32 { */
         }
         return true;
@@ -1805,7 +1865,7 @@ static bool fs_space(const FsTok *v, size_t i) {
         if (a->s[0] == ']')
             return y == FS_BIN || y == FS_ARROW || (y == FS_UNARY && !b->unary);
         /* cast `(T)v`：`) ` 与值紧贴。 */
-        if (fs_cast_close(v, i) &&
+        if (a->cast_close &&
             (y == FS_WORD || y == FS_LIT || y == FS_PREFIX ||
              (y == FS_UNARY && b->unary))) return false;
         return true;
@@ -1827,6 +1887,7 @@ static char *fmt_spacing(const char *line) {
     size_t n = 0;
     FsTok *v = fs_lex(line, &n);
     if (!n) { free(v); return xstrdup(""); }
+    fs_annotate(v, n);
     Buf out;
     buf_init(&out);
     for (size_t i = 0; i < n; i++) {
