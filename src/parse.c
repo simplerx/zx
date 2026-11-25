@@ -185,6 +185,7 @@ static Node *parse_stmt(P *p);
 static Node *parse_construct(P *p, const char *label);
 static Node *parse_for(P *p, const char *label, bool allow_nobind);
 static Node *parse_yield(P *p);
+static Node *parse_array_fill(P *p);   /* §252 [N]v */
 
 static Node *type_ident(const char *name, int line, int col) {
     Node *n = node_new(NK_TYPE_IDENT, line, col);
@@ -1150,6 +1151,13 @@ static Node *parse_unary(P *p) {
             n->nitems = lit->nitems;
             return n;
         }
+        if (at(p, TOK_LBRACKET) && peek(p, 1)->kind != TOK_RBRACKET) {
+            /* §252：`&[N]v` —— 指针形式的重复数组，得到 `*[N]T`。
+             * flag=false 让 sema 脱糖成 NK_ARRAY_LIT 的指针形式（backend 发 &(...)）。 */
+            Node *n = parse_array_fill(p);
+            n->flag = false;
+            return n;
+        }
         {
             Node *n = node_new(NK_UN, t->line, t->col);
             n->op = TOK_AMP;
@@ -1188,6 +1196,26 @@ static Node *parse_unary(P *p) {
     default:
         return parse_postfix(p, parse_primary(p));
     }
+}
+
+/* §252：`[N]v` —— 用同一元素重复 N 次初始化数组。
+ * primary 位置的 `[`（长度在前）与 parse_type_prefix 的 `[N]T`（数组类型）
+ * 用 `]` 之后的 token 分流：后面是值表达式（INT/STR/CHAR/`(`/`.`/`-`/`&` 等）
+ * 就按重复值收成 NK_ARRAY_FILL；后面是类型（`*`/`?`/`[`/IDENT/关键字）就
+ * 仍走数组类型。IDENT 有歧义（`[4]x` 既可能是值变量也可能是类型名），统一
+ * 收成 NK_ARRAY_FILL，由 sema 按 x 求值为类型还是值决定——zx 里类型是值，
+ * 这样 `const A = [4]u8;` 这类写法也能一并支持。 */
+static Node *parse_array_fill(P *p) {
+    Token *lb = advance(p);                    /* '[' */
+    Node *len = parse_expr(p);
+    expect(p, TOK_RBRACKET);
+    Node *n = node_new(NK_ARRAY_FILL, lb->line, lb->col);
+    n->flag = true;                     /* 值形式；&[N]v 由 parse_unary 翻成 false */
+    n->a = len;
+    /* 元素按一元层读：避免把 `[4]0 + 1` 的 `+ 1` 吃进元素（那是数组 + 1）。
+     * 需要整个表达式作元素时写 `[4](0 + 1)`。 */
+    n->b = parse_unary(p);
+    return n;
 }
 
 static Node *parse_primary(P *p) {
@@ -1334,9 +1362,12 @@ static Node *parse_primary(P *p) {
         return parse_type(p);   /* types are values（extern struct/union 走前缀分支） */
 
     /* 类型是值：`[]const u8` / `*i32` 也能出现在表达式位置（泛型实参、
-     * 结构体字面量的构造者）。primary 位置不可能以二元运算符开头，
-     * 所以这里看到 `[` / `*` 只可能是类型。 */
-    case TOK_LBRACKET: case TOK_STAR:
+     * 结构体字面量的构造者）。`[]T`（`[` 紧跟 `]`）是切片类型、仍走 parse_type；
+     * `*T` 同理。带长度的 `[N]…` 交给 parse_array_fill（§252）。 */
+    case TOK_LBRACKET:
+        if (peek(p, 1)->kind == TOK_RBRACKET) return parse_type(p);
+        return parse_array_fill(p);
+    case TOK_STAR:
         return parse_type(p);
 
     case TOK_KW_ERROR: case TOK_KW_TYPE:
@@ -2339,6 +2370,7 @@ static const char *nk_name(NodeKind k) {
     case NK_TUPLE_TYPE: return "tupleT";
     case NK_STRUCT_TYPE: return "struct";
     case NK_REPEAT_TYPE: return "repeatT";   /* [T; N]：对拍名与 bootstrap 一致 */
+    case NK_ARRAY_FILL: return "arrayFill";  /* [N]v：对拍名与 bootstrap 一致 */
     case NK_UNION_TYPE: return "union";
     case NK_ENUM_TYPE: return "enum";
     case NK_OPT_TYPE: return "opt";

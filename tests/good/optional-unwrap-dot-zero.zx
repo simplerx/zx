@@ -1,0 +1,21 @@
+// §254：`?*T` 的载荷必须先用 `.?` 解包，再 `.0` 读/写裸指针。
+// 格式化不得把 `.?.0` 拆成 `.? .0`（fs_space 的左邻 FS_DOT 分支）。
+// expect-output
+// before=100
+// after=7
+// expect-exit: 0
+const std = @mod("std");
+
+const Holder = struct { p: ?*i32 = null };
+
+pub const main = fn () u8 {
+    var v: i32 = 100;
+    var h = Holder{ .p = &v };
+    if (h.p.?.0 != 100) { return 1; }
+    std.println("before={}", h.p.?.0);
+
+    h.p.?.0 = 7;
+    if (v != 7) { return 2; }
+    std.println("after={}", v);
+    return 0;
+};

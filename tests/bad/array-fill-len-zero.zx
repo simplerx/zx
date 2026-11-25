@@ -1,0 +1,7 @@
+// §252：重复初始化的长度必须 >= 1。
+// expect: array length must be 1..1073741823
+pub const main = fn () u8 {
+    let a: [1]i32 = [0]7;
+    _ = a;
+    return 0;
+};

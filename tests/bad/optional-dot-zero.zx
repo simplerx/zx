@@ -1,0 +1,12 @@
+// §254：`?T` / `?*T` 不能绕过 `.?` 直接用 `.0` 取载荷。
+// expect: unwrap with `.?` first
+const Person = struct { age: ?*i32 = null };
+
+pub const main = fn () u8 {
+    var arr = [1]Person{};
+    var age: i32 = 100;
+    arr[0].age = &age;
+    let v = arr[0].age.0;
+    _ = v;
+    return 0;
+};

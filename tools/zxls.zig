@@ -71,6 +71,9 @@ var docs_cond: Io.Condition = .init;
 var docs: std.StringHashMapUnmanaged(Document) = .empty;
 var dirty: std.StringHashMapUnmanaged(void) = .empty;
 var quitting = false;
+// §253：上次 publishDiagnostics 是否带了诊断。编辑时先撤掉旧波浪线，
+// 免得 zxc 重查的空档里 stale 诊断赖着不走（重启 LSP 才清）。
+var last_pub_has_diags = std.atomic.Value(bool).init(false);
 
 var root_path: ?[]const u8 = null;
 var zxc_path: []const u8 = "zxc.exe";
@@ -135,7 +138,7 @@ const keywords = [_][]const u8{
     "const",  "let",    "var",  "fn",     "type",   "null",     "undefined",
     "if",     "else",   "while", "for",  "inline", "switch", "continue", "return",
     "defer",  "struct", "union", "enum", "error",  "pub",    "extern",   "orelse",
-    "try",    "break",  "and",    "or",
+    "try",    "break",  "and",    "or",   "[N]",
 };
 
 const Snip = struct { label: []const u8, body: []const u8, detail: []const u8 };
@@ -166,6 +169,7 @@ const snippets = [_]Snip{
     .{ .label = "enumtag", .body = "const ${1:Name} = enum(u8) { ${2:a}, ${3:b} };", .detail = "自定义类型 enum(u8)" },
     .{ .label = "new", .body = "const ${1:v} = ${2:Name}{ .${3:field} = $0 };", .detail = "按类型构造实例" },
     .{ .label = "anon", .body = ".{ .${1:field} = ${2:0} }$0", .detail = "匿名 struct 字面量" },
+    .{ .label = "[N]", .body = "[${1:N}]${2:0}", .detail = "用同一元素填满数组（§252）" },
     .{ .label = "error", .body = "error { ${1:open}, ${2:read} };", .detail = "代码片段 error" },
     .{ .label = "const", .body = "const ${1:name} = $0;", .detail = "代码片段 const" },
     .{ .label = "let", .body = "let ${1:name} = $0;", .detail = "代码片段 let" },
@@ -5916,6 +5920,32 @@ fn inferExprType(text: []const u8, doc: *const Document, expr: []const u8, depth
             }
         }
     }
+    // §252 `[N]v` 重复初始化：长度写在方括号里，元素类型递归推。
+    // 必须放在下标分支之前——`[4]0` 会被当成「无 base 的索引」。
+    // `&[N]v` 由下面的 `&` 分支递归到这儿，再自然补一层 `*`。
+    if (e[0] == '[' and depth < 4) {
+        var bd: usize = 0;
+        var cb: ?usize = null;
+        for (e, 0..) |ch, qi| {
+            if (ch == '[') bd += 1
+            else if (ch == ']') {
+                if (bd > 0) bd -= 1;
+                if (bd == 0) { cb = qi; break; }
+            }
+        }
+        if (cb) |close| {
+            const cnt = trimSl(e[1..close]);
+            const val = trimSl(e[close + 1 ..]);
+            if (cnt.len == 0 or val.len == 0) return null;
+            if (inferExprType(text, doc, val, depth + 1)) |et| {
+                const elem = trimSl(et);
+                // `[N]T` 是类型值（如 `const B: type = [4]u8;`）
+                if (std.mem.eql(u8, elem, "type")) return "type";
+                return std.fmt.allocPrint(gpa, "[{s}]{s}", .{ cnt, elem }) catch null;
+            }
+            return null;
+        }
+    }
     // 取地址的数组字面量：`&.{ "a", "b" }` → `*[N]T`（元素类型按第一项推）。
     // 用户 2026-11-09 第 16 条：`const s = strs.0` 推不出类型。
     // §146：位置式 `.{…}` 不再是元组写法；去掉前导点后按裸 `{…}` 推元素
@@ -11410,6 +11440,7 @@ fn inlayMsg(code: []const u8, msg: []const u8) []const u8 {
 }
 
 fn publishDiags(doc: *const Document, diags: []const Diag) void {
+    last_pub_has_diags.store(diags.len > 0, .seq_cst);
     var j = Json{};
     // 所有含字面花括号的片段用 appendSlice 写入，绕开 fmt 的 {{ }} 转义；
     // {d} 只出现在不含花括号的最小片段里。
@@ -11742,6 +11773,16 @@ fn handle(v: std.json.Value) ?[]const u8 {
             dirty.put(gpa, doc.path, {}) catch {};
             docs_cond.signal(g_io);
             docs_mu.unlock(g_io);
+            // §253：编辑后立刻撤掉上一轮诊断，不等 zxc 重查——
+            // 否则改正后旧波浪线一直挂在屏幕上，要重启 LSP 才消失。
+            if (last_pub_has_diags.load(.seq_cst)) {
+                last_pub_has_diags.store(false, .seq_cst);
+                var j = Json{};
+                j.raw("{{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{{\"uri\":", .{});
+                j.str(uri_v.string);
+                j.raw(",\"diagnostics\":[]}}}}", .{});
+                sendRaw(j.buf.items);
+            }
             logLine(uri_v.string);
         }
         return null;

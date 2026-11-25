@@ -1581,6 +1581,65 @@ static bool fs_kw(const char *s, size_t n) {
 }
 
 /* 把一行切成 token。返回动态数组与数量；调用方 free。 */
+/* `(T)v` cast: `)` 后面跟值时紧贴，不加空格。只认括号内是单个类型名
+ * （或 @Vec(T,N)）的形态，`if (x) foo` / `(a + b)` 不按 cast 处理。 */
+static bool fs_type_word(const char *s, size_t n) {
+    static const char *const builtins[] = {
+        "bool", "void", "str", "type", "noreturn",
+        "i8", "i16", "i32", "i64", "i128", "isize",
+        "u8", "u16", "u32", "u64", "u128", "usize",
+        "f16", "f32", "f64", "f128", NULL
+    };
+    if (n == 0) return false;
+    if (s[0] >= 'A' && s[0] <= 'Z') return true;
+    for (int i = 0; builtins[i]; i++)
+        if (n == strlen(builtins[i]) && !memcmp(s, builtins[i], n)) return true;
+    return false;
+}
+
+static bool fs_cast_close(const FsTok *v, size_t i) {
+    if (v[i].kind != FS_CLOSE || v[i].s[0] != ')') return false;
+    size_t j = i;
+    int depth = 0;
+    while (j > 0) {
+        j--;
+        if (v[j].kind == FS_CLOSE) depth++;
+        else if (v[j].kind == FS_OPEN) {
+            if (depth == 0) break;
+            depth--;
+        }
+    }
+    if (v[j].kind != FS_OPEN || j + 1 >= i) return false;
+    /* 控制流条件不是 cast：`if (x) foo` / `while (ok) bar`。 */
+    if (j > 0 && v[j - 1].kind == FS_WORD) {
+        static const char *const ctl[] = { "if", "while", "for", "switch", NULL };
+        for (int q = 0; ctl[q]; q++) {
+            size_t m = strlen(ctl[q]);
+            if (v[j - 1].n == m && !memcmp(v[j - 1].s, ctl[q], m)) return false;
+        }
+    }
+    size_t k = j + 1;
+    /* 类型前缀：?T / *T / *const T。 */
+    while (k < i && ((v[k].kind == FS_PREFIX && v[k].s[0] == '?') ||
+                     (v[k].kind == FS_UNARY && v[k].s[0] == '*'))) k++;
+    if (k < i && v[k].kind == FS_WORD && fs_type_word(v[k].s, v[k].n)) {
+        k++;
+        if (k == i) return true;
+    }
+    /* @Vec(T, N)：整段括号组算一个类型。 */
+    if (j + 2 < i && v[j + 1].kind == FS_PREFIX && v[j + 1].s[0] == '@' &&
+        v[j + 2].kind == FS_WORD && v[j + 2].n == 3 &&
+        !memcmp(v[j + 2].s, "Vec", 3) && v[j + 3].kind == FS_OPEN) {
+        int d = 0;
+        k = j + 3;
+        for (; k < i; k++) {
+            if (v[k].kind == FS_OPEN) d++;
+            else if (v[k].kind == FS_CLOSE) { d--; if (d == 0) { k++; break; } }
+        }
+        return k == i;
+    }
+    return false;
+}
 static FsTok *fs_lex(const char *s, size_t *out_n) {
     size_t cap = 32, n = 0;
     FsTok *v = xmalloc(cap * sizeof *v);
@@ -1669,6 +1728,10 @@ static FsTok *fs_lex(const char *s, size_t *out_n) {
             bool plain_word = (pk == FS_WORD && !fs_kw(v[i - 1].s, v[i - 1].n));
             val_before = plain_word || pk == FS_LIT || pk == FS_CLOSE ||
                          (pk == FS_RBRACE);
+            /* cast `(T)-1`：`)` 后面的一元 -/+ 不能被当二元。 */
+            if (val_before && pk == FS_CLOSE && fs_cast_close(v, i - 1) &&
+                (v[i].s[0] == '-' || v[i].s[0] == '+'))
+                val_before = false;
         }
         v[i].unary = !val_before;
     }
@@ -1702,6 +1765,9 @@ static bool fs_space(const FsTok *v, size_t i) {
         bool val_end = (x == FS_WORD && !fs_kw(a->s, a->n)) ||
                        x == FS_LIT || x == FS_CLOSE || x == FS_RBRACE ||
                        x == FS_OPEN;
+        /* `.?.0` / `p.x.y`：点后缀紧贴。`.{` 是字面量开头，后面字段要留
+         * 一格（`.{ .a = 1 }`），不能算 val_end。 */
+        if (x == FS_DOT && !(a->n == 2 && a->s[1] == '{')) val_end = true;
         return !val_end;
     }
 
@@ -1734,13 +1800,24 @@ static bool fs_space(const FsTok *v, size_t i) {
     /* 8. 左邻是闭圆/方括号：) 后留一格（) i32 / ) {）；
      *    ] 后跟类型名紧贴（[]const u8 / [N]T），跟运算符照常。 */
     if (x == FS_CLOSE) {
-        if (a->s[0] == ']') return y != FS_WORD;
+        /* `]` 后跟类型是 `[]const u8` / `[N]T`，后跟值是 §252 `[N]v`；
+         * 两种都要紧贴，只有运算符才留空格（和上面 `)` 的 cast 同口径）。 */
+        if (a->s[0] == ']')
+            return y == FS_BIN || y == FS_ARROW || (y == FS_UNARY && !b->unary);
+        /* cast `(T)v`：`) ` 与值紧贴。 */
+        if (fs_cast_close(v, i) &&
+            (y == FS_WORD || y == FS_LIT || y == FS_PREFIX ||
+             (y == FS_UNARY && b->unary))) return false;
         return true;
     }
 
-    /* 9. 左邻是一元前缀 / 开符号 / 点：紧贴。 */
+    /* 9. 左邻是一元前缀 / 开符号：紧贴。
+     * 点 token（. / .? / .0 / .{）不能一律紧贴：`.0 != 1` / `.0 = 7`
+     * 要有空格；后缀点 / 前缀符 / 开括号已由规则 4/5 处理成紧贴。 */
     if (x == FS_UNARY && a->unary) return false;
-    if (x == FS_OPEN || x == FS_DOT || x == FS_PREFIX) return false;
+    if (x == FS_OPEN || x == FS_PREFIX) return false;
+    if (x == FS_DOT)
+        return y == FS_BIN || y == FS_ARROW || (y == FS_UNARY && !b->unary);
 
     return true;                                 /* WORD / LIT / } 后留一格 */
 }

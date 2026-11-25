@@ -132,6 +132,7 @@ pub const NK = enum {
     try_capture,      // try expr err { ... } —— 追加在末尾（§171）
     tag_bind,         // §174 续链：tag v : tag.x = e; —— 追加在末尾
     repeat_type,      // [N]T：数组值类型（§201，节点编号沿用旧 repeat_type）
+    array_fill,       // [N]v：用同一元素重复 N 次初始化数组（§252）——追加末尾
 };
 
 pub const Node = struct {
@@ -218,6 +219,7 @@ const nk_name = fn (k: NK) []const u8 {
         .try_capture: "try";
         .tag_bind: "tagbind";
         .repeat_type: "repeatT";
+        .array_fill: "arrayFill";
     };
 };
 
@@ -1639,6 +1641,12 @@ pub const Parser = struct {
                 n.items = lit.items;
                 return n;
             }
+            // §252：`&[N]v` —— 指针形式的重复数组（flag=false → *[N]T）
+            if (self.at(lex.Kind.lbracket) and self.peek_tok(1).kind != lex.Kind.rbracket) {
+                let n = try self.parse_array_fill();
+                n.flag = false;
+                return n;
+            }
             let n = self.new_at(NK.un, t);
             n.op = lex.Kind.amp;
             n.a = try self.parse_unary();
@@ -1706,6 +1714,20 @@ pub const Parser = struct {
         }
         let prim = try self.parse_primary();
         return self.parse_postfix(prim);
+    };
+
+    // §252：`[N]v` —— 用同一元素重复 N 次初始化数组。
+    // 与 C 前端同步：primary 的 `[`（带长度）收成 NK.array_fill，
+    // a=长度、b=元素；`[]T`（紧跟 `]`）仍走 parse_type。
+    pub const parse_array_fill = fn (self: *Parser) !*Node {
+        let t = self.advance();   // '['
+        let len = try self.parse_expr();
+        try self.expect(lex.Kind.rbracket);
+        let n = self.new_at(NK.array_fill, t);
+        n.flag = true;   // 值形式；&[N]v 由 parse_unary 翻成 false
+        n.a = len;
+        n.b = try self.parse_unary();
+        return n;
     };
 
     pub const parse_primary = fn (self: *Parser) !*Node {
@@ -1842,11 +1864,18 @@ pub const Parser = struct {
 
         // 类型是值：struct/union/enum/?/[]/*/error/type 都能在表达式位置出现
         // （extern struct/union 也走 parse_type 的前缀分支）
+        // §252：`[]T`（lbracket 紧跟 rbracket）是切片类型仍走 parse_type；
+        // 带长度的 `[N]v` 收成 array_fill。
+        if (t.kind == lex.Kind.lbracket) {
+            if (self.peek_tok(1).kind == lex.Kind.rbracket) {
+                return self.parse_type();
+            }
+            return self.parse_array_fill();
+        }
         if (t.kind == lex.Kind.kw_struct or t.kind == lex.Kind.kw_union or
             t.kind == lex.Kind.kw_enum or t.kind == lex.Kind.question or
-            t.kind == lex.Kind.lbracket or t.kind == lex.Kind.star or
-            t.kind == lex.Kind.kw_error or t.kind == lex.Kind.kw_type or
-            t.kind == lex.Kind.kw_extern) {
+            t.kind == lex.Kind.star or t.kind == lex.Kind.kw_error or
+            t.kind == lex.Kind.kw_type or t.kind == lex.Kind.kw_extern) {
             return self.parse_type();
         }
 

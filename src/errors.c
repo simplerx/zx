@@ -166,6 +166,10 @@ static const ErrDoc g_errs[] = {
     { "E0532", "captured pointer escape or invalid capture",
       "`if (o) *t { }` / `while (o) *t { }` / `switch (s) { .tag: *t { } }` capture a POINTER to the matched payload so you can write back to the original object (`t[0] = value`). The condition/subject must be an addressable, mutable left-hand side (a `var`), because a temporary has no original object to write back to. The captured pointer is a stack borrow: it may be used inside the arm to read/write the payload and aliased to other locals, but it must never escape — not returned, not stored into a struct field, global, or array/slice element, and not passed as a function argument. This check is independent of the tag ledger (§225), so neither turning the ledger on nor leaving it off disables it" },
 
+    { "E0533", "optional dereferenced without unwrap",
+      "unwrap `?T` / `!T` with `.?` first -- `.0` is only dereference for a bare pointer "
+      "or a tuple component; use `x.?` / `if (x) v { ... }` / `orelse`" },
+
     /* ---- 模块 ---- */
     { "E0601", "module resolution failed",
       "check the path/spelling of `@mod(\"name\")`; circular module imports are allowed, but a cycle in top-level const/var VALUES needs an explicit initial value; `std` must resolve next to the compiler" },

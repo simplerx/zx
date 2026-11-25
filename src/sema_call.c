@@ -1829,6 +1829,46 @@ static Type *ce_32_nk_pair(Node *n, Type *expect) {
 
 }
 
+/* §252：`[N]v` —— 用同一元素 v 重复 N 次初始化数组。
+ * 长度必须编译期可得；元素若求值为类型（`[N]T` 写法）则整体就是数组类型值
+ *（顺带补上表达式位置原先不支持的 `[4]u8` 类型别名）；否则原地脱糖成
+ * NK_ARRAY_LIT（clone N 份 v），把定型/发码/逃逸/ct 全交给现成路径。 */
+static Type *ce_34_nk_array_fill(Node *n, Type *expect) {
+    IntV lv = ev_int(n->a);
+    if (!lv.ok || lv.neg)
+        return BAD(n->a, "array length must be a non-negative compile-time integer");
+    if (lv.v == 0 || lv.v > 0x3fffffffULL) {
+        diag_code_at("E0305", n->a->line, n->a->col,
+                     "array length must be 1..1073741823 (got %llu)",
+                     (unsigned long long)lv.v);
+        return ty_invalid();
+    }
+
+    Type *et = check_expr(n->b, NULL);
+    if (!et || et->kind == TY_INVALID) return ty_invalid();
+
+    /* 元素是类型值：`[N]T` 就是 T 的 N 元数组类型（值位置的类型）。
+     * check_expr 对类型表达式返回 ty_type()（"这是类型"），它表示的那个
+     * 类型挂在节点 b->type_val 上（见 ce_07/ce_28）。 */
+    if (et->kind == TY_TYPE) {
+        Type *elem = n->b->type_val;
+        if (!elem) return BAD(n->b, "array element is not a valid type");
+        Type *arr = ty_array(elem, lv.v);
+        n->ty = ty_type();
+        n->type_val = arr;
+        return n->ty;
+    }
+
+    /* 元素是值：脱糖。flag=true → `.{…}` 值形式 [N]T；false → `&[N]v` 指针形式。 */
+    int cnt = (int)lv.v;
+    Node **items = xcalloc((size_t)cnt, sizeof(Node *));
+    for (int i = 0; i < cnt; i++) items[i] = clone_tree(n->b);
+    n->kind = NK_ARRAY_LIT;
+    n->items = items;
+    n->nitems = cnt;
+    return check_array_lit(n, n->items, n->nitems, expect);
+}
+
 static Type *ce_33_default(Node *n) {
         return BAD(n, "unsupported expression here (node kind %d)", (int)n->kind);
 }
@@ -1889,6 +1929,7 @@ Type *check_expr_raw(Node *n, Type *expect) {
     case NK_YIELD: return ce_31_nk_defer(n);
     case NK_DECL: return ce_31_nk_defer(n);
     case NK_PAIR: return ce_32_nk_pair(n, expect);
+    case NK_ARRAY_FILL: return ce_34_nk_array_fill(n, expect);
     default: return ce_33_default(n);
     }
 }

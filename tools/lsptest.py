@@ -1961,9 +1961,10 @@ off = STDUSE.index("    std.map.HashMap.") + len("    std.map.HashMap.")
 hit3 = std_items(off, 420)
 h3 = {i["label"]: (i.get("detail"), i.get("insertText")) for i in hit3}
 check("completion.typePath.genericMembers",
-      # 三段路径的泛型容器：类型上只该有静态函数。init 是 pub 静态；
-      # norm 2026-11-11 起私有（无 pub），类型路径也不再出现。
-      set(h3) == {"init"}
+      # 三段路径的泛型容器：init 是 pub 静态；norm 2026-11-11 起私有。
+      # §230/§251：map.iter() 之后 Entry / Iterator 成了 pub 成员，
+      # Entry{...} 是对应的构造骨架，三者都应出现在类型路径补全里。
+      set(h3) == {"init", "Entry", "Entry{...}", "Iterator"}
       and h3.get("init", (None, None))[1] == "init(${1:alloc})$0",
       str(sorted(h3))[:240])
 #  6h union(enum) 的三段路径：Value. 出变体（构造骨架走 std.json. 类型项）

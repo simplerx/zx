@@ -1474,11 +1474,17 @@ Type *check_field(Node *n) {
     case TY_OPT: case TY_ERR:
         if (n->name && !strcmp(n->name, "tag"))
             return type_of(n, bt->kind == TY_OPT ? ty_bool() : ty_error());
-        if (!n->name && n->ival == 0) return type_of(n, bt->elem);
+        /* §254：`x.0` 曾绕过 `.?` 直接取 optional 载荷（null 也照样解引用）。
+         * 载荷访问统一走 `.?`：它是唯一会做 null 检查的解包口，不能让 `.0`
+         * 变成隐式的 unchecked unwrap。`payload/some/ok` 这些别名同理收口。 */
+        if (!n->name && n->ival == 0)
+            return BAD(n, "`%s` has no member `.0`: unwrap with `.?` first "
+                          "(write `x.?.0` for a pointer payload)", ty_str(bt));
         if (n->name && (!strcmp(n->name, "payload") || !strcmp(n->name, "some") ||
                         !strcmp(n->name, "ok")))
-            return type_of(n, bt->elem);
-        return BAD(n, "`%s` only has .0 / .tag", ty_str(bt));
+            return BAD(n, "`%s` has no member `%s`: unwrap with `.?` first",
+                       ty_str(bt), n->name);
+        return BAD(n, "`%s` only has .tag (unwrap with `.?`)", ty_str(bt));
 
     default:
         return BAD(n, "`%s` has no members", ty_str(bt));

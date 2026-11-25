@@ -132,6 +132,9 @@ static const DiagRule g_rules[] = {
     { "cannot coerce",                    "E0301" },
     { "no implicit conversion",           "E0301" },
     { "cannot infer the type",            "E0301" },
+    /* §254：optional 未解包就 `.0` 取载荷——旧消息含 "has no member"，
+     * 不先拦住会落到 spelling 建议上；这里要的是 `.?`。 */
+    { "unwrap with `.?`",                 "E0533" },
     { "has no member",                    "E0304" },
     { "has no field",                     "E0304" },
     { "has no variant",                   "E0304" },

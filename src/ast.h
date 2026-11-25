@@ -67,9 +67,12 @@ typedef enum {
                          * ival = tag 账本 id（sema 填）。只绑**无标签**值。
                          * 追加在末尾——与 bootstrap/parse.zx 的 NK 同序
                          * 镜像，插在中间会让所有旧编号漂移。 */
-    NK_REPEAT_TYPE,     /* [T; N]：N 个 T 的内联元组值类型（Rust 风格）。
-                         * a = 元素类型，b = 长度（编译期整数）。sema 期展开成
-                         * N 个 T 的 TY_TUPLE，复用元组的布局/发码/下标/反射。
+    NK_REPEAT_TYPE,     /* [N]T：数组值类型（旧 [T; N] 沿用本节点编号）。
+                         * a = 元素类型，b = 长度（编译期整数）。 */
+    NK_ARRAY_FILL,      /* [N]v：用同一个元素 v 重复 N 次初始化数组（§252）。
+                         * a = 长度表达式，b = 元素表达式。sema 期：若 b 求值为
+                         * 类型则整体就是 [N]T 类型值；否则原地脱糖成
+                         * NK_ARRAY_LIT（clone N 份 b），后端/逃逸/ct 走现成路径。
                          * 追加在末尾，保持与 bootstrap NK 同序。 */
 } NodeKind;
 

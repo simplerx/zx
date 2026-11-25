@@ -1,0 +1,12 @@
+// §252：数组重复初始化的长度必须是编译期整数。
+// 函数参数 n 没有编译期值，ev_int 拿不到。
+// expect: array length must be a non-negative compile-time integer
+const make = fn (n: usize) void {
+    let a: [4]i32 = [n]0;
+    _ = a;
+};
+
+pub const main = fn () u8 {
+    make(4);
+    return 0;
+};

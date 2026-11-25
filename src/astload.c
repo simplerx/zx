@@ -135,7 +135,7 @@ static Node *lnode(Loader *L) {
     unsigned long long fvb  = lnum(L);
     unsigned long long slen = lnum(L);
     if (L->bad) return NULL;
-    if (kind > (unsigned long long)NK_REPEAT_TYPE) { L->bad = 1; return NULL; } /* NK_REPEAT_TYPE 是当前最大 kind */
+    if (kind > (unsigned long long)NK_ARRAY_FILL) { L->bad = 1; return NULL; } /* NK_ARRAY_FILL 是当前最大 kind */
 
     Node *n = node_new((NodeKind)kind, (int)line, (int)col);
     if (!n) { L->bad = 1; return NULL; }

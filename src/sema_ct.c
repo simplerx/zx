@@ -808,7 +808,7 @@ Value *ct_eval(Node *n) {
     case NK_TYPE_IDENT: case NK_PTR_TYPE: case NK_SLICE_TYPE:
     case NK_TUPLE_TYPE: case NK_STRUCT_TYPE: case NK_UNION_TYPE:
     case NK_ENUM_TYPE:  case NK_OPT_TYPE:   case NK_ERR_TYPE:  case NK_ERR_SET:
-    case NK_REPEAT_TYPE:
+    case NK_REPEAT_TYPE: case NK_ARRAY_FILL:
         if (n->type_val) v = val_type(n->type_val);
         break;
 

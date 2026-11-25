@@ -1,0 +1,34 @@
+// §253：`[N]v` 嵌在 struct literal 里的各种形态。
+// 用户反馈「嵌在 struct literal 里不行，得先建变量再逐元素赋值」——
+// 实测命名/匿名/嵌套/指针字段四种形态都可用，留作回归守门。
+// expect-output
+// named=1 1
+// dot=2 2
+// nested=3 3
+// ptr=4 4
+// expect-exit: 0
+const std = @mod("std");
+
+const Person = struct { id: u8 = 0 };
+const Holder = struct { arr: [2]Person };
+const PtrHolder = struct { arr: *[2]Person };
+const Outer = struct { h: Holder };
+
+pub const main = fn () u8 {
+    let named = Holder{ .arr = [2]Person{ .id = 1 } };
+    if (named.arr[0].id != 1 or named.arr[1].id != 1) { return 1; }
+    std.println("named={} {}", named.arr[0].id, named.arr[1].id);
+
+    let dotted: Holder = .{ .arr = [2]Person{ .id = 2 } };
+    if (dotted.arr[1].id != 2) { return 2; }
+    std.println("dot={} {}", dotted.arr[0].id, dotted.arr[1].id);
+
+    let outer = Outer{ .h = .{ .arr = [2]Person{ .id = 3 } } };
+    if (outer.h.arr[0].id != 3) { return 3; }
+    std.println("nested={} {}", outer.h.arr[0].id, outer.h.arr[1].id);
+
+    let ptr = PtrHolder{ .arr = &[2]Person{ .id = 4 } };
+    if (ptr.arr[0][1].id != 4) { return 4; }
+    std.println("ptr={} {}", ptr.arr[0][0].id, ptr.arr[0][1].id);
+    return 0;
+};

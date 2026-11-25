@@ -2583,6 +2583,54 @@ else
     printf "  FAIL §251 静态断言\n"; fail=1
 fi
 
+# §252：`[N]v` 用同一元素重复初始化。运行期行为由 tests/good/array-fill.zx
+# 自动发现并运行，两个 bad 用例钉住长度必须是编译期整数且 >= 1。
+# 这里钉住设计红线：新节点追加在末尾（双前端同序）、sema 原地脱糖走
+# NK_ARRAY_LIT、长度校验沿用 E0305。
+printf "\n== §252 数组重复初始化静态断言\n"
+if grep -Fq 'NK_ARRAY_FILL,' src/ast.h \
+   && grep -Fq 'array_fill,       // [N]v' bootstrap/parse.zx \
+   && grep -Fq 'case NK_ARRAY_FILL: return "arrayFill";' src/parse.c \
+   && grep -Fq 'case NK_ARRAY_FILL: return ce_34_nk_array_fill(n, expect);' src/sema_call.c \
+   && grep -Fq 'n->kind = NK_ARRAY_LIT;' src/sema_call.c \
+   && grep -Fq 'array length must be 1..1073741823' src/sema_call.c \
+   && [ -f tests/good/array-fill.zx ] && [ -f tests/bad/array-fill-len-var.zx ]; then
+    printf "  ok   §252 [N]v 节点同序 + sema 脱糖 + 长度校验\n"
+else
+    printf "  FAIL §252 静态断言\n"; fail=1
+fi
+
+# §253：编辑器侧四项修复。cast 格式化不得给 `(T)v` 插入空格；
+# zxls 补 [N]v 的 inlay / snippet，并在编辑时立刻撤掉旧诊断。
+# 运行期覆盖由 tests/good/array-fill-in-struct.zx 自动发现。
+printf "\n== §253 编辑器体验静态断言\n"
+if grep -Fq 'fs_cast_close(v, i - 1)' src/main.c \
+   && grep -Fq 'if (fs_cast_close(v, i)' src/main.c \
+   && grep -Fq '"[N]",' tools/zxls.zig \
+   && grep -Fq '.label = "[N]", .body = "[${1:N}]${2:0}"' tools/zxls.zig \
+   && grep -Fq 'return std.fmt.allocPrint(gpa, "[{s}]{s}"' tools/zxls.zig \
+   && grep -Fq 'last_pub_has_diags.store(diags.len > 0, .seq_cst);' tools/zxls.zig \
+   && grep -Fq 'if (last_pub_has_diags.load(.seq_cst))' tools/zxls.zig \
+   && [ -f tests/good/array-fill-in-struct.zx ]; then
+    printf "  ok   §253 cast 格式 + [N]v inlay/snippet + 诊断即时清除\n"
+else
+    printf "  FAIL §253 静态断言\n"; fail=1
+fi
+# §254：`?T` 必须用 `.?` 解包；`.?.0` / `[N]v` 的格式化不得插空格。
+# 运行期由 tests/good/optional-unwrap-dot-zero.zx 自动发现，
+# tests/bad/optional-dot-zero.zx 钉住 E0533。
+printf "\n== §254 optional 解包与点 token 格式静态断言\n"
+if grep -Fq '{ "unwrap with `.?`",                 "E0533" },' src/zxc.c \
+   && grep -Fq '"E0533", "optional dereferenced without unwrap"' src/errors.c \
+   && grep -Fq 'unwrap with `.?` first' src/sema_expr.c \
+   && grep -Fq "if (x == FS_DOT && !(a->n == 2 && a->s[1] == '{')) val_end = true;" src/main.c \
+   && grep -Fq "if (a->s[0] == ']')" src/main.c \
+   && [ -f tests/good/optional-unwrap-dot-zero.zx ] \
+   && [ -f tests/bad/optional-dot-zero.zx ]; then
+    printf '  ok   §254 E0533 专用码 + .?.0 / [N]v 空格规则\n'
+else
+    printf "  FAIL §254 静态断言\n"; fail=1
+fi
 # 用例会在仓库根留下自己的临时文件：io_fmt.zx 写 io_fmt.tmp，stdfs.zx 建
 # fs_t_dir / fs_t_dir2。跑完统一带走——测试不该往工作区里堆东西。
 rm -rf io_fmt.tmp fs_t_dir fs_t_dir2 2>/dev/null || true
