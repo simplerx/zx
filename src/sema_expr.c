@@ -84,6 +84,7 @@ bool expr_frame(Node *e) {
     case NK_CALL:  return e->esc;                     /* std.stackAlloc */
     case NK_IDENT: return e->sym && e->sym->stack_val;
     case NK_UN:    return e->op == TOK_AMP && addr_frame(e->a);
+    case NK_CAST:  return expr_frame(e->b);   /* a 是类型；指针 cast 不改变栈来源 */
     case NK_ARRAY_LIT:                /* &.{…}：值本身就是当前帧的匿名存储 */
         /* §242（用户裁定）：**空**数组字面量 `&.{}` 展开后切片长度恒为 0，
          * 任何下标都不可达（越界检查也进不去），不存在可逃逸的存储——
@@ -111,7 +112,14 @@ bool expr_borrow(Node *e) {
     if (!e) return false;
     switch (e->kind) {
     case NK_IDENT: return e->sym && e->sym->cap_borrow;
-    case NK_CAST:  return expr_borrow(e->a);   /* 指针 cast 仍是借用 */
+    case NK_UN:
+        /* §261：对 if/while 捕获的**值**取地址（&win）——捕获值物化在
+         * 当前栈帧，出臂即失效，与 `*t` 指针捕获同为栈借用。不认这条时
+         * `store(&h, &win)` 把栈指针存进字段、或 `&win` 经别名带出，全部
+         * 漏过逃逸检查。普通 `&local` 不算（传参合法），只认 SK_CAPTURE。 */
+        return e->op == TOK_AMP && e->a && e->a->kind == NK_IDENT &&
+               e->a->sym && e->a->sym->kind == SK_CAPTURE;
+    case NK_CAST:  return expr_borrow(e->b);   /* 指针 cast 仍是借用；a 是类型，b 才是操作数 */
     case NK_ORELSE: case NK_TRY:
         return expr_borrow(e->a) || expr_borrow(e->b);
     case NK_BIN:

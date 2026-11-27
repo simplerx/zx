@@ -1,0 +1,19 @@
+// §261：`*void` 是合法指针类型，void 只是零尺寸载荷，不是编译期-only 类型。
+// 以前 sema_ty_ct_only 把 void 当 ct-only（TypeInfo 无载荷变体拿它占位），
+// 误报 E050；报错分支没设 state=2 又连带 E0601 cyclic dependency。
+// good 形态：应能干净编译，不出现 E050 / E0601。
+const err = fn (b: bool)!i32 {
+    if (b) { return 42; }
+    return error.Bad;
+};
+pub const main = fn () !u8 {
+    var pii: *void = undefined;
+    _ = pii;
+    if (err(false)) t {
+        let p: *const i32 = &t;
+        _ = p;
+    } else e {
+        _ = e;
+    }
+    return 0;
+};

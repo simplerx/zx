@@ -116,19 +116,36 @@ for f in os.listdir(os.path.join(ROOT, "std")):
     if f.endswith(".zx"):
         shutil.copy(os.path.join(ROOT, "std", f), os.path.join(STD_COPY, f))
 open(os.path.join(TESTDIR, "zx.json"), "w", encoding="utf-8").write(
-    '{\n  "name": "lsptest",\n  "main": "src/extuser.zx",\n  "out": "lsptest",\n  "deps": ["libs"]\n}\n')
+    '{\n  "name": "lsptest",\n  "main": "src/extuser.zx",\n  "out": "lsptest",\n  "deps": ["libs", "projdep"]\n}\n')
 open(os.path.join(TESTDIR, "vendor", "ext.zx"), "w", encoding="utf-8").write(
     'pub const VERSION = "1.2.3";\n\npub const hello = fn (n: []const u8) void {\n    n;\n};\n\n'
     'pub const Cfg = struct {\n    pub w: i32,\n    pub h: i32,\n};\n')
 open(os.path.join(TESTDIR, "libs", "util.zx"), "w", encoding="utf-8").write(
     'pub const twice = fn (x: i32) i32 {\n    return x * 2;\n};\n')
+# 本地 Zx 工程依赖：projdep 自身再依赖 baseproj，LSP 必须递归展开 deps。
+os.makedirs(os.path.join(TESTDIR, "projdep", "src"), exist_ok=True)
+os.makedirs(os.path.join(TESTDIR, "baseproj", "src"), exist_ok=True)
+open(os.path.join(TESTDIR, "projdep", "zx.json"), "w", encoding="utf-8").write(
+    '{"name":"projdep","main":"src/main.zx","deps":["../baseproj"]}\n')
+open(os.path.join(TESTDIR, "projdep", "src", "main.zx"), "w", encoding="utf-8").write(
+    'const base = @mod("baseproj");\n\npub const answer = fn () i32 { return base.value(); };\n'
+    'pub const BasePoint = base.Point;\n')
+open(os.path.join(TESTDIR, "baseproj", "zx.json"), "w", encoding="utf-8").write(
+    '{"name":"baseproj","main":"src/main.zx"}\n')
+open(os.path.join(TESTDIR, "baseproj", "src", "main.zx"), "w", encoding="utf-8").write(
+    'pub const value = fn () i32 { return 42; };\n'
+    'pub const Point = struct { pub x: i32, pub y: i32 };\n')
 EXTUSE = """const ext = @mod("ext");
 const util = @mod("util");
+const projdep = @mod("projdep");
 
 const main = fn () i32 {
     ext.hello("x");
     ext.
     util.twice(1);
+    projdep.
+    projdep.BasePoint.
+    projdep.answer();
     var c = ext.Cfg{ .w = 1 };
     c.
     ext.Cfg{.
@@ -708,6 +725,14 @@ off = EXTUSE.index("util.twice") + len("util.")          # zx.json deps
 labels = complete_at(EXTUSE, off, 22)
 check("completion.deps", "twice" in labels, str(sorted(labels))[:200])
 
+off = EXTUSE.index("    projdep.\n") + len("    projdep.")
+labels = complete_at(EXTUSE, off, 220)
+check("completion.projectMain", {"answer", "BasePoint"} <= labels, str(sorted(labels))[:240])
+# 工程依赖自己的 deps 也必须递归展开；否则 BasePoint 的 base.Point 体找不到。
+off = EXTUSE.index("projdep.BasePoint.") + len("projdep.BasePoint.")
+labels = complete_at(EXTUSE, off, 221)
+check("completion.projectTransitive", {"x", "y"} <= labels, str(sorted(labels))[:240])
+
 # 10b 模块成员的 detail 必须是函数签名/声明类型，不能落到绑定别名
 # （2026-11-08 截图：`g.` 弹窗每条右侧都标 `g`，看不出哪条是函数）。
 # `pub const hello = fn …` 这种 const 包着的函数同样按函数出（kind=3）。
@@ -780,6 +805,26 @@ if isinstance(loc, dict):
 elif isinstance(loc, list) and loc:
     target = loc[0].get("uri", "")
 check("definition.vendor", "vendor" in target, str(loc)[:200])
+
+# 10d 本地 Zx 工程依赖：main 映射、递归 deps、hover 与定义跳转。
+off = EXTUSE.index("projdep.answer") + len("projdep.answer") - 1
+send({"jsonrpc": "2.0", "id": 222, "method": "textDocument/hover", "params": {
+    "textDocument": {"uri": exturi}, "position": pos(EXTUSE, off)}})
+r, _ = recv_id("hover", 222)
+hv = r["result"]["contents"]["value"] if r and r.get("result") else ""
+check("hover.projectMain", "answer" in hv and "i32" in hv, hv[:160])
+
+off = EXTUSE.index("projdep.answer") + len("projdep.answer") - 1
+send({"jsonrpc": "2.0", "id": 223, "method": "textDocument/definition", "params": {
+    "textDocument": {"uri": exturi}, "position": pos(EXTUSE, off)}})
+r, _ = recv_id("definition", 223)
+loc = r.get("result") if r else None
+target = ""
+if isinstance(loc, dict):
+    target = loc.get("uri", "")
+elif isinstance(loc, list) and loc:
+    target = loc[0].get("uri", "")
+check("definition.projectMain", "projdep/src/main.zx" in target.replace("\\", "/"), str(loc)[:240])
 
 # 10b 诊断带 help/note：改出个错，publishDiagnostics 的 message 里应有
 #     did you mean（渲染器的 help 行被 zxls 挂进诊断消息）。
@@ -2677,6 +2722,113 @@ _r, _ = recv_id("kindaliasPattern", _rid)
 _alab = {i["label"] for i in ((_r or {}).get("result") or {}).get("items") or []}
 check("completion.descriptor.switchPatternVariants", "Function" in _alab,
       str(sorted(_alab)))
+
+# §260 — 泛型反射补全三修（用户 2026-11-26 三图）：
+#  ① `@type(T).` 直接点无提示（须经 const 接一下才有）；
+#  ② `inline for(s.fields) f` / `inline for(fncap.params) p` 循环变量无成员；
+#  ③ 同名污染：循环体内 `p.` 弹出文件里更早那个 `var p` 的成员。
+# 根治：recvExprStart 吞 `@`；loopVarTyAt 按 iterate 元素类型 + 作用域判定。
+LOOPUSE = """const V = struct { x: i32, y: i32 };
+const call = fn (func: type) void {
+    const info: Type = @type(func);
+    @type(func).
+    switch (info.kind) {
+        .Struct: s {
+            inline for (s.fields) f {
+                f.
+            };
+        },
+        .Function: fncap {
+            inline for (fncap.params) p {
+                p.
+            };
+        },
+        else: {},
+    }
+};
+const oldp = fn () void {
+    var p = V{ .x = 1, .y = 2 };
+    p.
+};
+"""
+luri = "file:///" + os.path.join(SRC_DIR, "loopuse.zx").replace("\\", "/")
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": luri, "languageId": "zx", "version": 1, "text": LOOPUSE}}})
+
+def _at(needle, after=0):
+    return LOOPUSE.index(needle, after) + len(needle)
+
+# ① @type(func). 直接链 → Type 的 5 字段
+_rid += 1
+send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/completion", "params": {
+    "textDocument": {"uri": luri}, "position": pos(LOOPUSE, _at("@type(func)."))}})
+_r, _ = recv_id("loopAtType", _rid)
+_atlab = {i["label"] for i in ((_r or {}).get("result") or {}).get("items") or []}
+check("completion.loop.atTypeChain",
+      {"name", "size", "align", "ty", "kind"} <= _atlab, str(sorted(_atlab)))
+
+# ②-a inline for(s.fields) f → Field 成员
+_rid += 1
+send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/completion", "params": {
+    "textDocument": {"uri": luri}, "position": pos(LOOPUSE, LOOPUSE.index("f.\n") + 2)}})
+_r, _ = recv_id("loopField", _rid)
+_flab = {i["label"] for i in ((_r or {}).get("result") or {}).get("items") or []}
+check("completion.loop.fieldVar",
+      {"name", "ty", "offset", "ptr"} <= _flab, str(sorted(_flab)))
+
+# ②-b inline for(fncap.params) p → Param 成员
+_pfor = LOOPUSE.index("for (fncap.params)")
+_ppos = LOOPUSE.index("p.\n", _pfor) + len("p.")
+_rid += 1
+send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/completion", "params": {
+    "textDocument": {"uri": luri}, "position": pos(LOOPUSE, _ppos)}})
+_r, _ = recv_id("loopParam", _rid)
+_plab = {i["label"] for i in ((_r or {}).get("result") or {}).get("items") or []}
+check("completion.loop.paramVar", {"ty", "isConst"} <= _plab, str(sorted(_plab)))
+
+# ③ 循环体外的旧 var p → 只出 V 的字段，不被循环变量污染
+_op = LOOPUSE.index("var p =")
+_opos = LOOPUSE.index("p.\n", _op) + len("p.")
+_rid += 1
+send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/completion", "params": {
+    "textDocument": {"uri": luri}, "position": pos(LOOPUSE, _opos)}})
+_r, _ = recv_id("loopOldP", _rid)
+_olab = {i["label"] for i in ((_r or {}).get("result") or {}).get("items") or []}
+check("completion.loop.noSameNamePollution",
+      {"x", "y"} <= _olab and "isConst" not in _olab, str(sorted(_olab)))
+# §262 — 多目录同名模块只取第一个命中（用户 2026-11-26 第 4 图：ext.
+# 补全混进 vendor/deps 里同名 ext.zx 的 add）。编译器 module_load 按目录顺序
+# 找到第一个即停；moduleDecls 以前所有目录都 append，等价于多模块合并。
+MODDIR = os.path.join(TESTDIR, "moddup")
+for _d in ("src", "vendor", "libs"):
+    os.makedirs(os.path.join(MODDIR, _d), exist_ok=True)
+open(os.path.join(MODDIR, "zx.json"), "w", encoding="utf-8").write(
+    '{"name":"moddup","main":"src/main.zx","deps":["vendor","libs"]}')
+open(os.path.join(MODDIR, "src", "ext.zx"), "w", encoding="utf-8").write(
+    'pub const Slot: type = struct { pub x: i32 = 0 };\n')
+open(os.path.join(MODDIR, "vendor", "ext.zx"), "w", encoding="utf-8").write(
+    'pub const add = fn (a: i32) i32 { return a; };\n')
+open(os.path.join(MODDIR, "libs", "ext.zx"), "w", encoding="utf-8").write(
+    'pub const sub = fn (a: i32) i32 { return a; };\n')
+MODUSE = ('const ext = @mod("ext");\n'
+          'const Slot: type = ext.Slot;\n'
+          'pub const main = fn () i32 {\n'
+          '    ext.\n'
+          '    return 0;\n'
+          '};\n')
+_mp = os.path.join(MODDIR, "src", "main.zx")
+open(_mp, "w", encoding="utf-8").write(MODUSE)
+_moduri = "file:///" + _mp.replace("\\", "/")
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": _moduri, "languageId": "zx", "version": 1, "text": MODUSE}}})
+_rid += 1
+_off = MODUSE.index("    ext.") + len("    ext.")
+send({"jsonrpc": "2.0", "id": _rid, "method": "textDocument/completion", "params": {
+    "textDocument": {"uri": _moduri}, "position": pos(MODUSE, _off)}})
+_r, _ = recv_id("modDup", _rid)
+_mlab = {i["label"] for i in ((_r or {}).get("result") or {}).get("items") or []}
+check("completion.moduleNoPollution",
+      "Slot" in _mlab and "add" not in _mlab and "sub" not in _mlab, str(sorted(_mlab)))
 
 # 类型值链的**源头**解析不到（`t` 不是模块绑定、模块文件不在扫描集里）：
 # `resolveContainerPathLoose` 从末段往前退（`LsP1.LsP2` → `LsP2`），
@@ -5152,6 +5304,112 @@ _clr_diags = _wait_diag("staleDiag.change", zuri, True)
 check("diagnostics.clearOnEveryChange", bool(_clr_diags), str(_clr_diags)[:200])
 check("shadows.staleRemoved", not os.path.exists(_stale), _stale)
 
+# §263 — 清空通知必须带 version；客户端按 version 丢弃旧消息，无 version 的
+# 空包会被当成旧消息忽略，随后 worker 的带 version 诊断把旧波浪线画回来。
+# 同时验证高频连续编辑后停在好文本，最后一条诊断为空且 version 单调。
+_clear_ver = [m["params"].get("version") for m in _clr_diags if m["params"].get("version") is not None]
+check("diagnostics.clearHasVersion", len(_clear_ver) > 0 and _clear_ver[0] == 2,
+      str(_clear_ver))
+
+# 高频 BAD/GOOD 交替，最后停在 GOOD。probe 实测：修复前 8/12 次最后一条
+# 是带 version 的非空诊断（旧快照）；修复后必须全部为空。
+_V263_BAD = "pub const arr = [10]0\nconst Op = enum { a1 };\n"
+_V263_GOOD = "pub const arr = [10]0;\nconst Op = enum { a1 };\n"
+_v263_uri = "file:///" + os.path.join(SRC_DIR, "ver263.zx").replace("\\", "/")
+open(os.path.join(SRC_DIR, "ver263.zx"), "w", encoding="utf-8").write(_V263_BAD)
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": _v263_uri, "languageId": "zx", "version": 1, "text": _V263_BAD}}})
+_wait_diag("ver263.open", _v263_uri, False)
+_v263_last_ver = 1
+for _v263_trial in range(2):
+    for _v263_bad in (True, False, True, False):
+        _v263_last_ver += 1
+        send({"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {
+            "textDocument": {"uri": _v263_uri, "version": _v263_last_ver},
+            "contentChanges": [{"text": _V263_BAD if _v263_bad else _V263_GOOD}]}})
+        time.sleep(0.02)
+    _v263_last_ver += 1
+    send({"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {
+        "textDocument": {"uri": _v263_uri, "version": _v263_last_ver},
+        "contentChanges": [{"text": _V263_GOOD}]}})
+    _v263_got = _wait_diag("ver263.rapid", _v263_uri, True, 8)
+check("diagnostics.noStaleAfterRapidEdits", bool(_v263_got), str(_v263_got)[:200])
+
+# §265 — 根因：didChange 曾用 had_diags 门控清空，而 has_diags 由 worker 异步
+# 写回，状态错位后停在 false，后续编辑不再发清空 → 波浪线永久残留，只有
+# restart 才好。守门：version 全部复用为 1（绕过 §263 的 version 判据），
+# 每次 didChange 都必须立即收到一条空诊断。修复前 4/6，修复后 6/6。
+_V265_BAD = "pub const arr = [10]0\nconst Op = enum { a1 };\n"
+_V265_GOOD = "pub const arr = [10]0;\nconst Op = enum { a1 };\n"
+_v265_uri = "file:///" + os.path.join(SRC_DIR, "ver265.zx").replace("\\", "/")
+open(os.path.join(SRC_DIR, "ver265.zx"), "w", encoding="utf-8").write(_V265_BAD)
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": _v265_uri, "languageId": "zx", "version": 1, "text": _V265_BAD}}})
+_wait_diag("ver265.open", _v265_uri, False)
+_v265_clears = 0
+for _v265_txt in (_V265_GOOD, _V265_BAD, _V265_GOOD, _V265_GOOD, _V265_BAD, _V265_GOOD):
+    send({"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {
+        "textDocument": {"uri": _v265_uri, "version": 1},
+        "contentChanges": [{"text": _v265_txt}]}})
+    _v265_got = _wait_diag("ver265.change", _v265_uri, True)
+    if any(len(m["params"]["diagnostics"]) == 0 for m in _v265_got):
+        _v265_clears += 1
+check("diagnostics.clearOnEveryEdit", _v265_clears == 6, "%d/6" % _v265_clears)
+
+# §266 — 定时磁盘刷新：Zed 漏发 didChange（失焦保存/外部改动）时，LSP 内存
+# text 停在旧文本，诊断永久残留，只能 restart。修法：worker 每 1s 读磁盘，
+# quiet 1.5s 后若磁盘内容变了就用磁盘刷新 buffer 并重查。
+_V266_BAD = "pub const arr = [10]0\nconst Op = enum { a1 };\npub const main = fn () i32 { return 0; };\n"
+_V266_GOOD = "pub const arr = [10]0;\nconst Op = enum { a1 };\npub const main = fn () i32 { return 0; };\n"
+_v266_path = os.path.join(SRC_DIR, "ver266.zx")
+_v266_uri = "file:///" + _v266_path.replace("\\", "/")
+open(_v266_path, "w", encoding="utf-8").write(_V266_BAD)
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": _v266_uri, "languageId": "zx", "version": 1, "text": _V266_BAD}}})
+_v266_open = _wait_diag("ver266.open", _v266_uri, False)
+check("diagnostics.diskRefresh.preexisting", bool(_v266_open) and len(_v266_open[-1]["params"]["diagnostics"]) > 0,
+      str(_v266_open)[:160])
+# 只改磁盘，不发送任何 didChange
+open(_v266_path, "w", encoding="utf-8").write(_V266_GOOD)
+time.sleep(3.0)  # quiet 1.5s + 1s tick + 余量
+_v266_after = _wait_diag("ver266.disk", _v266_uri, True, 5)
+_v266_last = _v266_after[-1] if _v266_after else None
+check("diagnostics.diskRefresh.selfHeal",
+      bool(_v266_last) and len(_v266_last["params"]["diagnostics"]) == 0,
+      str(_v266_after)[:200])
+
+# §269 — 磁盘刷新判据必须带 mtime 基线：§266 只看「磁盘内容 != buffer」，
+# Zed 里未保存的编辑让两者长期不同，1.5s 静默后磁盘旧内容把 buffer 冲掉，
+# 诊断退回旧状态并反复重查发布——磁盘上有真实错误的模块（如 engine.zx 的
+# 3 条 E0532）永远"改不对"，看起来就是"其他模块诊断一直不更新"（探针实测
+# 复现：didChange 改对 1.1s 后旧诊断复活）。守门：didOpen BAD 后只等不发，
+# 磁盘 mtime 没变（内容不同但没写过）时 buffer 是权威，诊断必须保持不变。
+_v269_path = os.path.join(SRC_DIR, "ver269.zx")
+_v269_uri = "file:///" + _v269_path.replace("\\", "/")
+open(_v269_path, "w", encoding="utf-8").write(_V266_GOOD)
+send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+    "textDocument": {"uri": _v269_uri, "languageId": "zx", "version": 1, "text": _V266_BAD}}})
+_v269_open = _wait_diag("ver269.open", _v269_uri, False)
+check("diagnostics.unsavedOpenDiags", bool(_v269_open) and len(_v269_open[0]["params"]["diagnostics"]) > 0,
+      str(_v269_open)[:160])
+# 静默 3s（>1.5s）：旧版在此用磁盘 GOOD 覆盖 buffer → 发布 0 条。正确行为
+# 是磁盘 mtime 没变，buffer 是权威——期间不该出现任何针对该 URI 的新发布。
+_v269_covered = False
+_v269_deadline = time.time() + 3.0
+while time.time() < _v269_deadline:
+    try:
+        _m = out_q.get(timeout=0.5)
+    except queue.Empty:
+        continue
+    if _m is None:
+        break
+    if (_m.get("method") == "textDocument/publishDiagnostics"
+            and _m["params"].get("uri") == _v269_uri):
+        if len(_m["params"].get("diagnostics", [])) == 0:
+            _v269_covered = True
+check("diagnostics.unsavedBufferRespected", not _v269_covered,
+      "covered=%s" % _v269_covered)
+
 # 9 shutdown/exit
 send({"jsonrpc": "2.0", "id": 8, "method": "shutdown", "params": None})
 recv_id("shutdown", 8)
@@ -6148,6 +6406,86 @@ check("semanticTokens.cover",
 
 # §258 — 旧诊断必须随每次编辑清掉；上一进程遗留的 .zxls-*.zx 要被回收。
 # 全局"上次有诊断"标志会被别的文件清零，不能拿它当清空条件。
+
+# §271 — switch 主语推断不能重新进入同一个捕获名。函数参数没有 const/let
+# 声明，inferExprType("op") 会转去捕获类型推断；旧实现又把 depth 重置为 0，
+# 在 `switch (op)` 形成无限递归。孤立 '.' 的补全会栈溢出并杀死整个 zxls。
+def dot_switch_probe():
+    d = os.path.join(TESTDIR, "dot271")
+    shutil.rmtree(d, ignore_errors=True)
+    os.makedirs(d)
+    src = '''const Op = union {
+    a1: u64,
+    a2: u64,
+    data: []const u8,
+};
+
+pub const main = fn (op: Op) void {
+    switch (op) {
+        .a1: a: a: {},
+        .a2: a: a: {},
+        .data: i: a: {},
+        .
+    else: undefined;
+    };
+};
+'''
+    path = os.path.join(d, "main.zx")
+    open(path, "w", encoding="utf-8").write(src)
+    uri = "file:///" + path.replace("\\", "/")
+    off = src.rindex("\n        .\n") + len("\n        .")
+    p = subprocess.Popen([ZXLS_BIN], stdin=subprocess.PIPE,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    def send(message):
+        body = json.dumps(message).encode()
+        p.stdin.write(("Content-Length: %d\r\n\r\n" % len(body)).encode() + body)
+        p.stdin.flush()
+
+    def recv(want):
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            headers = b""
+            while not headers.endswith(b"\r\n\r\n"):
+                char = p.stdout.read(1)
+                if not char:
+                    return None
+                headers += char
+            size = int([line for line in headers.split(b"\r\n")
+                        if line.lower().startswith(b"content-length")][0].split(b":")[1])
+            message = json.loads(p.stdout.read(size))
+            if message.get("id") == want:
+                return message
+        return None
+
+    try:
+        send({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "capabilities": {}, "rootUri": "file:///" + d.replace("\\", "/")}})
+        if recv(1) is None:
+            return None, "initialize failed"
+        send({"jsonrpc": "2.0", "method": "initialized", "params": {}})
+        send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": {"uri": uri, "languageId": "zx", "version": 1, "text": src}}})
+        send({"jsonrpc": "2.0", "id": 2, "method": "textDocument/completion", "params": {
+            "textDocument": {"uri": uri},
+            "position": {"line": src.count("\n", 0, off),
+                         "character": off - (src.rfind("\n", 0, off) + 1)}}})
+        response = recv(2)
+        if response is None:
+            return None, "server died or timed out"
+        return response.get("result"), None
+    finally:
+        try:
+            p.kill()
+        except Exception:
+            pass
+        p.wait(timeout=5)
+        shutil.rmtree(d, ignore_errors=True)
+
+_dot_result, _dot_error = dot_switch_probe()
+check("completion.switch.isolatedDot.noCrash",
+      _dot_error is None and isinstance(_dot_result, dict)
+      and isinstance(_dot_result.get("items"), list), str(_dot_error))
 
 # ---------------------------------------------------------------------------
 if fails:

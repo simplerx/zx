@@ -1,0 +1,9 @@
+// §261：`return &win.x` —— if 值捕获变量物化在栈帧，取字段地址带出必须报
+// E0503（addr_frame 认 SK_CAPTURE 的 in_fn 标记）。
+// expect: cannot return a pointer into the current function's stack frame
+// expect-code: E0503
+const S = struct { x: i32 = 0 };
+const get = fn () !S { return S{}; };
+pub const main = fn () !*const i32 {
+    if (get()) win { return &win.x; } else e { _ = e; return undefined; }
+};

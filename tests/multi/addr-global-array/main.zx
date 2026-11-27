@@ -1,0 +1,15 @@
+// §270c：&ext.arr 必须拿到与 extern 声明一致的 C 符号，且取值正确。
+// 注意 §201：`*[N]T` 的 p[0] 是第 0 个数组本身，取元素要 p[0][i]。
+const std = @mod("std");
+const ext = @mod("ext");
+
+pub const main = fn () i32 {
+    let p = &ext.arr;
+    if (p[0][0] != 7) { return 1; }
+    if (p[0][3] != 7) { return 2; }
+    std.println("addr-global-array ok {}", p[0][1]);
+    return 0;
+};
+
+// expect-output
+// addr-global-array ok 7

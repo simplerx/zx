@@ -17,15 +17,17 @@
  *                       中间文件进 .zxc-cache/，最终产物进 out/
  *   zxc run [args]      build 后直接运行 out/<产物>.exe（-- 之后的参数传给程序）
  *   zxc test [过滤]     运行 src/test/ 测试模块（零参 pub 函数即用例）
- *   zxc sync            扫 vendor/ 补生成缺失的 C 绑定（build/run 自动做）
+ *   zxc sync            扫 vendor/ 补生成缺失的 C 绑定，并同步 csrc 到 zx.json
  *   zxc include         接入本地/工程外的 C 库（原 add 的全部能力）
- *   zxc add <url>       从网站拉 C 库进 vendor/；zx.json 只记 URL，锚点全进 zx.lock
- *   zxc fetch           按 zx.lock 校验/补齐 vendor/（唯一可能联网的补齐入口）
+ *   zxc add <path|url>  添加 Zx 工程、预编译库或远程 C 库
+ *   zxc fetch           按 zx.lock 校验/补齐 vendor/，并同步 C 编译输入
  *   zxc check / fmt     检查 / 格式化
  *
  * zx.json：工程清单（init 生成）。name/version/main/out 之外，
- * "deps": ["vendor2", "../shared"] 是模块搜索目录——相对导入打不开时
- * 依次回退（工程根的 vendor/ 存在即自动加入）。
+ * "deps": ["vendor2", "../shared"] 是 Zx 模块搜索目录；
+ * "vendor": ["https://..."] 是远程源码声明；
+ * "csrc": ["vendor", "vendor/foo.clib"] 是 C 源码/清单编译输入；
+ * "libs": ["lib/libfoo.a", "ws2_32"] 是预编译库链接输入。
  *
  * 后端用的 C 编译器由 ZX_CC 环境变量指定，缺省 .toolchain/zig.exe cc。
  * -o 时每个模块一个 .c / .o，运行时函数体单独一个 _zxrt.c / .o：
@@ -74,9 +76,18 @@ static char *read_source(const char *path, size_t *out_len);
 static int  vendor_autoscan(void);   /* vendor/ 自动接管：build/run/test 解析源码前调 */
 static int  cmd_add(int argc, char **argv, int argi);
 static int  cmd_fetch(int argc, char **argv, int argi);
+static int  deps_add(const char *path, char *err, size_t cap);
+static int  project_str_array_add(const char *key, const char *value,
+                                 char *err, size_t cap);
+static int  csrc_add(const char *path, char *err, size_t cap);
+static int  libs_add(const char *lib, char *err, size_t cap);
+static int  sync_vendor_manifest(void);
 
 static const char *g_cc;
 static const char *g_cflags;
+static const char *g_csrc_inputs[64];
+static char g_csrc_buf[64][1200];
+static int g_csrc_n;
 /* §208: 当前构建目标。NULL = 宿主单目标（老路径），非 NULL = 走目标配置。
  * 用指针而非改所有 build_program 调用点：init 自检、cmd_run、cmd_test
  * 仍走宿主默认，只有 zxc build 的多目标循环会设置它。 */
@@ -556,49 +567,49 @@ static void prog(const char *fmt, ...) {
 /* cachedir 非空：中间文件（.h/.c/.o/.flags）全部落进 cachedir/，
  * out 是最终产物路径；cachedir 为空则维持旧行为——中间文件挨着 out 放。 */
 static int build_program(Node *root, const char *out, const char *cachedir, OutKind kind) {
-    /* vendor/ 下的 C 源码：与 zx 生成的 C 用同一套 cc + flags 编成静态库，
+    /* zx.json csrc 声明的 C 源码：与 zx 生成的 C 用同一套 cc + flags 编成静态库，
      * 注入链接。改了 .c/.h、换 dev/release 档都会自动重编；重编过必须强制
      * 重链，否则"无改动重建"会拿旧 exe 糊弄过去。没有 C 源码时这里零开销。 */
     bool csrc_relink = 0;
     if (kind != OUT_STATIC) {
-        char **libs = NULL, cerr[1024];
-        int ncomp = 0;
-        int nlib = csrc_build(g_cc, g_cflags, "vendor", ZX_CACHE_DIR, NULL, 0,
-                              &libs, cerr, sizeof cerr, &ncomp);
-        if (nlib < 0) { fprintf(stderr, "zxc: %s\n", cerr); return 1; }
-        for (int i = 0; i < nlib; i++) {
-            zx_add_link_lib(libs[i]);
-            free(libs[i]);
-        }
-        free(libs);
-
-        /* 目录树模式：.clib 清单里可以是指向任意深度、任意位置的源码
-         * （库本身一个文件都没复制过来）。build/run/test 走这里自动
-         * 增量重编，重编过同样必须强制重链。 */
-        int nman = 0;
-        char **mans = clib_scan_manifests("vendor", &nman);
-        for (int i = 0; i < nman; i++) {
-            char clib[1024], merr[1024];
-            int mcomp = 0;
-            int mr = clib_build(g_cc, g_cflags, mans[i], ZX_CACHE_DIR, 0,
-                                clib, sizeof clib, merr, sizeof merr, &mcomp);
-            free(mans[i]);
-            if (mr < 0) {
-                fprintf(stderr, "zxc: %s\n", merr);
-                free(mans);
+        int total_compiled = 0;
+        for (int ci = 0; ci < g_csrc_n; ci++) {
+            const char *input = g_csrc_inputs[ci];
+            struct stat input_st;
+            if (stat(input, &input_st) != 0) {
+                fprintf(stderr, "zxc: C source input '%s' not found\n", input);
                 return 1;
             }
-            if (mr > 0 && clib[0]) zx_add_link_lib(clib);
-            if (mcomp > 0) {
-                csrc_relink = 1;
-                prog("compiled %d C unit(s) from a .clib manifest", mcomp);
+            size_t ilen = strlen(input);
+            bool is_manifest = ilen > 5 && !strcmp(input + ilen - 5, ".clib");
+            if (is_manifest) {
+                char clib[1200], merr[1024];
+                int mcomp = 0;
+                int mr = clib_build(g_cc, g_cflags, input, ZX_CACHE_DIR, 0,
+                                    clib, sizeof clib, merr, sizeof merr, &mcomp);
+                if (mr < 0) {
+                    fprintf(stderr, "zxc: %s\n", merr);
+                    return 1;
+                }
+                if (mr > 0 && clib[0]) zx_add_link_lib(clib);
+                total_compiled += mcomp;
+            } else {
+                char **libs = NULL, cerr[1024];
+                int ncomp = 0;
+                int nlib = csrc_build(g_cc, g_cflags, input, ZX_CACHE_DIR, NULL, 0,
+                                      &libs, cerr, sizeof cerr, &ncomp);
+                if (nlib < 0) { fprintf(stderr, "zxc: %s\n", cerr); return 1; }
+                for (int i = 0; i < nlib; i++) {
+                    zx_add_link_lib(libs[i]);
+                    free(libs[i]);
+                }
+                free(libs);
+                total_compiled += ncomp;
             }
         }
-        free(mans);
-
-        if (ncomp > 0) {
+        if (total_compiled > 0) {
             csrc_relink = 1;
-            prog("compiled %d C unit(s) from vendor/", ncomp);
+            prog("compiled %d C unit(s) from zx.json csrc", total_compiled);
         }
     }
     /* §208: 有效编译参数 = 档位 + 目标 triple + 目标覆盖 cflags。
@@ -891,12 +902,12 @@ static void usage(FILE *f) {
         "\n"
         "project subcommands:\n"
         "  init [name]                      create a project: src/ sources, vendor/ module root, zx.json\n"
-        "  include <name|header.h|dir>  include a local C library: binding into vendor/\n"
+        "  include <name|header.h|dir>  generate a C binding; update zx.json csrc / libs\n"
         "  include ./third_party/foo     point at a library tree; no files are copied\n"
-        "  add <url> [--force]            fetch a C library into vendor/ (network, pinned)\n"
-        "  fetch [name|url] [--force]     verify/restore vendor/ from zx.lock\n"
-        "  sync                            scan vendor/, generate missing C bindings now\n"
-        "  cbuild [group]                 compile vendor/*.c into lib<group>.a (auto on include/build)\n"
+        "  add <path|url> [--force]    add a Zx project, precompiled library, or remote source\n"
+        "  fetch [name|url] [--force]     verify/restore vendor/ from zx.lock; sync zx.json\n"
+        "  sync                            discover vendor C inputs; update zx.json csrc\n"
+        "  cbuild [group]                 compile zx.json csrc entries (auto on build)\n"
         "  build [options]                  build per zx.json into out/ (intermediates in .zxc-cache/)\n"
         "  targets                          list built-in platform targets for zx.json \"targets\"\n"
         "  run [options] [-- prog args...]  build, then run\n"
@@ -947,13 +958,15 @@ static int explain_region(const char *file) {
 static int help_sub(FILE *f, const char *cmd) {
     if (!strcmp(cmd, "add")) {
         fprintf(f,
-            "zxc add <url> [--force] -- fetch a C library into vendor/ (network)\n"
+            "zxc add <path|url> [--force] -- add a project or library dependency\n"
             "\n"
+            "  zxc add ../shared-zx           local Zx project -> zx.json deps (no copy)\n"
+            "  zxc add lib/libfoo.a            precompiled library -> zx.json libs\n"
             "  zxc add https://raw.githubusercontent.com/nothings/stb/master/stb_image.h\n"
             "  zxc add https://example.com/foo.tar.gz\n"
             "  zxc add https://gitcode.com/some/foo.git\n"
             "\n"
-            "Two files, both committed:\n"
+            "Remote sources update two files, both committed:\n"
             "  zx.json   \"vendor\": [ \"<url>\", ... ]   just the URLs (like \"deps\")\n"
             "  zx.lock   written by zxc: sha256, git commit, tree hash, path, nfiles\n"
             "\n"
@@ -970,16 +983,18 @@ static int help_sub(FILE *f, const char *cmd) {
             "Sources: a single file, a .tar/.tgz/.zip archive, or a git repo (URL\n"
             "ending in .git). Archives auto-descend into a single top-level dir.\n"
             "Only https:// is accepted. loopback http:// is allowed for local mirrors;\n"
-            "file:// needs ZX_ALLOW_LOCAL_FETCH=1. No build scripts, no registry, no\n"
-            "dependency resolution. Uses curl / git / tar from PATH.\n"
+            "file:// needs ZX_ALLOW_LOCAL_FETCH=1. No build scripts and no registry;\n"
+            "Zx project dependencies resolve through zx.json. Uses curl / git / tar.\n"
             "\n"
-            "To change the source or re-pin, run the same add with --force.\n"
-            "For a library already on disk use `zxc include <path>` instead.\n");
+            "Remote C libraries also synchronize their build inputs into zx.json\n"
+            "csrc; a Zx project stays a source dependency and is not C-bound.\n"
+            "To change a remote source or re-pin, run the same add with --force.\n"
+            "For a C library already on disk use `zxc include <path>` instead.\n");
         return 0;
     }
     if (!strcmp(cmd, "fetch")) {
         fprintf(f,
-            "zxc fetch [name|url] [--force] -- verify / restore vendor/ from zx.lock\n"
+            "zxc fetch [name|url] [--force] -- restore locked sources; sync zx.json csrc\n"
             "\n"
             "  zxc fetch                  check every library (the usual case)\n"
             "  zxc fetch stb_image        check one by library name\n"
@@ -996,17 +1011,18 @@ static int help_sub(FILE *f, const char *cmd) {
             "overwritten -- --force restores it (old copy: .zxc-cache/fetch-backup/).\n"
             "A changed URL in zx.json is refused: re-pin with `zxc add <url> --force`.\n"
             "A URL with no lock entry is refused too: fetch never adds a new source;\n"
-            "use `zxc add <url>` explicitly to introduce one.\n"
+            "use `zxc add <url>` explicitly to introduce one. After a successful\n"
+            "restore, derived C inputs are synchronized into zx.json csrc.\n"
             "This is the only command that may download during a normal workflow.\n");
         return 0;
     }
     if (!strcmp(cmd, "sync")) {
         fprintf(f,
-            "zxc sync -- scan vendor/ and generate missing C bindings now\n"
+            "zxc sync -- scan vendor/, generate missing C bindings, update zx.json\n"
             "\n"
-            "build / run / test already do this automatically. Use sync when you\n"
-            "want the generated vendor/<name>.zx to exist BEFORE typing code, so\n"
-            "the editor offers @mod(\"name\") completion and hover right away.\n"
+            "build / run / test may generate missing bindings automatically. Use sync\n"
+            "when you also want vendor C inputs recorded in zx.json csrc BEFORE the\n"
+            "next build, so the editor can offer @mod(\"name\") completion and hover.\n"
             "\n"
             "Only NEW C libraries are touched: an existing .clib or .zx is never\n"
             "overwritten (edit it freely, or use one to opt a directory out).\n"
@@ -1015,9 +1031,9 @@ static int help_sub(FILE *f, const char *cmd) {
     }
     if (!strcmp(cmd, "cbuild")) {
         fprintf(f,
-            "zxc cbuild [group] [options] -- compile C sources in vendor/\n"
+            "zxc cbuild [group] [options] -- compile zx.json csrc entries\n"
             "\n"
-            "  zxc cbuild              compile every *.c group + every vendor/*.clib\n"
+            "  zxc cbuild              compile every declared C source directory / .clib\n"
             "  zxc cbuild mini         only group / manifest named 'mini'\n"
             "  zxc cbuild --force      ignore timestamps, rebuild all\n"
             "  zxc cbuild --release    use the -O2 profile\n"
@@ -1038,7 +1054,7 @@ static int help_sub(FILE *f, const char *cmd) {
             "\n"
             "  zxc include ../third_party/foo    point at a LIBRARY DIRECTORY (recommended)\n"
             "  zxc include ./vendor/raylib.h     parse one local header -> vendor/raylib.zx\n"
-            "  zxc include sqlite3               built-in recipe: locate header + set @link\n"
+            "  zxc include sqlite3               built-in recipe: locate header + record libs\n"
             "  zxc include --list                show built-in recipes\n"
             "\n"
             "Directory mode: zxc walks the library's own tree (include/, src/, any\n"
@@ -1047,7 +1063,7 @@ static int help_sub(FILE *f, const char *cmd) {
             "the library can live anywhere. Comment out lines in the .clib to trim.\n"
             "\n"
             "options:\n"
-            "  --lib NAME     override the library passed to @link\n"
+            "  --lib NAME     record a precompiled library in zx.json libs\n"
             "  --name NAME    override the module name in directory mode\n"
             "  --no-build     skip compiling C sources\n"
             "  --force        overwrite an existing vendor/<name>.zx\n"
@@ -1056,7 +1072,7 @@ static int help_sub(FILE *f, const char *cmd) {
             "  const ray = @mod(\"raylib\");   ray.InitWindow(800, 600, \"hi\");\n"
             "Completion / hover / inlay hints work on it like any other module.\n"
             "Declarations clang cannot translate are listed as comments at the end.\n"
-            "C sources are compiled into a static library and linked automatically;\n"
+            "C source inputs are recorded in zx.json csrc and linked automatically;\n"
             "zxc build recompiles them on change. tests/examples/build dirs are skipped.\n"
             "No network access and no package download involved.\n");
         return 0;
@@ -2369,7 +2385,7 @@ static int plat_copy_file(const char *src, const char *dst) {
 }
 
 /* §208: 为单个目标生成 std 镜像 + platform.zx。
- * 镜像目录 <dir>/<target>/std/：先拷全部源 std/*.zx，再用平台特化文件
+ * 镜像目录 <dir>/<target>/std/：先拷源 std 目录的全部 Zx 文件，再用平台特化文件
  * （src/platform_std/<family>/{net,fs,time}.zx）覆盖，并写 platform.zx。
  * 返回镜像的 std 目录路径（写入 mirror_out），成功 0。
  *
@@ -2385,7 +2401,7 @@ static int platform_gen_std(const Proj *pj, const Target *t,
     snprintf(mirror, sizeof mirror, "%s/%s/std", pj->platform_dir, t->name);
     mkdir_p(mirror);
 
-    /* 1) 拷全部 std/*.zx */
+    /* 1) 拷源 std 目录的全部 Zx 文件 */
     int nsrc = 0;
     char **srcs = collect_zx_files(srcdir, &nsrc);
     for (int i = 0; i < nsrc; i++) {
@@ -2581,12 +2597,13 @@ static const char *INIT_VENDOR_README =
     "搜索顺序：相对导入所在的目录 → 工程根的 `vendor/` → `zx.json` 的\n"
     "`\"deps\"` 数组。`vendor/` 存在即自动参与搜索，不用写进 deps。\n"
     "\n"
-    "C 库也直接放这里，不用敲任何接入命令：\n"
+    "C 库也可以放进来，再用 sync 把编译/链接输入写进 zx.json：\n"
     "\n"
     "```sh\n"
     "cp -r ../third_party/foo vendor/foo   # include/ + 多层 src/ 原样搬入\n"
     "# 或者把 foo.h / foo.c 直接放在 vendor/ 一层\n"
-    "zxc run                               # 自动生成绑定、编译 C 源码、链接\n"
+    "zxc sync                              # 生成绑定/清单，并写入 zx.json csrc\n"
+    "zxc run                               # 按 zx.json 编译 C 源码并链接\n"
     "```\n"
     "\n"
     "第一次会生成 `vendor/foo.zx`（普通 Zx 源码）和 `vendor/foo.clib`（编译清单），\n"
@@ -2740,7 +2757,8 @@ static int cmd_init(int argc, char **argv, int argi) {
     buf_init(&zj);
     buf_printf(&zj,
         "{\n  \"name\": \"%s\",\n  \"version\": \"0.1.0\",\n"
-        "  \"main\": \"src/main.zx\",\n  \"out\": \"%s\"\n}\n",
+        "  \"main\": \"src/main.zx\",\n  \"out\": \"%s\",\n"
+        "  \"deps\": [],\n  \"vendor\": [],\n  \"csrc\": [],\n  \"libs\": []\n}\n",
         name, name);
     write_text_file("zx.json", zj.data ? zj.data : "{}\n");
 
@@ -2764,10 +2782,10 @@ static int cmd_init(int argc, char **argv, int argi) {
 typedef struct {
     const char *alias;      /* zxc include <alias> */
     const char *header;     /* 头文件名 */
-    const char *lib;        /* @link 名，"" = 不用额外链接 */
+    const char *lib;        /* zx.json libs 条目，"" = 不用额外链接 */
 } CRecipe;
 
-/* 常见库配方：给个名字就能定位头文件 + 自动写 @link。
+/* 常见库配方：给个名字就能定位头文件，并把链接库写进 zx.json libs。
  * 本地找不到头文件副本时，用 `#include <...>` 走工具链自带的 SDK 头。 */
 static const CRecipe g_crecipes[] = {
     { "c",        "stdio.h",     "" },
@@ -2834,14 +2852,23 @@ static int cadd_probe_lib(const char *stem, char *buf, size_t cap) {
     return 0;
 }
 
-/* ---- vendor/ 自动接管：把库放进去，直接 zxc run -----------------------
+static int precompiled_lib_file(const char *p) {
+    if (!fexists(p) || path_is_dir(p)) return 0;
+    const char *dot = strrchr(p, '.');
+    if (!dot) return 0;
+    return !strcmp(dot, ".a") || !strcmp(dot, ".lib") ||
+           !strcmp(dot, ".so") || !strcmp(dot, ".dylib") ||
+           !strcmp(dot, ".dll");
+}
+
+/* ---- vendor/ 自动接管：生成缺失绑定，再由 sync 写 zx.json ---------------
  *
  * build/run/test 在解析源码之前扫一遍 vendor/，把还没接管的 C 库补成
  * "add 过"的状态：
  *   - 子目录里含 .h  -> 目录树模式，写 <name>.clib + <name>.zx
- *   - 顶层散的 *.h   -> 单头模式，写 <stem>.zx（.c 由 csrc_build 编）
- * 只生成绑定和清单，编译/链接仍由 build_program 里既有的 clib_build /
- * csrc_build 增量路径负责，不在这里重复编一次。
+ *   - 顶层散的 *.h   -> 单头模式，写 <stem>.zx
+ * 这里只生成绑定和清单，不修改 zx.json；管理命令随后同步 csrc。
+ * 编译/链接由 build_program 里既有的 clib_build / csrc_build 增量路径负责。
  *
  * 三条硬约束：
  *   ① 不覆盖：已有同名 .clib/.zx 一律不动。用户可能手工裁剪过清单、
@@ -2857,13 +2884,15 @@ static int cadd_probe_lib(const char *stem, char *buf, size_t cap) {
 
 typedef struct { char name[256]; int isdir; } VEntry;
 
-static VEntry *vendor_entries(int *nout) {
+static VEntry *dir_entries(const char *dir, int *nout) {
     *nout = 0;
     VEntry *list = NULL;
     int n = 0, cap = 0;
 #ifdef _WIN32
+    char pattern[1200];
+    snprintf(pattern, sizeof pattern, "%s/*", dir);
     WIN32_FIND_DATAA fd;
-    HANDLE h = FindFirstFileA("vendor/*", &fd);
+    HANDLE h = FindFirstFileA(pattern, &fd);
     if (h == INVALID_HANDLE_VALUE) return NULL;
     do {
         if (fd.cFileName[0] == '.') continue;
@@ -2877,13 +2906,13 @@ static VEntry *vendor_entries(int *nout) {
     } while (FindNextFileA(h, &fd));
     FindClose(h);
 #else
-    DIR *d = opendir("vendor");
+    DIR *d = opendir(dir);
     if (!d) return NULL;
     struct dirent *de;
     while ((de = readdir(d))) {
         if (de->d_name[0] == '.') continue;
-        char full[1024];
-        snprintf(full, sizeof full, "vendor/%s", de->d_name);
+        char full[1200];
+        snprintf(full, sizeof full, "%s/%s", dir, de->d_name);
         struct stat st;
         if (stat(full, &st) != 0) continue;
         if (n == cap) {
@@ -2900,21 +2929,22 @@ static VEntry *vendor_entries(int *nout) {
     return list;
 }
 
-/* vendor 下的 .c 有没有归到 stem 这一组的（同名或 <stem>_xxx）。
- * 只用来决定绑定里写不写 @link；链接本身由 build_program 注入。 */
-static int vendor_has_c_for(const VEntry *ents, int n, const char *stem) {
-    char exact[300], pref[300];
-    snprintf(exact, sizeof exact, "%s.c", stem);
-    snprintf(pref, sizeof pref, "%s_", stem);
-    size_t pl = strlen(pref);
+static VEntry *vendor_entries(int *nout) {
+    return dir_entries("vendor", nout);
+}
+
+static int dir_has_c_source(const char *dir) {
+    int n = 0, found = 0;
+    VEntry *ents = dir_entries(dir, &n);
     for (int i = 0; i < n; i++) {
-        if (ents[i].isdir) continue;
-        const char *p = ents[i].name;
-        size_t l = strlen(p);
-        if (l < 3 || strcmp(p + l - 2, ".c") != 0) continue;
-        if (!strcmp(p, exact) || !strncmp(p, pref, pl)) return 1;
+        size_t l = strlen(ents[i].name);
+        if (!ents[i].isdir && l > 2 && !strcmp(ents[i].name + l - 2, ".c")) {
+            found = 1;
+            break;
+        }
     }
-    return 0;
+    free(ents);
+    return found;
 }
 
 /* 已有清单是否已经指向这个目录：`zxc include vendor/foo --name bar` 会留下一张
@@ -2950,11 +2980,12 @@ static int vendor_autoscan(void) {
     for (int i = 0; i < n; i++) {
         if (!ents[i].isdir) continue;
         const char *dir = ents[i].name;
-        char root[1100], quick1[1100], quick2[1100];
+        char root[1100], quick1[1100], quick2[1100], project_cfg[1100];
         snprintf(root, sizeof root, "vendor/%s", dir);
         snprintf(quick1, sizeof quick1, "vendor/%s.clib", dir);
         snprintf(quick2, sizeof quick2, "vendor/%s.zx", dir);
-        if (fexists(quick1) || fexists(quick2)) continue;
+        snprintf(project_cfg, sizeof project_cfg, "%s/zx.json", root);
+        if (fexists(quick1) || fexists(quick2) || fexists(project_cfg)) continue;
         if (vendor_root_claimed(root)) continue;
 
         ClibManifest m;
@@ -2963,11 +2994,10 @@ static int vendor_autoscan(void) {
         }
         /* discover 会剥掉 -src/-master 之类的尾巴，清单名以 m.name 为准；
          * 否则 vendor/foo-master/ 每次 run 都会重新生成一遍。 */
-        char mf[1100], zxpath[1100], libpath[1100], regen[1200];
+        char mf[1100], zxpath[1100], regen[1200];
         snprintf(mf, sizeof mf, "vendor/%s.clib", m.name);
         snprintf(zxpath, sizeof zxpath, "vendor/%s.zx", m.name);
         if (fexists(mf) || fexists(zxpath)) { clib_free(&m); continue; }
-        snprintf(libpath, sizeof libpath, "vendor/lib%s.a", m.name);
         snprintf(regen, sizeof regen, "%s", root);
 
         char header[1100];
@@ -2978,7 +3008,7 @@ static int vendor_autoscan(void) {
         }
         char *incs = clib_inc_flags(&m);
         int nskip = 0;
-        char *text = cbind_generate(header, cc, m.nsrc > 0 ? libpath : NULL, 0,
+        char *text = cbind_generate(header, cc, 0,
                                     incs, (const char *const *)m.hdr, m.nhdr,
                                     regen, err, sizeof err, &nskip);
         free(incs);
@@ -3011,13 +3041,11 @@ static int vendor_autoscan(void) {
         snprintf(zxpath, sizeof zxpath, "vendor/%s.zx", stem);
         if (fexists(zxpath)) continue;
 
-        char header[1100], libpath[1100], regen[1200];
+        char header[1100], regen[1200];
         snprintf(header, sizeof header, "vendor/%s", file);
-        snprintf(libpath, sizeof libpath, "vendor/lib%s.a", stem);
         snprintf(regen, sizeof regen, "%s", header);
         int nskip = 0;
         char *text = cbind_generate(header, cc,
-                                    vendor_has_c_for(ents, n, stem) ? libpath : NULL,
                                     0, NULL, NULL, 0, regen, err, sizeof err, &nskip);
         if (!text) {
             fprintf(stderr, "zxc: %s: %s (skipped)\n", header, err);
@@ -3033,13 +3061,46 @@ static int vendor_autoscan(void) {
     return added;
 }
 
+/* 把 vendor/ 里已接管的 C 输入同步进 zx.json。构建本身只读清单；
+ * add/fetch/sync 才执行这一步，避免一次 run 偷偷改工程文件。 */
+static int sync_vendor_manifest(void) {
+    if (!fexists("vendor") || !fexists("zx.json")) return 0;
+    int n = 0, has_c = 0;
+    VEntry *ents = vendor_entries(&n);
+    for (int i = 0; i < n; i++) {
+        if (ents[i].isdir) continue;
+        size_t l = strlen(ents[i].name);
+        if (l > 5 && !strcmp(ents[i].name + l - 5, ".clib")) {
+            char path[1100];
+            snprintf(path, sizeof path, "vendor/%s", ents[i].name);
+            char err[256];
+            if (csrc_add(path, err, sizeof err) != 0) {
+                fprintf(stderr, "zxc sync: %s\n", err);
+                free(ents);
+                return -1;
+            }
+        }
+        if (l > 2 && !strcmp(ents[i].name + l - 2, ".c")) has_c = 1;
+    }
+    free(ents);
+    if (has_c) {
+        char err[256];
+        if (csrc_add("vendor", err, sizeof err) != 0) {
+            fprintf(stderr, "zxc sync: %s\n", err);
+            return -1;
+        }
+    }
+    return 0;
+}
+
 /* 显式同步入口：编辑器里第一次写 @mod("foo") 之前先跑一次，
  * 生成的绑定才会出现在补全里（build/run 自己也会调，不必先 sync）。 */
 static int cmd_sync(int argc, char **argv, int argi) {
     (void)argc; (void)argv; (void)argi;
     int n = vendor_autoscan();
+    if (sync_vendor_manifest() != 0) return 1;
     if (n > 0) printf("zxc sync: added %d C library(ies); `zxc build` will compile them\n", n);
-    else printf("zxc sync: vendor/ is up to date, no new C libraries\n");
+    else printf("zxc sync: vendor/ is up to date; zx.json C inputs synchronized\n");
     return 0;
 }
 
@@ -3050,6 +3111,10 @@ static int cmd_sync(int argc, char **argv, int argi) {
  */
 static int cmd_include_tree(const char *root, const char *uname,
                         const char *ulib, int force, int no_build) {
+    if (!fexists("zx.json")) {
+        fprintf(stderr, "zxc include: no zx.json here (run `zxc init` first)\n");
+        return 1;
+    }
     char err[1024];
     ClibManifest m;
     if (clib_discover(root, uname, &m, err, sizeof err) != 0) {
@@ -3114,7 +3179,6 @@ static int cmd_include_tree(const char *root, const char *uname,
         clib_free(&m); return 1;
     }
 
-    const char *lib = ulib;
     if (!no_build && !ulib && m.nsrc > 0) {
         int ncomp = 0;
         if (clib_build(g_cc, g_cflags ? g_cflags : CC_DEV, mf, ZX_CACHE_DIR, 0,
@@ -3124,12 +3188,11 @@ static int cmd_include_tree(const char *root, const char *uname,
         }
         printf("zxc include: compiled %d C unit(s) -> %s\n", ncomp, libpath);
     }
-    /* 纯头库不写 @link；其它情况即使 --no-build 也先把路径写进绑定，
-     * 之后 zxc build 会自动把库编出来。 */
-    if (!lib && m.nsrc > 0) lib = libpath;
-
+    /* 源码交给 zx.json 的 csrc，预编译库交给 libs；生成绑定不再夹带
+     * 链接选项，编译配置只有一个来源。 */
+    int has_src = m.nsrc > 0;
     int nskip = 0;
-    char *text = cbind_generate(header, g_cc, lib, 0, incs,
+    char *text = cbind_generate(header, g_cc, 0, incs,
                                 (const char *const *)m.hdr, m.nhdr, regen,
                                 err, sizeof err, &nskip);
     free(incs);
@@ -3138,10 +3201,20 @@ static int cmd_include_tree(const char *root, const char *uname,
     int rc = write_text_file(zxpath, text);
     free(text);
     if (rc != 0) return 1;
+    if (has_src && !ulib && csrc_add(mf, err, sizeof err) != 0) {
+        fprintf(stderr, "zxc include: %s\n", err);
+        return 1;
+    }
+    if (ulib && libs_add(ulib, err, sizeof err) != 0) {
+        fprintf(stderr, "zxc include: %s\n", err);
+        return 1;
+    }
     printf("zxc include: wrote %s (%d declaration(s) skipped)\n", zxpath, nskip);
     printf("  use:  const %s = @mod(\"%s\");\n", modname, modname);
-    if (lib && lib[0])
-        printf("  link: @link(\"%s\") is already in the binding\n", lib);
+    if (has_src && !ulib)
+        printf("  build: %s recorded in zx.json csrc\n", mf);
+    else if (ulib)
+        printf("  link: %s recorded in zx.json libs\n", ulib);
     else
         printf("  note: header-only, nothing to link\n");
     printf("  later: edit %s, then `zxc build` recompiles automatically\n", mf);
@@ -3192,6 +3265,10 @@ static int cmd_include(int argc, char **argv, int argi) {
                         "       zxc include --list\n");
         return 2;
     }
+    if (!fexists("zx.json")) {
+        fprintf(stderr, "zxc include: no zx.json here (run `zxc init` first)\n");
+        return 1;
+    }
 
     /* 目录参数 = 库原本的目录树：不复制文件，走清单模式。 */
     if (path_is_dir(name)) return cmd_include_tree(name, uname, ulib, force, no_build);
@@ -3241,12 +3318,14 @@ static int cmd_include(int argc, char **argv, int argi) {
     char stem[256];
     cadd_stem(r ? name : header, stem, sizeof stem);
 
-    /* 头文件旁边有 .c：用 zxc 自己的 cc + flags 编成静态库并自动 @link。
-     * 这一步根治了"手工编的 C 库和 zx 的 sanitizer 档位对不上"的链接错误。 */
+    /* 头文件旁边有 .c：用 zxc 自己的 cc + flags 编成静态库；构建输入写进
+     * zx.json csrc，避免手工编库与 zx 的 sanitizer 档位对不上。 */
     char builtlib[1024] = "";
+    char csrc_dir[1024] = "";
+    char hdir[1024];
+    cadd_dir_of(header, hdir, sizeof hdir);
     if (!no_build && !ulib && !allow_system) {
-        char hdir[1024];
-        cadd_dir_of(header, hdir, sizeof hdir);
+        snprintf(csrc_dir, sizeof csrc_dir, "%s", hdir);
         char **libs = NULL, cerr[1024];
         int ncomp = 0;
         int nlib = csrc_build(g_cc, g_cflags ? g_cflags : CC_DEV,
@@ -3263,6 +3342,8 @@ static int cmd_include(int argc, char **argv, int argi) {
         }
         for (int i = 0; i < nlib; i++) free(libs[i]);
         free(libs);
+    } else if (no_build && !ulib && !allow_system && dir_has_c_source(hdir)) {
+        snprintf(csrc_dir, sizeof csrc_dir, "%s", hdir);
     }
 
     char libbuf[1024] = "";
@@ -3291,28 +3372,36 @@ static int cmd_include(int argc, char **argv, int argi) {
 
     char err[1024];
     int nskip = 0;
-    char *text = cbind_generate(header, g_cc, lib, allow_system, NULL, NULL, 0, name,
+    char *text = cbind_generate(header, g_cc, allow_system, NULL, NULL, 0, name,
                                 err, sizeof err, &nskip);
     if (!text) { fprintf(stderr, "zxc include: %s\n", err); return 1; }
     int rc = write_text_file(outpath, text);
     free(text);
     if (rc != 0) return 1;
+    if (csrc_dir[0] && !ulib && csrc_add(csrc_dir, err, sizeof err) != 0) {
+        fprintf(stderr, "zxc include: %s\n", err);
+        return 1;
+    }
+    if (!csrc_dir[0] && lib && lib[0] && libs_add(lib, err, sizeof err) != 0) {
+        fprintf(stderr, "zxc include: %s\n", err);
+        return 1;
+    }
 
     printf("zxc include: wrote %s (%d declaration(s) skipped)\n", outpath, nskip);
     printf("  use:  const %s = @mod(\"%s\");\n", stem, stem);
-    if (lib && lib[0])
-        printf("  link: @link(\"%s\") is already in the binding\n", lib);
+    if (csrc_dir[0])
+        printf("  build: %s recorded in zx.json csrc\n", csrc_dir);
+    else if (lib && lib[0])
+        printf("  link: %s recorded in zx.json libs\n", lib);
     else
         printf("  note: no library linked yet; rerun with --lib NAME if the linker complains\n");
-    if (!fexists("zx.json"))
-        printf("  note: no zx.json here; run this inside a project (or use vendor/ directly)\n");
     return 0;
 }
 
-/* ---- add / fetch：从网站拉 C 库，两层声明与锁 -------------------------
- * `zxc add <url>`  往 zx.json 加一行 URL、把实际结果锁进 zx.lock、落地 vendor/。
- * `zxc fetch`      只按这两份文件校验 / 补齐，不改写声明。
- * run / build / test 一行联网代码都没有，只在缺库时提示去跑 fetch。
+/* ---- add / fetch：本地依赖接入与远端来源锁定 -------------------------
+ * `zxc add <path|url>` 本地工程/库写 zx.json，远端来源再写 zx.lock 与 vendor/。
+ * `zxc fetch` 只按锁校验 / 补齐，成功后同步派生 C 输入。
+ * run / build / test 不联网，只在缺库时提示去跑 fetch。
  */
 static int fetch_lock_upsert(const FetchLock *item, char *err, size_t cap) {
     FetchLock *v = NULL;
@@ -3330,9 +3419,8 @@ static int fetch_lock_upsert(const FetchLock *item, char *err, size_t cap) {
     return rc;
 }
 
-/* `zxc add <url>` 重新构造后只剩一个参数：URL（外加 --force 重新锁定）。
- * 库名、源类型、sha256、commit、tree hash 全由工具推导并写进 zx.lock，
- * 人不用记第二个名字，也不用填任何可选字段。 */
+/* `zxc add <path|url>` 只收一个来源参数（外加 --force 重新锁定）。
+ * 本地工程/预编译库直接写清单；远端库名、源类型与完整性锚点由工具推导。 */
 static int cmd_add(int argc, char **argv, int argi) {
     const char *url = NULL;
     int force = 0;
@@ -3349,17 +3437,41 @@ static int cmd_add(int argc, char **argv, int argi) {
         }
     }
     if (!url) {
-        fprintf(stderr, "usage: zxc add <url> [--force]\n");
-        return 2;
-    }
-    if (!strstr(url, "://")) {
-        fprintf(stderr, "zxc add: expected an https:// URL; a library already on disk"
-                        " is handled by `zxc include <path>`\n");
+        fprintf(stderr, "usage: zxc add <path|url> [--force]\n");
         return 2;
     }
     if (!fexists("zx.json")) {
         fprintf(stderr, "zxc add: no zx.json here (run `zxc init` first)\n");
         return 1;
+    }
+    if (!strstr(url, "://")) {
+        if (precompiled_lib_file(url)) {
+            char err[1024];
+            if (libs_add(url, err, sizeof err) != 0) {
+                fprintf(stderr, "zxc add: %s\n", err);
+                return 1;
+            }
+            printf("zxc add: %s -> libs\n", url);
+            return 0;
+        }
+        char cfg[1200];
+        snprintf(cfg, sizeof cfg, "%s/zx.json", url);
+        if (!path_is_dir(url) || !fexists(cfg)) {
+            fprintf(stderr, "zxc add: '%s' is not a Zx project (expected zx.json);"
+                            " C libraries use `zxc include <path>`\n", url);
+            return 2;
+        }
+        char err[1024];
+        if (deps_add(url, err, sizeof err) != 0) {
+            fprintf(stderr, "zxc add: %s\n", err);
+            return 1;
+        }
+        printf("zxc add: %s -> deps\n", url);
+        char modname[256];
+        path_basename(url, modname, sizeof modname);
+        path_strip_ext(modname);
+        printf("  use: const %s = @mod(\"%s\");\n", modname, modname);
+        return 0;
     }
     char err[1024];
     if (fetch_url_check(url, err, sizeof err) != 0) {
@@ -3395,13 +3507,24 @@ static int cmd_add(int argc, char **argv, int argi) {
         fprintf(stderr, "zxc add: %s\n", err);
         return 1;
     }
-    vendor_autoscan();
+    char project_cfg[1200];
+    snprintf(project_cfg, sizeof project_cfg, "%s/zx.json", res.path);
+    int is_zx_project = fexists(project_cfg);
+    if (!is_zx_project) {
+        vendor_autoscan();
+        if (sync_vendor_manifest() != 0) return 1;
+    }
     printf("zxc add: %s -> %s (%d file(s))\n", d.name, res.path, res.nfiles);
     printf("  zx.json: one URL added; zx.lock: tree %.12s\n", res.tree);
     if (d.kind == FK_GIT) printf("  resolved commit %s\n", res.resolved);
     else printf("  download sha256 %s\n", res.d.sha256);
-    printf("  `zxc run` works offline from here; `zxc fetch %s` restores it elsewhere\n",
-           d.name);
+    if (is_zx_project) {
+        printf("  use: const %s = @mod(\"%s\");\n", d.name, d.name);
+        printf("  Zx project detected; C binding autoscan skipped\n");
+    } else {
+        printf("  `zxc run` works offline from here; `zxc fetch %s` restores it elsewhere\n",
+               d.name);
+    }
     return 0;
 }
 
@@ -3482,15 +3605,22 @@ static int cmd_fetch(int argc, char **argv, int argi) {
                         " run `zxc fetch` to check all)\n", only);
         bad++;
     }
-    if (ok) vendor_autoscan();
+    if (ok) {
+        vendor_autoscan();
+        if (sync_vendor_manifest() != 0) {
+            fetch_decls_free(ds, nd);
+            fetch_lock_free(ls, nl);
+            return 1;
+        }
+    }
     printf("zxc fetch: %d ok, %d problem(s)\n", ok, bad);
     fetch_decls_free(ds, nd);
     fetch_lock_free(ls, nl);
     return bad ? 1 : 0;
 }
 
-/* ---- cbuild：显式重编 vendor/ 下的 C 源码 ----------------------------
- * 平时用不到：add 会编一次，build 会在 .c/.h 变化时自动增量重编。
+/* ---- cbuild：显式重编 zx.json csrc 声明的 C 源码 ----------------------
+ * 平时用不到：include/add 可先编一次，build 会在 .c/.h 变化时自动增量重编。
  * 留这个入口是为了"只想编库、不想编整个 zx 工程"和排查 C 编译错误。 */
 static int cmd_cbuild(int argc, char **argv, int argi) {
     const char *group = NULL;
@@ -3507,69 +3637,69 @@ static int cmd_cbuild(int argc, char **argv, int argi) {
             return 2;
         }
     }
-    if (!fexists("vendor")) {
-        fprintf(stderr, "zxc cbuild: vendor/ not found (run inside a project)\n");
+    if (!fexists("zx.json")) {
+        fprintf(stderr, "zxc cbuild: no zx.json here (run inside a project)\n");
         return 2;
     }
+    Proj pj;
+    if (!proj_load(&pj)) {
+        fprintf(stderr, "zxc cbuild: cannot read zx.json\n");
+        return 1;
+    }
+    setup_search_paths(&pj);
     g_cflags = release ? CC_REL : CC_DEV;
     g_zx_release = release;
-    char **libs = NULL, err[1024];
-    int ncomp = 0;
-    int nlib = csrc_build(g_cc, g_cflags, "vendor", ZX_CACHE_DIR, group, force,
-                          &libs, err, sizeof err, &ncomp);
-    if (nlib < 0) { fprintf(stderr, "zxc cbuild: %s\n", err); return 1; }
-
-    /* 清单模式：`zxc cbuild foo` 只编 vendor/foo.clib，不带名字则编全部。 */
-    char **mans = NULL;
-    int nman = 0;
-    if (group) {
-        char mf[1024];
-        snprintf(mf, sizeof mf, "vendor/%s.clib", group);
-        if (fexists(mf)) {
-            mans = xmalloc(sizeof *mans);
-            mans[0] = xstrdup(mf);
-            nman = 1;
+    char err[1024];
+    char **all = NULL;
+    int nall = 0, ncomp = 0, matched = 0;
+    for (int ci = 0; ci < g_csrc_n; ci++) {
+        const char *input = g_csrc_inputs[ci];
+        size_t ilen = strlen(input);
+        bool is_manifest = ilen > 5 && !strcmp(input + ilen - 5, ".clib");
+        if (is_manifest) {
+            char base[256];
+            path_basename(input, base, sizeof base);
+            path_strip_ext(base);
+            if (group && strcmp(group, base)) continue;
+            matched++;
+            char clib[1200];
+            int mcomp = 0;
+            int mr = clib_build(g_cc, g_cflags, input, ZX_CACHE_DIR, force,
+                                clib, sizeof clib, err, sizeof err, &mcomp);
+            if (mr < 0) { fprintf(stderr, "zxc cbuild: %s\n", err); return 1; }
+            ncomp += mcomp;
+            if (mr > 0 && clib[0]) {
+                all = xrealloc(all, (size_t)(nall + 1) * sizeof *all);
+                all[nall++] = xstrdup(clib);
+            }
+        } else {
+            matched++;
+            char **libs = NULL;
+            int part = 0;
+            int nlib = csrc_build(g_cc, g_cflags, input, ZX_CACHE_DIR, group, force,
+                                  &libs, err, sizeof err, &part);
+            if (nlib < 0) { fprintf(stderr, "zxc cbuild: %s\n", err); return 1; }
+            ncomp += part;
+            for (int i = 0; i < nlib; i++) {
+                all = xrealloc(all, (size_t)(nall + 1) * sizeof *all);
+                all[nall++] = xstrdup(libs[i]);
+                free(libs[i]);
+            }
+            free(libs);
         }
-    } else {
-        mans = clib_scan_manifests("vendor", &nman);
     }
-    char **extra = NULL;
-    int nextra = 0;
-    for (int i = 0; i < nman; i++) {
-        char clib[1024];
-        int mcomp = 0;
-        int mr = clib_build(g_cc, g_cflags, mans[i], ZX_CACHE_DIR, force,
-                            clib, sizeof clib, err, sizeof err, &mcomp);
-        free(mans[i]);
-        if (mr < 0) {
-            fprintf(stderr, "zxc cbuild: %s\n", err);
-            free(mans); free(extra); free(libs);
-            return 1;
-        }
-        ncomp += mcomp;
-        if (mr > 0 && clib[0]) {
-            extra = xrealloc(extra, (size_t)(nextra + 1) * sizeof *extra);
-            extra[nextra++] = xstrdup(clib);
-        }
-    }
-    free(mans);
-
-    if (nlib == 0 && nextra == 0) {
-        printf("zxc cbuild: no C sources in vendor/ (nothing to do)\n");
-        free(libs); free(extra);
+    if (!matched) {
+        printf("zxc cbuild: no matching C sources in zx.json csrc (nothing to do)\n");
+        free(all);
         return 0;
     }
     printf("zxc cbuild: %d C unit(s) recompiled, %d library(ies):\n",
-           ncomp, nlib + nextra);
-    for (int i = 0; i < nlib; i++) {
-        printf("  %s\n", libs[i]);
-        free(libs[i]);
+           ncomp, nall);
+    for (int i = 0; i < nall; i++) {
+        printf("  %s\n", all[i]);
+        free(all[i]);
     }
-    for (int i = 0; i < nextra; i++) {
-        printf("  %s\n", extra[i]);
-        free(extra[i]);
-    }
-    free(libs); free(extra);
+    free(all);
     printf("  run 'zxc build' to relink\n");
     return 0;
 }
@@ -3691,6 +3821,134 @@ static int json_get_str_array(const char *text, const char *key,
     return n;
 }
 
+static bool json_array_span(const char *text, const char *key,
+                            size_t *start, size_t *end) {
+    char pat[64];
+    snprintf(pat, sizeof pat, "\"%s\"", key);
+    const char *p = strstr(text, pat);
+    if (!p) return false;
+    p = strchr(p + strlen(pat), '[');
+    if (!p) return false;
+    const char *s = p;
+    int depth = 0;
+    for (; *p; p++) {
+        if (*p == '"') {
+            p++;
+            while (*p && *p != '"') {
+                if (*p == '\\' && p[1]) p++;
+                p++;
+            }
+            if (!*p) return false;
+            continue;
+        }
+        if (*p == '[') depth++;
+        if (*p == ']' && --depth == 0) {
+            *start = (size_t)(s - text);
+            *end = (size_t)(p - text);
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool json_array_has(const char *text, size_t start, size_t end,
+                           const char *value) {
+    for (size_t i = start + 1; i < end; i++) {
+        if (text[i] != '"') continue;
+        size_t j = ++i;
+        while (j < end && text[j] != '"') {
+            if (text[j] == '\\' && j + 1 < end) j++;
+            j++;
+        }
+        size_t n = j - i;
+        if (strlen(value) == n && !strncmp(text + i, value, n)) return true;
+        i = j;
+    }
+    return false;
+}
+
+static void json_path_escape(const char *path, char *out, size_t cap) {
+    size_t n = 0;
+    for (const char *p = path; *p && n + 2 < cap; p++) {
+        char c = *p == '\\' ? '/' : *p;
+        if (c == '"' || c == '\\') {
+            out[n++] = '\\';
+            out[n++] = c;
+        } else {
+            out[n++] = c;
+        }
+    }
+    out[n] = 0;
+}
+
+/* 所有工程级字符串数组都走同一个插入器，保证 add/include/fetch 写出的
+ * zx.json 格式、去重和转义规则一致。 */
+static int project_str_array_add(const char *key, const char *value,
+                                 char *err, size_t cap) {
+    size_t len = 0;
+    char *text = read_source("zx.json", &len);
+    if (!text) {
+        snprintf(err, cap, "zx.json not found (run `zxc init` first)");
+        return -1;
+    }
+    char escaped[1200];
+    json_path_escape(value, escaped, sizeof escaped);
+    size_t vs = 0, ve = 0;
+    Buf out; buf_init(&out);
+    if (json_array_span(text, key, &vs, &ve)) {
+        if (json_array_has(text, vs, ve, escaped)) {
+            free(text);
+            return 0;
+        }
+        bool empty = true;
+        for (size_t i = vs + 1; i < ve; i++)
+            if (!isspace((unsigned char)text[i])) { empty = false; break; }
+        buf_putn(&out, text, ve);
+        if (!empty) buf_puts(&out, ",");
+        buf_printf(&out, "\n    \"%s\"\n  ", escaped);
+        buf_puts(&out, text + ve);
+    } else {
+        size_t last = len;
+        while (last > 0 && isspace((unsigned char)text[last - 1])) last--;
+        if (last == 0 || text[last - 1] != '}') {
+            snprintf(err, cap, "zx.json is not a JSON object");
+            buf_free(&out); free(text);
+            return -1;
+        }
+        size_t at = last - 1;
+        size_t k = at;
+        while (k > 0 && isspace((unsigned char)text[k - 1])) k--;
+        int has_comma = k > 0 && text[k - 1] == ',';
+        size_t open = 0;
+        while (open < at && text[open] != '{') open++;
+        int empty = 1;
+        for (size_t q = open + 1; q < at; q++)
+            if (!isspace((unsigned char)text[q]) && text[q] != ',') { empty = 0; break; }
+        buf_putn(&out, text, k);
+        if (!has_comma && !empty) buf_puts(&out, ",");
+        buf_printf(&out, "\n  \"%s\": [\n    \"%s\"\n  ]\n", key, escaped);
+        buf_puts(&out, text + at);
+    }
+    int rc = write_text_file("zx.json", out.data ? out.data : "");
+    if (rc != 0) snprintf(err, cap, "cannot write zx.json");
+    buf_free(&out);
+    free(text);
+    return rc;
+}
+
+/* 本地 Zx 项目依赖只记录路径，不复制源码；相对路径按当前工程根解析。 */
+static int deps_add(const char *path, char *err, size_t cap) {
+    return project_str_array_add("deps", path, err, cap);
+}
+
+static int csrc_add(const char *path, char *err, size_t cap) {
+    return project_str_array_add("csrc", path, err, cap);
+}
+
+static int libs_add(const char *lib, char *err, size_t cap) {
+    return project_str_array_add("libs", lib, err, cap);
+}
+
 static bool proj_load(Proj *pj) {
     memset(pj, 0, sizeof *pj);
     FILE *f = fopen("zx.json", "rb");
@@ -3728,13 +3986,150 @@ static bool proj_load(Proj *pj) {
 }
 
 /* deps 搜索路径：工程根的 vendor/（存在即默认加入）+ zx.json "deps" 数组。
- * 注入给 sema：相对导入打不开时依次回退这些目录。 */
+ * 依赖项目自己的 deps/vendor 也递归注入，循环由路径去重截断。 */
 static const char *g_search[48];
+static char g_search_buf[48][1024];
+static int g_search_n;
+
+static bool path_is_abs_c(const char *p) {
+    if (!p || !p[0]) return false;
+    if (p[0] == '/' || p[0] == '\\') return true;
+    return p[1] == ':' && ((p[0] >= 'A' && p[0] <= 'Z') ||
+                           (p[0] >= 'a' && p[0] <= 'z'));
+}
+
+static bool search_add(const char *path) {
+    if (!path || !*path || !fexists(path) || g_search_n >= 48) return false;
+    char abs[1024];
+    path_abs(path, abs, sizeof abs);
+    for (int i = 0; i < g_search_n; i++)
+        if (!strcmp(g_search_buf[i], abs)) return false;
+    int n = g_search_n++;
+    snprintf(g_search_buf[n], sizeof g_search_buf[n], "%s", abs);
+    g_search[n] = g_search_buf[n];
+    g_search[g_search_n] = NULL;
+    return true;
+}
+
+static bool csrc_collect_add(const char *path) {
+    if (!path || !*path || g_csrc_n >= 64) return false;
+    char abs[1200];
+    path_abs(path, abs, sizeof abs);
+    for (int i = 0; i < g_csrc_n; i++)
+        if (!strcmp(g_csrc_buf[i], abs)) return false;
+    int n = g_csrc_n++;
+    snprintf(g_csrc_buf[n], sizeof g_csrc_buf[n], "%s", abs);
+    g_csrc_inputs[n] = g_csrc_buf[n];
+    return true;
+}
+
+static void collect_project_tree(const char *root, int add_self, int depth);
+
+static bool lib_ref_is_path(const char *s) {
+    if (!s || !*s) return false;
+    if (path_is_abs_c(s) || s[0] == '.') return true;
+    if (strchr(s, '/') || strchr(s, '\\')) return true;
+    const char *dot = strrchr(s, '.');
+    return dot && dot != s;
+}
+
+/* zx.json "libs"：预编译库直接进链接器，不再要求源码里写 @link。
+ * 带路径或扩展名的项相对声明它的工程根解析；裸名沿用 @link 的 -l<name>。 */
+static void collect_project_libs(const char *root, const char *text) {
+    char *libs[64];
+    int nl = json_get_str_array(text, "libs", libs, 64);
+    for (int i = 0; i < nl; i++) {
+        if (lib_ref_is_path(libs[i]) && !path_is_abs_c(libs[i])) {
+            char full[1200];
+            snprintf(full, sizeof full, "%s/%s", root, libs[i]);
+            zx_add_link_lib(full);
+        } else {
+            zx_add_link_lib(libs[i]);
+        }
+        free(libs[i]);
+    }
+}
+
+static void collect_vendor_projects(const char *root, int depth) {
+    char vendor[1200];
+    snprintf(vendor, sizeof vendor, "%s/vendor", root);
+    if (!path_is_dir(vendor)) return;
+#ifdef _WIN32
+    char pat[1300];
+    snprintf(pat, sizeof pat, "%s/*", vendor);
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pat, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        if (fd.cFileName[0] == '.' ||
+            !(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+        char full[1300], cfg[1300];
+        snprintf(full, sizeof full, "%s/%s", vendor, fd.cFileName);
+        snprintf(cfg, sizeof cfg, "%s/zx.json", full);
+        if (fexists(cfg) && search_add(full))
+            collect_project_tree(full, 0, depth + 1);
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+#else
+    DIR *d = opendir(vendor);
+    if (!d) return;
+    struct dirent *de;
+    while ((de = readdir(d))) {
+        if (de->d_name[0] == '.') continue;
+        char full[1300], cfg[1300];
+        snprintf(full, sizeof full, "%s/%s", vendor, de->d_name);
+        snprintf(cfg, sizeof cfg, "%s/zx.json", full);
+        struct stat st;
+        if (stat(full, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
+        if (fexists(cfg) && search_add(full))
+            collect_project_tree(full, 0, depth + 1);
+    }
+    closedir(d);
+#endif
+}
+
+static void collect_project_tree(const char *root, int add_self, int depth) {
+    if (depth > 16) return;
+    if (add_self && !search_add(root)) return;
+    char vendor[1200];
+    snprintf(vendor, sizeof vendor, "%s/vendor", root);
+    search_add(vendor);
+    collect_vendor_projects(root, depth);
+
+    char cfg[1200];
+    snprintf(cfg, sizeof cfg, "%s/zx.json", root);
+    if (!fexists(cfg)) return;
+    size_t len = 0;
+    char *text = read_source(cfg, &len);
+    if (!text) return;
+    collect_project_libs(root, text);
+    char *csrc[64];
+    int nc = json_get_str_array(text, "csrc", csrc, 64);
+    for (int i = 0; i < nc; i++) {
+        char full[1300];
+        if (path_is_abs_c(csrc[i])) snprintf(full, sizeof full, "%s", csrc[i]);
+        else snprintf(full, sizeof full, "%s/%s", root, csrc[i]);
+        csrc_collect_add(full);
+        free(csrc[i]);
+    }
+    char *deps[16];
+    int nd = json_get_str_array(text, "deps", deps, 16);
+    for (int i = 0; i < nd; i++) {
+        char dep[1200];
+        if (path_is_abs_c(deps[i])) snprintf(dep, sizeof dep, "%s", deps[i]);
+        else snprintf(dep, sizeof dep, "%s/%s", root, deps[i]);
+        if (search_add(dep)) collect_project_tree(dep, 0, depth + 1);
+        free(deps[i]);
+    }
+    free(text);
+}
+
 static void setup_search_paths(const Proj *pj) {
-    int n = 0;
-    if (fexists("vendor") && n < 47) g_search[n++] = "vendor";
-    for (int i = 0; i < pj->ndeps && n < 47; i++) g_search[n++] = pj->deps[i];
-    g_search[n] = NULL;
+    (void)pj;
+    g_search_n = 0;
+    g_search[0] = NULL;
+    g_csrc_n = 0;
+    collect_project_tree(".", 0, 0);
     sema_set_search_paths(g_search);
 }
 
@@ -3755,15 +4150,6 @@ static void setup_search_paths(const Proj *pj) {
  * 找工程根，把 vendor/ 与 deps 拼成绝对路径再注入；找不到就维持原状，
  * 孤立 .zx 文件的行为不变。
  */
-static bool path_is_abs_c(const char *p) {
-    if (!p || !p[0]) return false;
-    if (p[0] == '/' || p[0] == '\\') return true;
-    return p[1] == ':' && ((p[0] >= 'A' && p[0] <= 'Z') ||
-                           (p[0] >= 'a' && p[0] <= 'z'));
-}
-
-static char g_search_abs[48][1024];   /* 绝对路径缓冲，进程内常驻、零泄漏 */
-
 static void setup_search_paths_for_file(const char *file) {
     Proj pj;
     if (proj_load(&pj)) { setup_search_paths(&pj); return; }
@@ -3775,51 +4161,23 @@ static void setup_search_paths_for_file(const char *file) {
     if (!last) return;
     *last = 0;
 
-    /* 工程根不唯一也不重要：沿向上路径把**每一层**的 vendor/ 都收进搜索
-     * 列表（近→远），zx.json 命中层再读它的 deps。@mod("name") 依次
-     * 尝试：源文件目录 → 各层 vendor/ → deps。嵌套工程、测试影子目录
-     * 都不会抢根——搜索路径本来就是一个列表，不需要"唯一的根"。 */
+    g_search_n = 0;
+    g_search[0] = NULL;
+    g_csrc_n = 0;
     char root[1024];
     root[0] = 0;
-    int n = 0;
     char zx[1060];
     for (int up = 0; up < 32 && dir[0]; up++) {
         snprintf(zx, sizeof zx, "%s/vendor", dir);
-        if (fexists(zx) && n < 47) {
-            snprintf(g_search_abs[n], sizeof g_search_abs[n], "%s", zx);
-            g_search[n++] = g_search_abs[n];
-        }
+        search_add(zx);
         snprintf(zx, sizeof zx, "%s/zx.json", dir);
         if (fexists(zx) && !root[0]) snprintf(root, sizeof root, "%s", dir);
         char *cut = strrchr(dir, '/');
         if (!cut || cut == dir) break;
-        if (cut - dir == 2 && dir[1] == ':') break;   /* E:/ 已到盘符根 */
+        if (cut - dir == 2 && dir[1] == ':') break;
         *cut = 0;
     }
-    if (root[0]) {
-        snprintf(zx, sizeof zx, "%s/zx.json", root);
-        FILE *f = fopen(zx, "rb");
-        if (f) {
-            char text[8192];
-            size_t len = fread(text, 1, sizeof text - 1, f);
-            fclose(f);
-            text[len] = 0;
-            char *deps[16];
-            int nd = json_get_str_array(text, "deps", deps, 16);
-            for (int i = 0; i < nd && n < 47; i++) {
-                char d[1024];
-                if (path_is_abs_c(deps[i])) snprintf(d, sizeof d, "%s", deps[i]);
-                else snprintf(d, sizeof d, "%s/%s", root, deps[i]);
-                if (fexists(d)) {
-                    snprintf(g_search_abs[n], sizeof g_search_abs[n], "%s", d);
-                    g_search[n] = g_search_abs[n];
-                    n++;
-                }
-                free(deps[i]);
-            }
-        }
-    }
-    g_search[n] = NULL;
+    if (root[0]) collect_project_tree(root, 0, 0);
     sema_set_search_paths(g_search);
 }
 

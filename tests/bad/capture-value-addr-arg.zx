@@ -1,0 +1,18 @@
+// §261：if 值捕获的 win 是当前栈帧上的对象，`&win` 是栈借用。
+// 把它作为实参传给函数（函数可能存进字段/全局）必须报 E0532。
+// expect: cannot pass a captured pointer
+// expect-code: E0532
+const Holder = struct {
+    p: ?*u8 = null,
+};
+const store = fn (h: *Holder, p: *u8) void { h.p = p; };
+const get = fn () !i32 { return 7; };
+pub const main = fn () i32 {
+    var h: Holder = .{};
+    if (get()) win {
+        store(&h, (*u8)(&win));
+    } else e {
+        _ = e;
+    }
+    return 0;
+};

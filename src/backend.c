@@ -1483,6 +1483,17 @@ static void lvalue(Buf *b, Node *n) {
         cname(b, sym_cname(n));
         return;
     case NK_FIELD: {
+        /* §270c：模块成员的取地址（`&ext.arr`）必须和 ex() 的 NK_FIELD
+         * 同口径——check_field 对 SK_NS 已把成员符号挂在 n->sym，C 名是
+         * `ext_arr`（gen_global 的同名 extern 声明）。以前这里没看
+         * n->sym，base 是命名空间（TY_TYPE、type_val 是内部枚举）就误判
+         * 成"类型静态成员"，发 `ZxE<n>_arr`——C 里没有该符号，B1001。 */
+        if (n->sym) {
+            const char *cn = sym_cname(n);
+            need_by_cname(cn);
+            emit_sym_name(b, n);
+            return;
+        }
         Type *bt = n->a ? n->a->ty : NULL;
         if (bt && bt->kind == TY_TYPE) {   /* 静态成员 */
             Buf nm; buf_init(&nm); tn(&nm, n->a->type_val);

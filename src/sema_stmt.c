@@ -428,6 +428,11 @@ void ensure_raw(Symbol *s) {
         err_at(d->line, d->col,
                "`%s` exists only at compile time; bind it with `const` "
                "straight from `@type`", ty_str(ann));
+        /* 报错后必须收尾：否则 s->state 停在 ensure_raw 设的 1，后续
+         * 任何 resolve 这个符号的地方都会再报一条 E0601 cyclic dependency。 */
+        s->ty = ty_invalid();
+        s->state = 2;
+        d->ty = s->ty;
         return;
     }
     Type *init = d->b ? check_expr(d->b, ann) : NULL;

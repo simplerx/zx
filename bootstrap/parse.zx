@@ -2193,12 +2193,16 @@ pub const Parser = struct {
             return (error)Fail.f;
         }
         // 捕获名 + 单个返回值（语法糖）：`if (o) v v else 0`
-        if (self.at(lex.Kind.ident) and self.starts_value(self.peek_tok(1).kind)) {
+        // else 臂始终按普通表达式解析，不能占用这套捕获语法。
+        if (implicit_ok and self.at(lex.Kind.ident) and
+            self.starts_value(self.peek_tok(1).kind)) {
             self.cap = try self.take_ident();
             return self.parse_expr();
         }
-        // `if (m) v * 2 else 0`：v 既是捕获名又是表达式的一部分
-        if (self.at(lex.Kind.ident) and self.starts_binop(self.peek_tok(1).kind)) {
+        // `if (m) v * 2 else 0`：真值臂里的 v 既是捕获名又是表达式的一部分。
+        // else 的 `i + 1` / `f(x)` 必须保持普通表达式。
+        if (implicit_ok and self.at(lex.Kind.ident) and
+            self.starts_binop(self.peek_tok(1).kind)) {
             let id = self.advance();
             self.cap = self.tok_text(id);
             let lhs = self.new_at(NK.id, id);

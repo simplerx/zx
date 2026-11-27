@@ -305,7 +305,9 @@ const main = fn () i32 {
 ZSRC
 if ( cd "$pdir/demo" && "$ZXCW" include cliadd --force > "$TPFX.cli.cadd" 2>&1 ) \
    && [ -f "$pdir/demo/vendor/libcliadd.a" ] \
-   && grep -q '@link("vendor/libcliadd.a")' "$pdir/demo/vendor/cliadd.zx" \
+   && grep -q '"csrc": *\[' "$pdir/demo/zx.json" \
+   && grep -q '"vendor"' "$pdir/demo/zx.json" \
+   && ! grep -q '@link(' "$pdir/demo/vendor/cliadd.zx" \
    && ( cd "$pdir/demo" && "$ZXCW" run > "$TPFX.cli.crun" 2>&1 ) \
    && grep -q "sum=5 g=4" "$TPFX.cli.crun"; then
     printf "  ok   include 自动编译 C 源码并链接运行\n"
@@ -374,6 +376,7 @@ ZSRC
 if ( cd "$pdir/demo" && "$ZXCW" include ../treelib > "$TPFX.cli.tree" 2>&1 ) \
    && [ -f "$pdir/demo/vendor/treelib.clib" ] \
    && [ -f "$pdir/demo/vendor/libtreelib.a" ] \
+   && grep -q 'vendor/treelib.clib' "$pdir/demo/zx.json" \
    && [ "$(grep -c '^source = ' "$pdir/demo/vendor/treelib.clib")" = "2" ] \
    && ! grep -q 'tests/main.c' "$pdir/demo/vendor/treelib.clib" \
    && ! [ -f "$pdir/demo/vendor/calc.c" ] \
@@ -396,11 +399,11 @@ else
     printf "  FAIL 深层 .c 改动没有重编\n"; cat "$TPFX.cli.trun2" 2>/dev/null; fail=1
 fi
 
-# 2.54b vendor/ 自动接管：库直接丢进 vendor，不跑 include，一条 zxc run 就能跑。
+# 2.54b vendor/ 自动接管：sync 生成绑定并把 C 输入写进 zx.json，随后 run 可构建。
 # 守的是：① 绑定必须在解析入口源码之前生成（否则第一次 run 就报找不到模块）；
 # ② 目录树和顶层散头两种放法；③ 幂等且绝不覆盖手工改过的 .zx；
 # ④ 纯 zx 模块目录不误判、同名占位可 opt-out、zxc sync 幂等。
-printf "\n== vendor/ 自动接管（免 zxc include，直接 run）\n"
+printf "\n== vendor/ 自动接管（sync 写清单，再 run）\n"
 AP="$pdir/auto/autodemo"
 mkdir -p "$pdir/auto"
 if ( cd "$pdir/auto" && "$ZXCW" init autodemo > "$TPFX.cli.ainit" 2>&1 ); then
@@ -414,15 +417,18 @@ if ( cd "$pdir/auto" && "$ZXCW" init autodemo > "$TPFX.cli.ainit" 2>&1 ); then
         > "$AP/vendor/geolib/src/util/twice.c"
     printf 'const std = @mod("std");\nconst g = @mod("geolib");\nconst main = fn () i32 {\n    std.println("add={} twice={} ver={}", g.geo_add(2, 3), g.geo_twice(), g.GEO_VER);\n    return 0;\n};\n' \
         > "$AP/src/main.zx"
-    if ( cd "$AP" && "$ZXCW" run > "$TPFX.cli.arun" 2>&1 ) \
-       && grep -q "auto-added C library vendor/geolib" "$TPFX.cli.arun" \
+    if ( cd "$AP" && "$ZXCW" sync > "$TPFX.cli.asy1" 2>&1 ) \
+       && grep -q "auto-added C library vendor/geolib" "$TPFX.cli.asy1" \
+       && grep -q 'vendor/geolib.clib' "$AP/zx.json" \
+       && ( cd "$AP" && "$ZXCW" run > "$TPFX.cli.arun" 2>&1 ) \
        && grep -q "add=5 twice=14 ver=3" "$TPFX.cli.arun" \
        && [ -f "$AP/vendor/geolib.clib" ] \
        && [ -f "$AP/vendor/geolib.zx" ] \
+       && ! grep -q '@link(' "$AP/vendor/geolib.zx" \
        && [ -f "$AP/vendor/libgeolib.a" ]; then
-        printf "  ok   丢库进 vendor 后直接 run，自动接管 + 编译 + 链接\n"
+        printf "  ok   丢库进 vendor 后 sync 写清单，再 run 编译链接\n"
     else
-        printf "  FAIL vendor 自动接管\n"; cat "$TPFX.cli.arun" 2>/dev/null; fail=1
+        printf "  FAIL vendor 自动接管\n"; cat "$TPFX.cli.asy1" "$TPFX.cli.arun" 2>/dev/null; fail=1
     fi
     # 第二次 run 不能重复生成，手改过的绑定不能被冲掉
     printf '\n// HAND EDIT -- must survive\n' >> "$AP/vendor/geolib.zx"
@@ -438,10 +444,12 @@ if ( cd "$pdir/auto" && "$ZXCW" init autodemo > "$TPFX.cli.ainit" 2>&1 ); then
     printf '#include "small.h"\nint small_mul(int a, int b) { return a * b; }\n' > "$AP/vendor/small.c"
     printf 'const std = @mod("std");\nconst s = @mod("small");\nconst main = fn () i32 {\n    std.println("mul={} k={}", s.small_mul(4, 5), s.SMALL_K);\n    return 0;\n};\n' \
         > "$AP/src/main.zx"
-    if ( cd "$AP" && "$ZXCW" run > "$TPFX.cli.arun3" 2>&1 ) \
-       && grep -q "auto-added C header vendor/small.h" "$TPFX.cli.arun3" \
+    if ( cd "$AP" && "$ZXCW" sync > "$TPFX.cli.asy3" 2>&1 ) \
+       && grep -q "auto-added C header vendor/small.h" "$TPFX.cli.asy3" \
+       && grep -q '"vendor"' "$AP/zx.json" \
+       && ( cd "$AP" && "$ZXCW" run > "$TPFX.cli.arun3" 2>&1 ) \
        && grep -q "mul=20 k=9" "$TPFX.cli.arun3"; then
-        printf "  ok   顶层散头 + 散 .c 也能免 include 直接跑\n"
+        printf "  ok   顶层散头 + 散 .c 经 sync 写清单后直接跑\n"
     else
         printf "  FAIL 散头自动接管\n"; cat "$TPFX.cli.arun3" 2>/dev/null; fail=1
     fi
@@ -463,11 +471,11 @@ else
 fi
 
 # 2.54c zxc add / fetch：清单极简（URL 数组）+ 锁承担全部安全锚点。
-# 守的是：① zx.json 只允许 name/version/main/out/deps/vendor，vendor 必须是
-# 字符串数组，不许再冒出 ref/sha256/subdir 之类的参数；② 旧 CLI 参数一律删除，
-# 旧写法直接报错；③ 单头 / 归档 / git 三种源零参数落地并被自动接管；
-# ④ fetch 幂等、篡改检测、缺库恢复、URL 变更拒绝、锁内 sha256/commit 复现；
-# ⑤ 源站下线 run 仍成功；⑥ include 的能力完整保留。
+# 守的是：① vendor 必须是字符串数组，不许再冒出 ref/sha256/subdir 之类的参数；
+# ② 旧 CLI 参数一律删除，旧写法直接报错；③ 单头 / 归档 / git 三种源零参数落地；
+# ④ C 输入同步进 zx.json csrc，锁仍承担全部安全锚点；⑤ fetch 幂等、篡改检测、
+# 缺库恢复、URL 变更拒绝、锁内 sha256/commit 复现；⑥ 源站下线 run 仍成功；
+# ⑦ include 的能力完整保留。
 printf "\n== zxc add/fetch（zx.json 只记 URL + zx.lock 全锚点，run 不联网）\n"
 FDIR="$pdir/fetch"
 FSRV="$FDIR/srv"
@@ -489,6 +497,8 @@ if mkdir -p "$FSRV/flib-1.0/include" "$FSRV/flib-1.0/src" "$FSRV/fgit.git/includ
        && [ -f "$FDEMO/vendor/fmini.h" ] && [ -f "$FDEMO/vendor/fmini.zx" ] \
        && [ -f "$FDEMO/vendor/flib.clib" ] && [ -f "$FDEMO/vendor/fgit.zx" ] \
        && grep -q '"name": *"demo"' "$FDEMO/zx.json" \
+       && grep -q 'vendor/flib.clib' "$FDEMO/zx.json" \
+       && grep -q 'vendor/fgit.clib' "$FDEMO/zx.json" \
        && [ "$(grep -Ec '"(http|https|file)://' "$FDEMO/zx.json")" -ge 3 ] \
        && grep -q "resolved = [0-9a-f]\{40\}" "$FDEMO/zx.lock" \
        && grep -q "tree = [0-9a-f]\{64\}" "$FDEMO/zx.lock" \
@@ -540,6 +550,17 @@ if mkdir -p "$FSRV/flib-1.0/include" "$FSRV/flib-1.0/src" "$FSRV/fgit.git/includ
     else
         printf "  FAIL fetch 幂等\n"; cat "$TPFX.cli.ff1" 2>/dev/null; fail=1
     fi
+    # fetch 不仅复现 vendor，也把派生 C 编译输入补回 zx.json
+    cp "$FDEMO/zx.json" "$TPFX.cli.fjson.csrbak"
+    sed -i '/"csrc": *\[/,/\]/c\  "csrc": []' "$FDEMO/zx.json"
+    if ( cd "$FDEMO" && "$ZXCW" fetch > "$TPFX.cli.ffsync" 2>&1 ) \
+       && grep -q 'vendor/flib.clib' "$FDEMO/zx.json" \
+       && grep -q 'vendor/fgit.clib' "$FDEMO/zx.json"; then
+        printf "  ok   fetch 按锁复现后同步 zx.json csrc\n"
+    else
+        printf "  FAIL fetch 未同步 csrc\n"; cat "$TPFX.cli.ffsync" 2>/dev/null; fail=1
+    fi
+    cp "$TPFX.cli.fjson.csrbak" "$FDEMO/zx.json"
     # fetch 的单条过滤：name 和 URL 都认（用户不必记「name 到底是什么」）
     if ( cd "$FDEMO" && "$ZXCW" fetch "file:///$FSRV/fmini.h" > "$TPFX.cli.ffurl" 2>&1 ) \
        && grep -q "1 ok, 0 problem" "$TPFX.cli.ffurl"; then
@@ -618,6 +639,50 @@ else
     printf "  FAIL add/fetch 用例的 fixture 准备\n"; cat "$TPFX.cli.finit" 2>/dev/null; fail=1
 fi
 
+# 2.54c2 zx.json libs：预编译库 + 二进制链接。路径相对声明工程解析，
+# 裸名走 -l；依赖项目的 libs 递归生效；add 本地 .a 只写清单不复制。
+printf "\n== zx.json libs（预编译库 / 裸名 / 依赖传递 / 缺失失败）\n"
+BDIR="$pdir/binlib"
+BAPP="$BDIR/app"
+if mkdir -p "$BAPP/lib" "$BAPP/src" "$BDIR/base/lib" "$BDIR/base/src" "$BDIR/consumer/src" \
+   && printf 'int bin_add(int a, int b) { return a + b; }\n' > "$BAPP/lib/bin.c" \
+   && $ZYG cc -std=c11 -O0 -fno-sanitize=undefined -c "$BAPP/lib/bin.c" -o "$BAPP/lib/bin.o" \
+   && $ZYG ar rcs "$BAPP/lib/libbin.a" "$BAPP/lib/bin.o" \
+   && printf '{\n  "name": "binlib",\n  "main": "src/main.zx",\n  "libs": ["lib/libbin.a", "m"]\n}\n' > "$BAPP/zx.json" \
+   && printf 'const std = @mod("std");\nextern "C" { fn bin_add(a: i32, b: i32) i32; }\nconst main = fn () i32 { std.println("{}", bin_add(20, 22)); return 0; };\n' > "$BAPP/src/main.zx" \
+   && ( cd "$BAPP" && "$ZXCW" add lib/libbin.a > "$TPFX.cli.badd" 2>&1 ) \
+   && [ "$(grep -c 'lib/libbin.a' "$BAPP/zx.json")" = "1" ] \
+   && ( cd "$BAPP" && "$ZXCW" run > "$TPFX.cli.brun" 2>&1 ) \
+   && grep -q '^42$' "$TPFX.cli.brun"; then
+    printf "  ok   相对静态库 + 裸名系统库链接，add 去重且不复制\n"
+else
+    printf "  FAIL zx.json libs 基本链接\n"
+    cat "$TPFX.cli.badd" "$TPFX.cli.brun" 2>/dev/null; fail=1
+fi
+cp "$BAPP/zx.json" "$TPFX.cli.bjson.bak"
+sed -i 's|lib/libbin.a|lib/missing.a|' "$BAPP/zx.json"
+if ( cd "$BAPP" && "$ZXCW" run > "$TPFX.cli.bmissing" 2>&1 ) \
+   || ! grep -qE 'B2001|B2002' "$TPFX.cli.bmissing"; then
+    printf "  FAIL 缺失预编译库未被链接器守住\n"; cat "$TPFX.cli.bmissing" 2>/dev/null; fail=1
+else
+    printf "  ok   缺失预编译库明确链接失败\n"
+fi
+cp "$TPFX.cli.bjson.bak" "$BAPP/zx.json"
+if mkdir -p "$BDIR/base/lib" "$BDIR/base/src" \
+   && printf 'int base_mul(int a, int b) { return a * b; }\n' > "$BDIR/base/lib/base.c" \
+   && $ZYG cc -std=c11 -O0 -fno-sanitize=undefined -c "$BDIR/base/lib/base.c" -o "$BDIR/base/lib/base.o" \
+   && $ZYG ar rcs "$BDIR/base/lib/libbase.a" "$BDIR/base/lib/base.o" \
+   && printf '{"name":"base","main":"src/main.zx","libs":["lib/libbase.a"]}\n' > "$BDIR/base/zx.json" \
+   && printf 'extern "C" { fn base_mul(a: i32, b: i32) i32; }\npub const mul = fn (a: i32, b: i32) i32 { return base_mul(a, b); };\n' > "$BDIR/base/src/main.zx" \
+   && printf '{"name":"consumer","main":"src/main.zx","deps":["../base"]}\n' > "$BDIR/consumer/zx.json" \
+   && printf 'const std = @mod("std");\nconst base = @mod("base");\nconst main = fn () i32 { std.println("{}", base.mul(6, 7)); return 0; };\n' > "$BDIR/consumer/src/main.zx" \
+   && ( cd "$BDIR/consumer" && "$ZXCW" run > "$TPFX.cli.bdep" 2>&1 ) \
+   && grep -q '^42$' "$TPFX.cli.bdep"; then
+    printf "  ok   依赖项目的 libs 递归进入最终链接\n"
+else
+    printf "  FAIL 依赖 libs 传递\n"; cat "$TPFX.cli.bdep" 2>/dev/null; fail=1
+fi
+
 # 2.54d LSP 诊断的模块搜索路径：单文件分派 `zxc <file> --check` 必须认识
 # vendor/ 与 deps。以前只有 build/run（do_build）和 `zxc check` 子命令设了
 # 搜索路径，LSP 偏偏 spawn 的是单文件分派，于是「能编过、编辑器却假报
@@ -667,6 +732,79 @@ if mkdir -p "$MDIR/src" "$MDIR/vendor" "$MDIR/shared" \
     fi
 else
     printf "  FAIL 单文件搜索路径用例的 fixture 准备\n"; fail=1
+fi
+
+# 2.54e Zx 工程依赖：本地项目根直接进 deps，项目自己的 deps 递归展开；
+# 入口与依赖都叫 main.zx 也必须生成不同 C 单元。Git 拉取的 Zx 工程仍走
+# vendor/ + zx.lock，但不得被 C 库自动接管误判。
+printf "\n== Zx 工程依赖（本地 / 传递 deps / Git）\n"
+PDIR="$pdir/projdeps"
+if mkdir -p "$PDIR/app/src" "$PDIR/lib/src" "$PDIR/base/src" \
+   && printf '{"name":"app","main":"src/main.zx","deps":["../lib"]}\n' > "$PDIR/app/zx.json" \
+   && printf 'const std = @mod("std");\nconst lib = @mod("lib");\nconst main = fn () i32 { std.println("{}", lib.answer()); return 0; };\n' > "$PDIR/app/src/main.zx" \
+   && printf '{"name":"lib","main":"src/main.zx","deps":["../base"]}\n' > "$PDIR/lib/zx.json" \
+   && printf 'const base = @mod("base");\npub const answer = fn () i32 { return base.value(); };\n' > "$PDIR/lib/src/main.zx" \
+   && printf '{"name":"base","main":"src/main.zx"}\n' > "$PDIR/base/zx.json" \
+   && printf 'pub const value = fn () i32 { return 42; };\n' > "$PDIR/base/src/main.zx"; then
+    if ( cd "$PDIR/app" && "$ZXCW" run > "$TPFX.pd1" 2>&1 ) && grep -q '^42$' "$TPFX.pd1"; then
+        printf "  ok   本地工程依赖 + 传递 deps + 同名 main.zx\n"
+    else
+        printf "  FAIL 本地/传递工程依赖\n"; cat "$TPFX.pd1" 2>/dev/null; fail=1
+    fi
+else
+    printf "  FAIL 工程依赖 fixture 准备\n"; fail=1
+fi
+
+ADIR="$pdir/projadd"
+if mkdir -p "$ADIR/src" \
+   && printf '{"name":"addapp","main":"src/main.zx","deps":[]}\n' > "$ADIR/zx.json" \
+   && printf 'const std = @mod("std");\nconst base = @mod("base");\nconst main = fn () i32 { std.println("{}", base.value()); return 0; };\n' > "$ADIR/src/main.zx" \
+   && ( cd "$ADIR" && "$ZXCW" add ../projdeps/base > "$TPFX.pd2" 2>&1 ) \
+   && ( cd "$ADIR" && "$ZXCW" add ../projdeps/base > "$TPFX.pd3" 2>&1 ) \
+   && [ "$(grep -o '"../projdeps/base"' "$ADIR/zx.json" | wc -l)" = "1" ] \
+   && [ ! -e "$ADIR/base" ] \
+   && ( cd "$ADIR" && "$ZXCW" run > "$TPFX.pd4" 2>&1 ) \
+   && grep -q '^42$' "$TPFX.pd4"; then
+    printf "  ok   zxc add <本地工程> 记录 deps、去重且不复制源码\n"
+else
+    printf "  FAIL zxc add 本地工程\n"
+    cat "$TPFX.pd2" "$TPFX.pd3" "$TPFX.pd4" 2>/dev/null; fail=1
+fi
+
+BDIR="$pdir/projbad"
+mkdir -p "$BDIR/app/src" "$BDIR/badproj"
+printf '{"name":"badapp","main":"src/main.zx","deps":["../badproj"]}\n' > "$BDIR/app/zx.json"
+printf 'const bad = @mod("badproj");\nconst main = fn () i32 { return bad.value; };\n' > "$BDIR/app/src/main.zx"
+printf '{"name":"badproj"}\n' > "$BDIR/badproj/zx.json"
+( cd "$BDIR/app" && "$ZXCW" run > "$TPFX.pd5" 2>&1 ) || true
+if grep -q 'E0601' "$TPFX.pd5" && grep -q 'cannot open module' "$TPFX.pd5"; then
+    printf "  ok   工程清单缺 main 仍给模块解析诊断\n"
+else
+    printf "  FAIL 坏工程清单没有诊断\n"; cat "$TPFX.pd5"; fail=1
+fi
+
+GSRV="$pdir/projgit-srv"
+GDEMO="$pdir/projgit-demo"
+if mkdir -p "$GSRV/zgit.git/src" "$GSRV/zgit.git/include" "$GDEMO" \
+   && printf '{"name":"zgit","main":"src/main.zx"}\n' > "$GSRV/zgit.git/zx.json" \
+   && printf 'pub const value = fn () i32 { return 77; };\n' > "$GSRV/zgit.git/src/main.zx" \
+   && printf '#define ZGIT_K 9\n' > "$GSRV/zgit.git/include/zgit.h" \
+   && printf '#include "zgit.h"\nint zgit_n = ZGIT_K;\n' > "$GSRV/zgit.git/src/zgit.c" \
+   && ( cd "$GSRV/zgit.git" && git init -q && git config core.autocrlf false \
+        && git config user.email t@t.t && git config user.name t \
+        && git add . && git commit -q -m init ) \
+   && ( cd "$GDEMO" && "$ZXCW" init demo > "$TPFX.pd6" 2>&1 ) \
+   && ( cd "$GDEMO/demo" && ZX_ALLOW_LOCAL_FETCH=1 "$ZXCW" add "file:///$GSRV/zgit.git" > "$TPFX.pd7" 2>&1 ) \
+   && [ -f "$GDEMO/demo/vendor/zgit/src/main.zx" ] \
+   && [ ! -f "$GDEMO/demo/vendor/zgit.clib" ] \
+   && [ ! -f "$GDEMO/demo/vendor/zgit.zx" ] \
+   && printf 'const std = @mod("std");\nconst z = @mod("zgit");\nconst main = fn () i32 { std.println("{}", z.value()); return 0; };\n' > "$GDEMO/demo/src/main.zx" \
+   && ( cd "$GDEMO/demo" && "$ZXCW" run > "$TPFX.pd8" 2>&1 ) \
+   && grep -q '^77$' "$TPFX.pd8"; then
+    printf "  ok   Git Zx 工程进 vendor，按项目解析且不做 C 绑定接管\n"
+else
+    printf "  FAIL Git Zx 工程依赖\n"
+    cat "$TPFX.pd6" "$TPFX.pd7" "$TPFX.pd8" 2>/dev/null; fail=1
 fi
 
 rm -rf "$pdir" 2>/dev/null || true

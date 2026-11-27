@@ -5,8 +5,9 @@
  * 和所在文件。这里只做「挑出来 + 翻类型名」，不引入 JSON 解析器，也不
  * 自己预处理 C。工具链就是项目里 vendored 的 zig cc。
  *
- * 生成物是普通 Zx 源码：extern "C" 块 + @link + 常量。它进 vendor/ 之后
- * 和手写的绑定没有任何区别，LSP 的补全 / hover / inlayHint 全部照常。
+ * 生成物是普通 Zx 源码：extern "C" 块 + 常量。编译/链接输入由 zx.json 的
+ * csrc / libs 统一声明。它进 vendor/ 之后和手写的绑定没有区别，LSP 的补全 /
+ * hover / inlayHint 全部照常。
  * 翻不了的声明一律跳过并在文件末尾留注释，绝不猜一个错的 ABI 出来。
  *
  * 控制台输出只用 ASCII；写进 .zx 的注释是模板内容，可以是中文。
@@ -972,7 +973,7 @@ static const char *zx_text_path(const char *src, char *buf, size_t cap) {
     return buf;
 }
 
-char *cbind_generate(const char *header, const char *cc, const char *link_lib,
+char *cbind_generate(const char *header, const char *cc,
                      int allow_system, const char *extra_incs,
                      const char *const *macro_headers, int nmacro,
                      const char *regen_arg,
@@ -1062,7 +1063,7 @@ char *cbind_generate(const char *header, const char *cc, const char *link_lib,
     free(ast);
 
     SB out; memset(&out, 0, sizeof out);
-    char ra_buf[1200], link_buf[1200];
+    char ra_buf[1200];
     const char *ra = zx_text_path(
         (regen_arg && *regen_arg) ? regen_arg : shown, ra_buf, sizeof ra_buf);
     sb_printf(&out,
@@ -1073,9 +1074,6 @@ char *cbind_generate(const char *header, const char *cc, const char *link_lib,
     if (allow_system)
         sb_puts(&out, "// Toolchain header mode: function signatures only (no SDK structs/vars).\n"
                       "// For full bindings, put the library's .h into the project and add it by path.\n\n");
-    if (link_lib && *link_lib)
-        sb_printf(&out, "@link(\"%s\");\n\n",
-                  zx_text_path(link_lib, link_buf, sizeof link_buf));
     if (vars.n) { sb_addn(&out, vars.p, vars.n); sb_puts(&out, "\n"); }
     sb_puts(&out, "extern \"C\" {\n");
     /* 不完整句柄先落占位定义，函数签名里的 *GLFWwindow 等才解析得到。 */

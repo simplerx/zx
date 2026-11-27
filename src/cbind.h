@@ -12,7 +12,6 @@
 /* 生成一份绑定源码。成功返回 malloc 的字符串（调用方 free），失败返回 NULL。
  *   header   目标 C 头文件路径（或系统头名，由调用方落成临时包装头）
  *   cc       C 编译器命令行（ZX_CC 或缺省的 "<toolchain>/zig.exe cc"）
- *   link_lib 要写进 @link 的库名；NULL / "" 表示不写
  *   allow_system 1 = 目标是系统头（配方给的名字），放行 libc/SDK 里的声明
  *   extra_incs 目录树模式额外拼好的 `-I"..." -D...` 串，可为 NULL
  *   macro_headers / nmacro 需要扫 #define 的头（目录树模式下是全部公开头）；
@@ -22,7 +21,7 @@
  *   err      失败原因（ASCII）
  *   nskip    解析不了、被跳过的声明条数（可为 NULL）
  */
-char *cbind_generate(const char *header, const char *cc, const char *link_lib,
+char *cbind_generate(const char *header, const char *cc,
                      int allow_system, const char *extra_incs,
                      const char *const *macro_headers, int nmacro,
                      const char *regen_arg,

@@ -733,7 +733,10 @@ bool sema_ty_ct_only(Type *t) {
     Type *info = sema_type_info_type();
     if (info && info->tag_ty == t) return true;
     for (int i = 0; info && i < info->nfields; i++)
-        if (info->fields[i].ty == t) return true;
+        /* 无载荷变体拿 void 占位（见 sema_type_variant_type），不能因此把
+         * 所有 void（含 *void / []void）判成 ct-only：void 只是零尺寸类型，
+         * 没有运行时表示不等于"只能在编译期绑定"。 */
+        if (info->fields[i].ty == t && t->kind != TY_VOID) return true;
     if (t->kind == TY_TAG) return true;          /* §172：标签句柄只活在编译期 */
     if (t->kind == TY_SLICE || t->kind == TY_PTR || t->kind == TY_OPT) {
         /* `[]type` / []Field / []Param 和类型值本身没有运行时表示；
@@ -1487,6 +1490,51 @@ static char *find_module_file(const char *cand, bool allow_zx) {
     return NULL;
 }
 
+/* zx.json 由 zxc init 生成，项目依赖只需要读 name/main 两个字符串。
+ * 这里沿用 main.c 的轻量口径，不为了两个字段引入完整 JSON 解析器。 */
+static bool project_json_str(const char *text, const char *key,
+                             char *out, size_t cap) {
+    char pat[64];
+    snprintf(pat, sizeof pat, "\"%s\"", key);
+    const char *p = strstr(text, pat);
+    if (!p) return false;
+    p = strchr(p + strlen(pat), '"');
+    if (!p) return false;
+    p++;
+    size_t n = 0;
+    while (*p && *p != '"' && n + 1 < cap) out[n++] = *p++;
+    out[n] = 0;
+    return *p == '"' && n > 0;
+}
+
+/* dir 本身是 Zx 项目时，返回 zx.json main 指向的文件；否则 NULL。
+ * 项目名优先按 manifest name，目录名是兼容手写项目的兜底。 */
+static char *project_main_of(const char *dir, const char *mod) {
+    if (!dir || !*dir || !mod || !*mod) return NULL;
+    char *cfg = path_join(dir, "zx.json");
+    FILE *f = fopen(cfg, "rb");
+    free(cfg);
+    if (!f) return NULL;
+    char text[65537];
+    size_t n = fread(text, 1, sizeof text - 1, f);
+    fclose(f);
+    text[n] = 0;
+
+    char name[256], main_path[1024];
+    if (!project_json_str(text, "name", name, sizeof name) ||
+        !project_json_str(text, "main", main_path, sizeof main_path)) return NULL;
+
+    char modbuf[256];
+    snprintf(modbuf, sizeof modbuf, "%s", mod);
+    size_t ml = strlen(modbuf);
+    if (ml >= 3 && !strcmp(modbuf + ml - 3, ".zx")) modbuf[ml - 3] = 0;
+    char *base = path_stem(dir);
+    bool match = !strcmp(name, modbuf) || !strcmp(base, modbuf);
+    free(base);
+    if (!match) return NULL;
+    return path_join(dir, main_path);
+}
+
 Module *module_load(const char *rel, int line, int col) {
     char *dir  = path_dup_dir(g_mod ? g_mod->path : g_srcpath);
     char *orig = path_join(dir, rel);
@@ -1496,9 +1544,18 @@ Module *module_load(const char *rel, int line, int col) {
     /* ① 相对导入所在目录 → ② 工程级搜索路径（vendor/、deps） */
     char *full = find_module_file(orig, allow_zx);
     for (int i = 0; !full && g_search_paths && g_search_paths[i]; i++) {
-        char *cand = path_join(g_search_paths[i], rel);
+        const char *search = g_search_paths[i];
+        char *cand = path_join(search, rel);
         full = find_module_file(cand, allow_zx);
         free(cand);
+        /* deps 可以直接指向另一个 Zx 项目根；vendor 里的 Git 项目则落在
+         * <search>/<mod>/zx.json。两种形态都映射到项目的 main。 */
+        if (!full) full = project_main_of(search, rel);
+        if (!full) {
+            char *project_dir = path_join(search, rel);
+            full = project_main_of(project_dir, rel);
+            free(project_dir);
+        }
     }
     if (!full) full = orig;               /* 没找到：留着原路径去报错 */
     else free(orig);
@@ -1526,14 +1583,34 @@ Module *module_load_full(const char *full_in, int line, int col) {
     m->stem = path_stem(full);
     m->loading = true;
 
-    /* 同名文件（不同目录）要区分开，否则 C 名字会撞 */
-    for (int i = 1; i < g_nmods; i++) {
+    /* 同名文件（不同目录）要区分开，否则 C 名字会撞。入口模块也参与比较：
+     * 依赖项目的 main.zx 与消费者入口同名是项目依赖的常见形态。
+     * 后缀必须继续探测到真正唯一：依赖链里有多个 main.zx 时，只追加
+     * 一次会把它们都叫 main1，后端就会重复编译/链接同一个 C 单元。 */
+    bool stem_clash = false;
+    for (int i = 0; i < g_nmods; i++) {
         if (g_mods[i]->stem && !strcmp(g_mods[i]->stem, m->stem)) {
-            char *nn = xmalloc(strlen(m->stem) + 12);
-            sprintf(nn, "%s%d", m->stem, i + 1);
-            m->stem = nn;
+            stem_clash = true;
             break;
         }
+    }
+    if (stem_clash) {
+        char *base = xstrdup(m->stem);
+        int suffix = 1;
+        char nn[512];
+        for (;;) {
+            snprintf(nn, sizeof nn, "%s%d", base, suffix++);
+            bool clash = false;
+            for (int i = 0; i < g_nmods; i++) {
+                if (g_mods[i]->stem && !strcmp(g_mods[i]->stem, nn)) {
+                    clash = true;
+                    break;
+                }
+            }
+            if (!clash) break;
+        }
+        m->stem = xstrdup(nn);
+        free(base);
     }
 
     if (g_nmods == g_cmods) {

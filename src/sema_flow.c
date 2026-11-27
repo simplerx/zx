@@ -169,6 +169,17 @@ static Type *check_if(Node *n, Type *expect) {
             if (s) { s->ty = cap_ty; s->state = 2;
                      s->reg_slot = region_of_expr(n->a);
                      s->cap_src = n->a;
+                     /* §261：捕获值是条件解包物化在当前栈帧的对象——`&v` 与
+                      * stackAlloc 出的指针同源，出臂即失效。不标 in_fn 时
+                      * addr_frame 看不见它，`return &v.x`、把 `&v` 存进字段/
+                      * 全局全部漏过栈逃逸检查。
+                      * 只设 in_fn（"取它的地址落在栈帧"），不设 stack_val：
+                      * 后者表示"这个值本身就是栈来源"，而捕获的载荷常常
+                      * 是指向堆的指针（std 的 `if (raw) p { return Self{
+                      * .buf = p } }`），设了会把合法返回误报成 E0503。
+                      * 也不设 cap_borrow——值捕获传参合法，只有 `*t` 指针
+                      * 捕获禁传参（§221）。 */
+                     s->in_fn = true;
                      tag_capture_inherit(s, n->a, NULL);
                      if (n->cap_ptr) cap_mark_borrow(s); }
         }

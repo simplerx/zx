@@ -28,8 +28,10 @@
  * 1.6.1 = 泛型 struct 糖语法（§190，`struct (T: type, N: usize) { … }`
  * 解析期脱糖成返回 struct 的泛型函数，双端 C/bootstrap 对齐）、deinit
  * 变换克隆丢 sym 修复（§191，std.free 改写后 .ctx 标识符悬垂 → B1001）、
- * std/fs.zx zpath 五处泄漏修复、std 容器全部迁移到糖语法。 */
-#define ZXC_VERSION "1.7.0"
+ * std/fs.zx zpath 五处泄漏修复、std 容器全部迁移到糖语法。
+ * 1.8.0 = zx.json 统一工程依赖/编译链接清单（§272）、LSP 递归推断与
+ * 模块成员修复（§270–271）、void 指针与 if else 表达式解析修复（§261、§273）。 */
+#define ZXC_VERSION "1.8.0"
 
 /* ---------- diagnostics ---------- */
 

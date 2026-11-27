@@ -86,6 +86,10 @@ edit `zx.json`; zxc generates everything else. See `zxc targets` for the list.
   "name": "myapp",
   "main": "src/main.zx",
   "out": "myapp",
+  "deps": [],
+  "vendor": [],
+  "csrc": [],
+  "libs": [],
   "targets": ["windows-x86_64", "linux-x86_64", "macos-aarch64"],
   "platform": { "generate": true }
 }
@@ -136,14 +140,41 @@ zxc targets              # list built-in cross-compilation targets
 zxc fmt [--check]        # format
 ```
 
-Binding C libraries:
+Dependencies and C libraries:
 
 ```sh
 zxc include ../raylib    # directory -> vendor/<name>.zx bindings + vendor/<name>.clib manifest
 zxc include foo.h        # a single header
-zxc add https://.../xx.h  or xx.git  or lib  # fetch from the network into vendor/, SHA-256 / commit recorded in zx.lock
-zxc fetch                # reproduce vendor/ from the lock file on a new machine
+zxc add ../other-zx      # local Zx project -> zx.json deps
+zxc add https://.../xx.git or lib  # fetch a remote Zx project or C library into vendor/
+zxc add lib/libfoo.a     # precompiled library -> zx.json libs (no copying)
+zxc fetch                # reproduce locked vendor sources, then sync zx.json C inputs
+zxc sync                 # discover vendor C inputs and record them in zx.json
 ```
+
+`include`, `add`, `fetch`, and `sync` update `zx.json`; `build`, `run`,
+`test`, and `cbuild` only read it. Source projects listed in `deps` stay at
+their local paths, while remote sources are materialized under `vendor/` and
+pinned by `zx.lock`.
+
+```json
+{
+  "name": "myapp",
+  "main": "src/main.zx",
+  "out": "myapp",
+  "deps": ["../shared", "vendor/other-zx"],
+  "vendor": ["https://example.com/other-zx.git"],
+  "csrc": ["vendor/foo.clib", "native"],
+  "libs": ["lib/libfoo.a", "ws2_32"]
+}
+```
+
+- `deps`: local/Git Zx project module roots; a project root resolves
+  `@mod("<name>")` through its `zx.json` `main`.
+- `csrc`: C source directories or `.clib` manifests, compiled before linking.
+- `libs`: precompiled library paths or bare system-library names (`-l<name>`).
+  Relative paths resolve from the project that declares them, including
+  transitive dependencies.
 
 `vendor/` is a module search root: after `const r = @mod("raylib");`, completion,
 go-to-definition, and inlay type hints all work as usual. The generated bindings

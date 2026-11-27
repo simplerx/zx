@@ -1703,14 +1703,15 @@ static Node *parse_if_arm(P *p, const char **capture, bool *cap_ptr, bool implic
                 "put the statement inside a block");
     }
     /* 捕获名 + 单个返回值（语法糖）：`if (o) v v else 0`。
-     * 两者之间没有分隔符，只能靠"下一个 token 能不能开始一个值"来认——
-     * 运算符开头（`v + 1`）仍是普通表达式，`v` 就是外层变量。 */
-    if (at(p, TOK_IDENT) && starts_value(peek(p, 1)->kind)) {
+     * 两者之间没有分隔符，只能靠"下一个 token 能不能开始一个值"来认。
+     * else 臂始终按普通表达式解析，不能占用这套捕获语法。 */
+    if (implicit_ok && at(p, TOK_IDENT) && starts_value(peek(p, 1)->kind)) {
         *capture = take_ident(p);
         return parse_expr(p);
     }
-    /* `if (m) v * 2 else 0`：v 既是捕获名，又是表达式的一部分。 */
-    if (at(p, TOK_IDENT) && starts_binop(peek(p, 1)->kind)) {
+    /* `if (m) v * 2 else 0`：真值臂里的 v 既是捕获名，又是表达式的一部分。
+     * else 的 `i + 1` / `f(x)` 则必须保持普通表达式，避免捕获节点绕过符号解析。 */
+    if (implicit_ok && at(p, TOK_IDENT) && starts_binop(peek(p, 1)->kind)) {
         Token *id = advance(p);
         *capture = dup_tok(id);
         Node *lhs = node_new(NK_IDENT, id->line, id->col);

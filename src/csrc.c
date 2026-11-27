@@ -1,4 +1,4 @@
-/* csrc.c — 把 vendor/ 下的 C 源码编成静态库，供 Zx 绑定直接 @link。
+/* csrc.c — 把 zx.json csrc 声明的 C 源码编成静态库，供 driver 注入链接器。
  *
  * 设计要点：
  *  - 只认一层目录里的 *.c，按同名头文件分组（见 csrc.h）。第三方 C 库

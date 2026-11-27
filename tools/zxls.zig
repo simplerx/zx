@@ -66,6 +66,16 @@ const Document = struct {
     version: i64,
     // §258: 该 URI 上一次 publishDiagnostics 是否带了诊断。
     has_diags: bool = false,
+    // §266: 最后一次 didChange/didOpen 的真实时间（ns）。定时刷新磁盘时
+    // 靠它判断用户是否正在输入——正在打字时不能用磁盘旧内容覆盖 buffer。
+    last_edit_ns: i128 = 0,
+    // §269: 磁盘文件的 mtime 基线。**buffer 是权威，磁盘不是**：Zed 里
+    // 未保存的编辑只存在于 didChange 推来的 text 中，磁盘仍停留在上一
+    // 次保存的旧内容。只有磁盘 mtime 相对基线真正变化（用户保存/外部
+    // 工具写入）时，磁盘才成为"更新的真相"允许覆盖 buffer。仅凭内容
+    // 差异判断（§266 的做法）会把未保存的编辑在 1.5s 静默后全部冲掉，
+    // 用户看到的就是"改对了诊断也不更新"（§269 实测复现）。
+    disk_mtime: i96 = 0,
 };
 
 var docs_mu: Io.Mutex = .init;
@@ -3781,6 +3791,8 @@ fn tyMembersOf(files: []const []const u8, ty: []const u8,
 
 var g_mod_dirs: [48][]const u8 = undefined;
 var g_mod_dir_n: usize = 0;
+var g_project_dirs: [32][]const u8 = undefined;
+var g_project_dir_n: usize = 0;
 
 fn joinPath(a: []const u8, b: []const u8) []const u8 {
     var out: std.ArrayList(u8) = .empty;
@@ -3804,24 +3816,45 @@ fn isDirPath(p: []const u8) bool {
     return true;
 }
 
-/// 收一个搜索目录（接管 p 的所有权：没被收下就释放）
-fn addModDir(p: []const u8) void {
+/// 收一个搜索目录（接管 p 的所有权：没被收下就释放）。
+/// 返回 true 表示本次新加入，便于工程依赖递归时判断是否还需展开。
+fn addModDir(p: []const u8) bool {
     var keep = false;
     defer if (!keep) gpa.free(p);
-    if (p.len == 0 or g_mod_dir_n >= g_mod_dirs.len) return;
+    if (p.len == 0 or g_mod_dir_n >= g_mod_dirs.len) return false;
     for (g_mod_dirs[0..g_mod_dir_n]) |d| {
-        if (std.mem.eql(u8, d, p)) return;
+        if (std.mem.eql(u8, d, p)) return false;
     }
-    if (!isDirPath(p)) return;
+    if (!isDirPath(p)) return false;
     g_mod_dirs[g_mod_dir_n] = p;
     g_mod_dir_n += 1;
     keep = true;
+    return true;
 }
 
-/// zx.json 的 `"deps"`：模块搜索目录。相对路径按**工程根**拼成绝对路径
-/// （LSP 进程的 cwd 由宿主决定，不能靠相对路径）。`vendor/` 不写也在，
-/// 那是 zx 的规矩（编译器 setup_search_paths 同款）。
-fn appendDepsDirs(root: []const u8, txt: []const u8) void {
+fn projectSeen(root: []const u8) bool {
+    for (g_project_dirs[0..g_project_dir_n]) |d| {
+        if (std.mem.eql(u8, d, root)) return true;
+    }
+    return false;
+}
+
+/// 递归收集工程依赖：根目录、vendor/、vendor 下的 Zx 工程，以及每层
+/// zx.json 的 deps。project_dirs 独立于搜索目录去重，避免「目录已在搜索
+/// 表里」被误判成循环而漏展开它的 deps。
+fn collectProjectTree(root: []const u8) void {
+    if (g_project_dir_n >= g_project_dirs.len or projectSeen(root)) return;
+    g_project_dirs[g_project_dir_n] = gpa.dupe(u8, root) catch return;
+    g_project_dir_n += 1;
+
+    _ = addModDir(gpa.dupe(u8, root) catch return);
+    _ = addModDir(joinPath(root, "vendor"));
+    collectVendorProjects(root);
+
+    const cfg = joinPath(root, "zx.json");
+    defer gpa.free(cfg);
+    const txt = readFileSmall(cfg) orelse return;
+    defer gpa.free(txt);
     const parsed = std.json.parseFromSlice(std.json.Value, gpa, txt, .{}) catch return;
     defer parsed.deinit();
     if (parsed.value != .object) return;
@@ -3829,20 +3862,34 @@ fn appendDepsDirs(root: []const u8, txt: []const u8) void {
     if (deps != .array) return;
     for (deps.array.items) |it| {
         if (it != .string or it.string.len == 0) continue;
-        addModDir(if (isAbsPath(it.string)) dupe(it.string) else joinPath(root, it.string));
+        const dep = if (isAbsPath(it.string)) dupe(it.string) else joinPath(root, it.string);
+        collectProjectTree(dep);
+        gpa.free(dep);
     }
 }
 
-/// initialize 之后调用一次：工程根的 vendor/ 与 zx.json 的 deps
+fn collectVendorProjects(root: []const u8) void {
+    const vendor = joinPath(root, "vendor");
+    defer gpa.free(vendor);
+    var d = Io.Dir.cwd().openDir(g_io, vendor, .{ .iterate = true }) catch return;
+    defer d.close(g_io);
+    var it = d.iterate();
+    while (it.next(g_io) catch null) |entry| {
+        if (entry.kind != .directory or std.mem.startsWith(u8, entry.name, ".")) continue;
+        const full = joinPath(vendor, entry.name);
+        defer gpa.free(full);
+        const cfg = joinPath(full, "zx.json");
+        defer gpa.free(cfg);
+        if (readFileSmall(cfg) != null) collectProjectTree(full);
+    }
+}
+
+/// initialize 之后调用一次：工程根的 vendor/ 与 zx.json 的 deps。
 fn initModuleDirs() void {
     g_mod_dir_n = 0;
+    g_project_dir_n = 0;
     const root = root_path orelse return;
-    addModDir(joinPath(root, "vendor"));
-    const cfg = joinPath(root, "zx.json");
-    defer gpa.free(cfg);
-    const txt = readFileSmall(cfg) orelse return;
-    defer gpa.free(txt);
-    appendDepsDirs(root, txt);
+    collectProjectTree(root);
 }
 
 /// 文档所在目录往上的工程根：就近的 zx.json + 它的 vendor/ + 它的 deps。
@@ -3856,14 +3903,14 @@ fn ensureDocDirs(doc_dir: []const u8) void {
     while (depth < 8) : (depth += 1) {
         if (dir.len == 0) return;
         // vendor 不看 zx.json 是否存在：编译器也是"目录在就参与搜索"
-        addModDir(joinPath(dir, "vendor"));
+        _ = addModDir(joinPath(dir, "vendor"));
         const cfg = joinPath(dir, "zx.json");
         const txt = readFileSmall(cfg);
         gpa.free(cfg);
         if (txt) |t| {
             defer gpa.free(t);
-            addModDir(dupe(dir));
-            appendDepsDirs(dir, t);
+            _ = addModDir(dupe(dir));
+            collectProjectTree(dir);
             return;
         }
         const up = dirName(dir);
@@ -3909,6 +3956,23 @@ fn moduleBase(m: []const u8) []const u8 {
     return m;
 }
 
+/// dir 本身是 Zx 项目时，按 zx.json 的 name/main 返回入口文件。
+fn projectMainFor(dir: []const u8, mod: []const u8) ?[]const u8 {
+    const cfg = joinPath(dir, "zx.json");
+    defer gpa.free(cfg);
+    const txt = readFileSmall(cfg) orelse return null;
+    defer gpa.free(txt);
+    const parsed = std.json.parseFromSlice(std.json.Value, gpa, txt, .{}) catch return null;
+    defer parsed.deinit();
+    if (parsed.value != .object) return null;
+    const name = parsed.value.object.get("name") orelse return null;
+    const main_field = parsed.value.object.get("main") orelse return null;
+    if (name != .string or main_field != .string) return null;
+    if (!std.mem.eql(u8, name.string, mod) and
+        !std.mem.eql(u8, baseName(dir), mod)) return null;
+    return joinPath(dir, main_field.string);
+}
+
 /// mod 名 → 各搜索目录下的 `<mod>.zx` 或 `<mod>/<mod>.zx` 顶层声明
 /// （只收 pub；目录顺序见 modDirsInto，与编译器一致）
 fn moduleDecls(doc_dir: []const u8, mod: []const u8, out: *std.ArrayList(Decl)) void {
@@ -3916,6 +3980,10 @@ fn moduleDecls(doc_dir: []const u8, mod: []const u8, out: *std.ArrayList(Decl)) 
     var dirs: std.ArrayList([]const u8) = .empty;
     defer dirs.deinit(gpa);
     modDirsInto(doc_dir, &dirs);
+    // §262：跟编译器 module_load 同一条解析顺序——按目录逐个探，第一个
+    // 命中的模块就是 @mod("m") 绑的那个，找到即停。以前所有目录都 append，
+    // 工程根/vendor/deps 里同名 m.zx 的成员全混进 `m.` 补全（截图4：ext.
+    // 弹出别处的 add），等价于编译器从未做过的"多模块合并"。
     for (dirs.items) |d| {
         var path: std.ArrayList(u8) = .empty;
         defer path.deinit(gpa);
@@ -3927,7 +3995,7 @@ fn moduleDecls(doc_dir: []const u8, mod: []const u8, out: *std.ArrayList(Decl)) 
         if (readFileSmall(path.items)) |txt| {
             // 跨模块引用只收 pub 声明（非 pub 是模块内部实现细节）
             topLevelDecls(txt, out, true);
-            continue;
+            return;
         }
         // 目录型模块（如 std → std/std.zx）：编译器只读 <mod>/<mod>.zx，
         // 补全也只对齐这个语义，绝不扫目录里其他文件的内部声明。
@@ -3937,13 +4005,30 @@ fn moduleDecls(doc_dir: []const u8, mod: []const u8, out: *std.ArrayList(Decl)) 
         path.appendSlice(gpa, ".zx") catch continue;
         if (readFileSmall(path.items)) |txt| {
             topLevelDecls(txt, out, true);
-            continue;
+            return;
+        }
+        if (projectMainFor(d, m)) |p| {
+            if (readFileSmall(p)) |txt| {
+                topLevelDecls(txt, out, true);
+                return;
+            }
+        }
+        const project_dir = joinPath(d, m);
+        if (projectMainFor(project_dir, m)) |p| {
+            gpa.free(project_dir);
+            if (readFileSmall(p)) |txt| {
+                topLevelDecls(txt, out, true);
+                return;
+            }
+        } else {
+            gpa.free(project_dir);
         }
         // 目录里没有 <mod>/<mod>.zx 才退回全目录扫描（同样只收 pub）
         path.items.len = dirlen + m.len;
         var dir = Io.Dir.cwd().openDir(g_io, path.items, .{ .iterate = true }) catch continue;
         defer dir.close(g_io);
         var it = dir.iterate();
+        var found = false;
         while (it.next(g_io) catch null) |entry| {
             if (entry.kind != .file) continue;
             if (std.mem.startsWith(u8, entry.name, ".zxls-") or !std.mem.endsWith(u8, entry.name, ".zx")) continue;
@@ -3952,8 +4037,12 @@ fn moduleDecls(doc_dir: []const u8, mod: []const u8, out: *std.ArrayList(Decl)) 
             fp.appendSlice(gpa, path.items) catch continue;
             fp.append(gpa, '/') catch continue;
             fp.appendSlice(gpa, entry.name) catch continue;
-            if (readFileSmall(fp.items)) |txt| topLevelDecls(txt, out, true);
+            if (readFileSmall(fp.items)) |txt| {
+                topLevelDecls(txt, out, true);
+                found = true;
+            }
         }
+        if (found) return;
     }
 }
 
@@ -4235,6 +4324,11 @@ fn resolveModuleFile(doc: *const Document, m_raw: []const u8) ?[]const u8 {
         path.appendSlice(gpa, m) catch continue;
         path.appendSlice(gpa, ".zx") catch continue;
         if (readFileSmall(path.items) != null) return dupe(path.items);
+        // deps 指向项目根，或 vendor/<m> 是 Git 拉取的 Zx 项目。
+        if (projectMainFor(d, m)) |p| return p;
+        const project_dir = joinPath(d, m);
+        defer gpa.free(project_dir);
+        if (projectMainFor(project_dir, m)) |p| return p;
     }
     return null;
 }
@@ -6493,7 +6587,20 @@ fn inferExprType(text: []const u8, doc: *const Document, expr: []const u8, depth
     // 6 跳：`pa` → `arrs.0` → `arrs` → 标注，用户 2026-11-09 第 17 条的
     // `let pa = arrs.0; pa.name` 要跨三跳才拿到 Person。各表达式分支自带
     // depth<4 的帽子，真正的递归深度仍被封住。
+    //
+    // §270：e 必须**整个是标识符**才能当"名字"查。未完成赋值的 init 提取
+    // 可能吞入后续声明，伪表达式不能进入名字解析。§271：合法标识符也会
+    // 形成递归环——`switch (op)` 的捕获解析再次推断主语 op；捕获链必须
+    // 透传 depth，不能在回调时重置为 0/1。
     if (depth < 6 and isIdentChar(e[0]) and std.mem.indexOfScalar(u8, e, '.') == null) {
+        var pure_ident = true;
+        for (e) |ch| {
+            if (!isIdentChar(ch)) {
+                pure_ident = false;
+                break;
+            }
+        }
+        if (!pure_ident) return null;
         if (findDeclStmt(text, e)) |stmt2| {
             const init2 = declInitOf(stmt2);
             if (init2) |ival| {
@@ -6515,7 +6622,7 @@ fn inferExprType(text: []const u8, doc: *const Document, expr: []const u8, depth
         }
         // 捕获绑定（`if (arena) a {` 的 a）：没有声明语句，类型来自条件解包
         if (depth < 4) {
-            if (captureBindTy(text, doc, e)) |t| return t;
+            if (captureBindTy(text, doc, e, depth)) |t| return t;
         }
     }
     return null;
@@ -7375,6 +7482,15 @@ fn recvExprStart(text: []const u8, at: usize) usize {
         //（`arena.?.` 的 path 必须是 `arena.?`，否则推断不出内层类型）。
         if (ch == '?' and s >= 2 and text[s - 2] == '.') {
             s -= 2;
+            continue;
+        }
+        // §260 — `@` 是内建名前缀，必须算进接收者：`@type(func).` 直接点
+        // 若不吞 '@'，path 会变成 `type(func)`，inferExprType 的 @type 特判
+        // 命不中 → expr_recv 分支给空列表（必须先接成 const 才有提示）。
+        // 吞掉 '@' 后下一轮看它前面的字符（空格/`=`/换行）自然停下；
+        // 字符串/注释里的 '@' 到不了这里——回扫先撞上引号就 break 了。
+        if (ch == '@') {
+            s -= 1;
             continue;
         }
         if (ch != ')' and ch != ']') break;
@@ -9622,11 +9738,102 @@ fn addIdents(list: *Json, seen: *std.StringHashMapUnmanaged(void), doc_text: []c
 ///（实例上没有嵌套类型）。用户 2026-11-10："Task 命名空间污染了"。
 const RecvKind = enum { module, ty, instance };
 
+/// §260 — `for (xs) v {}` / `inline for (xs) v {}` 的循环变量类型。
+/// 循环变量没有声明语句，findDeclStmt 找不到；旧链把它当普通变量，
+/// 要么推出空、要么撞上文件里更早的同名 `var v`（用户截图：`p.` 弹老 p 的
+/// age/name）。这里按 iterate 表达式的元素类型推，并要求 `at` 落在循环体
+/// `{…}` 内——同名变量在循环体外时绝不能命中，这是根治"残留污染"的关键。
+fn loopVarTyAt(text: []const u8, doc: *const Document, name: []const u8,
+               at: usize) ?[]const u8 {
+    if (name.len == 0 or !isIdentChar(name[0])) return null;
+    for (name) |c| if (!isIdentChar(c)) return null; // 只接单段标识符
+    const kws = [_][]const u8{ "inline for (", "for (" };
+    for (kws) |kw| {
+        var from: usize = 0;
+        while (std.mem.indexOfPos(u8, text, from, kw)) |kp| {
+            from = kp + kw.len;
+            if (kp >= at) break; // 位置递增，光标之后的绑定不认
+            if (inLineComment(text, kp)) continue;
+            // 配平括号取出 iterate 表达式
+            var d: usize = 1;
+            var i = kp + kw.len;
+            var in_str = false;
+            while (i < text.len and d > 0) : (i += 1) {
+                const c = text[i];
+                if (in_str) {
+                    if (c == '\\') { i += 1; continue; }
+                    if (c == '"') in_str = false;
+                    continue;
+                }
+                if (c == '"') { in_str = true; continue; }
+                if (c == '(') d += 1;
+                if (c == ')' and d > 0) d -= 1;
+            }
+            if (d != 0) continue;
+            const iter = trimSl(text[kp + kw.len .. i - 1]);
+            if (iter.len == 0) continue;
+            // ')' 之后跳空白就是循环变量名（`for (xs) v {`）
+            var k = i;
+            while (k < text.len and (text[k] == ' ' or text[k] == '\t')) k += 1;
+            if (!std.mem.startsWith(u8, text[k..], name)) continue;
+            const ne = k + name.len;
+            if (ne < text.len and isIdentChar(text[ne])) continue;
+            // 循环变量的作用域是紧随其后的 `{…}`：光标必须在体内，
+            // 否则文件里更晚的同名 `var v` 会被误推成循环元素（污染）。
+            var b = ne;
+            while (b < text.len and (text[b] == ' ' or text[b] == '\t' or
+                text[b] == '\r' or text[b] == '\n')) b += 1;
+            if (b >= text.len or text[b] != '{') continue;
+            var bd: usize = 1;
+            var j = b + 1;
+            while (j < text.len and bd > 0) : (j += 1) {
+                if (text[j] == '{') bd += 1;
+                if (text[j] == '}') bd -= 1;
+            }
+            if (bd != 0 or at < b or at >= j) continue; // 光标不在循环体内
+            const seq = inferExprType(text, doc, iter, 1) orelse continue;
+            var elem: []const u8 = "";
+            if (sliceOrArrayRecv(seq)) |si| {
+                elem = trimSl(si.elem);
+            } else {
+                const pe = ptrSliceElemTy(seq);
+                if (!std.mem.eql(u8, pe, seq)) elem = pe;
+            }
+            // 兜底：`fp.params` / `fncap.params` 这类链式成员有时被推断成
+            // 主语类型（FunctionInfo）而非字段类型。拆末段用内建字段表取
+            // 真正的成员类型（`[]Param`），再剥一层元素。
+            if (elem.len == 0) {
+                if (std.mem.lastIndexOfScalar(u8, iter, '.')) |ld| {
+                    const ibase = trimSl(iter[0..ld]);
+                    const imem = trimSl(iter[ld + 1 ..]);
+                    if (ibase.len > 0 and imem.len > 0) {
+                        if (inferExprType(text, doc, ibase, 1)) |bt| {
+                            if (builtinFieldTy(bt, imem)) |mty| {
+                                if (sliceOrArrayRecv(mty)) |msi| {
+                                    elem = trimSl(msi.elem);
+                                } else {
+                                    const me = ptrSliceElemTy(mty);
+                                    if (!std.mem.eql(u8, me, mty)) elem = me;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if (elem.len == 0 or !isIdentChar(elem[0])) continue;
+            return elem;
+        }
+    }
+    return null;
+}
+
 /// `if (arena) a { … }` / `while (x) v { … }` 的捕获绑定：返回条件表达式
 /// 解包后的类型（`?Allocator` → `Allocator`）。捕获变量没有声明语句，
 /// findDeclStmt 找不到，补全/hover 的整条类型链就断在 `a.` 上。
-fn captureBindTy(text: []const u8, doc: *const Document, name: []const u8) ?[]const u8 {
-    if (name.len == 0) return null;
+/// depth 是调用方的推断预算，向条件与 switch 主语透传以防合法名字成环。
+fn captureBindTy(text: []const u8, doc: *const Document, name: []const u8,
+                 depth: u8) ?[]const u8 {
+    if (depth >= 4 or name.len == 0) return null;
     const kws = [_][]const u8{ "if (", "while (" };
     for (kws) |kw| {
         var from: usize = 0;
@@ -9657,7 +9864,7 @@ fn captureBindTy(text: []const u8, doc: *const Document, name: []const u8) ?[]co
             if (!std.mem.startsWith(u8, text[k..], name)) continue;
             const e = k + name.len;
             if (e < text.len and isIdentChar(text[e])) continue;
-            var t = inferExprType(text, doc, cond, 1) orelse continue;
+            var t = inferExprType(text, doc, cond, depth + 1) orelse continue;
             t = trimSl(t);
             if (t.len > 0 and (t[0] == '?' or t[0] == '!')) t = trimSl(t[1..]);
             if (t.len > 0) return t;
@@ -9666,15 +9873,16 @@ fn captureBindTy(text: []const u8, doc: *const Document, name: []const u8) ?[]co
     // §257 — switch 臂捕获（`.Function: f { … }` / `TypeInfo.Function: f { … }`）：
     // 捕获变量没有声明语句，按主语类型 + 臂上的变体名推载荷类型。用户
     // 2026-11-26："switch 里也没有"——之前只有 if/while 捕获有类型链。
-    if (switchCaptureTy(text, doc, name)) |t| return t;
+    if (switchCaptureTy(text, doc, name, depth)) |t| return t;
     return null;
 }
 
 /// `switch (subject) { pattern: cap { … } }` 的捕获变量类型。
 /// 联合体取变体载荷类型；`?T`/`!T` 去一层包装；枚举/整数/bool 捕获主语值本身。
 /// TypeInfo 的变体载荷查内建表（没有任何源码声明）。
-fn switchCaptureTy(text: []const u8, doc: *const Document, name: []const u8) ?[]const u8 {
-    if (name.len == 0) return null;
+fn switchCaptureTy(text: []const u8, doc: *const Document, name: []const u8,
+                   depth: u8) ?[]const u8 {
+    if (depth >= 4 or name.len == 0) return null;
     var from: usize = 0;
     while (std.mem.indexOfPos(u8, text, from, "switch (")) |kp| {
         from = kp + 8;
@@ -9699,24 +9907,24 @@ fn switchCaptureTy(text: []const u8, doc: *const Document, name: []const u8) ?[]
         while (k < text.len and (text[k] == ' ' or text[k] == '\t' or
             text[k] == '\r' or text[k] == '\n')) k += 1;
         if (k >= text.len or text[k] != '{') continue;
-        var subj_ty = inferExprType(text, doc, subject, 0) orelse "";
+        var subj_ty = inferExprType(text, doc, subject, depth + 1) orelse "";
         // `switch (info.kind.tag)` 捕获的是 tag 值，不是变体载荷：
         var tag_subject = false;
         if (std.mem.endsWith(u8, subject, ".tag") and subject.len > 4) {
             const base = trimSl(subject[0 .. subject.len - 4]);
-            if (inferExprType(text, doc, base, 0)) |bt| {
+            if (inferExprType(text, doc, base, depth + 1)) |bt| {
                 subj_ty = trimSl(bt);
                 tag_subject = true;
             }
         }
         // 扫臂：只在 body 的顶层找 ':'，嵌套块里的冒号不算。
         var q = k + 1;
-        var depth: usize = 1;
-        while (q < text.len and depth > 0) : (q += 1) {
+        var body_depth: usize = 1;
+        while (q < text.len and body_depth > 0) : (q += 1) {
             const c = text[q];
-            if (c == '{') { depth += 1; continue; }
-            if (c == '}') { depth -= 1; continue; }
-            if (depth != 1 or c != ':') continue;
+            if (c == '{') { body_depth += 1; continue; }
+            if (c == '}') { body_depth -= 1; continue; }
+            if (body_depth != 1 or c != ':') continue;
             var a = q + 1;
             while (a < text.len and (text[a] == ' ' or text[a] == '\t' or
                 text[a] == '\r' or text[a] == '\n')) a += 1;
@@ -10649,6 +10857,20 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                 if (kind_handled) {
                     handled = true;
                     recv_kind = .ty;
+                }
+            }
+            // §260 — for / inline for 的循环变量（`inline for (s.fields) f`、
+            // `inline for (fncap.params) p`）：f/p 没有声明语句，旧的实例兜底
+            // 要么推出空、要么撞上文件里更早的同名 var（截图里 p. 弹老 p 的
+            // age/name）。loopVarTyAt 要求光标落在循环体内，推出元素类型
+            //（Field / Param）交给内建成员表。必须早于"实例变量兜底"那条
+            // 全文 findDeclStmt 链，否则污染先发生。
+            if (!handled and !lit_ctx and std.mem.indexOfScalar(u8, path, '(') == null) {
+                if (loopVarTyAt(text, doc, path, off)) |vty| {
+                    if (builtinTyDefOf(vty) != null and builtinTyMembers(vty, &decls)) {
+                        handled = decls.items.len > 0;
+                        if (handled) recv_kind = .instance;
+                    }
                 }
             }
             // §257 — 类型已知的接收者直接按类型取成员：内建反射类型没有
@@ -11792,7 +12014,9 @@ fn formatDoc(doc: *const Document) ?[]const u8 {
 }
 
 fn runCheck(doc: *const Document, out_diags: *std.ArrayList(Diag)) void {
+    logLine("rc: cleanup");
     cleanupStaleShadows(dirName(doc.path));
+    logLine("rc: cleanup done");
     // 影子文件：把缓冲内容写到与源文件同目录的隐藏 .zx，zxc 检查它——
     // 诊断反映的是编辑器缓冲，而不是磁盘旧状态；同目录保证 @mod(...)
     // 的解析路径与真实文件一致。
@@ -11804,23 +12028,30 @@ fn runCheck(doc: *const Document, out_diags: *std.ArrayList(Diag)) void {
     shadow.appendSlice(gpa, "/.zxls-") catch return;
     shadow.print(gpa, "{x}", .{h}) catch return;
     shadow.appendSlice(gpa, ".zx") catch return;
+    logLine("rc: unhide");
     unhideFile(shadow.items);  // 先清上一轮残留的 HIDDEN|TEMPORARY
+    logLine("rc: write");
     Io.Dir.cwd().writeFile(g_io, .{ .sub_path = shadow.items, .data = doc.text }) catch return;
+    logLine("rc: hide");
     hideFile(shadow.items);
     defer {
+        logLine("rc: defer unhide");
         unhideFile(shadow.items);
         Io.Dir.cwd().deleteFile(g_io, shadow.items) catch {};
+        logLine("rc: defer delete");
     }
     // 不再经命令解释器包装。以前 zxc 用 system("zxfe ... 2> log")，孙进程
     // 的 stderr 句柄继承会断链，只能靠中转恢复；现在 zxc 直接 CreateProcess
     // 并把 stderr 接到日志文件（src/fe.c fe_spawn_zxfe），句柄链不再参与，
     // 中转也就没必要了——还少一层在受限环境里会 ACCESS_DENIED 的进程。
     const argv = [_][]const u8{ zxc_path, shadow.items, "--check" };
+    logLine("rc: spawn zxc");
     const res = std.process.run(gpa, g_io, .{
         .argv = &argv,
         .stderr_limit = .unlimited,
         .cwd = childCwd(),
     }) catch return;
+    logLine("rc: zxc done");
     defer gpa.free(res.stdout);
     defer gpa.free(res.stderr);
 
@@ -12013,11 +12244,40 @@ fn publishDiags(doc: *const Document, diags: []const Diag) void {
         j.buf.appendSlice(gpa, "}") catch @panic("oom");
     }
     j.buf.appendSlice(gpa, "]}}") catch @panic("oom");
-    logLine("publish");
-    sendRaw(j.buf.items);
+    // §264：文本校验 + sendRaw 必须原子。§263 靠 version 判据，但有两个洞：
+    //  ① 判据在 worker 里、unlock 之后才 sendRaw，didChange 能插进这个窗口；
+    //  ② version 由客户端给，Zed 快速输入时会复用同一个 version，判据失效。
+    // 结果：worker 把旧文本快照的诊断发出去，覆盖 didChange 刚发的空诊断，
+    // 波浪线永久残留（用户实测：改对了提示还在，restart 才好）。
+    // 根治：改用「文本内容 + version」双判据，且校验与发送在同一把锁内，
+    // 所有诊断发布严格串行。文本不一致说明快照已过期，整条丢弃——下一轮
+    // worker 会用新文本重查并发布。文本判据不依赖客户端 version 的正确性。
     docs_mu.lockUncancelable(g_io);
-    if (docs.getPtr(doc.path)) |d| d.has_diags = diags.len > 0;
+    const d = docs.getPtr(doc.path) orelse {
+        docs_mu.unlock(g_io);
+        logLine("pubskip: doc gone");
+        return;
+    };
+    const stale = d.version != doc.version or !std.mem.eql(u8, d.text, doc.text);
+    if (stale) {
+        // §268 排查插桩：丢弃过期快照时记录原因与两边版本/长度，否则
+        // 「为什么诊断没更新」在日志里完全不可见。
+        var b: std.ArrayList(u8) = .empty;
+        b.print(gpa, "pubskip stale: snapver={d} docver={d} snaplen={d} doclen={d}", .{ doc.version, d.version, doc.text.len, d.text.len }) catch {};
+        logLine(b.items);
+        b.deinit(gpa);
+        docs_mu.unlock(g_io);
+        return;
+    }
+    d.has_diags = diags.len > 0;
     docs_mu.unlock(g_io);
+    // §269c：sendRaw（stdout IO）移出 docs_mu——锁内做管道写会与主线程
+    // 的 stdin 读取在 Threaded 内部互锁（探针 3/3 复现：didOpen 2s 后
+    // 主线程卡 readLine、两线程 CPU=0 全部等锁）。§264 想要的「校验与
+    // 发送原子」由版本判据保证：即便 didChange 插进 unlock 与 sendRaw
+    // 之间，它发的清空包带新 version 且随后必有一轮新文本重查，旧包
+    // 会被客户端按 version 丢弃，不会永久残留。
+    sendRaw(j.buf.items);
 }
 
 /// zxc.exe 的 mtime：编译器被重编替换后，已打开文档的旧诊断就过时了，
@@ -12028,24 +12288,29 @@ fn zxc_exe_mtime() i96 {
     return st.mtime.nanoseconds;
 }
 
+/// §269c：磁盘轮询的单文档工作项。锁内只拷元数据，stat/read 全在锁外，
+/// 结果带回锁内应用（基线推进 + buffer 替换 + 标脏）。
+const PollItem = struct {
+    path: []const u8,
+    disk_mtime: i96,
+    quiet: bool,
+    new_mtime: i96,
+    disk: ?[]const u8 = null,
+};
+
 fn diagnosticsWorker() void {
     var zxc_mtime: i96 = 0;           // 0 → 首个 tick 必触发一轮全量重查
     var mtime_tick: u32 = 0;
     while (true) {
         docs_mu.lockUncancelable(g_io);
-        while (dirty.count() == 0 and !quitting) {
+        // §270：磁盘轮询必须有「无编辑也醒」的路径。§269c 重构曾把轮询挪到
+        // 本 while 之后——而 while 只在 dirty 非空时退出，于是「只改磁盘、
+        // 不发 didChange」（§266 selfHeal 场景）永远轮询不到。修法：超时
+        // 醒来且仍无活干时置 poll_due 跳出，让后面的轮询段有机会跑。
+        var poll_due = false;
+        while (dirty.count() == 0 and !quitting and !poll_due) {
             docs_cond.waitTimeout(g_io, &docs_mu, .{ .duration = .{ .raw = Io.Duration.fromMilliseconds(250), .clock = .awake } }) catch {};
-            mtime_tick += 1;
-            if (mtime_tick >= 8) {    // ~2s 一次 stat，开销可忽略
-                mtime_tick = 0;
-                const m = zxc_exe_mtime();
-                if (m != zxc_mtime) {
-                    zxc_mtime = m;
-                    var dit = docs.iterator();
-                    while (dit.next()) |e|
-                        dirty.put(gpa, e.key_ptr.*, {}) catch {};
-                }
-            }
+            if (dirty.count() == 0 and !quitting) poll_due = true;
         }
         if (quitting) {
             docs_mu.unlock(g_io);
@@ -12079,13 +12344,124 @@ fn diagnosticsWorker() void {
         dirty.clearRetainingCapacity();
         docs_mu.unlock(g_io);
 
+        // §269c：磁盘轮询全部在锁外做 IO，临界区只做内存操作。
+        // 之前 tick 的 statFile/readFileAlloc 和 zxc_exe_mtime 在 docs_mu
+        // 持有下进行，而 Threaded 的文件 IO 完成等待会与主线程的 stdin
+        // 读取互锁（探针 3/3 稳定复现：didOpen 2s 后主线程卡在 readLine、
+        // 两个线程 CPU=0 全部等锁）。IO 移出锁后互锁不再成立。
+        // §270：poll_due 空转轮（250ms 一次）不做磁盘 IO，per-doc stat 与
+        // exe stat 同节奏（mtime_tick 归零的那轮，~1s 一次）才执行。
+        mtime_tick += 1;
+        var exe_changed = false;
+        var do_poll = false;
+        if (mtime_tick >= 4) {    // ~1s 一次磁盘轮询，开销可忽略
+            mtime_tick = 0;
+            do_poll = true;
+            const m = zxc_exe_mtime();
+            if (m != zxc_mtime) {
+                zxc_mtime = m;
+                exe_changed = true;
+            }
+        }
+        // 锁内快照 per-doc 元数据（path/基线/quiet），锁外 stat+read，
+        // 锁内应用变更。zxc 重编（exe_changed）不需要读文件，直接全量标脏。
+        var poll: std.ArrayList(PollItem) = .empty;
+        defer {
+            for (poll.items) |*pi| {
+                if (pi.disk) |d| gpa.free(d);
+                gpa.free(pi.path);
+            }
+            poll.deinit(gpa);
+        }
+        if (do_poll) {
+            const now_ns = Io.Clock.now(.real, g_io).nanoseconds;
+            docs_mu.lockUncancelable(g_io);
+            var dit = docs.iterator();
+            while (dit.next()) |e| {
+                const path = gpa.dupe(u8, e.key_ptr.*) catch continue;
+                poll.append(gpa, .{
+                    .path = path,
+                    .disk_mtime = e.value_ptr.disk_mtime,
+                    .quiet = now_ns - e.value_ptr.last_edit_ns > 1500 * std.time.ns_per_ms,
+                    .new_mtime = e.value_ptr.disk_mtime,
+                    .disk = null,
+                }) catch gpa.free(path);
+            }
+            docs_mu.unlock(g_io);
+        }
+        for (poll.items) |*pi| {
+            if (!pi.quiet) continue;
+            const st = Io.Dir.cwd().statFile(g_io, pi.path, .{}) catch {
+                // §268 排查插桩：读失败必须可见，否则刷新静默失效。
+                var fb: std.ArrayList(u8) = .empty;
+                fb.print(gpa, "tick diskstat FAIL path={s}", .{pi.path}) catch {};
+                logLine(fb.items);
+                fb.deinit(gpa);
+                continue;
+            };
+            const dm = st.mtime.nanoseconds;
+            pi.new_mtime = dm;
+            if (dm == pi.disk_mtime) continue;  // 磁盘没写过：buffer 是权威
+            pi.disk = Io.Dir.cwd().readFileAlloc(g_io, pi.path, gpa, Io.Limit.limited(16 * 1024 * 1024)) catch blk: {
+                var fb: std.ArrayList(u8) = .empty;
+                fb.print(gpa, "tick diskread FAIL path={s}", .{pi.path}) catch {};
+                logLine(fb.items);
+                fb.deinit(gpa);
+                break :blk null;
+            };
+        }
+        // 锁内应用：基线推进 + buffer 刷新 + 标脏。text 替换必须持锁
+        //（didChange 同时在替换），用磁盘读到的内容做深拷贝。
+        if (exe_changed or poll.items.len > 0) {
+            docs_mu.lockUncancelable(g_io);
+            defer docs_mu.unlock(g_io);
+            for (poll.items) |*pi| {
+                const entry = docs.getEntry(pi.path) orelse continue;
+                const e = entry.value_ptr;
+                e.disk_mtime = pi.new_mtime;   // 基线只进不退，读到什么都认这次写入
+                if (exe_changed) {
+                    dirty.put(gpa, entry.key_ptr.*, {}) catch {};   // zxc 重编 → 旧诊断过时，重跑
+                    continue;
+                }
+                if (pi.disk) |d| {
+                    if (!std.mem.eql(u8, d, e.text)) {
+                        // 磁盘被真实写入且与 buffer 不同：刷新 buffer
+                        var fb: std.ArrayList(u8) = .empty;
+                        fb.print(gpa, "tick diskdiff snaplen={d} disklen={d} -> refresh", .{ e.text.len, d.len }) catch {};
+                        logLine(fb.items);
+                        fb.deinit(gpa);
+                        const nt = gpa.dupe(u8, d) catch continue;
+                        gpa.free(e.text);
+                        e.text = nt;
+                        dirty.put(gpa, entry.key_ptr.*, {}) catch {};
+                    }
+                }
+            }
+        }
+
         for (batch.items) |doc| {
             var diags: std.ArrayList(Diag) = .empty;
             defer diags.deinit(gpa);
             runCheck(&doc, &diags);
             docs_mu.lockUncancelable(g_io);
-            const still = !dirty.contains(doc.path);
+            // §263：dirty 判据之外再加版本判据。batch 是取出时拷走的快照，
+            // zxc --check 一次 ~30ms，期间 didChange 可以再来好几轮。若新
+            // didChange 恰好在这轮 runCheck 结束、下次取 batch 之前被 worker
+            // 自己 consume（dirty 已清），单看 dirty.contains 会漏判，把旧
+            // 文本的诊断当当前版本发布。version 单调递增，直接比对 docs 里
+            // 当前版本，只有完全一致才发布——这是"改对了但波浪线不消失"
+            // 的最后一道闸。
+            const cur = docs.get(doc.path);
+            const current = cur != null and cur.?.version == doc.version;
+            const still = current and !dirty.contains(doc.path);
             docs_mu.unlock(g_io);
+            // §268 排查插桩：每轮检查记录快照版本/长度与诊断数；丢弃时记原因。
+            {
+                var b: std.ArrayList(u8) = .empty;
+                b.print(gpa, "checked ver={d} len={d} diags={d} pub={}", .{ doc.version, doc.text.len, diags.items.len, still }) catch {};
+                logLine(b.items);
+                b.deinit(gpa);
+            }
             if (still) publishDiags(&doc, diags.items);
         }
         for (batch.items) |doc| {
@@ -12135,7 +12511,10 @@ fn sendRaw(payload: []const u8) void {
         }
         b.print(gpa, "{d:0>2}:{d:0>2}:{d:0>2} out {s} id={s} {d}B ", .{ hh, mm, ss, meth, resp_id, payload.len }) catch {};
         if (payload.len > 0) {
-            const snip = if (payload.len > 90) payload[0..90] else payload;
+            // §268 排查陈旧诊断：publishDiagnostics 记录 700B——能看到首条
+            // 诊断的 code 与消息头，否则 90B 只剩 uri 前缀无法定位内容。
+            const cap: usize = if (std.mem.indexOf(u8, payload, "publishDiagnostics") != null) 700 else 90;
+            const snip = if (payload.len > cap) payload[0..cap] else payload;
             b.appendSlice(gpa, "| ") catch {};
             b.appendSlice(gpa, snip) catch {};
         }
@@ -12296,7 +12675,14 @@ fn handle(v: std.json.Value) ?[]const u8 {
                 }
             }
             const path = uriToPath(uri_v.string);
-            const doc = Document{ .uri = dupe(uri_v.string), .path = path, .text = dupe(text), .version = version, .has_diags = false };
+            // §269：记录磁盘 mtime 基线。didChange 时磁盘通常没被写过
+            //（编辑在 buffer 里），stat 只是刷新基线；用户保存后 Zed 会
+            // 再发一次 didChange（全文），基线自然抬到保存后的 mtime。
+            const disk_mtime: i96 = dmt: {
+                const st = Io.Dir.cwd().statFile(g_io, path, .{}) catch break :dmt 0;
+                break :dmt st.mtime.nanoseconds;
+            };
+            const doc = Document{ .uri = dupe(uri_v.string), .path = path, .text = dupe(text), .version = version, .has_diags = false, .last_edit_ns = Io.Clock.now(.real, g_io).nanoseconds, .disk_mtime = disk_mtime };
             docs_mu.lockUncancelable(g_io);
             var had_diags = false;
             if (docs.get(path)) |old| had_diags = old.has_diags;
@@ -12315,14 +12701,21 @@ fn handle(v: std.json.Value) ?[]const u8 {
             dirty.put(gpa, doc.path, {}) catch {};
             docs_cond.signal(g_io);
             docs_mu.unlock(g_io);
-            // §253/§258：编辑后只清掉「这个 URI 的」旧波浪线。
-            // 不能用全局标志：别的文件一编辑就会把它清零，本文件随后改正时不再发空诊断，旧错误就一直挂着。
-            // 也不能无条件发：批量 didOpen 会灌满 stdout 管道，客户端写请求与服务端发通知互等死锁。
-            if (had_diags) {
+            // §265：didChange 无条件发带 version 的空诊断。
+            // §253/§258 曾用 had_diags 门控，但那是异步写回的脆弱状态机：
+            // worker 发布诊断 → has_diags=true；用户编辑 → 清空、新 doc
+            // has_diags=false；只要有一次 worker 的诊断写回被跳过（版本/
+            // 文本判据拦下、或时序错位），docs 里 has_diags 就停在 false，
+            // 而客户端仍画着旧波浪线——之后每次编辑都不发清空，永久残留，
+            // 只有 restart 重建状态才好。这正是用户反复反馈的现象。
+            // didChange 是用户逐字输入，频率有限，每包约 150B，不会灌满
+            // stdout 管道；§258 的死锁来自「批量 didOpen」，那些仍走 had_diags。
+            const is_change = !std.mem.eql(u8, method, "textDocument/didOpen");
+            if (had_diags or is_change) {
                 var j = Json{};
                 j.raw("{{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{{\"uri\":", .{});
                 j.str(uri_v.string);
-                j.raw(",\"diagnostics\":[]}}}}", .{});
+                j.raw(",\"version\":{d},\"diagnostics\":[]}}}}", .{version});
                 sendRaw(j.buf.items);
             }
             logLine(uri_v.string);
@@ -12338,6 +12731,8 @@ fn handle(v: std.json.Value) ?[]const u8 {
             if (td != .object) break :blk;
             const uri_v = td.object.get("uri") orelse break :blk;
             if (uri_v != .string) break :blk;
+            const close_version: i64 = if (td.object.get("version")) |vv|
+                (if (vv == .integer) vv.integer else 0) else 0;
             const path = uriToPath(uri_v.string);
             docs_mu.lockUncancelable(g_io);
             // 同上：先按 path 摘脏表，再释放文档本身。
@@ -12351,7 +12746,9 @@ fn handle(v: std.json.Value) ?[]const u8 {
             var j = Json{};
             j.raw("{{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{{\"uri\":", .{});
             j.str(uri_v.string);
-            j.raw(",\"diagnostics\":[]}}}}", .{});
+            // §263：关闭时的清空也带 version，同 didChange——否则客户端把
+            // 无 version 的空包当旧消息丢掉，重开同一路径时旧波浪线复活。
+            j.raw(",\"version\":{d},\"diagnostics\":[]}}}}", .{close_version});
             return j.buf.items;
         }
         return null;
@@ -12816,6 +13213,7 @@ pub fn main() !void {
 
     outer: while (true) {
         var content_len: usize = 0;
+        logLine("main loop: reading headers");
         while (true) {
             if (!readLine(rin, &hdr_line)) break :outer;
             if (hdr_line.items.len == 0) break; // 空行 = 头结束
@@ -12825,13 +13223,33 @@ pub fn main() !void {
             if (std.ascii.eqlIgnoreCase(key, "Content-Length"))
                 content_len = std.fmt.parseInt(usize, val, 10) catch 0;
         }
+        logLine("main loop: headers done");
         if (content_len == 0 or content_len > 64 * 1024 * 1024) continue;
         const body = gpa.alloc(u8, content_len) catch continue;
         defer gpa.free(body);
         rin.readSliceAll(body) catch break :outer;
+        {
+            var fb: std.ArrayList(u8) = .empty;
+            fb.print(gpa, "main loop: body {d}B read", .{content_len}) catch {};
+            logLine(fb.items);
+            fb.deinit(gpa);
+        }
 
         const parsed = std.json.parseFromSlice(std.json.Value, gpa, body, .{}) catch continue;
-        if (handle(parsed.value)) |resp| sendRaw(resp);
+        // §269b 卡死定位插桩：主线程收到消息、handle 返回两个点都要可见。
+        if (parsed.value == .object) {
+            if (parsed.value.object.get("method")) |mv| {
+                if (mv == .string) {
+                    var fb: std.ArrayList(u8) = .empty;
+                    fb.print(gpa, "main recv {s}", .{mv.string}) catch {};
+                    logLine(fb.items);
+                    fb.deinit(gpa);
+                }
+            }
+        }
+        const _resp = handle(parsed.value);
+        logLine("main handled");
+        if (_resp) |resp| sendRaw(resp);
     }
 
     docs_mu.lockUncancelable(g_io);
