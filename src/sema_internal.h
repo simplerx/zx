@@ -29,7 +29,6 @@
 #define TC_COND     3
 #define TC_UNKNOWN  4
 #define TC_MOVED    5   /* §189：载体已随 std.move 转移 */
-#define TAG_SNAP_MAX 128
 #define CT_MAX_CALLS  200000
 #define CT_MAX_LOOPS  1000000
 
@@ -38,7 +37,7 @@
 enum { SK_CONST, SK_LET, SK_VAR, SK_PARAM, SK_CAPTURE, SK_FN, SK_NS };
 typedef struct Symbol Symbol;
 typedef struct FieldTag FieldTag;
-struct Symbol { const char *name; int kind; Node *decl; Type *ty; Type *type_val; int state; int index; Value *ct; int builtin; struct Module *mod; bool is_pub; bool is_std; bool broken; bool ct_bind; bool in_fn; int fn_d; bool fn_local; bool is_top; bool used; struct Symbol *locals_next; bool stack_val; bool cap_borrow; int reg_slot; int tag_id; int tag_state; FieldTag *ftags; Node *ft_src; bool ptr_taint; const char *cname; int decl_line; int decl_col; int nassign; bool escaped; Node *cap_src; Node *in_agg; Symbol *next; };
+struct Symbol { const char *name; int kind; Node *decl; Type *ty; Type *type_val; int state; int index; Value *ct; int builtin; struct Module *mod; bool is_pub; bool is_std; bool broken; bool ct_bind; bool in_fn; int fn_d; bool fn_local; bool is_top; bool used; struct Symbol *locals_next; int storage_tag; int reg_slot; int tag_id; int tag_state; FieldTag *ftags; Node *ft_src; bool ptr_taint; const char *cname; int decl_line; int decl_col; int nassign; bool escaped; Node *cap_src; Node *in_agg; Symbol *next; };
 typedef struct HBucket { Symbol *sym; struct HBucket *next; } HBucket;
 typedef struct Scope { struct Scope *parent; Symbol *first; bool is_module; HBucket **tab; int ntab; int cnt; int tag_wm; } Scope;
 typedef struct Module { const char *path; const char *stem; Node *root; Scope scope; Symbol *ns; bool loading; bool tags_enabled; bool tags_batch; } Module;
@@ -53,7 +52,8 @@ typedef struct { bool ok; bool neg; uint64_t v; } IntV;
 typedef struct { Node *clone, *tmpl; } IdentAnchor;
 typedef struct { int state; int line, col; int free_line, free_col; uint64_t size, align; const char *unit; int gid; uint64_t off, total; Node *site; Symbol *sym; int tag; bool no_merge; bool is_handle; bool tainted; Symbol *owner_sym; } RegionSlot;
 typedef struct { int line, col; const char *unit; bool proven, erased; const char *reason; } ProvePoint;
-typedef struct { const char *name; int line, col; int state; int region; int free_line, free_col; int moved_line, moved_col; bool confirm_arm; int confirm_line, confirm_col; int own_line, own_col; Symbol *carrier; bool stack; bool abstract; bool auto_n; bool scope_freed; bool ever_freed; bool arr_esc; bool rt_pending; int rt_line, rt_col; Symbol *adopt_ar; int adopt_line, adopt_col; bool book; Node *ret_fn; int inst_of; int ninst; const char *def_fn; const char *own_fn; const char *file; } TagSlot;
+typedef struct { const char *name; int line, col; int state; int region; int free_line, free_col; int moved_line, moved_col; bool confirm_arm; int confirm_line, confirm_col; int own_line, own_col; Symbol *carrier; bool stack; bool abstract; bool auto_n; bool scope_freed; bool ever_freed; bool arr_esc; bool rt_pending; int rt_line, rt_col; Symbol *adopt_ar; int adopt_line, adopt_col; bool book; Node *ret_fn; int inst_of; int ninst; const char *def_fn; const char *own_fn; const char *file; int stack_kind; int base_tag; int scope_depth; bool borrow; } TagSlot;
+enum { ST_STORAGE, ST_ALLOC, ST_TEMP, ST_BORROW };
 typedef struct { const char *callee, *caller; int line, col; } TagCallEdge;
 struct FieldTag { const char *name; int slot; FieldTag *next; };
 typedef struct { Symbol *psym; const char *fname; } ParamFieldFree;
@@ -64,7 +64,20 @@ typedef struct { Symbol *base; char path[64]; int slot; bool taken; } AgtMem;
 typedef struct { Symbol *base; char path[64]; } AgtClosed;
 typedef struct { Symbol *ar; int slot; int line, col; bool done; } ArAdopt;
 typedef struct { int tag; int state; Node *val; bool stmt; } ArmExit;
-typedef struct { int n; int total; int state[TAG_SNAP_MAX]; Symbol *carrier[TAG_SNAP_MAX]; int cstate[TAG_SNAP_MAX]; Symbol *fsym[TAG_SNAP_MAX]; FieldTag *ft[TAG_SNAP_MAX]; int nfts; Symbol *lsym[TAG_SNAP_MAX]; int lstate[TAG_SNAP_MAX]; int nlsyms; } TagSnap;
+typedef struct {
+    int n, total;
+    int *state;
+    Symbol **carrier;
+    int *cstate;
+    Symbol **fsym;
+    FieldTag **ft;
+    int nfts;
+    Symbol **lsym;
+    int *lstate;
+    int *ltag;
+    int nlsyms;
+} TagSnap;
+typedef struct { Symbol **syms; FieldTag **fts; int n; } TagFieldDiff;
 typedef struct { Node *call, *arg, *fn; Symbol *ps; int idx; int tid, tst, rel; const char *srcpath; } TagDefer;
 typedef struct YieldScope { const char *label; const struct YieldScope *up; } YieldScope;
 
@@ -78,6 +91,7 @@ extern Module *g_mod;
 extern bool g_root_stmts;
 extern bool g_ct_stuck;
 extern int g_ct_exec;
+extern bool g_ct_checking;
 extern bool g_ct_soft_div;
 extern bool g_ct_soft_bounds;
 extern CtFlow g_ct_flow;
@@ -215,6 +229,8 @@ bool agt_any(Symbol *base, const char *path);
 void agt_remove(Symbol *base, const char *path, int slot);
 void agt_clear(Symbol *base, const char *path, Node *site);
 Symbol *agt_base_of(Node *e, char *path, size_t cap);
+FieldTag *tag_for_element_ftags(Node *seq, uint64_t len, bool len_known,
+                                int *id, int *state, bool *ambiguous);
 bool agt_closed(Symbol *base, const char *path);
 void pffa_add(Symbol *ps);
 bool pffa_has(Symbol *ps);
@@ -224,6 +240,10 @@ void ft_scan_returns(Node *n, FieldTag **out);
 void tag_of_expr(Node *e, int *id, int *state);
 TagSlot *tag_decl(const char *name, Node *n);
 void tag_auto_decl(Node *call, bool stack);
+int tag_stack_new(int kind, Node *site, int base_tag);
+int tag_addr_origin(Node *o);
+bool tag_expr_borrow(Node *e);
+int tag_join_origin(int a, int b);
 int tag_clone_site(TagSlot *src, Node *call, bool freed);
 void pfs_mirror_arg(Symbol *ps, Node *arg, Node *call, Node *fn);
 void tag_scope_exit(Scope *sc, Node *n);
@@ -247,17 +267,16 @@ int arm_ret_scan(Node *nd, int slot);
 ArmExit tag_arm_reconcile(Node *armval, Node *armnode, const int *snap, int n0, int ntotal);
 void tag_join_arms(Node *n, ArmExit a, ArmExit b);
 void tag_snap(TagSnap *s);
+void tag_snap_free(TagSnap *s);
 void tag_restore(const TagSnap *s);
-int ft_arm_collect(const TagSnap *s, Symbol **syms, FieldTag **fts, int cap);
+void tag_join_locals(const TagSnap *a, const TagSnap *b);
+void ft_arm_collect(const TagSnap *s, TagFieldDiff *d);
+void ft_field_diff_free(TagFieldDiff *d);
 FieldTag *ft_arms_intersect(FieldTag *a, FieldTag *b);
 void ft_arms_join(Symbol **s1, FieldTag **f1, int n1, Symbol **s2, FieldTag **f2, int n2);
 void tag_loop_balance(Node *body, const TagSnap *snap);
 bool tag_module_exempt(Module *m);
 void tag_ledger_final(const char *entry_path);
-bool expr_frame(Node *e);
-bool expr_borrow(Node *e);
-bool addr_frame(Node *o);
-bool frame_in_agg(Node *e, int depth);
 Type *check_assign(Node *n);
 bool f64_fits_int(double v, int bits, bool sign);
 Type *check_binary(Node *n, Type *expect);

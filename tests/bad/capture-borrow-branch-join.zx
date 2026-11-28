@@ -1,0 +1,21 @@
+// expect: captured pointer
+// expect-code: E0532
+// expect-count: 1
+tag.enable;
+
+const sink = fn (p: *const u8) void { _ = p; };
+
+const bad = fn (flag: bool) void {
+    var o: ?u8 = 1;
+    if (o) * t {
+        var inner: u8 = 2;
+        var q: *u8 = null;
+        switch (flag) {
+            true: { q = &inner; };
+            false: { q = t; };
+        }
+        sink(q);
+    };
+};
+
+pub const main = fn () i32 { return 0; };

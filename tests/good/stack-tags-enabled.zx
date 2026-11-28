@@ -1,0 +1,36 @@
+// 统一标签账本保留合法用法：局部/同作用域使用、普通取址传参、堆指针值捕获、标量字段返回。
+// expect-exit: 0
+// expect-output
+// 7 4
+tag.enable;
+const std = @mod("std");
+
+const Obj = struct { x: i32 };
+
+const consume = fn (p: *i32) void {
+    _ = p;
+};
+
+const scalar_field = fn (self: Obj) i32 {
+    let p = &self;
+    return p.x;
+};
+
+pub const main = fn () i32 {
+    var x: i32 = 7;
+    var p: *i32 = &x;
+    consume(p);
+    std.println("{} {}", p[0], scalar_field(Obj{ .x = 4 }));
+
+    var q: ?*[1]i32 = null;
+    var o: ?*[1]i32 = std.heapAlloc(std.heap.page, i32, 1).?;
+    if (o) captured {
+        q = captured;
+    }
+    std.free(std.heap.page, q.?);
+
+    var branch: ?*i32 = null;
+    if (true) branch = &x;
+    _ = branch.?[0];
+    return 0;
+};

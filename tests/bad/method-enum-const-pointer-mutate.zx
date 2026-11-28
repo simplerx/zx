@@ -1,0 +1,14 @@
+// expect-code: E0301
+// expect: receiver: expected
+const Kind = enum {
+    one,
+    two,
+    const bump = fn (self: *Self) void {};
+};
+
+const main = fn () u8 {
+    var e = Kind.one;
+    var p: *const Kind = &e;
+    p.bump();
+    return 0;
+};

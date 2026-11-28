@@ -2,6 +2,7 @@
 // 把它作为实参传给函数（函数可能存进字段/全局）必须报 E0532。
 // expect: cannot pass a captured pointer
 // expect-code: E0532
+tag.enable;
 const Holder = struct {
     p: ?*u8 = null,
 };

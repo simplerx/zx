@@ -1,0 +1,49 @@
+// tag.enable 关闭时，栈存储、栈分配与捕获借用都不建标签，也不执行相关逃逸检查。
+// expect-exit: 0
+const std = @mod("std");
+
+const Shape = union (enum) { value: i32, other: i64 };
+
+const consume = fn (p: *i32) void {
+    _ = p;
+};
+
+const local_escape = fn () void {
+    var q: ?*i32 = null;
+    {
+        var x: i32 = 1;
+        q = &x;
+    }
+    _ = q;
+};
+
+const if_capture_escape = fn () void {
+    var o: ?i32 = 1;
+    if (o) * t {
+        consume(t);
+    }
+};
+
+const while_capture_escape = fn () void {
+    var o: ?i32 = 1;
+    while (o) * t {
+        consume(t);
+        o = null;
+    }
+};
+
+const switch_capture_escape = fn () void {
+    var s = Shape{ .value = 1 };
+    switch (s) {
+        .value: *t { consume(t); };
+        .other: {};
+    }
+};
+
+pub const main = fn () i32 {
+    local_escape();
+    if_capture_escape();
+    while_capture_escape();
+    switch_capture_escape();
+    return 0;
+};

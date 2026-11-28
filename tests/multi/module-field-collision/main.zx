@@ -1,0 +1,15 @@
+// expect-exit: 0
+// expect-output
+// module 23
+const std = @mod("std");
+const ball = @mod("ball.zx");
+
+const BallJoint = struct {
+    ball: *BallJoint,
+    angle: i32,
+};
+
+pub const main = fn () i32 {
+    std.println("module {}", ball.value);
+    return 0;
+};

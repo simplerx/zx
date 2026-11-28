@@ -1360,14 +1360,18 @@ if grep -q 'E0211' "$TPFX.oldmod.log" && grep -q '@mod' "$TPFX.oldmod.log"; then
 else
     printf "  FAIL 旧 module(...) 写法没有迁移提示\n"; cat "$TPFX.oldmod.log"; fail=1
 fi
-# *[N]T 的 ptr.0/.1、ptr[0]/ptr[i] 由 array-pointer-index.zx 逐字比对；
-# 这里再确认运行期界检查确实进了生成代码。
-if $ZXC tests/good/array-pointer-index.zx --emit-c > "$TPFX.api.c" 2>/dev/null \
-   && grep -q 'out of bounds' "$TPFX.api.c"; then
-    printf "  ok   *[N]T 的 ptr[i] 带运行期界检查\n"
-else
-    printf "  FAIL ptr[i] 没生成界检查\n"; fail=1
-fi
+# *[N]T 的 ptr.0/.1、ptr[0]/ptr[i] 由 array-pointer-index.zx 逐字比对。
+# ptr.0[i] 必须直接发成 (ptr[0]).v[i]：内层数组值下标带运行期界检查，
+# 外层数组指针下标没有个数可查；整条链不经临时数组或 memcpy。
+for fe in "" "--fe=c"; do
+    if $ZXC tests/good/array-pointer-index.zx --emit-c $fe > "$TPFX.api.c" 2>/dev/null \
+       && grep -q 'out of bounds' "$TPFX.api.c" \
+       && grep -Eq 'printf\("dot = .*\([A-Za-z_][A-Za-z0-9_]*\[0\]\)\.v\[zx_bound' "$TPFX.api.c"; then
+        printf "  ok   %s *[N]T 的 ptr.0[i] 直接访问原数组并检查内层下标\n" "${fe:-默认前端}"
+    else
+        printf "  FAIL %s ptr.0[i] 生成代码出现复制或缺少界检查\n" "${fe:-默认前端}"; fail=1
+    fi
+done
 # §205：.{…} 位置形式已是 [N]T 数组值；removed-dot-tuple 现在守的是数组 .N
 # 点下标的 E0211。解构 .{a,b} 仍是 E0211。两套前端都给迁移提示。
 # runner 只跑默认前端（zxfe），这里补一条 --fe=c 的对拍。
@@ -1384,7 +1388,7 @@ done
 
 # §224：方法接收者形态由写法决定，编译器不再按大小改 ABI。
 # `Self` 一律按值（8B 和 20B 都是）、`*Self` 发可变指针、`*const Self` 发
-# const 指针；方法体里不再补 `(*self)`，调用点不再自动补 `&` / 自动解引用。
+# const 指针；方法体里不再补 `(*self)`。§274 的调用点转换不改变这些签名。
 $ZXC tests/good/self-recv-abi.zx --emit-c > "$TPFX.s151.c" 2>/dev/null
 if grep -Eq 'sum_[A-Za-z0-9_]+\(ZxS[0-9]+ self\)' "$TPFX.s151.c" \
    && grep -Eq 'total_[A-Za-z0-9_]+\(ZxS[0-9]+ self\)' "$TPFX.s151.c" \
@@ -1411,6 +1415,18 @@ if grep -qF '&(self)' "$TPFX.s152.c" \
 else
     printf "  FAIL §224 &self 取址形态\n"
     grep -nE '&\(\(?\*?self' "$TPFX.s152.c" | head -20
+    fail=1
+fi
+
+# §274：点方法调用自动转换不可变接收者，生成 C 等价于显式 `&` / `.0`。
+$ZXC tests/good/method-receiver-coerce.zx --emit-c > "$TPFX.s274.c" 2>/dev/null
+if grep -Eq 'value_[A-Za-z0-9_]+\(\(\*sp_[A-Za-z0-9_]+\)\)' "$TPFX.s274.c" \
+   && grep -Eq 'read_[A-Za-z0-9_]+\(&\(e_[A-Za-z0-9_]+\)\)' "$TPFX.s274.c" \
+   && grep -Eq 'value_[A-Za-z0-9_]+\(\(\*up_[A-Za-z0-9_]+\)\)' "$TPFX.s274.c"; then
+    printf "  ok   §274 不可变接收者自动转换（值/只读指针，struct/union/enum）\n"
+else
+    printf "  FAIL §274 不可变接收者转换形态\n"
+    grep -nE 'value_|read_' "$TPFX.s274.c" | head -20
     fail=1
 fi
 
@@ -2243,7 +2259,7 @@ else
     printf "  FAIL §220 C 前端交叉\n"; cat "$TPFX.c220c.log"; fail=1
 fi
 
-# §221：捕获指针 *t —— 写回原对象 + 栈借用禁逃逸（账本开关关不掉）。
+# §221：捕获指针 *t —— 写回原对象 + 栈借用禁逃逸（由 tag.enable 统一门控）。
 printf "\n== §221 捕获指针 *t 写回与逃逸检查\n"
 cat > "$TPFX.c221.zx" <<'ZXEOF'
 const std = @mod("std");
@@ -2298,11 +2314,11 @@ cap_escape() {
         printf "  ok   逃逸拦截: %s\n" "$name"
     fi
 }
-cap_escape return 'const main = fn () ?*i32 { var o: ?i32 = 42; if (o) *t { return t; }; return null; };'
-cap_escape arg 'const use = fn (p: *i32) i32 { return p[0]; }; const main = fn () void { var o: ?i32 = 42; if (o) *t { let x = use(t); }; };'
-cap_escape field 'const Box = struct { p: ?*i32 = null }; const main = fn () void { var o: ?i32 = 42; var b = Box{}; if (o) *t { b.p = t; }; };'
-cap_escape global 'var g: ?*i32 = null; const main = fn () void { var o: ?i32 = 42; if (o) *t { g = t; }; };'
-cap_escape alias 'const main = fn () ?*i32 { var o: ?i32 = 42; if (o) *t { let u = t; return u; }; return null; };'
+cap_escape return 'tag.enable; const main = fn () ?*i32 { var o: ?i32 = 42; if (o) *t { return t; }; return null; };'
+cap_escape arg 'tag.enable; const use = fn (p: *i32) i32 { return p[0]; }; const main = fn () void { var o: ?i32 = 42; if (o) *t { _ = use(t); }; };'
+cap_escape field 'tag.enable; const Box = struct { p: ?*i32 = null }; const main = fn () void { var o: ?i32 = 42; var b = Box{}; if (o) *t { b.p = t; }; };'
+cap_escape global 'tag.enable; var g: ?*i32 = null; const main = fn () void { var o: ?i32 = 42; if (o) *t { g = t; }; };'
+cap_escape alias 'tag.enable; const main = fn () ?*i32 { var o: ?i32 = 42; if (o) *t { let u = t; return u; }; return null; };'
 cap_escape non-lvalue 'const mk = fn () ?i32 { return 42; }; const main = fn () void { if (mk()) *t { }; };'
 cap_escape ledger-on 'tag.enable; const main = fn () ?*i32 { var o: ?i32 = 42; if (o) *t { return t; }; return null; };'
 

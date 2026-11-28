@@ -210,7 +210,9 @@ void hoist(Scope *sc, Node *blk) {
                      * 模块是在**函数体里**懒性加载的（第一次用到 std 就在那时），
                      * g_fn_depth 那时已>0＜误把模块顶层声明当成局部。 */
                     if (!sc->is_module) local_track(s, id->line, id->col);
-                    s->fn_local = (!sc->is_module && g_fn_depth > 0);
+                    s->in_fn = (!sc->is_module && g_fn_depth > 0);
+                    if (s->in_fn) s->storage_tag = tag_stack_new(ST_STORAGE, id, 0);
+                    s->fn_local = s->in_fn;
                     s->fn_d = s->fn_local ? g_fn_depth : 0;  /* §192 闭包检查 */
                 }
             } else if (it->name) {
@@ -233,6 +235,8 @@ void hoist(Scope *sc, Node *blk) {
                 /* 模块是在函数体里懒加载的，g_fn_depth 已 > 0；
                 判文件作用域要看 sc->is_module，否则模块顶层的 extern var 会被误判成局部。 */
                 s->in_fn = (!sc->is_module && g_fn_depth > 0);
+                if (s->in_fn && (s->kind == SK_VAR || s->kind == SK_LET))
+                    s->storage_tag = tag_stack_new(ST_STORAGE, it, 0);
                 s->fn_local = s->in_fn;
                 s->fn_d = s->in_fn ? g_fn_depth : 0;   /* §192 闭包检查 */
                 s->is_top = file_scope; /* 只有文件根作用域才是真全局；comptime 块内的局部槽位不算 */
@@ -374,6 +378,16 @@ void ensure_raw(Symbol *s) {
         else if (s->kind == SK_CONST)
             err_at(d->line, d->col,
                    "const '%s' must be computable at compile time (R1)", s->name ? s->name : "?");
+        char key[32];
+        snprintf(key, sizeof key, "%d", s->index);
+        FieldTag *component = ft_find(ftags_of_expr(d->b), key);
+        if (component && component->slot > 0) {
+            TagSlot *slot = tag_slot(component->slot);
+            s->tag_id = component->slot;
+            s->tag_state = slot && slot->state == TST_FREED ? TC_FREED : TC_LIVE;
+            if (slot) slot->carrier = s;
+            s->ftags = ft_subtree(ftags_of_expr(d->b), key);
+        }
         /* 后端要按分量声明全局/局部，所以把类型和值也挂到标识符节点上 */
         if (d->c && s->index < d->c->nitems) {
             Node *id = d->c->items[s->index];
@@ -436,10 +450,6 @@ void ensure_raw(Symbol *s) {
         return;
     }
     Type *init = d->b ? check_expr(d->b, ann) : NULL;
-    if (d->b) {
-        s->stack_val = expr_frame(d->b);   /* 初值指向当前栈帧？记下来 */
-        s->cap_borrow = expr_borrow(d->b); /* §221：别名继承捕获指针借用 */
-    }
 
     if (ann && init) {
         coerce_node(d->b, init, ann, "initializer");
@@ -485,7 +495,7 @@ void ensure_raw(Symbol *s) {
         /* let / const 绑定数组字面量 → 只读视图（R9）。只收字面量本尊
          * （`&.{…}` / `.{…}`）：字面量的匿名存储可以落成只读。cast /
          * stackAlloc 出来的 *[N]T 指向的是**别人的存储**（struct 字段、
-         * 栈槽），可变性跟着被指物走——一刀切变 *const 会把
+         * 栈存储），可变性跟着被指物走——一刀切变 *const 会把
          * `let p = (*[8]i32)(&h.buf)` 这种合法视图模式打死（§182）。 */
         Node *ainit = d->b;
         bool is_arrlit = ainit && (ainit->kind == NK_ARRAY_LIT ||
@@ -679,7 +689,6 @@ void ensure(Symbol *s) {
 
 Type *check_fn_body(Node *fn) {
     const char *prev_fn = g_cur_fn_name;
-    if (getenv("ZX_DBG")) fprintf(stderr, "[dbg] body fn=%s nitems=%d line=%d\n", fn->name ? fn->name : "?", fn->nitems, fn->line);
     g_cur_fn_name = fn->name ? fn->name : "?";
     Type *ft = resolve_fn_type(fn);
     if (!ft || ft->kind == TY_INVALID) return ft;
@@ -696,13 +705,12 @@ Type *check_fn_body(Node *fn) {
     scope_push(&sc);
     /* §192 闭包检查：深度要先于形参绑定抬上去——形参和体内局部
      * 同属本帧（fn_d 相等），外层函数的形参/局部更浅（fn_d 更小），
-     * 嵌套函数体里解析到更浅的栈槽就是捕获。 */
+     * 嵌套函数体里解析到更浅的局部就是捕获。 */
     g_fn_depth++;
     for (int i = 0; i < fn->nitems; i++) {
         Node *pm = fn->items[i];
         if (!pm->name) continue;
         Symbol *s = scope_add(&sc, pm->name, pm->flag ? SK_VAR : SK_PARAM);
-        if (getenv("ZX_DBG")) fprintf(stderr, "[dbg]   bind param '%s' -> %p\n", pm->name ? pm->name : "(null)", (void*)s);
         if (!s) { err_at(pm->line, pm->col, "duplicate parameter '%s'", pm->name); continue; }
         if (sema_ty_ct_only(pm->ty))
             err_at(pm->line, pm->col,
@@ -711,7 +719,8 @@ Type *check_fn_body(Node *fn) {
 
         s->ty = pm->ty;
         s->state = 2;
-        s->in_fn = true;      /* 形参槽位也在被调方的栈帧上：&pm 不可返回 */
+        s->in_fn = true;      /* 本帧形参；栈来源由 storage_tag 记录 */
+        s->storage_tag = tag_stack_new(ST_STORAGE, pm, 0);
         s->fn_d  = g_fn_depth;/* §192：本帧深度（与体内局部一致） */
         local_track(s, pm->line, pm->col);
         /* §173：跨函数追踪 —— 指针形参领一张抽象槽（借出语义）：体内
@@ -753,6 +762,7 @@ Type *check_fn_body(Node *fn) {
 
     check_block(fn->b);
     check_return_paths(fn, ret);
+    tag_scope_exit(&sc, fn->b);
 
     g_nlabels--;               /* 函数的标签作用域 */
     g_fn_depth--;
@@ -1153,48 +1163,46 @@ static void cs_04_nk_return(Node *n) {
                 return;
             }
         }
-        /* 逃逸检查（decisions §44）：不许把指向当前栈帧的指针带出去。
-         * §188（用户裁定）：看「是否携带标签」——返回值携带的任何栈槽
-         * 都是悬垂，不管返回类型是裸指针还是裹进结构体/元组带走（此前
-         * 只查返回类型形状，结构体裹栈指针整只漏过）。expr_frame 保留：
-         * 没进账本的来源（&局部、&.{…} 匿名存储）只能靠形状看。 */
+        /* 逃逸检查（decisions §44）：返回值及其聚合字段只能携带非栈标签。
+         * 账本关闭时不建槽，因此同一开关也关闭 E0503/E0512/E0532。 */
         {
-            /* §221：捕获指针 *t 是栈借用，绝不许作为返回值带出作用域。
-             * 独立于 tag 账本——账本开关（§225）挡不住这条。 */
-            if (expr_borrow(n->a)) {
+            bool ptr_shape = want->kind == TY_PTR || want->kind == TY_SLICE ||
+                ((want->kind == TY_OPT || want->kind == TY_ERR) && want->elem &&
+                 (want->elem->kind == TY_PTR || want->elem->kind == TY_SLICE));
+            int id, st;
+            tag_of_expr(n->a, &id, &st);
+            TagSlot *top = tag_slot(id);
+            bool borrowed = ptr_shape && top && top->borrow && top->stack_kind == ST_BORROW;
+            bool escaped = ptr_shape && top && top->stack && !top->abstract;
+            Node *src = n->a;
+            for (int g = 0; g < 6 && src &&
+                 (src->kind == NK_CAST || src->kind == NK_UNWRAP || src->kind == NK_TRY);
+                 g++)
+                src = src->kind == NK_CAST ? (src->b ? src->b : src->a) : src->a;
+            FieldTag *fields = ftags_of_expr(src);
+            char prefix[128] = "";
+            Node *field_base = NULL;
+            if (!fields && src && src->kind == NK_FIELD &&
+                ft_path_key(src, prefix, sizeof prefix, &field_base) &&
+                field_base && field_base->kind == NK_IDENT && field_base->sym)
+                fields = (FieldTag *)field_base->sym->ftags;
+            size_t plen = strlen(prefix);
+            for (FieldTag *f = fields; f; f = f->next) {
+                if (plen && (!f->name || strncmp(f->name, prefix, plen) ||
+                    (f->name[plen] && f->name[plen] != '.')))
+                    continue;
+                TagSlot *slot = tag_slot(f->slot);
+                if (!slot || slot->abstract) continue;
+                if (slot->stack) escaped = true;
+                if (slot->borrow && slot->stack_kind == ST_BORROW) borrowed = true;
+            }
+            if (borrowed) {
                 diag_code_at("E0532", n->a->line, n->a->col,
                     "cannot return a captured pointer `*t`: it is a borrow into the "
                     "enclosing object and must not outlive the capture scope");
                 return;
             }
-            /* §201 补丁：不要只看 want 是不是裸指针/切片。`?*T` / `![]T`
-             * 的载荷同样是指针，裹在 optional/error 里也照样悬垂。 */
-            bool ptr_shape = want->kind == TY_PTR || want->kind == TY_SLICE ||
-                ((want->kind == TY_OPT || want->kind == TY_ERR) && want->elem &&
-                 (want->elem->kind == TY_PTR || want->elem->kind == TY_SLICE));
-            /* §199：聚合返回值里藏的栈帧来源（S{ .s = &.{} }） */
-            bool agg_esc = !ptr_shape && frame_in_agg(n->a, 0);
-            /* §201 补丁：标量返回值不查栈来源。`p.a` 是 u64，即便 p 指向
-             * 当前帧，读出来的标量也能安全返回；旧写法无条件算 expr_frame
-             * 把 §152 的 `let p = &self; return p.a;` 全误杀了。聚合字面量
-             * （S{ .s = &.{} }）自身 expr_frame 为假，但 agg_esc 直接算逃逸。 */
-            bool esc = (ptr_shape && expr_frame(n->a)) || agg_esc;
-            if (!esc) {
-                int id, st;
-                tag_of_expr(n->a, &id, &st);
-                if (id) {
-                    TagSlot *t = tag_slot(id);
-                    if (t && t->stack && !t->abstract) esc = true;
-                }
-            }
-            if (!esc) {
-                for (FieldTag *g = ftags_of_expr(n->a); g; g = g->next) {
-                    if (g->slot <= 0) continue;
-                    TagSlot *t = tag_slot(g->slot);
-                    if (t && t->stack && !t->abstract) { esc = true; break; }
-                }
-            }
-            if (esc)
+            if (escaped)
                 err_at(n->a->line, n->a->col,
                        "cannot return a pointer into the current function's stack frame "
                        "(use std.heapAlloc for outliving storage)");

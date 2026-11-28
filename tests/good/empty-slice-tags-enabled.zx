@@ -1,0 +1,28 @@
+// §242/§275：开启 tag 后，空切片仍无可读栈存储，允许返回。
+// expect-exit: 0
+// expect-output
+// direct: 0
+// via-var: 0
+// in-struct: 0
+const std = @mod("std");
+tag.enable;
+
+const S = struct { s: []const u8 };
+
+const direct = fn ()[]const u8 {
+    return & .{ };
+};
+
+const viaVar = fn ()[]const u8 {
+    let e: []const u8 = & .{ };
+    return e;
+};
+
+const inStruct = fn () S{ return S{ .s = & .{ } }; };
+
+pub const main = fn () u8 {
+    std.println("direct: {}", direct().len);
+    std.println("via-var: {}", viaVar().len);
+    std.println("in-struct: {}", inStruct().s.len);
+    return 0;
+};

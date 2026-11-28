@@ -1,7 +1,8 @@
 // expect: cannot return a pointer into the current function's stack frame
+tag.enable;
 const Big = struct {
     a: u64, b: u64, c: u64,
-    const f = fn (self: Self) *const Self { return &self; };
+    const f = fn (self: Self) * const Self{ return &self; };
 };
 
 const main = fn () u8 { return 0; };

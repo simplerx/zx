@@ -1,0 +1,13 @@
+tag.enable;
+// expect: use after free
+// expect-code: E0512
+// expect-count: 1
+const std = @mod("std");
+pub const main = fn () i32 {
+    let p = std.heapAlloc(std.heap.page, i32, 1).?;
+    p[0][0] = 7;
+    var ps: [1]*i32 = .{&p[0]};
+    std.free(std.heap.page, p);
+    for (ps[0..]) q { std.println("{}", q[0]); }
+    return 0;
+};

@@ -1,6 +1,7 @@
 // expect: cannot return a pointer into the current function's stack frame
 // 返回局部变量的地址是悬垂指针：局部变量的槽位随栈帧一起消失
-const handle = fn () *u64 {
+tag.enable;
+const handle = fn () * u64 {
     var x: u64 = 5;
     return &x;
 };

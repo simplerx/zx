@@ -1,0 +1,18 @@
+// expect-exit: 0
+// expect-output
+// 3
+tag.enable;
+const std = @mod("std");
+
+pub const main = fn () i32 {
+    var x: i32 = 3;
+    {
+        var alias = &x;
+        _ = alias[0];
+    }
+    var xs: [2]i32 = .{1, 2 };
+    for (xs[0..]) value { _ = value; }
+    _ = xs.ptr[0];
+    std.println("{}", x);
+    return 0;
+};

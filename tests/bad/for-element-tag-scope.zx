@@ -1,0 +1,15 @@
+// expect: use after scope
+// expect-code: E0512
+tag.enable;
+
+const leak = fn () u8 {
+    var q: ?*i32 = null;
+    {
+        var x: i32 = 1;
+        var xs: [1] * i32 = .{&x };
+        for (xs[0..]) p { q = p; }
+    }
+    return (u8)q.?[0];
+};
+
+pub const main = fn () i32 { return 0; };

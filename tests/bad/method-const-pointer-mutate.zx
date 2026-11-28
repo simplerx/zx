@@ -1,0 +1,12 @@
+// expect-code: E0301
+// expect: receiver: expected
+const P = struct {
+    x: i32,
+    const bump = fn (self: *Self) void { self.x = 1; };
+};
+
+const main = fn () u8 {
+    var p: *const P = & .{ .x = 0 };
+    p.bump();
+    return 0;
+};

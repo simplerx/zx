@@ -1,0 +1,12 @@
+// expect: captured pointer
+// expect-code: E0532
+// expect-count: 1
+tag.enable;
+const std = @mod("std");
+
+const bad = fn () void {
+    var o: ?u8 = 1;
+    if (o) * t { std.println(t[0..1]); };
+};
+
+pub const main = fn () i32 { return 0; };

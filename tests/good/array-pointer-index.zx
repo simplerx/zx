@@ -20,7 +20,7 @@ pub const main = fn () i32 {
     ptr[0][1] = 2;
     ptr[0][7] = 8;
     ptr[0][0] = ptr[0][0] + 10;
-    ptr[0][i] = 37;
+    ptr.0[i] = 37;
     bumpAt(ptr, i);                            // 传进函数里照样读改写
     std.println("dot = {} {}", ptr.0[1], ptr[0][7]);
     std.println("br = {} {}", ptr[0][0], ptr[0][i]);

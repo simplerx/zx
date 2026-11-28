@@ -1,0 +1,10 @@
+// expect: cannot return a pointer into the current function's stack frame
+// expect-code: E0503
+tag.enable;
+
+const leak = fn () * i32 {
+    var xs: [1]i32 = .{1 };
+    return xs.ptr;
+};
+
+pub const main = fn () i32 { return 0; };

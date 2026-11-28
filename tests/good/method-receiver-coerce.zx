@@ -1,0 +1,76 @@
+// 不可变接收者在方法调用点自动转换：值 <-> *const Self，指针 -> Self。
+// struct / union / enum 一致；*const Self 不能调用 *Self。
+// expect-exit: 0
+// expect-output
+// struct-let: 3 3
+// struct-var: 3 3
+// struct-ptr: 3 3 3 3
+// struct-mutptr: 4 4
+// struct-mutptr: 5 5
+// union-let: 7 7
+// union-var: 7 7
+// union-ptr: 7 7 7 7
+// union-mutptr: 7 7
+// enum-let: 0 0
+// enum-var: 0 0
+// enum-ptr: 0 0 0 0
+// enum-mutptr: 0 0
+const std = @mod("std");
+
+const Pair = struct {
+    x: i32,
+    y: i32,
+    const value = fn (self: Self) i32 { return self.x + self.y; };
+    const read = fn (self: *const Self) i32 { return self.x + self.y; };
+    const bump = fn (self: *Self) void { self.x = self.x + 1; };
+};
+
+const Choice = union {
+    a: i32,
+    b: i64,
+    const value = fn (self: Self) i32 { return self.a; };
+    const read = fn (self: *const Self) i32 { return self.a; };
+};
+
+const Kind = enum {
+    one,
+    two,
+    const value = fn (self: Self) i32 { return (i32)self; };
+    const read = fn (self: *const Self) i32 { return (i32)self.0; };
+};
+
+pub const main = fn () i32 {
+    let s = Pair{ .x = 1, .y = 2 };
+    var m = Pair{ .x = 1, .y = 2 };
+    let sp: *const Pair = &s;
+    var mp: *const Pair = &s;
+    let smp: *Pair = &m;
+    std.println("struct-let: {} {}", s.value(), s.read());
+    std.println("struct-var: {} {}", m.value(), m.read());
+    m.bump();
+    std.println("struct-ptr: {} {} {} {}", sp.value(), sp.read(), mp.value(), mp.read());
+    std.println("struct-mutptr: {} {}", smp.value(), smp.read());
+    smp.bump();
+    std.println("struct-mutptr: {} {}", smp.value(), smp.read());
+
+    let u = Choice{ .a = 7 };
+    var v = Choice{ .a = 7 };
+    let up: *const Choice = &u;
+    var vp: *const Choice = &v;
+    let ump: *Choice = &v;
+    std.println("union-let: {} {}", u.value(), u.read());
+    std.println("union-var: {} {}", v.value(), v.read());
+    std.println("union-ptr: {} {} {} {}", up.value(), up.read(), vp.value(), vp.read());
+    std.println("union-mutptr: {} {}", ump.value(), ump.read());
+
+    let e = Kind.one;
+    var f = Kind.one;
+    let ep: *const Kind = &e;
+    var fp: *const Kind = &f;
+    let emp: *Kind = &f;
+    std.println("enum-let: {} {}", e.value(), e.read());
+    std.println("enum-var: {} {}", f.value(), f.read());
+    std.println("enum-ptr: {} {} {} {}", ep.value(), ep.read(), fp.value(), fp.read());
+    std.println("enum-mutptr: {} {}", emp.value(), emp.read());
+    return 0;
+};

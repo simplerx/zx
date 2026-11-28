@@ -38,6 +38,14 @@ Type *check_std_move(Node *call) {
             t2 ? t2->moved_line : 0);
         return t;
     }
+    if (t2 && t2->stack) {
+        for (Symbol *ls = g_locals; ls; ls = ls->locals_next)
+            if (ls->tag_id == id && ls->tag_state == TC_LIVE)
+                ls->tag_state = TC_MOVED;
+        arg->tag_id = id; arg->tag_state = TC_MOVED;
+        call->tag_id = id; call->tag_state = TC_LIVE;
+        return t;
+    }
     if (t2) {
         t2->state = TST_MOVED;
         t2->moved_line = call->line; t2->moved_col = call->col;
@@ -170,20 +178,6 @@ static void tag_scan_returns(Node *n, Node *fn, int *pk, int *pslot, int *pst, b
     tag_scan_returns(n->c, fn, pk, pslot, pst, ok);
     tag_scan_returns(n->d, fn, pk, pslot, pst, ok);
     for (int i = 0; i < n->nitems; i++) tag_scan_returns(n->items[i], fn, pk, pslot, pst, ok);
-}
-
-/* 直接调用的目标 fn 节点（直呼名字/实例化；函数指针分发拿不到）。 */
-static Node *call_direct_fn(Node *call) {
-    Node *a = call->a;
-    if (!a) return NULL;
-    if (a->sym && a->sym->decl) {
-        Node *d = a->sym->decl;
-        if (d->kind == NK_FN) return d;
-        if (d->kind == NK_DECL && d->b && d->b->kind == NK_FN) return d->b;
-        return NULL;
-    }
-    if (a->inst && a->inst->kind == NK_FN) return a->inst;
-    return NULL;
 }
 
 /* 返回流缓存三态：1 = 有（*k_out 形参下标 / *slot_out 体内槽）；
@@ -419,13 +413,24 @@ int arm_ret_scan(Node *nd, int slot) {
     }
 }
 
+static void tag_revive_expr(Node *e, int id) {
+    if (!e) return;
+    if (e->tag_id == id && e->tag_state == TC_FREED) e->tag_state = TC_LIVE;
+    tag_revive_expr(e->a, id);
+    tag_revive_expr(e->b, id);
+    tag_revive_expr(e->c, id);
+    tag_revive_expr(e->d, id);
+    for (int i = 0; i < e->nitems; i++) tag_revive_expr(e->items[i], id);
+}
+
 /* 臂检查后对账：对比快照，臂内释放的 tag 必须以 null 收尾，臂内分配的
  * tag 必须由臂值传出。返回该臂的出口载体（无传出 → tag=0）。
  * armnode：臂的语句节点（表达式臂传 NULL）——终局臂（return/continue
  * 收尾，控制不落到 join 点）的释放/传出走别的路径，不参与对账。 */
 ArmExit tag_arm_reconcile(Node *armval, Node *armnode,
                                  const int *snap, int n0, int ntotal) {
-    ArmExit e = { 0, TC_NONE, armval };
+    ArmExit e = { 0 };
+    e.val = armval;
     for (int i = 0; i < g_ntslots; i++) {
         /* §172：快照之后新建的槽（自动建槽可能发生在臂内）按 idle 进入；
          * 超出快照数组容量的老槽维持旧行为（跳过） */
@@ -444,6 +449,7 @@ ArmExit tag_arm_reconcile(Node *armval, Node *armnode,
             continue;
         }
         TagSlot *t = &g_tslots[i];
+        if (t->stack || t->borrow) continue;
         if (t->state == TST_FREED && snap[i] == TST_LIVE) {
             /* §187：终局臂（return/continue 收尾，控制不落到 join 点）
              * 的释放随路径离开——不落账（快照恢复后槽保持 LIVE），
@@ -468,6 +474,13 @@ ArmExit tag_arm_reconcile(Node *armval, Node *armnode,
                     "the free/deinit to confirm the pointer is given up; an "
                     "unconfirmed release is treated as not-released at the "
                     "join because the branch may not run");
+                t->state = before;
+                if (t->carrier && t->carrier->tag_state == TC_FREED)
+                    t->carrier->tag_state = TC_LIVE;
+                for (Symbol *ls = g_locals; ls; ls = ls->locals_next)
+                    if (ls->tag_id == i + 1 && ls->tag_state == TC_FREED)
+                        ls->tag_state = TC_LIVE;
+                tag_revive_expr(armval, i + 1);
                 continue;
             }
             /* 臂内释放：值臂必须传出 null 载体（"在臂内释放，就返回空
@@ -519,6 +532,10 @@ ArmExit tag_arm_reconcile(Node *armval, Node *armnode,
             }
         }
     }
+    if (!e.tag && armval) {
+        tag_of_expr(armval, &e.tag, &e.state);
+        e.val = armval;
+    }
     return e;
 }
 
@@ -531,9 +548,20 @@ void tag_join_arms(Node *n, ArmExit a, ArmExit b) {
     if (a.tag != b.tag) {
         if (a.tag && !b.tag) { b.tag = a.tag; b.state = TC_NONE; b.val = NULL; }
         else if (b.tag && !a.tag) { a.tag = b.tag; a.state = TC_NONE; a.val = NULL; }
-        else {                        /* 两臂动了不同的 tag：各自记账即可 */
-            n->tag_id = a.tag ? a.tag : b.tag;
-            n->tag_state = a.tag ? a.state : b.state;
+        else {                        /* 两臂动了不同的 tag */
+            TagSlot *ta = tag_slot(a.tag), *tb = tag_slot(b.tag);
+            if ((ta && ta->stack) || (tb && tb->stack)) {
+                int id = tag_join_origin(a.tag, b.tag);
+                n->tag_id = id;
+                if (id == a.tag) n->tag_state = a.state;
+                else if (id == b.tag) n->tag_state = b.state;
+                else n->tag_state = TC_UNKNOWN;
+                TagSlot *joined = tag_slot(id);
+                if (joined && joined->scope_freed) n->tag_state = TC_FREED;
+            } else {
+                n->tag_id = a.tag ? a.tag : b.tag;
+                n->tag_state = a.tag ? a.state : b.state;
+            }
             return;
         }
     }
@@ -561,26 +589,42 @@ void tag_join_arms(Node *n, ArmExit a, ArmExit b) {
 }
 
 void tag_snap(TagSnap *s) {
+    *s = (TagSnap){0};
     s->total = g_ntslots;
-    s->n = g_ntslots < TAG_SNAP_MAX ? g_ntslots : TAG_SNAP_MAX;
+    s->n = g_ntslots;
+    if (s->n) {
+        s->state = xmalloc((size_t)s->n * sizeof(*s->state));
+        s->carrier = xmalloc((size_t)s->n * sizeof(*s->carrier));
+        s->cstate = xmalloc((size_t)s->n * sizeof(*s->cstate));
+    }
     for (int i = 0; i < s->n; i++) {
         s->state[i] = g_tslots[i].state;
         s->carrier[i] = g_tslots[i].carrier;
         s->cstate[i] = g_tslots[i].carrier ? g_tslots[i].carrier->tag_state : 0;
     }
-    s->nfts = 0;
-    for (Symbol *ls = g_locals; ls && s->nfts < TAG_SNAP_MAX; ls = ls->locals_next) {
-        s->fsym[s->nfts] = ls;
-        s->ft[s->nfts] = (FieldTag *)ls->ftags;
-        s->nfts++;
+    for (Symbol *ls = g_locals; ls; ls = ls->locals_next) s->nfts++;
+    s->nlsyms = s->nfts;
+    if (s->nfts) {
+        s->fsym = xmalloc((size_t)s->nfts * sizeof(*s->fsym));
+        s->ft = xmalloc((size_t)s->nfts * sizeof(*s->ft));
+        s->lsym = xmalloc((size_t)s->nlsyms * sizeof(*s->lsym));
+        s->lstate = xmalloc((size_t)s->nlsyms * sizeof(*s->lstate));
+        s->ltag = xmalloc((size_t)s->nlsyms * sizeof(*s->ltag));
     }
-    s->nlsyms = 0;
-    for (Symbol *ls = g_locals; ls && s->nlsyms < TAG_SNAP_MAX; ls = ls->locals_next) {
-        if (!ls->tag_id) continue;
-        s->lsym[s->nlsyms] = ls;
-        s->lstate[s->nlsyms] = ls->tag_state;
-        s->nlsyms++;
+    int i = 0;
+    for (Symbol *ls = g_locals; ls; ls = ls->locals_next, i++) {
+        s->fsym[i] = ls;
+        s->ft[i] = (FieldTag *)ls->ftags;
+        s->lsym[i] = ls;
+        s->lstate[i] = ls->tag_state;
+        s->ltag[i] = ls->tag_id;
     }
+}
+
+void tag_snap_free(TagSnap *s) {
+    free(s->state); free(s->carrier); free(s->cstate);
+    free(s->fsym); free(s->ft); free(s->lsym); free(s->lstate); free(s->ltag);
+    *s = (TagSnap){0};
 }
 
 /* 恢复快照：另一臂 / 下一轮迭代从同一进入状态开始检查。
@@ -606,7 +650,7 @@ void tag_restore(const TagSnap *s) {
             prev->tag_state = TC_LIVE;
     }
     for (int i = s->total; i < g_ntslots; i++) {
-        g_tslots[i].state = 0;
+        if (!g_tslots[i].stack) g_tslots[i].state = 0;
         g_tslots[i].carrier = NULL;
     }
     /* §173 补丁五：字段账本按符号指针回滚（臂内的捕获变量不在快照里，
@@ -614,25 +658,74 @@ void tag_restore(const TagSnap *s) {
     for (Symbol *ls = g_locals; ls; ls = ls->locals_next)
         for (int i = 0; i < s->nfts; i++)
             if (s->fsym[i] == ls) { ls->ftags = s->ft[i]; break; }
-    /* §187：非 carrier 局部符号的 tag 载体状态回滚（按符号指针匹配，
-     * 同字段账口径——臂内 push 的捕获变量不在快照里，随作用域消亡）。 */
+    /* 局部符号的载体身份和状态一起回滚；零标签局部也必须保存，
+     * 否则臂内第一次绑定栈指针会在合流时丢掉。 */
     for (Symbol *ls = g_locals; ls; ls = ls->locals_next)
         for (int i = 0; i < s->nlsyms; i++)
-            if (s->lsym[i] == ls) { ls->tag_state = s->lstate[i]; break; }
+            if (s->lsym[i] == ls) {
+                ls->tag_id = s->ltag[i];
+                ls->tag_state = s->lstate[i];
+                break;
+            }
+}
+
+void tag_join_locals(const TagSnap *a, const TagSnap *b) {
+    for (int i = 0; i < a->nlsyms; i++) {
+        Symbol *sym = a->lsym[i];
+        int j;
+        for (j = 0; j < b->nlsyms; j++)
+            if (b->lsym[j] == sym) break;
+        if (j == b->nlsyms) continue;
+        int aid = a->ltag[i], bid = b->ltag[j];
+        int id = tag_join_origin(aid, bid);
+        if (!id) continue;
+        int state;
+        if (aid == bid) {
+            state = a->lstate[i] == b->lstate[j] ? a->lstate[i] : TC_UNKNOWN;
+            if ((a->lstate[i] == TC_LIVE && b->lstate[j] == TC_FREED) ||
+                (a->lstate[i] == TC_FREED && b->lstate[j] == TC_LIVE))
+                state = TC_UNKNOWN;
+        } else if (!aid || !bid) {
+            int live = aid ? a->lstate[i] : b->lstate[j];
+            state = live == TC_LIVE ? TC_COND : TC_UNKNOWN;
+        } else {
+            state = TC_UNKNOWN;
+        }
+        TagSlot *slot = tag_slot(id);
+        if (slot && slot->scope_freed) state = TC_FREED;
+        sym->tag_id = id;
+        sym->tag_state = state;
+    }
 }
 
 /* 臂出口收集字段账被臂改动的载体（与快照比对）。 */
-int ft_arm_collect(const TagSnap *s, Symbol **syms, FieldTag **fts, int cap) {
+void ft_arm_collect(const TagSnap *s, TagFieldDiff *d) {
+    *d = (TagFieldDiff){0};
+    for (Symbol *ls = g_locals; ls; ls = ls->locals_next)
+        for (int i = 0; i < s->nfts; i++)
+            if (s->fsym[i] == ls) {
+                if ((FieldTag *)ls->ftags != s->ft[i]) d->n++;
+                break;
+            }
+    if (!d->n) return;
+    d->syms = xmalloc((size_t)d->n * sizeof(*d->syms));
+    d->fts = xmalloc((size_t)d->n * sizeof(*d->fts));
     int n = 0;
-    for (Symbol *ls = g_locals; ls && n < cap; ls = ls->locals_next)
+    for (Symbol *ls = g_locals; ls; ls = ls->locals_next)
         for (int i = 0; i < s->nfts; i++)
             if (s->fsym[i] == ls) {
                 if ((FieldTag *)ls->ftags != s->ft[i]) {
-                    syms[n] = ls; fts[n] = (FieldTag *)ls->ftags; n++;
+                    d->syms[n] = ls;
+                    d->fts[n] = (FieldTag *)ls->ftags;
+                    n++;
                 }
                 break;
             }
-    return n;
+}
+
+void ft_field_diff_free(TagFieldDiff *d) {
+    free(d->syms); free(d->fts);
+    *d = (TagFieldDiff){0};
 }
 
 /* 两臂字段账合并（保守口径，运行期互斥路径）：某字段两臂最终账本
@@ -670,6 +763,7 @@ void tag_loop_balance(Node *body, const TagSnap *snap) {
     for (int i = 0; i < g_ntslots; i++) {
         /* §172：快照之后新建的槽按 idle 进入；超容量老槽跳过 */
         if (g_tslots[i].abstract) continue;    /* §173：借出槽不参与配平 */
+        if (g_tslots[i].stack || g_tslots[i].borrow) continue;
         if (g_tslots[i].book) continue;        /* §187：容器账不参与配平 */
         int before, after;
         if (i < snap->n) before = snap->state[i];
@@ -691,7 +785,7 @@ void tag_loop_balance(Node *body, const TagSnap *snap) {
     tag_of_expr(body->kind == NK_BLOCK ? body->d : body, &id, &st);
     if (id) {
         TagSlot *t = tag_slot(id);
-        if (t) diag_code_at("E0516", t->line, t->col,
+        if (t && !t->stack) diag_code_at("E0516", t->line, t->col,
             "a loop cannot yield this pointer -- it is a different allocation "
             "in each iteration; free inside the loop or allocate outside");
     }
@@ -826,7 +920,7 @@ static bool tag_chain_slot(TagSlot *t, char *out, size_t cap) {
 void tag_ledger_final(const char *entry_path) {
     for (int i = 0; i < g_ntslots; i++) {
         TagSlot *t = &g_tslots[i];
-        if (t->state != TST_LIVE || t->abstract) continue;
+        if (t->state != TST_LIVE || t->abstract || t->stack || t->borrow) continue;
         /* §187：终局臂内释放过的槽——状态已随快照恢复 LIVE，但释放
          * 事件真实发生过（ever_freed），路径并集口径下不算泄漏。 */
         if (t->ever_freed) continue;

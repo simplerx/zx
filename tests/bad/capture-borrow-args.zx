@@ -1,0 +1,53 @@
+tag.enable;
+// expect: captured pointer
+// expect-code: E0532
+// expect-count: 6
+const std = @mod("std");
+
+const Obj = struct {
+    x: i32,
+    const read = fn (self: *const Self) i32 { return self.x; };
+    const put = fn (self: Self, p: *i32) void { _ = p; };
+};
+
+const sink = fn (p: *const i32) void { _ = p; };
+
+const ordinary_arg = fn () void {
+    var o: ?i32 = 1;
+    if (o) * t { sink(t); };
+};
+
+const explicit_receiver = fn () void {
+    var o: ?Obj = Obj{ .x = 1 };
+    if (o) * t { _ = Obj.read(t); };
+};
+
+const implicit_receiver = fn () void {
+    var o: ?Obj = Obj{ .x = 1 };
+    if (o) * t { _ = t.read(); };
+};
+
+const method_arg = fn () void {
+    var o: ?i32 = 1;
+    if (o) * t { Obj{ .x = 1 }.put(t); };
+};
+
+const variadic_arg = fn () void {
+    var o: ?i32 = 1;
+    if (o) * t { std.println("{}", t); };
+};
+
+const capture_address = fn () void {
+    var o: ?Obj = Obj{ .x = 1 };
+    if (o) captured { sink(&captured.x); };
+};
+
+pub const main = fn () i32 {
+    ordinary_arg();
+    explicit_receiver();
+    implicit_receiver();
+    method_arg();
+    variadic_arg();
+    capture_address();
+    return 0;
+};

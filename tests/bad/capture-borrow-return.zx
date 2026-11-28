@@ -1,0 +1,29 @@
+// expect: captured pointer
+// expect-code: E0532
+// expect-count: 3
+tag.enable;
+
+const Shape = union (enum) { value: i32, other: i64 };
+
+const from_if = fn () * i32 {
+    var o: ?i32 = 1;
+    if (o) * t { return t; }
+    return null;
+};
+
+const from_while = fn () * i32 {
+    var o: ?i32 = 1;
+    while (o) * t { return t; }
+    return null;
+};
+
+const from_switch = fn () * i32 {
+    var s = Shape{ .value = 1 };
+    switch (s) {
+        .value: *t { return t; };
+        .other: {};
+    }
+    return null;
+};
+
+pub const main = fn () i32 { return 0; };

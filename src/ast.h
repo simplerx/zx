@@ -113,7 +113,6 @@ struct Node {
     struct Value  *ct;        /* 编译期值；NULL = 只能运行时算 */
     struct Node   *inst;      /* 泛型调用：单态化出来的那份函数 */
     struct Symbol *sym;
-    bool          esc;        /* 值指向当前栈帧（std.stackAlloc 调用打上；逃逸检查用） */
     bool          body_checked;
     bool          meth_done;  /* 方法调用已补过接收者（重复检查时直接返回类型） */
     bool          ct_no;      /* A1 负缓存：检查阶段这块子树折不出编译期值。
@@ -189,7 +188,7 @@ bool sema_sym_is_extern(struct Symbol *s);
 /* 符号指向的声明节点（NK_DECL / NK_FN / NULL）。局部 fn 绑定引用要
  * 用它判断"这是函数体里的 fn 字面量绑定"——C 层函数名带 _impl 后缀。 */
 Node *sema_sym_decl(struct Symbol *s);
-/* 符号声明在函数体里吗（它的槽位在栈帧上） */
+/* 符号声明在函数体里吗（用于闭包深度与后端查询） */
 bool sema_sym_in_fn(struct Symbol *s);
 /* 模块表：0 是入口文件 */
 int   sema_module_count(void);

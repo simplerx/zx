@@ -1,0 +1,18 @@
+// expect-exit: 0
+tag.enable;
+
+const Item = struct { v: i32 };
+const Box = struct { item: ?*Item };
+
+const get = fn (b: *Box) ?*Item{ return b.item; };
+
+const field_address = fn (b: *Box) * i32 {
+    return &get(b).?.v;
+};
+
+pub const main = fn () i32 {
+    var it = Item{ .v = 42 };
+    var b = Box{ .item = &it };
+    if (field_address(&b).0 == 42) { return 0; }
+    return 1;
+};

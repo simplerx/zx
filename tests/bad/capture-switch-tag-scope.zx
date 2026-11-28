@@ -1,0 +1,13 @@
+tag.enable;
+// expect: use after scope
+// expect-code: E0512
+const Shape = union (enum) { value: i32, other: i64 };
+const main = fn () u8 {
+    var s = Shape{ .value = 7 };
+    var q: ?*i32 = null;
+    switch (s) {
+        .value: *t { q = t; };
+        .other: {};
+    }
+    return (u8)q.?[0];
+};

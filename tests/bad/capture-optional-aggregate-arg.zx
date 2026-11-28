@@ -1,0 +1,18 @@
+// expect: captured pointer
+// expect-code: E0532
+// expect-count: 1
+tag.enable;
+
+const Obj = struct { p: *i32 };
+const sink = fn (p: *const i32) void { _ = p; };
+
+const bad = fn () void {
+    var o: ?i32 = 1;
+    if (o) * t {
+        var os: ?Obj = Obj{ .p = t };
+        var s = os.?;
+        sink(s.p);
+    };
+};
+
+pub const main = fn () i32 { return 0; };

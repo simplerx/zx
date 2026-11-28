@@ -78,119 +78,6 @@ static Type *check_ptr_arith(Node *n, Type *a, Type *b, TokKind op) {
     return type_of(n, ty_ptr(a->elem, a->is_const, false, 0));
 }
 
-bool expr_frame(Node *e) {
-    if (!e) return false;
-    switch (e->kind) {
-    case NK_CALL:  return e->esc;                     /* std.stackAlloc */
-    case NK_IDENT: return e->sym && e->sym->stack_val;
-    case NK_UN:    return e->op == TOK_AMP && addr_frame(e->a);
-    case NK_CAST:  return expr_frame(e->b);   /* a 是类型；指针 cast 不改变栈来源 */
-    case NK_ARRAY_LIT:                /* &.{…}：值本身就是当前帧的匿名存储 */
-        /* §242（用户裁定）：**空**数组字面量 `&.{}` 展开后切片长度恒为 0，
-         * 任何下标都不可达（越界检查也进不去），不存在可逃逸的存储——
-         * 不判栈帧来源。非空 `&.{1,2}` 照旧是当前帧的匿名存储。 */
-        return e->nitems != 0;
-    case NK_FIELD: case NK_INDEX: case NK_SLICE:
-        return expr_frame(e->a);
-    case NK_UNWRAP:                   /* `x.?`：载荷来源跟着 optional 走 */
-        return expr_frame(e->a);
-    case NK_ORELSE: case NK_TRY:      /* 两臂任一来自当前帧即为当前帧 */
-        return expr_frame(e->a) || expr_frame(e->b);
-    case NK_BIN:
-        if (e->op == TOK_PLUS || e->op == TOK_MINUS)  /* 指针运算保持来源 */
-            return expr_frame(e->a) || expr_frame(e->b);
-        return false;
-    default: return false;
-    }
-}
-
-/* §221：表达式是否携带捕获指针（*t）的栈借用。与 expr_frame 平行，但只认
- * cap_borrow 标记的符号——普通 &local 的栈指针不算（传给函数是合法的），
- * 只有捕获指针这套借用才禁传参/禁外泄。赋值/别名沿 NK_IDENT 传播（符号的
- * cap_borrow 由 check_assign 重算），cast/下标/字段读取保持来源。 */
-bool expr_borrow(Node *e) {
-    if (!e) return false;
-    switch (e->kind) {
-    case NK_IDENT: return e->sym && e->sym->cap_borrow;
-    case NK_UN:
-        /* §261：对 if/while 捕获的**值**取地址（&win）——捕获值物化在
-         * 当前栈帧，出臂即失效，与 `*t` 指针捕获同为栈借用。不认这条时
-         * `store(&h, &win)` 把栈指针存进字段、或 `&win` 经别名带出，全部
-         * 漏过逃逸检查。普通 `&local` 不算（传参合法），只认 SK_CAPTURE。 */
-        return e->op == TOK_AMP && e->a && e->a->kind == NK_IDENT &&
-               e->a->sym && e->a->sym->kind == SK_CAPTURE;
-    case NK_CAST:  return expr_borrow(e->b);   /* 指针 cast 仍是借用；a 是类型，b 才是操作数 */
-    case NK_ORELSE: case NK_TRY:
-        return expr_borrow(e->a) || expr_borrow(e->b);
-    case NK_BIN:
-        if (e->op == TOK_PLUS || e->op == TOK_MINUS)
-            return expr_borrow(e->a) || expr_borrow(e->b);
-        return false;
-    /* 注意：NK_FIELD / NK_INDEX / NK_UNWRAP 是"穿过借用指针读载荷"——
-     * 结果是载荷值，不是借用指针本身。t[0] / t.f 不携带借用，不能在这里
-     * 传播，否则 `t[0] = t[0]+1` 会被误判成把借用存进数组元素。 */
-    default: return false;
-    }
-}
-
-bool addr_frame(Node *o) {
-    if (!o) return false;
-    /* §201 补丁：`&x.?` / `&x.?.f` 的 unwrap 结果（即便载荷是指针 `*T`）
-     * 会被后端物化到当前帧临时，取它的地址就落在当前帧。必须先于下面的
-     * "指针类型跟着被指物走"分支判定，否则 `&get(b).?.v` 会跟着堆载荷
-     * 判成非栈帧，漏过 E0503、生成悬垂 C。 */
-    if (o->kind == NK_UNWRAP || o->kind == NK_ORELSE || o->kind == NK_TRY)
-        return true;
-    Type *t = o->ty;
-    if (t && (t->kind == TY_PTR || t->kind == TY_SLICE))
-        return expr_frame(o);       /* 取的是被指物：来源跟着被指物走 */
-    switch (o->kind) {
-    case NK_IDENT:  return o->sym && o->sym->in_fn;   /* 局部变量的槽位本身 */
-    case NK_FIELD:  return addr_frame(o->a);
-    case NK_INDEX: {
-        Type *bt = o->a ? o->a->ty : NULL;
-        if (bt && (bt->kind == TY_PTR || bt->kind == TY_SLICE))
-            return expr_frame(o->a);  /* 指针/切片下标：指到被指物里去了 */
-        return addr_frame(o->a);      /* 数组下标：还在数组槽位里 */
-    }
-    case NK_ARRAY_LIT: case NK_TUPLE: case NK_STRUCT_LIT: case NK_ANON_STRUCT:
-        return true;                /* &.{…} 等匿名存储落在当前栈帧 */
-    case NK_UNWRAP:
-        /* `&x.?` / `&x.?.f`：unwrap 是 zx_unwrap_...() 的 rvalue，后端会
-         * 物化到当前帧临时；即便载荷来自堆，取地址也落在当前帧。 */
-        return true;
-    case NK_ORELSE: case NK_TRY:
-        return true;                /* 兜底臂/捕获块都是当前帧的临时量 */
-    default: return false;
-    }
-}
-
-/* §199：聚合值里藏着的栈帧来源。return 逃逸检查原先只看返回类型形状
- * （want 是 TY_PTR/TY_SLICE），于是 `return S{ .s = &.{} }` —— 把匿名
- * slice 裹进结构体带走——整只漏过，生成悬垂 C。这里下钻聚合字面量的
- * 字段值，任何一个字段是指向栈帧的指针就算逃逸。纯值结构体（字段全是
- * 标量/常量）不会被误伤。 */
-bool frame_in_agg(Node *e, int depth) {
-    if (!e || depth > 12) return false;
-    switch (e->kind) {
-    case NK_STRUCT_LIT: case NK_ANON_STRUCT: case NK_TUPLE:
-        for (int i = 0; i < e->nitems; i++) {
-            Node *v = e->items[i];
-            if (v && v->kind == NK_PAIR) v = v->a;
-            /* 字段值本身就指向当前栈帧（&.{} / &local / stackAlloc） */
-            if (v && expr_frame(v)) return true;
-            if (frame_in_agg(v, depth + 1)) return true;
-        }
-        return false;
-    case NK_PAIR:
-        return frame_in_agg(e->a, depth + 1);
-    default:
-        /* 普通字段 / 标识符 / 下标不在这里判——它们由 want 形状那条
-         * expr_frame 路径负责；这里只补"聚合字面量内部藏着栈帧来源"。 */
-        return false;
-    }
-}
-
 Type *check_assign(Node *n) {
     /* `_ = expr;` —— 显式丢弃（M26）：求值右值（拿副作用），不落存储。
      * 只认普通 `=`；复合赋值没有丢弃语义。 */
@@ -206,10 +93,9 @@ Type *check_assign(Node *n) {
     if (n->op == TOK_ASSIGN) {
         rt = check_expr(n->b, lt);
         coerce_node(n->b, rt, lt, "assignment");
-        /* §221：捕获指针借用不许存进长生命周期位置——字段、全局/静态、
-         * 数组/切片元素。局部简单变量赋值是别名传播（上面会记 cap_borrow），
-         * 不算逃逸。账本开关（§225）关不掉这条（走 expr_borrow 而非 tag 账本）。 */
-        if (expr_borrow(n->b)) {
+        /* 捕获借用只能留在捕获作用域；字段、全局和容器元素是长期存储。
+         * 账本关闭时 tag_expr_borrow 自然为假，与栈检查使用同一开关。 */
+        if (tag_expr_borrow(n->b)) {
             bool escapes = false;
             const char *where = "a struct field";
             if (n->a->kind == NK_FIELD) {
@@ -239,13 +125,6 @@ Type *check_assign(Node *n) {
                 base = base->a;
             if (base && base->kind == NK_IDENT && base->sym)
                 base->sym->nassign++;
-        }
-        /* 赋进局部变量的指针也记来源：之后 return 它同样要拦。
-         * 重算而非只置 true——先存栈地址再改成堆/全局地址必须洗掉旧事实。 */
-        if (n->a->kind == NK_IDENT && n->a->sym) {
-            n->a->sym->stack_val = expr_frame(n->b);
-            /* §221：捕获指针借用沿别名传播（重算而非只置 true，赋成干净值即洗白） */
-            n->a->sym->cap_borrow = expr_borrow(n->b);
         }
         /* §130：赋值重新绑定发行版本；赋成别的值就把旧版本标 opaque */
         if (n->a->kind == NK_IDENT && n->a->sym) {
@@ -762,15 +641,33 @@ Type *check_array_lit(Node *n, Node **items, int nitems, Type *expect) {
     }
     for (int i = 0; i < nitems; i++)
         coerce_node(items[i], items[i]->ty, elem, "array element");
+    for (int i = 0; i < nitems; i++) {
+        char nb[16];
+        snprintf(nb, sizeof nb, "%d", i);
+        int tid, tst;
+        tag_of_expr(items[i], &tid, &tst);
+        if (tid && (tst == TC_LIVE || tst == TC_FREED)) {
+            char *key = ft_path_dup(NULL, nb);
+            if (key) ft_set((FieldTag **)&n->ftags, key, tid);
+        } else {
+            FieldTag *inft = ftags_of_expr(items[i]);
+            for (FieldTag *g = inft; g; g = g->next) {
+                if (g->slot <= 0) continue;
+                char *key = ft_path_dup(nb, g->name);
+                if (key) ft_set((FieldTag **)&n->ftags, key, g->slot);
+            }
+        }
+    }
     /* §205：`.{…}` 位置形式是 [N]T 数组值；`&.{…}` 是 *[N]T 指针。 */
     if (n->flag) return type_of(n, ty_array(elem, (uint64_t)nitems));
-    /* §212：`&.{…}` 就是 stackAlloc 的糖——匿名存储落在当前栈帧，块退出
-     * 即消亡。建 stack TagSlot，复用 tag_scope_exit（出块标 FREED）与
+    /* §212：非空 `&.{…}` 就是 stackAlloc 的糖——匿名存储落在当前栈帧，
+     * 块退出即消亡。空字面量没有可读存储，按 §242 不建栈标签。
+     * 建 stack TagSlot，复用 tag_scope_exit（出块标 FREED）与
      * tag_check_deref（块外解引用报 E0512 use after scope），堵住
      * "pNext 链存 &.{…} 地址、块后进 vkQueueSubmit 崩溃" 这类悬垂指针。
      * 只在运行期函数体内建槽：全局字面量走静态 backing（§199，无栈帧），
      * CT 执行中的字面量也不该带运行期标签。 */
-    if (g_fn_depth > 0 && g_ct_exec == 0)
+    if (g_fn_depth > 0 && g_ct_exec == 0 && nitems > 0)
         tag_auto_decl(n, true);
     return type_of(n, ty_ptr(ty_array(elem, (uint64_t)nitems), false, true,
                              (uint64_t)nitems));
@@ -799,6 +696,11 @@ Type *check_unary(Node *n, Type *expect) {
          * `&xs` 是合法的 `**(...)`（用户 2026-11-10 确认的设计）。
          * 以前这里错误地按"内联数组"挡掉，是文档/实现的误解。 */
         bool cst = !lvalue_mutable(n->a);
+        n->tag_id = tag_addr_origin(n->a);
+        if (n->tag_id) {
+            TagSlot *slot = tag_slot(n->tag_id);
+            n->tag_state = slot && slot->state == TST_FREED ? TC_FREED : TC_LIVE;
+        }
         /* §201：取数组值的地址就是普通指针，elem 是 TY_ARRAY */
         return type_of(n, ty_ptr(t, cst, false, 0));
     }
@@ -1145,6 +1047,11 @@ Type *check_field(Node *n) {
         if (!pv->xexpr)
             return BAD(n, "`.ptr` needs a descriptor from `@type(lvalue)`; "
                           "`@type(SomeType)` has no instance to point into");
+        n->tag_id = pv->xexpr->tag_id ? pv->xexpr->tag_id : tag_addr_origin(pv->xexpr);
+        if (n->tag_id) {
+            TagSlot *slot = tag_slot(n->tag_id);
+            n->tag_state = slot && slot->scope_freed ? TC_FREED : TC_LIVE;
+        }
         n->b = clone_tree(pv->xexpr);
         n->ival = pv->off;
         Type *pt = ty_ptr(pv->ty->elem, !lvalue_mutable(n->b), false, 0);

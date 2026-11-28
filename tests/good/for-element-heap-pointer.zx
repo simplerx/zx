@@ -1,0 +1,19 @@
+// expect-exit: 0
+// expect-output
+// 7
+// 7
+tag.enable;
+const std = @mod("std");
+
+const Obj = struct { p: *i32 };
+
+pub const main = fn () i32 {
+    let p = std.heapAlloc(std.heap.page, i32, 1).?;
+    p[0][0] = 7;
+    var xs: [1]Obj = .{Obj{ .p = &p[0] } };
+    for (xs[0..]) s { std.println("{}", s.p[0]); }
+    var ps: [1] * i32 = .{&p[0] };
+    for (ps[0..]) q { std.println("{}", q[0]); }
+    std.free(std.heap.page, p);
+    return 0;
+};

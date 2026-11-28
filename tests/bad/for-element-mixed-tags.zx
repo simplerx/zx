@@ -1,0 +1,14 @@
+// expect: different or unknown tracked pointers
+// expect-code: E0521
+// expect-count: 1
+tag.enable;
+
+const bad = fn () i32 {
+    var x: i32 = 1;
+    var y: i32 = 2;
+    var xs: [2] * i32 = .{&x, &y };
+    for (xs[0..]) p { _ = p[0]; }
+    return 0;
+};
+
+pub const main = fn () i32 { return 0; };

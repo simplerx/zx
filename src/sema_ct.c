@@ -4,7 +4,7 @@
 #include "sema_internal.h"
 
 static int   g_ct_nstack;
-static bool  g_ct_checking;
+bool g_ct_checking;
 
 static bool ct_on_stack(Node *fn) {
     for (int i = 0; i < g_ct_nstack; i++)
@@ -50,6 +50,7 @@ Node *clone_tree(Node *n) {
     Node *c = xcalloc(1, sizeof(Node));
     *c = *n;
     c->ty = NULL; c->type_val = NULL; c->ct = NULL; c->sym = NULL;
+    c->tag_id = 0; c->tag_state = TC_NONE; c->ftags = NULL;
     c->body_checked = false;
     /* inline for 的展开结果不随克隆走：unroll 数组是源节点私有的，
      * 浅拷贝指针 + nunroll 会让克隆体在重新展开时 realloc 挪块，

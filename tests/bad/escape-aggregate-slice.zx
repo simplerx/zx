@@ -2,9 +2,10 @@
 // expect-code: E0503
 // §199：把匿名 slice 裹进结构体字段后整体返回——原先只看返回类型形状
 // （want 是 struct 就放行），生成悬垂 C。现在下钻聚合字段值拦下。
+tag.enable;
 const P = struct { a: i32 };
 const S = struct { s: []const P };
-const make = fn () S { return S{ .s = &.{ .{ .a = 1 }, .{ .a = 2 } } }; };
+const make = fn () S{ return S{ .s = & .{ .{ .a = 1 }, .{ .a = 2 } } }; };
 const main = fn () i32 {
     const r = make();
     return r.s[0].a;

@@ -1,8 +1,8 @@
 // self-recv-abi.zx —— §224：方法接收者形态完全由写法决定，编译器不再按
 // 大小改 ABI。`self: Self` 就是普通按值参数（C 里发 `ZxS self`，无论结构
 // 多大），`self: *Self` 发 `ZxS * self`，`self: *const Self` 发
-// `const ZxS * self`。不再有 >16B 自动降级成 const 指针，也不再有方法体里
-// 补 `(*self)` 或调用点自动补 `&` / 自动解引用。
+// `const ZxS * self`。不再有 >16B 自动降级成 const 指针，也不再有方法体里补
+// `(*self)`；§274 的调用点值/只读指针转换不改变这些签名。
 //
 // 生成 C 的形态由 test.sh §224 断言钉住：Small/Big 都按值、没有 (*self)。
 // expect-exit: 0

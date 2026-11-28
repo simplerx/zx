@@ -1,0 +1,14 @@
+// expect: cannot return a pointer into the current function's stack frame
+// expect-code: E0503
+tag.enable;
+
+const Obj = struct { p: *i32 };
+
+const bad = fn () * i32 {
+    var x: i32 = 1;
+    var xs: [1]Obj = .{Obj{ .p = &x } };
+    for (xs[0..]) s { return s.p; }
+    return null;
+};
+
+pub const main = fn () i32 { return 0; };

@@ -61,6 +61,14 @@ static bool arm_is_capture_value(Node *a, const char *cap) {
     return a && a->kind == NK_IDENT && a->name && !strcmp(a->name, cap);
 }
 
+static void join_value_tags(Node *n, Node *a, Node *b) {
+    ArmExit ea = { 0 }, eb = { 0 };
+    ea.val = a; eb.val = b;
+    tag_of_expr(a, &ea.tag, &ea.state);
+    tag_of_expr(b, &eb.tag, &eb.state);
+    tag_join_arms(n, ea, eb);
+}
+
 /* §221：捕获指针的前置校验。条件必须是可写左值——捕获的 *t 指向"原对象"
  * 的载荷存储，右值（函数调用结果、字面量）没有原对象可写回。
  * 成功返回指向载荷的指针类型 *T；失败报错并返回 NULL。 */
@@ -81,12 +89,17 @@ static Type *cap_ptr_prepare(Node *n, Type *cap_ty, bool is_opt_or_err) {
     return ty_ptr(cap_ty, cap_ty->is_const, false, 0);
 }
 
-/* 给捕获符号打 §221 栈借用标记。stack_val 让通用 return 逃逸检查覆盖它，
- * cap_borrow 让 §221 专用出口检查（实参/字段/全局）拦它。 */
-static void cap_mark_borrow(Symbol *s) {
+/* §221：`*t` 捕获建立借用标签；是否追踪由 tag.enable 统一决定。 */
+static void cap_mark_borrow(Symbol *s, Node *subject) {
     if (!s) return;
-    s->cap_borrow = true;
-    s->stack_val = true;
+    int base = tag_addr_origin(subject), state;
+    if (!base) tag_of_expr(subject, &base, &state);
+    int id = tag_stack_new(ST_BORROW, subject, base);
+    if (!id) return;
+    s->tag_id = id;
+    s->tag_state = TC_LIVE;
+    TagSlot *slot = tag_slot(id);
+    if (slot) slot->carrier = s;
 }
 
 static Type *check_if(Node *n, Type *expect) {
@@ -156,11 +169,10 @@ static Type *check_if(Node *n, Type *expect) {
     if (known && cv->bval && n->c) mark_uses(n->c);
 
     Type *tt;
-    ArmExit exT = { 0, TC_NONE, NULL };
-    TagSnap snapT;
+    ArmExit exT = { 0 };
+    TagSnap snapT, endT = {0}, endE = {0};
     tag_snap(&snapT);                 /* §170：臂出口对账的基准 */
-    Symbol *chT[TAG_SNAP_MAX]; FieldTag *cfT[TAG_SNAP_MAX]; int nchT = 0;
-    Symbol *chE[TAG_SNAP_MAX]; FieldTag *cfE[TAG_SNAP_MAX]; int nchE = 0;
+    TagFieldDiff chT = {0}, chE = {0};
     {
         Scope sc;
         scope_push(&sc);
@@ -169,19 +181,12 @@ static Type *check_if(Node *n, Type *expect) {
             if (s) { s->ty = cap_ty; s->state = 2;
                      s->reg_slot = region_of_expr(n->a);
                      s->cap_src = n->a;
-                     /* §261：捕获值是条件解包物化在当前栈帧的对象——`&v` 与
-                      * stackAlloc 出的指针同源，出臂即失效。不标 in_fn 时
-                      * addr_frame 看不见它，`return &v.x`、把 `&v` 存进字段/
-                      * 全局全部漏过栈逃逸检查。
-                      * 只设 in_fn（"取它的地址落在栈帧"），不设 stack_val：
-                      * 后者表示"这个值本身就是栈来源"，而捕获的载荷常常
-                      * 是指向堆的指针（std 的 `if (raw) p { return Self{
-                      * .buf = p } }`），设了会把合法返回误报成 E0503。
-                      * 也不设 cap_borrow——值捕获传参合法，只有 `*t` 指针
-                      * 捕获禁传参（§221）。 */
+                     /* 捕获值有独立存储；指针载荷是否来自栈由 tag_capture_inherit
+                      * 决定，不能仅因捕获绑定在栈上就判成栈指针。 */
                      s->in_fn = true;
+                     s->storage_tag = tag_stack_new(ST_STORAGE, n->a, 0);
                      tag_capture_inherit(s, n->a, NULL);
-                     if (n->cap_ptr) cap_mark_borrow(s); }
+                     if (n->cap_ptr) cap_mark_borrow(s, n->a); }
         }
         tt = (known && !cv->bval) ? ty_void() : check_arm(n->b, expect);
         if (!(known && !cv->bval)) {
@@ -191,13 +196,15 @@ static Type *check_if(Node *n, Type *expect) {
             exT = tag_arm_reconcile(tval, n->b, snapT.state, snapT.n, snapT.total);
         }
         /* §173 补丁五：臂内整结构体赋值改了哪些载体的字段账，恢复前先记下 */
-        nchT = ft_arm_collect(&snapT, chT, cfT, TAG_SNAP_MAX);
-        tag_restore(&snapT);          /* 臂 2 从同一进入状态开始 */
+        ft_arm_collect(&snapT, &chT);
+        tag_snap(&endT);
+        if (!known) tag_restore(&snapT);  /* 另一臂从同一进入状态开始 */
+        tag_scope_exit(&sc, n->b ? n->b : n);
         scope_pop(&sc);
     }
 
     Type *et = NULL;
-    ArmExit exE = { 0, TC_NONE, NULL };
+    ArmExit exE = { 0 };
     if (n->c && !(known && cv->bval)) {
         Scope sc;
         scope_push(&sc);
@@ -219,21 +226,19 @@ static Type *check_if(Node *n, Type *expect) {
             Type *ft = is_err ? ty_error() : ty_error();
             if (ft) {
                 Symbol *s = scope_add(&sc, n->d->name, SK_CAPTURE);
-                if (s) { s->ty = ft; s->state = 2; }
+                if (s) { s->ty = ft; s->state = 2;
+                         s->storage_tag = tag_stack_new(ST_STORAGE, n->a, 0); }
                 n->d->sym = s;
             }
         }
         et = check_arm(n->c, expect);
         Node *eval = lb ? lb->val : ((n->c && n->c->kind == NK_BLOCK) ? n->c->d : n->c);
         exE = tag_arm_reconcile(eval, n->c, snapT.state, snapT.n, snapT.total);
-        Symbol *chE2[TAG_SNAP_MAX]; FieldTag *cfE2[TAG_SNAP_MAX];
-        int nchE2 = ft_arm_collect(&snapT, chE2, cfE2, TAG_SNAP_MAX);
-        tag_restore(&snapT);
+        ft_arm_collect(&snapT, &chE);
+        tag_snap(&endE);
+        if (!known) tag_restore(&snapT);
+        tag_scope_exit(&sc, n->c);
         scope_pop(&sc);
-        for (int i = 0; i < nchE2 && i < TAG_SNAP_MAX; i++) {
-            chE[i] = chE2[i]; cfE[i] = cfE2[i];
-        }
-        nchE = nchE2;
     }
 
     /* §170：两臂出口合并；单臂（剪枝 / 无 else）直接沿用那支的出口 */
@@ -241,22 +246,22 @@ static Type *check_if(Node *n, Type *expect) {
         ArmExit one = cv->bval ? exT : exE;
         if (one.tag) { n->tag_id = one.tag; n->tag_state = one.state; }
     } else if (!n->c) {
+        tag_join_locals(&endT, &snapT);
         /* 无 else：隐含一支"返回零值（null）"，与 then 出口合并 */
-        ArmExit none = { 0, TC_NONE, NULL };
+        ArmExit none = { 0 };
         tag_join_arms(n, exT, none);
     } else {
+        tag_join_locals(&endT, &endE);
         tag_join_arms(n, exT, exE);
     }
     /* §173 补丁五：字段账的臂间落账。剪枝 = 幸存臂的账直接生效；
      * 两臂都跑 = 逐符号保守合并（一致才保留）；无 else = then 的单边
      * 改动丢弃（运行期可能不进臂，落账会假报）。 */
     if (known) {
-        Symbol **ch = cv->bval ? chT : chE;
-        FieldTag **cf = cv->bval ? cfT : cfE;
-        int nc = cv->bval ? nchT : nchE;
-        for (int i = 0; i < nc; i++) ch[i]->ftags = cf[i];
+        TagFieldDiff *ch = cv->bval ? &chT : &chE;
+        for (int i = 0; i < ch->n; i++) ch->syms[i]->ftags = ch->fts[i];
     } else if (n->c) {
-        ft_arms_join(chT, cfT, nchT, chE, cfE, nchE);
+        ft_arms_join(chT.syms, chT.fts, chT.n, chE.syms, chE.fts, chE.n);
     }
     /* §173：语句臂的臂内释放 —— 状态机直接落账（槽 + 所有局部载体）：
      * 后续解引用 E0512，再 free E0509。§189：臂内 std.move 落 MOVED
@@ -302,6 +307,8 @@ static Type *check_if(Node *n, Type *expect) {
      * （和"块没被收割"是 `{}` 同一条规则）。类型只能由 then 臂给出。 */
     else                           r = tt;
     if (lb) label_pop();
+    tag_snap_free(&snapT); tag_snap_free(&endT); tag_snap_free(&endE);
+    ft_field_diff_free(&chT); ft_field_diff_free(&chE);
     n->ty = r;
     return r;
 }
@@ -327,14 +334,20 @@ static Type *check_while(Node *n, Type *expect) {
         if (cap_ty && n->name) {
             Symbol *s = scope_add(&sc, n->name, SK_CAPTURE);
             if (s) { s->ty = cap_ty; s->state = 2;
+                     s->in_fn = true;
+                     s->storage_tag = tag_stack_new(ST_STORAGE, n->a, 0);
                      tag_capture_inherit(s, n->a, NULL);
-                     if (n->cap_ptr) cap_mark_borrow(s); }
+                     if (n->cap_ptr) cap_mark_borrow(s, n->a); }
         }
-        TagSnap snapW;                     /* §170：循环配平 */
+        TagSnap snapW, endW = {0};       /* 零次迭代入口也参与合流 */
         tag_snap(&snapW);
         check_block(n->b);
+        tag_snap(&endW);
         tag_loop_balance(n->b, &snapW);
         tag_restore(&snapW);
+        tag_join_locals(&endW, &snapW);
+        tag_snap_free(&snapW); tag_snap_free(&endW);
+        tag_scope_exit(&sc, n->b);
         scope_pop(&sc);
     }
 
@@ -368,12 +381,17 @@ static Type *check_while(Node *n, Type *expect) {
                 /* 报错后仍把捕获绑成 error 类型：只报上面那一条，别让 else
                  * 臂里对 e 的引用级联成一串未知标识符。 */
                 Symbol *s = scope_add(&sc, n->d->name, SK_CAPTURE);
-                if (s) { s->ty = ty_error(); s->state = 2; }
+                if (s) { s->ty = ty_error(); s->state = 2;
+                         s->storage_tag = tag_stack_new(ST_STORAGE, n->a, 0); }
                 n->d->sym = s;
             }
-            TagSnap snapE; tag_snap(&snapE);
+            TagSnap snapE, endE = {0}; tag_snap(&snapE);
             et = check_arm(n->c, expect);
+            tag_snap(&endE);
             tag_restore(&snapE);
+            tag_join_locals(&endE, &snapE);
+            tag_snap_free(&snapE); tag_snap_free(&endE);
+            tag_scope_exit(&sc, n->c);
             scope_pop(&sc);
         }
     }
@@ -394,6 +412,8 @@ static Type *check_while(Node *n, Type *expect) {
     }
     else if (et)       r = et;
     else               r = ty_void();
+    Node *ev = n->c && n->c->kind == NK_BLOCK ? n->c->d : n->c;
+    join_value_tags(n, lb ? lb->val : NULL, ev);
     label_pop();
     n->ty = r;
     return r;
@@ -429,6 +449,7 @@ static bool seq_len(Node *s, uint64_t *out) {
     Node *base = s->a;
     uint64_t blen = 0;
     if (ty_is_array_ptr(base->ty)) blen = base->ty->elem->len;
+    else if (base->ty && base->ty->kind == TY_ARRAY) blen = base->ty->len;
     else if (base->ty && base->ty->has_len) blen = base->ty->len;
     else if (base->kind == NK_UN && base->a && base->a->kind == NK_ARRAY_LIT) blen = (uint64_t)base->a->nitems;
     else if (base->kind == NK_ARRAY_LIT) blen = (uint64_t)base->nitems;
@@ -514,6 +535,9 @@ static Type *check_for(Node *n, Type *expect) {
     Type  *binds[8];
     bool   len_known[8];
     uint64_t lens[8];
+    int   seq_tag[8] = {0};
+    int   seq_state[8] = {0};
+    FieldTag *seq_ft[8] = {0};
 
     for (int i = 0; i < nseq && i < 8; i++) {
         Node *s = n->items[i];
@@ -552,6 +576,16 @@ static Type *check_for(Node *n, Type *expect) {
         /* 长度：范围、定长数组上的视图都算得出来；切片本身不带长度 */
         lens[i] = 0;
         len_known[i] = seq_len(s, &lens[i]);
+        if (s->kind != NK_RANGE && s->ty && s->ty->kind == TY_SLICE) {
+            bool ambiguous;
+            seq_ft[i] = tag_for_element_ftags(s, lens[i], len_known[i],
+                                               &seq_tag[i], &seq_state[i], &ambiguous);
+            if (ambiguous && tag_diag_once(s->line, s->col))
+                diag_code_at("E0521", s->line, s->col,
+                    "this sequence is iterated at runtime and its elements carry "
+                    "different or unknown tracked pointers -- copy the element out "
+                    "with a constant index or an explicit tag binding before the loop");
+        }
     }
 
     /* 编译期可算的长度必须一致 */
@@ -591,14 +625,25 @@ static Type *check_for(Node *n, Type *expect) {
             if (!s) { err_at(b->line, b->col, "duplicate binding '%s'", b->name); continue; }
             s->ty = i < nseq ? binds[i] : ty_invalid();
             s->state = 2;
+            s->in_fn = true;
+            s->storage_tag = tag_stack_new(ST_STORAGE, b, 0);
+            if (i < nseq) {
+                s->tag_id = seq_tag[i];
+                s->tag_state = seq_state[i];
+                s->ftags = ft_clone(seq_ft[i]);
+            }
             b->sym = s;
             b->ty = s->ty;
         }
-        TagSnap snapF;                     /* §170：循环配平 */
+        TagSnap snapF, endF = {0};
         tag_snap(&snapF);
         check_block(n->b);
+        tag_snap(&endF);
         tag_loop_balance(n->b, &snapF);
         tag_restore(&snapF);
+        tag_join_locals(&endF, &snapF);
+        tag_snap_free(&snapF); tag_snap_free(&endF);
+        tag_scope_exit(&sc, n->b);
         scope_pop(&sc);
     }
 
@@ -619,6 +664,7 @@ static Type *check_for(Node *n, Type *expect) {
     if (lb && lb->has) r = lb->ty;
     else if (et)       r = et;
     else               r = ty_void();
+    join_value_tags(n, lb ? lb->val : NULL, NULL);
     label_pop();
     n->ty = r;
     return r;
@@ -833,12 +879,10 @@ static Type *check_switch(Node *n, Type *expect) {
     /* §174：switch 臂与 if 臂同口径（臂快照 / 出口对账 / 逐臂 join）。
      * 此前臂间不回滚：第一臂的 free 事件泄漏进第二臂（两臂各 free
      * 一次被假报 E0509 双重释放），臂内分配也无法与臂值对账。 */
-    TagSnap snapS;
+    TagSnap snapS, acc = {0}, endA = {0};
     tag_snap(&snapS);
     ArmExit exAcc = { 0, TC_NONE, NULL, false };
-    Symbol *chAcc[TAG_SNAP_MAX];
-    FieldTag *cfAcc[TAG_SNAP_MAX];
-    int nAcc = 0;
+    TagFieldDiff chAcc = {0};
     n->tag_id = 0;
     n->tag_state = TC_NONE;
 
@@ -894,9 +938,7 @@ static Type *check_switch(Node *n, Type *expect) {
         }
 
         ArmExit ex = { 0, TC_NONE, NULL, false };
-        Symbol *chA[TAG_SNAP_MAX];
-        FieldTag *cfA[TAG_SNAP_MAX];
-        int nA = 0;
+        TagFieldDiff chA = {0};
         {
             Scope sc;
             scope_push(&sc);
@@ -905,12 +947,14 @@ static Type *check_switch(Node *n, Type *expect) {
                 if (cs) {
                     cs->ty = cap_ty;
                     cs->state = 2;
+                    cs->in_fn = true;
+                    cs->storage_tag = tag_stack_new(ST_STORAGE, n->a, 0);
                     /* §174：捕获载荷继承主语 tag 账（变体名取自模式） */
                     const char *vn =
                         (arm->nitems == 1 && arm->items[0]->kind == NK_FIELD &&
                          arm->items[0]->name) ? arm->items[0]->name : NULL;
                     tag_capture_inherit(cs, n->a, vn);
-                    if (arm->cap_ptr) cap_mark_borrow(cs);
+                    if (arm->cap_ptr) cap_mark_borrow(cs, n->a);
                 }
             }
             Type *at = check_arm(arm->a, expect);
@@ -921,8 +965,10 @@ static Type *check_switch(Node *n, Type *expect) {
             Node *armval = lb ? lb->val
                          : ((arm->a && arm->a->kind == NK_BLOCK) ? arm->a->d : arm->a);
             ex = tag_arm_reconcile(armval, arm->a, snapS.state, snapS.n, snapS.total);
-            nA = ft_arm_collect(&snapS, chA, cfA, TAG_SNAP_MAX);
+            ft_arm_collect(&snapS, &chA);
+            tag_snap(&endA);
             tag_restore(&snapS);
+            tag_scope_exit(&sc, arm->a ? arm->a : arm);
 
             scope_pop(&sc);
 
@@ -937,26 +983,35 @@ static Type *check_switch(Node *n, Type *expect) {
          * 交集直接写回符号：chAcc 的符号就是 g_locals 链上的活符号。 */
         if (i == 0) {
             exAcc = ex;
-            for (int k = 0; k < nA && k < TAG_SNAP_MAX; k++) {
-                chAcc[k] = chA[k];
-                cfAcc[k] = cfA[k];
-            }
-            nAcc = nA;
+            acc = endA;
+            endA = (TagSnap){0};
+            chAcc = chA;
+            chA = (TagFieldDiff){0};
         } else {
             tag_join_arms(n, exAcc, ex);
+            tag_join_locals(&acc, &endA);
+            tag_snap_free(&acc);
+            tag_snap(&acc);
             exAcc.tag = n->tag_id;
             exAcc.state = n->tag_state;
             exAcc.val = NULL;
             exAcc.stmt = exAcc.stmt || ex.stmt;
-            for (int a2 = 0; a2 < nAcc && a2 < TAG_SNAP_MAX; a2++)
-                for (int b2 = 0; b2 < nA && b2 < TAG_SNAP_MAX; b2++)
-                    if (chA[b2] == chAcc[a2]) {
-                        FieldTag *nt = ft_arms_intersect(cfAcc[a2], cfA[b2]);
-                        chAcc[a2]->ftags = nt;
-                        cfAcc[a2] = nt;
+            for (int a2 = 0; a2 < chAcc.n; a2++)
+                for (int b2 = 0; b2 < chA.n; b2++)
+                    if (chA.syms[b2] == chAcc.syms[a2]) {
+                        FieldTag *nt = ft_arms_intersect(chAcc.fts[a2], chA.fts[b2]);
+                        chAcc.syms[a2]->ftags = nt;
+                        chAcc.fts[a2] = nt;
                         break;
                     }
         }
+        tag_snap_free(&endA);
+        ft_field_diff_free(&chA);
+    }
+
+    if (n->nitems == 1 && exAcc.tag) {
+        n->tag_id = exAcc.tag;
+        n->tag_state = exAcc.state;
     }
 
     /* §173：语句臂的臂内释放——join 后终局落账（槽 + 所有局部载体）：
@@ -992,6 +1047,8 @@ static Type *check_switch(Node *n, Type *expect) {
     if (lb) r = lb->has ? lb->ty : ty_void();
     else    r = result ? result : ty_void();
     if (lb) label_pop();
+    tag_snap_free(&snapS); tag_snap_free(&acc);
+    ft_field_diff_free(&chAcc);
     n->ty = r;
     return r;
 }

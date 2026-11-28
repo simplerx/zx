@@ -701,13 +701,14 @@ static bool libc_declared(const char *s) {
  * 撞上任何一个都加个下划线后缀，免得把 abs() 之类重定义掉。 */
 static bool c_keyword(const char *s) {
     if (libc_declared(s)) return true;
+    /* main 不转义：入口定义固定为 C main，函数别名引用必须保持同名。 */
     static const char *kw[] = {
         /* C11 关键字 */
         "auto","break","case","char","const","continue","default","do","double",
         "else","enum","extern","float","for","goto","if","inline","int","long",
         "register","restrict","return","short","signed","sizeof","static","struct",
         "switch","typedef","union","unsigned","void","volatile","while","bool",
-        "true","false","main","noreturn",
+        "true","false","noreturn",
         /* stdint / stddef / stdbool 里的类型名 */
         "size_t","ptrdiff_t","intptr_t","uintptr_t","intmax_t","uintmax_t",
         "int8_t","int16_t","int32_t","int64_t","uint8_t","uint16_t","uint32_t","uint64_t",

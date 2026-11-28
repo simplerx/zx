@@ -3,6 +3,11 @@
  */
 #include "sema_internal.h"
 
+static void reject_borrow_arg(Node *arg) {
+    diag_code_at("E0532", arg->line, arg->col,
+        "cannot pass a captured pointer as a function argument: it is a "
+        "borrow that must not escape the capture scope");
+}
 
 static Type *check_method_call(Node *n) {
     Node *fld = n->a;
@@ -26,6 +31,10 @@ static Type *check_method_call(Node *n) {
         for (int i = 0; i < n->nitems; i++) {
             Type *got = check_expr(n->items[i], mft->params[i]);
             coerce_node(n->items[i], got, mft->params[i], "argument");
+            if (tag_expr_borrow(n->items[i])) {
+                reject_borrow_arg(n->items[i]);
+                return type_of(n, ty_invalid());
+            }
         }
         n->inst = fld->inst;
         n->ival = 0;
@@ -43,10 +52,21 @@ static Type *check_method_call(Node *n) {
     Type *want = mft->params[0];
     Node *arg0 = recv;
 
-    if (want->kind == TY_PTR && !(rt && rt->kind == TY_PTR && ty_eq(rt, want))) {
+    /* §274：不可变接收者在调用点转换，不改变方法签名或 ABI。
+     * 指针调按值方法等价于显式 `.0`；值调只读指针方法等价于显式 `&`。 */
+    if (want->kind != TY_PTR && rt && rt->kind == TY_PTR &&
+        !rt->has_len && ty_eq(rt->elem, want)) {
+        Node *deref = node_new(NK_FIELD, recv->line, recv->col);
+        deref->a = recv;
+        deref->ival = 0;
+        deref->ty = rt->elem;
+        arg0 = deref;
+    } else if (want->kind == TY_PTR &&
+               !(rt && rt->kind == TY_PTR && ty_eq(rt, want))) {
         if (rt && rt->kind == TY_PTR) {
             /* 已经是指针了：剩下的只是 const 的加减，交给普通转换 */
-        } else if (rt->kind == TY_STRUCT || rt->kind == TY_UNION || rt->kind == TY_TUPLE) {
+        } else if (rt->kind == TY_STRUCT || rt->kind == TY_UNION ||
+                   rt->kind == TY_ENUM || rt->kind == TY_TUPLE) {
             if (!addr_ok(recv)) {
                 /* §210：rvalue 接收者没法取地址，必须绑到有存储的局部变量。
                  * 建议的绑定种类要看方法要不要可变接收者——对 `*Self` 方法
@@ -71,6 +91,10 @@ static Type *check_method_call(Node *n) {
     }
     if (coerce_node(arg0, arg0->ty, want, "receiver")->kind == TY_INVALID)
         return type_of(n, ty_invalid());
+    if (want->kind == TY_PTR && tag_expr_borrow(arg0)) {
+        reject_borrow_arg(arg0);
+        return type_of(n, ty_invalid());
+    }
 
     int nargs = n->nitems;
     if (nargs + 1 != mft->nparams)
@@ -84,9 +108,14 @@ static Type *check_method_call(Node *n) {
     n->nitems = nargs + 1;
     n->meth_done = true;
 
-    for (int i = 1; i < n->nitems; i++)
+    for (int i = 1; i < n->nitems; i++) {
         coerce_node(n->items[i], check_expr(n->items[i], mft->params[i]),
                     mft->params[i], "argument");
+        if (tag_expr_borrow(n->items[i])) {
+            reject_borrow_arg(n->items[i]);
+            return type_of(n, ty_invalid());
+        }
+    }
 
     n->inst = fld->inst;
     n->ival = 0;
@@ -186,7 +215,21 @@ Type *check_call(Node *n, Type *expect) {
             }
             Type *ft = check_expr(n->items[first], ty_slice(ty_u8(), true));
             coerce_node(n->items[first], ft, ty_slice(ty_u8(), true), "format string");
-            for (int i = first + 1; i < n->nitems; i++) check_expr(n->items[i], NULL);
+            if (tag_expr_borrow(n->items[first])) {
+                reject_borrow_arg(n->items[first]);
+                return type_of(n, ty_invalid());
+            }
+            if (isfmt && tag_expr_borrow(n->items[0])) {
+                reject_borrow_arg(n->items[0]);
+                return type_of(n, ty_invalid());
+            }
+            for (int i = first + 1; i < n->nitems; i++) {
+                check_expr(n->items[i], NULL);
+                if (tag_expr_borrow(n->items[i])) {
+                    reject_borrow_arg(n->items[i]);
+                    return type_of(n, ty_invalid());
+                }
+            }
             check_fmt_args(n, first, n->nitems - first - 1);
             if (isfmt) return type_of(n, ty_err(ty_slice(ty_u8(), false)));
             return type_of(n, ty_void());
@@ -232,7 +275,6 @@ Type *check_call(Node *n, Type *expect) {
             if (!c.ok)
                 return BAD(n->items[base + 1],
                            "std.%s count must be known at compile time", m->name);
-            n->esc = stack;          /* 栈那份指向当前帧：逃逸检查盯它 */
             if (!stack) {
                 if (!n->reg_slot) {
                     int sz = ty_size(elem), al = ty_align(elem);
@@ -302,9 +344,9 @@ Type *check_call(Node *n, Type *expect) {
             Type *want = ft->params[i];
             Type *got = check_expr(n->items[i], want);
             coerce_node(n->items[i], got, want, "argument");
-            if (expr_borrow(n->items[i])) {
+            if (tag_expr_borrow(n->items[i])) {
                 diag_code_at("E0532", n->items[i]->line, n->items[i]->col,
-                    "cannot pass a captured pointer `*t` as a function argument: it is a "
+                    "cannot pass a captured pointer as a function argument: it is a "
                     "borrow that must not escape the capture scope");
                 return type_of(n, ty_invalid());
             }
@@ -323,6 +365,10 @@ Type *check_call(Node *n, Type *expect) {
                 return BAD(n, "std.debug.panic takes a message");
             Type *mt = check_expr(n->items[0], ty_slice(ty_u8(), true));
             coerce_node(n->items[0], mt, ty_slice(ty_u8(), true), "message");
+            if (tag_expr_borrow(n->items[0])) {
+                reject_borrow_arg(n->items[0]);
+                return type_of(n, ty_invalid());
+            }
             debug_inject_loc(n);
             return type_of(n, ty_noreturn());
         }
@@ -333,6 +379,10 @@ Type *check_call(Node *n, Type *expect) {
             coerce_node(n->items[0], bt, ty_bool(), "condition");
             Type *mt = check_expr(n->items[1], ty_slice(ty_u8(), true));
             coerce_node(n->items[1], mt, ty_slice(ty_u8(), true), "message");
+            if (tag_expr_borrow(n->items[0]) || tag_expr_borrow(n->items[1])) {
+                reject_borrow_arg(n->items[tag_expr_borrow(n->items[0]) ? 0 : 1]);
+                return type_of(n, ty_invalid());
+            }
             debug_inject_loc(n);
             return type_of(n, ty_void());
         }
@@ -348,7 +398,13 @@ Type *check_call(Node *n, Type *expect) {
         coerce_node(n->items[0], ht, ty_usize(), "handle");
         Type *ft = check_expr(n->items[1], ty_slice(ty_u8(), true));
         coerce_node(n->items[1], ft, ty_slice(ty_u8(), true), "format string");
-        for (int i = 2; i < n->nitems; i++) check_expr(n->items[i], NULL);
+        for (int i = 0; i < n->nitems; i++) {
+            if (i >= 2) check_expr(n->items[i], NULL);
+            if (tag_expr_borrow(n->items[i])) {
+                reject_borrow_arg(n->items[i]);
+                return type_of(n, ty_invalid());
+            }
+        }
         check_fmt_args(n, 1, n->nitems - 2);
         return type_of(n, ty_void());
     }
@@ -388,9 +444,9 @@ Type *check_call(Node *n, Type *expect) {
         coerce_node(n->items[i], got, want, "argument");
         /* §221：捕获指针 *t 一律不许作为实参传出（用户裁定）——它是对
          * 原对象的栈借用，函数可能把它存到比捕获作用域更长的地方。 */
-        if (expr_borrow(n->items[i])) {
+        if (tag_expr_borrow(n->items[i])) {
             diag_code_at("E0532", n->items[i]->line, n->items[i]->col,
-                "cannot pass a captured pointer `*t` as a function argument: it is a "
+                "cannot pass a captured pointer as a function argument: it is a "
                 "borrow that must not escape the capture scope");
             return type_of(n, ty_invalid());
         }
@@ -1231,7 +1287,6 @@ static Type *ce_07_nk_ident(Node *n) {
             if (b) { n->type_val = b; return type_of(n, ty_type()); }
             const char *sug = suggest_ident(n->name);
             if (sug) diag_help("did you mean `%s`?", sug);
-            if (getenv("ZX_DBG")) fprintf(stderr, "[dbg] unknown '%s' in fn=%s depth=%d root=%d\n", n->name, g_cur_fn_name ? g_cur_fn_name : "?", g_fn_depth, (int)g_root_stmts);
             return BAD(n, "unknown identifier '%s'", n->name);
         }
         n->sym = s;
@@ -1247,10 +1302,10 @@ static Type *ce_07_nk_ident(Node *n) {
             return BAD_CODE("E0401", n, "'%s' is used before its declaration "
                             "in this block", n->name);
         }
-        /* §192：闭包不支持。嵌套函数体里解析到**外层函数的**栈槽
+        /* §192：闭包不支持。嵌套函数体里解析到**外层函数的**局部
          * （fn_d 更浅）——以前 sema 放行，后端发一个谁也不认识的 C 名，
          * 最后被包装成 B1001「编译器 bug」。在这里给人话。fn 值绑定
-         * （`const F = fn …`）不是栈槽：嵌套函数之间的兄弟引用合法，
+         * （`const F = fn …`）不是外层局部值：嵌套函数之间的兄弟引用合法，
          * 不算捕获。 */
         if (s->fn_d > 0 && s->fn_d < g_fn_depth &&
             !(s->decl && s->decl->kind == NK_DECL && s->decl->b &&
@@ -1308,6 +1363,7 @@ static Type *ce_10_nk_unwrap(Node *n) {
     {
         Type *t = check_expr(n->a, NULL);
         if (!t || t->kind == TY_INVALID) return ty_invalid();
+        tag_check_deref(n->a);
         if (t->kind == TY_NULL)
             /* `null` 自己没有类型——它只是"给 ?T 填空"的那个字面量，不是 ?T。
              * 所以 `null.?` 不是"运行时空解包"，而是压根没东西可解。 */
@@ -1410,8 +1466,10 @@ static Type *ce_12_nk_try_capture(Node *n) {
         /* `?T` 的空值走捕获时错误码是保留码 error.null（65535）。 */
         Type *payload = t->elem;
 
-        ArmExit exOK = { 0, TC_NONE, NULL };   /* 成功臂：无 tag 事件 */
-        ArmExit exErr;
+        ArmExit exOK = { 0 };
+        tag_of_expr(n->a, &exOK.tag, &exOK.state);
+        exOK.val = n->a;
+        ArmExit exErr = { 0 };
         TagSnap snapT;
         tag_snap(&snapT);
         Type *bt;
@@ -1421,6 +1479,8 @@ static Type *ce_12_nk_try_capture(Node *n) {
             if (n->name) {
                 Symbol *s = scope_add(&sc, n->name, SK_CAPTURE);
                 if (s) { s->ty = ty_error(); s->state = 2;
+                         s->in_fn = true;
+                         s->storage_tag = tag_stack_new(ST_STORAGE, n->a, 0);
                          s->reg_slot = region_of_expr(n->a);
                          s->cap_src = n->a; }
             }
@@ -1430,14 +1490,16 @@ static Type *ce_12_nk_try_capture(Node *n) {
             if (n->b->kind == NK_BLOCK) {
                 exErr = tag_arm_reconcile(n->b->d, n->b, snapT.state, snapT.n, snapT.total);
             } else {
-                exErr = (ArmExit){ 0, TC_NONE, NULL };
+                exErr = (ArmExit){ 0 };
             }
+            tag_scope_exit(&sc, n->b);
             tag_restore(&snapT);
             scope_pop(&sc);
         }
-        /* 成功臂没动 tag；错误臂若臂内 free/alloc 未按约定传出，reconcile 已报。
-         * 合并：LIVE⊔FREED(null 载体)→COND，等待使用者判空防守。 */
+        /* 成功载荷与错误臂都可能携带既有标签，不能只在出现分配/释放
+         * 事件时合并。LIVE⊔FREED(null 载体)→COND。 */
         tag_join_arms(n, exOK, exErr);
+        tag_snap_free(&snapT);
 
         if (!bt || bt->kind == TY_INVALID) return ty_invalid();
         Type *r = unify(n, payload, bt);
@@ -1462,6 +1524,11 @@ static Type *ce_13_nk_orelse(Node *n, Type *expect) {
         if (t->kind != TY_OPT && t->kind != TY_ERR)
             return BAD(n, "`orelse` needs an optional or an error union, found `%s`", ty_str(t));
         Type *elem = t->elem;
+        ArmExit exLeft = { 0 };
+        tag_of_expr(n->a, &exLeft.tag, &exLeft.state);
+        exLeft.val = n->a;
+        TagSnap snapO;
+        tag_snap(&snapO);
         Type *alt = check_expr(n->b, elem);
         /* §200：`orelse` 的兜底臂不产出值时允许——臂末尾是 `return` /
          * `continue` / noreturn 调用 / 无限循环（永不落到块尾），它根本
@@ -1476,6 +1543,14 @@ static Type *ce_13_nk_orelse(Node *n, Type *expect) {
          * 单语句臂 `orelse break;` / `orelse out: v;` 与块臂 `{ break; }`
          * 都覆盖（后者递归进 NK_BLOCK 的 items）。 */
         if (!alt_exits && n->b) alt_exits = arm_ends_with_yield(n->b);
+        ArmExit exRight = { 0 };
+        if (!alt_exits && n->b) {
+            Node *val = n->b->kind == NK_BLOCK ? n->b->d : n->b;
+            exRight = tag_arm_reconcile(val, n->b, snapO.state, snapO.n, snapO.total);
+        }
+        tag_restore(&snapO);
+        tag_join_arms(n, exLeft, exRight);
+        tag_snap_free(&snapO);
         n->flag = alt_exits;         /* 后端据此跳过右支的 C 表达式位置 */
         if (!alt_exits)
             coerce_node(n->b, alt, elem, "`orelse` alternative");

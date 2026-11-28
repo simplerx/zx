@@ -120,6 +120,10 @@ open(os.path.join(TESTDIR, "zx.json"), "w", encoding="utf-8").write(
 open(os.path.join(TESTDIR, "vendor", "ext.zx"), "w", encoding="utf-8").write(
     'pub const VERSION = "1.2.3";\n\npub const hello = fn (n: []const u8) void {\n    n;\n};\n\n'
     'pub const Cfg = struct {\n    pub w: i32,\n    pub h: i32,\n};\n')
+open(os.path.join(TESTDIR, "vendor", "ball.zx"), "w", encoding="utf-8").write(
+    'pub const moduleValue = 17;\n'
+    'pub const make = fn () i32 { return moduleValue; };\n')
+open(os.path.join(TESTDIR, "vendor", "empty.zx"), "w", encoding="utf-8").write('')
 open(os.path.join(TESTDIR, "libs", "util.zx"), "w", encoding="utf-8").write(
     'pub const twice = fn (x: i32) i32 {\n    return x * 2;\n};\n')
 # 本地 Zx 工程依赖：projdep 自身再依赖 baseproj，LSP 必须递归展开 deps。
@@ -128,8 +132,20 @@ os.makedirs(os.path.join(TESTDIR, "baseproj", "src"), exist_ok=True)
 open(os.path.join(TESTDIR, "projdep", "zx.json"), "w", encoding="utf-8").write(
     '{"name":"projdep","main":"src/main.zx","deps":["../baseproj"]}\n')
 open(os.path.join(TESTDIR, "projdep", "src", "main.zx"), "w", encoding="utf-8").write(
-    'const base = @mod("baseproj");\n\npub const answer = fn () i32 { return base.value(); };\n'
-    'pub const BasePoint = base.Point;\n')
+    'const base = @mod("baseproj");\nconst local = @mod("types.zx");\n\n'
+    'pub const answer = fn () i32 { return base.value(); };\n'
+    'pub const BasePoint = base.Point;\n'
+    'pub const BasePointAlias = BasePoint;\n'
+    'pub const BasePointChain = BasePointAlias;\n'
+    'pub const RelativePoint = local.Point;\n'
+    'pub const RelativePointAlias = RelativePoint;\n'
+    'pub const RelativeChoice = local.Choice;\n'
+    'pub const RelativeKind = local.Kind;\n')
+RELATIVE_SRC = (
+    'pub const Point = struct { pub r: i32, pub s: i32 };\n'
+    'pub const Choice = union(enum) { left: i32, right: i32 };\n'
+    'pub const Kind = enum { idle, busy };\n')
+open(os.path.join(TESTDIR, "projdep", "src", "types.zx"), "w", encoding="utf-8").write(RELATIVE_SRC)
 open(os.path.join(TESTDIR, "baseproj", "zx.json"), "w", encoding="utf-8").write(
     '{"name":"baseproj","main":"src/main.zx"}\n')
 open(os.path.join(TESTDIR, "baseproj", "src", "main.zx"), "w", encoding="utf-8").write(
@@ -138,6 +154,15 @@ open(os.path.join(TESTDIR, "baseproj", "src", "main.zx"), "w", encoding="utf-8")
 EXTUSE = """const ext = @mod("ext");
 const util = @mod("util");
 const projdep = @mod("projdep");
+const ball = @mod("ball");
+const ball_mod = @mod("ball");
+const empty_ball = @mod("empty");
+
+const BallJoint = struct {
+    ball: *BallJoint,
+    empty_ball: *BallJoint,
+    angle: f32,
+};
 
 const main = fn () i32 {
     ext.hello("x");
@@ -145,7 +170,20 @@ const main = fn () i32 {
     util.twice(1);
     projdep.
     projdep.BasePoint.
+    projdep.BasePointAlias.
+    projdep.BasePointChain.
+    projdep.RelativePoint.
+    projdep.RelativePointAlias.
+    projdep.RelativeChoice.
+    projdep.RelativeKind.
+    projdep.RelativePoint.r;
+    projdep.RelativePointAlias.r;
     projdep.answer();
+    ball.
+    ball_mod.
+    empty_ball.
+    ball.make();
+    ball_mod.make();
     var c = ext.Cfg{ .w = 1 };
     c.
     ext.Cfg{.
@@ -732,6 +770,61 @@ check("completion.projectMain", {"answer", "BasePoint"} <= labels, str(sorted(la
 off = EXTUSE.index("projdep.BasePoint.") + len("projdep.BasePoint.")
 labels = complete_at(EXTUSE, off, 221)
 check("completion.projectTransitive", {"x", "y"} <= labels, str(sorted(labels))[:240])
+# 同一依赖内的类型别名链也要落到 baseproj 的真实容器，不能只在第一层展开。
+off = EXTUSE.index("projdep.BasePointAlias.") + len("projdep.BasePointAlias.")
+labels = complete_at(EXTUSE, off, 224)
+check("completion.projectTransitiveAlias", {"x", "y"} <= labels, str(sorted(labels))[:240])
+off = EXTUSE.index("projdep.BasePointChain.") + len("projdep.BasePointChain.")
+labels = complete_at(EXTUSE, off, 225)
+check("completion.projectTransitiveChain", {"x", "y"} <= labels, str(sorted(labels))[:240])
+
+# 别名所在文件写 @mod("types.zx") 时，必须相对 projdep/src 解析，不能拿消费者目录。
+off = EXTUSE.index("projdep.RelativePoint.") + len("projdep.RelativePoint.")
+labels = complete_at(EXTUSE, off, 226)
+check("completion.projectRelativeAlias", {"r", "s"} <= labels, str(sorted(labels))[:240])
+off = EXTUSE.index("projdep.RelativePointAlias.") + len("projdep.RelativePointAlias.")
+labels = complete_at(EXTUSE, off, 227)
+check("completion.projectRelativeAliasChain", {"r", "s"} <= labels, str(sorted(labels))[:240])
+# 接收者策略对 struct / union / enum 一视同仁。
+off = EXTUSE.index("projdep.RelativeChoice.") + len("projdep.RelativeChoice.")
+labels = complete_at(EXTUSE, off, 228)
+check("completion.projectRelativeUnion", {"left", "right"} <= labels, str(sorted(labels))[:240])
+off = EXTUSE.index("projdep.RelativeKind.") + len("projdep.RelativeKind.")
+labels = complete_at(EXTUSE, off, 229)
+check("completion.projectRelativeEnum", {"idle", "busy"} <= labels, str(sorted(labels))[:240])
+
+# 模块绑定与同名字段共存时，接收者分类必须先看词法模块绑定。
+for rid, binding in ((232, "ball"), (233, "ball_mod")):
+    needle = f"    {binding}.\n"
+    off = EXTUSE.index(needle) + len(f"    {binding}.")
+    labels = complete_at(EXTUSE, off, rid)
+    check(f"completion.moduleFieldCollision.{binding}",
+          {"make", "moduleValue"} <= labels and not ({"angle", "ball"} & labels),
+          str(sorted(labels))[:240])
+
+# 模块已绑定但暂无公开成员时，空列表才是正确结果；不能回退到同名字段类型。
+needle = "    empty_ball.\n"
+off = EXTUSE.index(needle) + len("    empty_ball.")
+labels = complete_at(EXTUSE, off, 234)
+check("completion.moduleFieldCollision.emptyModule",
+      not labels, str(sorted(labels))[:240])
+
+# 成员跳转必须落到别名链源头的真实文件与字节偏移，而不是别名声明文件。
+for rid, alias in ((230, "RelativePoint"), (231, "RelativePointAlias")):
+    needle = f"projdep.{alias}.r"
+    off = EXTUSE.index(needle) + len(needle)
+    send({"jsonrpc": "2.0", "id": rid, "method": "textDocument/definition", "params": {
+        "textDocument": {"uri": exturi}, "position": pos(EXTUSE, off)}})
+    r, _ = recv_id("definition", rid)
+    loc = r.get("result") if r else None
+    if isinstance(loc, list):
+        loc = loc[0] if loc else None
+    target = loc.get("uri", "") if isinstance(loc, dict) else ""
+    start = loc.get("range", {}).get("start", {}) if isinstance(loc, dict) else {}
+    expected = pos(RELATIVE_SRC, RELATIVE_SRC.index("r:"))
+    check(f"definition.projectRelativeAlias.{alias}",
+          "projdep/src/types.zx" in target.replace("\\", "/")
+          and start == expected, str(loc)[:240])
 
 # 10b 模块成员的 detail 必须是函数签名/声明类型，不能落到绑定别名
 # （2026-11-08 截图：`g.` 弹窗每条右侧都标 `g`，看不出哪条是函数）。

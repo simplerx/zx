@@ -2,8 +2,8 @@
 //
 // `self: Self` 是普通按值参数（进函数复制一份，和方法外的普通形参同规则：
 // 只读槽位）；`self: *const Self` 只读、`self: *Self` 可改调用者本身。
-// 编译器不再按 ty_size(Self) 偷偷把 `Self` 升级成 `const Self *`，调用点
-// 也不再自动补 `&` 或自动解引用——要指针就自己写出来。
+// 编译器不再按 ty_size(Self) 偷偷把 `Self` 升级成 `const Self *`；§274 只在
+// 调用点转换不可变接收者：值可自动取只读地址，指针可自动解引用后按值传递。
 // expect-exit: 0
 // expect-output
 // by-val: 3

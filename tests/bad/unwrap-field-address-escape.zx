@@ -1,20 +1,21 @@
-// §201 补丁：`&x.?.field` 的 unwrap 结果会被后端物化到当前帧临时，
+// §201 补丁：`&x.?.field` 的可选值 unwrap 结果会被后端物化到当前帧临时，
 // 返回它的字段地址必须拦 E0503，不能生成悬垂 C。
 // expect: E0503
+tag.enable;
 const Item = struct { v: i32 };
-const Box = struct { item: ?*Item };
+const Box = struct { item: ?Item };
 
-const get = fn (b: *Box) ?*Item {
+const get = fn (b: *Box) ?Item{
     return b.item;
 };
 
-const bad = fn (b: *Box) *i32 {
+const bad = fn (b: *Box) * i32 {
     return &get(b).?.v;
 };
 
 pub const main = fn () i32 {
     var it = Item{ .v = 42 };
-    var b = Box{ .item = &it };
+    var b = Box{ .item = it };
     if (bad(&b).0 == 42) { return 0; }
     return 1;
 };

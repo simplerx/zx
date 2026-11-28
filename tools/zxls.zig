@@ -1136,6 +1136,7 @@ fn moduleAliasIn(text: []const u8, name: []const u8) ?[]const u8 {
         if (!std.mem.startsWith(u8, rest, "const ")) continue;
         rest = rest[6..];
         if (!std.mem.startsWith(u8, rest, name)) continue;
+        if (rest.len > name.len and isIdentChar(rest[name.len])) continue;
         rest = rest[name.len..];
         var k: usize = 0;
         while (k < rest.len and (rest[k] == ' ' or rest[k] == '\t')) k += 1;
@@ -4165,13 +4166,54 @@ fn containerInitOf(stmt: []const u8) ?[]const u8 {
     return null;
 }
 
-const ModContainer = struct { txt: []const u8, member: []const u8 };
+const ModContainer = struct { txt: []const u8, member: []const u8, path: []const u8, is_alias: bool };
+
+fn resolvedSrcPath(doc: *const Document, text: []const u8, target: []const u8,
+                   src: []const u8) []const u8 {
+    if (std.mem.eql(u8, src, text)) return doc.path;
+    var end = target.len;
+    while (end > 0) {
+        if (qualModulePath(doc, text, target[0..end])) |p| {
+            if (readFileSmall(p)) |pt| {
+                if (std.mem.eql(u8, pt, src)) {
+                    gpa.free(pt);
+                    return p;
+                }
+                gpa.free(pt);
+            }
+            gpa.free(p);
+        }
+        end = std.mem.lastIndexOfScalar(u8, target[0..end], '.') orelse 0;
+    }
+    return pathOfSrcText(doc, src) orelse doc.path;
+}
+
+/// 展开模块文件内的容器别名；裸别名只沿本文档声明链查找，避免撞名。
+fn containerAliasOf(doc: *const Document, text: []const u8, member: []const u8,
+                    depth: u8) ?ModContainer {
+    if (depth > 6) return null;
+    const st = findDeclStmt(text, member) orelse return null;
+    if (containerInitOf(st) != null)
+        return .{ .txt = text, .member = member, .path = doc.path, .is_alias = false };
+    const target = trimSl(declInitOf(st) orelse return null);
+    if (!isPurePath(target) or std.mem.eql(u8, target, member)) return null;
+    if (std.mem.indexOfScalar(u8, target, '.') != null) {
+        const pc = resolveContainerPathD(&[_][]const u8{text}, doc, text, target, depth + 1) orelse return null;
+        return .{ .txt = pc.src, .member = dupe(pc.name),
+                  .path = resolvedSrcPath(doc, text, target, pc.src), .is_alias = true };
+    }
+    if (containerAliasOf(doc, text, target, depth + 1)) |mc|
+        return .{ .txt = mc.txt, .member = mc.member, .path = mc.path, .is_alias = true };
+    return null;
+}
 
 /// KEEP — vendor/deps 导入的容器 `vp.Cfg` / `std.Widget`：
 /// 本文件与 std 目录扫描（scanFiles）都够不到模块文件，容器体必须按
 /// 绑定解析。用户 2026-11-08：从 vendor 导入的 struct、fn 和原生不一样，
 /// 字段/成员也要查得到。限定名（恰好一段 `绑定.容器`）、绑定存在、
-/// 模块文件里该成员确实是容器，三条都成立才命中。
+/// 模块文件里该成员是容器或可展开的容器别名，三条都成立才命中。
+/// `pub const Alias = other.Container` 与同模块别名链必须继续展开到真实
+/// 容器；解析时以别名所在文件为文档上下文，保留编译器的相对导入语义。
 fn modContainerOf(doc: *const Document, text: []const u8, qualified: []const u8) ?ModContainer {
     const d = std.mem.lastIndexOfScalar(u8, qualified, '.') orelse return null;
     if (d == 0 or d + 1 >= qualified.len) return null;
@@ -4181,14 +4223,24 @@ fn modContainerOf(doc: *const Document, text: []const u8, qualified: []const u8)
     var mm: ?[]const u8 = moduleOfBinding(text, bind);
     if (mm == null and std.mem.eql(u8, bind, "std")) mm = "std";
     const mod = mm orelse return null;
-    if (resolveModuleFile(doc, mod)) |mp| {
-        if (readFileSmall(mp)) |mt| {
-            if (findDeclStmt(mt, member)) |st| {
-                if (containerInitOf(st) != null) return .{ .txt = mt, .member = member };
-            }
-        }
-    }
-    return null;
+    const mp = resolveModuleFile(doc, mod) orelse return null;
+    const mt = readFileSmall(mp) orelse {
+        gpa.free(mp);
+        return null;
+    };
+    var alias_doc = doc.*;
+    alias_doc.path = mp;
+    alias_doc.text = mt;
+    const mc = containerAliasOf(&alias_doc, mt, member, 0) orelse {
+        gpa.free(mt);
+        gpa.free(mp);
+        return null;
+    };
+    const mt_start = @intFromPtr(mt.ptr);
+    const src_start = @intFromPtr(mc.txt.ptr);
+    if (src_start < mt_start or src_start + mc.txt.len > mt_start + mt.len) gpa.free(mt);
+    if (mc.path.ptr != mp.ptr) gpa.free(mp);
+    return mc;
 }
 
 /// 容器体里成员声明的字节偏移（相对 body 起点）。字段（`pub c: i32,`）、
@@ -4440,6 +4492,23 @@ fn definitionOfMember(doc: *const Document, text: []const u8,
         }
     }
     if (!isPurePath(base)) return null;
+
+    // 导入容器的别名链与补全共用解析器，避免末段搜索跳到同名的无关声明。
+    if (modContainerOf(doc, text, base)) |mc| {
+        const body = if (findContainerBody(&[_][]const u8{mc.txt}, mc.member)) |h|
+            h.body
+        else if (genericBodyOf(&[_][]const u8{mc.txt}, mc.member)) |b|
+            b
+        else
+            return null;
+        if (memberDeclOffset(body, word)) |boff| {
+            const base_off = @intFromPtr(body.ptr) - @intFromPtr(mc.txt.ptr);
+            const lc = offsetToLineCol(mc.txt, base_off + boff);
+            const p2 = mc.path;
+            return makeLocation(pathToUri(p2), lc.line, lc.character,
+                                lc.character + @as(u32, @intCast(word.len)));
+        }
+    }
 
     // 容器路径（实例链 / 限定类型路径 / 类型值别名 / 模块里的容器）：逐段
     // 解析拿到容器体，再在体里找成员声明。
@@ -11035,7 +11104,7 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                 if (modContainerOf(doc, text, path)) |mc0| {
                     if (containerMembersAny(&[_][]const u8{mc0.txt}, mc0.member, &decls) != null) {
                         handled = decls.items.len > 0;
-                        if (handled) recv_kind = .ty;
+                        if (handled) recv_kind = if (mc0.is_alias) .instance else .ty;
                         mem_txt = mc0.txt;
                         // 容器名要一起带上：方法签名里的 `Self`、返回类型里的
                         // `?Self` 都靠它换成真名（以前漏了这条，`std.BufReader.`
@@ -11050,12 +11119,13 @@ fn completeAt(doc: *const Document, line: u32, character: u32) []const u8 {
                 }
             }
             if (mod) |m| {
+                decls.clearRetainingCapacity();
                 moduleDecls(doc_dir, m, &decls);
-                handled = decls.items.len > 0;
-                if (handled) {
-                    if (resolveModuleFile(doc, m)) |mp| {
-                        mem_txt = readFileSmall(mp);
-                    }
+                // 已知模块绑定即使暂无公开成员，也不能回退成同名字段/容器。
+                handled = true;
+                recv_kind = .module;
+                if (resolveModuleFile(doc, m)) |mp| {
+                    mem_txt = readFileSmall(mp);
                 }
             }
             // KEEP — std 门面子模块（用户 2026-11-09：std.str. 一个成员都不

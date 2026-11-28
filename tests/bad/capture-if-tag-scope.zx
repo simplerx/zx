@@ -1,0 +1,11 @@
+tag.enable;
+// expect: use after scope
+// expect-code: E0512
+const main = fn () u8 {
+    var o: ?i32 = 7;
+    var q: ?*i32 = null;
+    if (o) * t {
+        q = t;
+    }
+    return (u8)q.?[0];
+};

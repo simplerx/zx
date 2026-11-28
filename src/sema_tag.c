@@ -34,6 +34,114 @@ void tag_call_edge(const char *callee, const char *caller,
 
 Module *g_std_mod;       /* 5931 附近定义：std 模块（豁免判定用） */
 
+int g_tag_auto_seq;
+
+static int stack_tag_name(char *buf, size_t cap) {
+    do {
+        snprintf(buf, cap, "alloc%d", ++g_tag_auto_seq);
+    } while (tag_by_name(buf));
+    return 1;
+}
+
+int tag_stack_new(int kind, Node *site, int base_tag) {
+    if (!g_scope || g_fn_depth <= 0 || g_ct_exec || g_ct_checking ||
+        !(g_mod && g_mod->tags_enabled)) return 0;
+    char namebuf[32];
+    stack_tag_name(namebuf, sizeof namebuf);
+    Node tmp; memset(&tmp, 0, sizeof tmp);
+    tmp.line = site ? site->line : 0;
+    tmp.col = site ? site->col : 0;
+    TagSlot *t = tag_decl(xstrdup(namebuf), &tmp);
+    if (!t) return 0;
+    t->auto_n = true;
+    t->stack = kind != ST_BORROW || base_tag != 0;
+    t->stack_kind = kind;
+    t->base_tag = base_tag;
+    for (Scope *sc = g_scope; sc; sc = sc->parent) t->scope_depth++;
+    t->borrow = kind == ST_BORROW;
+    t->state = TST_LIVE;
+    return (int)(t - g_tslots) + 1;
+}
+
+int tag_addr_origin(Node *o) {
+    if (!o) return 0;
+    if (o->kind == NK_ARRAY_LIT && o->nitems == 0) return 0;
+    if (o->kind == NK_IDENT) {
+        int id = o->sym ? o->sym->storage_tag : 0;
+        TagSlot *t = tag_slot(id);
+        if (t && o->sym->kind == SK_CAPTURE) t->borrow = true;
+        return id;
+    }
+    if (o->kind == NK_UN && o->op == TOK_STAR) {
+        int id, st;
+        tag_of_expr(o->a, &id, &st);
+        return id;
+    }
+    if (o->kind == NK_FIELD) {
+        if (o->a && o->a->ty && o->a->ty->kind == TY_SLICE && o->name &&
+            !strcmp(o->name, "ptr")) {
+            int id, st;
+            tag_of_expr(o->a, &id, &st);
+            return id;
+        }
+        if (o->a && o->a->ty && o->a->ty->kind == TY_PTR &&
+            !ty_is_array_ptr(o->a->ty)) {
+            int id, st;
+            tag_of_expr(o->a, &id, &st);
+            return id;
+        }
+        return tag_addr_origin(o->a);
+    }
+    if (o->kind == NK_INDEX) {
+        if (o->a && o->a->ty &&
+            (o->a->ty->kind == TY_SLICE || o->a->ty->kind == TY_PTR)) {
+            int id, st;
+            tag_of_expr(o->a, &id, &st);
+            return id;
+        }
+        return tag_addr_origin(o->a);
+    }
+    if (o->tag_id) return o->tag_id;
+    return tag_stack_new(ST_TEMP, o, 0);
+}
+
+static bool tag_ptrish(Type *t) {
+    if (!t) return false;
+    if (t->kind == TY_PTR || t->kind == TY_SLICE) return true;
+    if (t->kind == TY_OPT || t->kind == TY_ERR) return tag_ptrish(t->elem);
+    return false;
+}
+
+bool tag_expr_borrow(Node *e) {
+    if (!e) return false;
+    int id, st;
+    tag_of_expr(e, &id, &st);
+    TagSlot *t = tag_slot(id);
+    if (t && t->borrow && (tag_ptrish(e->ty) || expr_taint(e))) return true;
+    Node *fields_expr = e;
+    if (fields_expr->kind == NK_UN && fields_expr->op == TOK_AMP)
+        fields_expr = fields_expr->a;
+    for (FieldTag *f = ftags_of_expr(fields_expr); f; f = f->next) {
+        t = tag_slot(f->slot);
+        if (t && t->borrow) return true;
+    }
+    return false;
+}
+
+int tag_join_origin(int a, int b) {
+    if (a == b) return a;
+    TagSlot *sa = tag_slot(a), *sb = tag_slot(b);
+    if (!sa) return b;
+    if (!sb) return a;
+    if (sa->borrow != sb->borrow) return sa->borrow ? a : b;
+    if (sa->stack != sb->stack) return sa->stack ? a : b;
+    if (!sa->stack) return 0;
+    if (sa->scope_freed != sb->scope_freed) return sa->scope_freed ? a : b;
+    if (sa->scope_depth != sb->scope_depth)
+        return sa->scope_depth > sb->scope_depth ? a : b;
+    return a < b ? a : b;
+}
+
 TagSlot *tag_slot(int id) {       /* id = TagSlot 下标 + 1 */
     return (id > 0 && id <= g_ntslots) ? &g_tslots[id - 1] : NULL;
 }
@@ -166,10 +274,10 @@ bool ft_path_key_d(Node *e, char *buf, size_t cap, Node **base_out,
      * 路径透明穿过（等价自动穿透的字段访问）；运行期索引在此截断，
      * 写入处另报 E0521。 */
     while (fb && np < 8 &&
-           (fb->kind == NK_FIELD &&
-            (fb->name || (fb->ival >= 0 && fb->a && fb->a->ty &&
-                          (fb->a->ty->kind == TY_TUPLE ||
-                           fb->a->ty->kind == TY_PTR))) ||
+           ((fb->kind == NK_FIELD &&
+             (fb->name || (fb->ival >= 0 && fb->a && fb->a->ty &&
+                           (fb->a->ty->kind == TY_TUPLE ||
+                            fb->a->ty->kind == TY_PTR)))) ||
             (fb->kind == NK_INDEX && fb->b && fb->b->kind == NK_INT &&
              fb->a))) {
         if (fb->kind == NK_FIELD) {
@@ -241,6 +349,8 @@ FieldTag *ftags_of_expr(Node *e) {
     if (e->ftags) return (FieldTag *)e->ftags;
     if (e->kind == NK_IDENT && e->sym && e->sym->ftags)
         return (FieldTag *)e->sym->ftags;
+    if (e->kind == NK_UNWRAP || e->kind == NK_TRY)
+        return ftags_of_expr(e->a);
     return NULL;
 }
 
@@ -598,7 +708,8 @@ Symbol *agt_base_of(Node *e, char *path, size_t cap) {
                 } else {
                     /* 元组字段里的数组：按下标进路径（与 §196 同口径） */
                     snprintf(idxbuf[np], sizeof idxbuf[np], "%d", (int)e->ival);
-                    names[np++] = idxbuf[np];
+                    names[np] = idxbuf[np];
+                    np++;
                 }
                 seen_agg = true; e = e->a; continue;
             }
@@ -608,6 +719,156 @@ Symbol *agt_base_of(Node *e, char *path, size_t cap) {
         return NULL;
     }
     return NULL;
+}
+
+static bool ft_element_key(const char *name, uint64_t *index, const char **suffix) {
+    const char *dot = strchr(name, '.');
+    const char *end = dot ? dot : name + strlen(name);
+    if (end == name || (end - name > 1 && name[0] == '0')) return false;
+    uint64_t v = 0;
+    for (const char *p = name; p < end; p++) {
+        if (*p < '0' || *p > '9') return false;
+        v = v * 10 + (uint64_t)(*p - '0');
+    }
+    *index = v;
+    *suffix = dot ? dot + 1 : "";
+    return true;
+}
+
+static bool tag_element_selected(uint64_t ix, uint64_t offset, uint64_t len,
+                                 bool len_known) {
+    if (ix < offset) return false;
+    return !len_known || ix - offset < len;
+}
+
+FieldTag *tag_for_element_ftags(Node *seq, uint64_t len, bool len_known,
+                                int *id, int *state, bool *ambiguous) {
+    *id = 0; *state = TC_NONE; *ambiguous = false;
+    if (!seq || (len_known && len == 0)) return NULL;
+    Node *src = seq;
+    uint64_t offset = 0;
+    bool offset_known = true;
+    for (int depth = 0; depth < 12; depth++) {
+        if (src->kind == NK_SLICE) {
+            if (src->b) {
+                IntV lo = ev_int(src->b);
+                if (!lo.ok || lo.neg || UINT64_MAX - offset < lo.v) {
+                    offset_known = false;
+                } else {
+                    offset += lo.v;
+                }
+            }
+            src = src->a;
+            continue;
+        }
+        if (src->kind == NK_CAST || src->kind == NK_UNWRAP) {
+            src = src->a;
+            continue;
+        }
+        if (src->kind == NK_IDENT && src->sym && !src->sym->ftags && src->sym->ft_src) {
+            src = src->sym->ft_src;
+            continue;
+        }
+        break;
+    }
+    FieldTag *indexed = ftags_of_expr(src);
+    if (src->kind == NK_FIELD) {
+        char path[128];
+        Node *fb = NULL;
+        if (ft_path_key(src, path, sizeof path, &fb) && fb && fb->kind == NK_IDENT &&
+            fb->sym)
+            indexed = ft_subtree((FieldTag *)fb->sym->ftags, path);
+    }
+    FieldTag *out = NULL;
+    for (FieldTag *f = indexed; f; f = f->next) {
+        uint64_t ix;
+        const char *suffix;
+        if (!ft_element_key(f->name, &ix, &suffix)) {
+            *ambiguous = true;
+            continue;
+        }
+        bool selected = !offset_known || tag_element_selected(ix, offset, len, len_known);
+        if (!selected) continue;
+        if (f->slot <= 0) {
+            *ambiguous = true;
+            continue;
+        }
+        bool same = true;
+        int count = 0;
+        for (FieldTag *g = indexed; g; g = g->next) {
+            uint64_t gx;
+            const char *gs;
+            if (!ft_element_key(g->name, &gx, &gs) || strcmp(gs, suffix))
+                continue;
+            if (offset_known && !tag_element_selected(gx, offset, len, len_known))
+                continue;
+            count++;
+            if (g->slot != f->slot) same = false;
+        }
+        if (!len_known || !same || (uint64_t)count != len) {
+            *ambiguous = true;
+            continue;
+        }
+        if (!*suffix) {
+            if (*id && *id != f->slot) *ambiguous = true;
+            else *id = f->slot;
+        } else {
+            char *key = ft_path_dup(NULL, suffix);
+            if (key) ft_set(&out, key, f->slot);
+        }
+    }
+    for (FieldTag *f = indexed; f; f = f->next) {
+        uint64_t ix;
+        const char *suffix;
+        if (!ft_element_key(f->name, &ix, &suffix)) {
+            *ambiguous = true;
+            continue;
+        }
+        bool selected = !offset_known || tag_element_selected(ix, offset, len, len_known);
+        if (!selected) continue;
+        if (!len_known || f->slot <= 0) {
+            *ambiguous = true;
+            continue;
+        }
+        if (!*suffix) {
+            if (*id != f->slot) *ambiguous = true;
+        } else {
+            FieldTag *g = ft_find(out, suffix);
+            if (!g || g->slot != f->slot) *ambiguous = true;
+        }
+    }
+    char path[64];
+    Symbol *base = agt_base_of(src, path, sizeof path);
+    if (base) {
+        bool any = false, same = true;
+        int count = 0, aid = 0;
+        for (int i = 0; i < g_naesc; i++) {
+            ArrEsc *a = &g_aesc[i];
+            if (a->base != base || strcmp(a->path, path)) continue;
+            if (a->idx < 0) {
+                *ambiguous = true;
+                continue;
+            }
+            bool selected = !offset_known ||
+                tag_element_selected((uint64_t)a->idx, offset, len, len_known);
+            if (!selected) continue;
+            if (!any) aid = a->slot;
+            else if (aid != a->slot) same = false;
+            any = true; count++;
+        }
+        if (any) {
+            if (!len_known || !same || (uint64_t)count != len) *ambiguous = true;
+            else if (*id && *id != aid) *ambiguous = true;
+            else *id = aid;
+        }
+        if (agt_any(base, path)) *ambiguous = true;
+    }
+    if (*ambiguous) {
+        *id = 0; *state = TC_NONE;
+    } else if (*id) {
+        *state = ft_state_of(*id);
+    }
+    return out;
 }
 
 /* §185 跨函数：「形参数组被整容器终结」事实账（体内 free(p) 且 p
@@ -705,17 +966,61 @@ void ft_scan_returns(Node *n, FieldTag **out) {
     for (int i = 0; i < n->nitems; i++) ft_scan_returns(n->items[i], out);
 }
 
+static int tag_join_state(int a, int b) {
+    if (a == b) return a;
+    if ((a == TC_LIVE && b == TC_FREED) || (a == TC_FREED && b == TC_LIVE))
+        return TC_COND;
+    return TC_UNKNOWN;
+}
+
 /* 表达式携带的 tag 载体：(id = TagSlot 下标+1, 载体状态)。id=0 = 不带 tag。
  * 顺序：节点自带的标记（贴标/合并/传播时填好）优先，ident 查符号，
  * 收割冒泡到值。 */
 void tag_of_expr(Node *e, int *id, int *state) {
     *id = 0; *state = TC_NONE;
     if (!e) return;
-    if (e->tag_id) { *id = e->tag_id; *state = e->tag_state; return; }
+    if (e->tag_id) {
+        *id = e->tag_id; *state = e->tag_state;
+        TagSlot *t = tag_slot(*id);
+        if (t && t->scope_freed) *state = TC_FREED;
+        return;
+    }
     if (e->kind == NK_IDENT && e->sym && e->sym->tag_id) {
-        *id = e->sym->tag_id; *state = e->sym->tag_state; return;
+        *id = e->sym->tag_id; *state = e->sym->tag_state;
+        TagSlot *t = tag_slot(*id);
+        if (t && t->scope_freed) *state = TC_FREED;
+        return;
     }
     if (e->kind == NK_YIELD) { tag_of_expr(e->a, id, state); return; }
+    if (e->kind == NK_BLOCK) { tag_of_expr(e->d, id, state); return; }
+    if (e->kind == NK_TRY) { tag_of_expr(e->a, id, state); return; }
+    if (e->kind == NK_ORELSE || e->kind == NK_TRY_CAPTURE) {
+        int aid, ast, bid, bst;
+        tag_of_expr(e->a, &aid, &ast);
+        Node *right = e->kind == NK_TRY_CAPTURE ? (e->b ? e->b->d : NULL) : e->b;
+        tag_of_expr(right, &bid, &bst);
+        *id = tag_join_origin(aid, bid);
+        if (!*id) return;
+        TagSlot *t = tag_slot(*id);
+        *state = aid == bid ? tag_join_state(ast, bst) :
+                 (t->scope_freed ? TC_FREED : (t->borrow ? TC_LIVE : TC_UNKNOWN));
+        return;
+    }
+    if (e->kind == NK_UN && e->op == TOK_AMP) {
+        *id = tag_addr_origin(e->a);
+        if (*id) {
+            TagSlot *t = tag_slot(*id);
+            *state = t && t->state == TST_FREED ? TC_FREED : TC_LIVE;
+        }
+        return;
+    }
+    if (e->kind == NK_BIN && e->ty &&
+        (e->ty->kind == TY_PTR || e->ty->kind == TY_SLICE) &&
+        (e->op == TOK_PLUS || e->op == TOK_MINUS)) {
+        tag_of_expr(e->a, id, state);
+        if (!*id) tag_of_expr(e->b, id, state);
+        return;
+    }
     /* §174 续链：`tag v : tag.x = old;` 降糖成 let——DECL 绑定从这里
      * 拿到续上的槽（case 里已守门：值无标签、槽 LIVE）。 */
     if (e->kind == NK_TAG_BIND && e->tag_id) {
@@ -728,11 +1033,21 @@ void tag_of_expr(Node *e, int *id, int *state) {
     /* §179：切片是同一份内存的视图——p[0..] 携带基址的标签；cast 结果
      * 落在指针/切片家族时身份同样跟过去（节点烙印只盖指针→指针，切片
      * 家族在这里兜底；抽象借用槽不追）。 */
-    if ((e->kind == NK_SLICE || e->kind == NK_CAST) && e->a && e->ty &&
+    Node *cast_base = e->kind == NK_CAST ? e->b : e->a;
+    if (e->kind == NK_SLICE && cast_base && cast_base->ty &&
+        cast_base->ty->kind == TY_ARRAY) {
+        *id = tag_addr_origin(cast_base);
+        if (*id) {
+            TagSlot *t = tag_slot(*id);
+            *state = t && t->scope_freed ? TC_FREED : TC_LIVE;
+        }
+        return;
+    }
+    if ((e->kind == NK_SLICE || e->kind == NK_CAST) && cast_base && e->ty &&
         (e->ty->kind == TY_SLICE || e->ty->kind == TY_PTR) &&
-        !(e->kind == NK_CAST && e->a->tag_id &&
-          tag_slot(e->a->tag_id) && tag_slot(e->a->tag_id)->abstract)) {
-        tag_of_expr(e->a, id, state);
+        !(e->kind == NK_CAST && cast_base->tag_id &&
+          tag_slot(cast_base->tag_id) && tag_slot(cast_base->tag_id)->abstract)) {
+        tag_of_expr(cast_base, id, state);
         return;
     }
     /* §173 补丁十（收紧版）：常索引读精确元素账——`let q = xs[0][i];`
@@ -795,8 +1110,22 @@ void tag_of_expr(Node *e, int *id, int *state) {
             }
         }
     }
-    if (e->kind == NK_FIELD && e->name && !strcmp(e->name, "ptr") && e->a) {
+    if (e->kind == NK_FIELD && e->name && e->a && e->a->ty && e->ty &&
+        e->a->ty->kind == TY_PTR && !ty_is_array_ptr(e->a->ty) &&
+        (e->ty->kind == TY_PTR || e->ty->kind == TY_SLICE)) {
         tag_of_expr(e->a, id, state);
+        return;
+    }
+    if (e->kind == NK_FIELD && e->name && !strcmp(e->name, "ptr") && e->a) {
+        if (e->a->ty && e->a->ty->kind == TY_ARRAY) {
+            *id = tag_addr_origin(e->a);
+            if (*id) {
+                TagSlot *t = tag_slot(*id);
+                *state = t && t->scope_freed ? TC_FREED : TC_LIVE;
+            }
+        } else {
+            tag_of_expr(e->a, id, state);
+        }
         return;
     }
     /* §174：(*p) 解引用（方法接收者自动补的 name=NULL NK_FIELD，基址
@@ -844,26 +1173,23 @@ int g_tag_auto_seq;
 /* §173：alloc 自动建槽。每个分配调用点自动获得唯一标签并预绑 LIVE——
  * `tag.x : expr` 只剩「给分配起名」的作用。§225：没写 tag.enable 的模块连槽都不建，std 天然休眠。 */
 void tag_auto_decl(Node *call, bool stack) {
-    if (call->tag_id) return;                       /* 重扫幂等 */
-    /* §225：账本默认关闭，没写 tag.enable 的模块不建自动槽。 */
-    if (!(g_mod && g_mod->tags_enabled)) return;
-    /* 槽名必须是可词法的标识符：手动标记 `tag.allocN : null;` 要能
-     * 在源码里引用自动槽（alloc#N 的 # 写不进源码）。撞名则跳号。 */
+    if (call->tag_id || g_ct_exec || g_ct_checking ||
+        !(g_mod && g_mod->tags_enabled)) return;
+    if (stack) {
+        call->tag_id = tag_stack_new(ST_ALLOC, call, 0);
+        if (call->tag_id) call->tag_state = TC_LIVE;
+        return;
+    }
     char namebuf[32];
-    do {
-        snprintf(namebuf, sizeof namebuf, "alloc%d", ++g_tag_auto_seq);
-    } while (tag_by_name(namebuf));
-    char *nm = xstrdup(namebuf);
-    if (!nm) return;
+    stack_tag_name(namebuf, sizeof namebuf);
     Node tmp; memset(&tmp, 0, sizeof tmp);
     tmp.line = call->line; tmp.col = call->col;
-    TagSlot *t = tag_decl(nm, &tmp);
+    TagSlot *t = tag_decl(xstrdup(namebuf), &tmp);
     if (!t) return;
     t->auto_n = true;
-    t->stack = stack;
     t->state = TST_LIVE;
-    t->region = stack ? 0 : call->reg_slot;
-    if (!stack && call->reg_slot > 0 && call->reg_slot <= g_nrslots)
+    t->region = call->reg_slot;
+    if (call->reg_slot > 0 && call->reg_slot <= g_nrslots)
         g_rslots[call->reg_slot - 1].tag = (int)(t - g_tslots) + 1;
     call->tag_id = (int)(t - g_tslots) + 1;
     call->tag_state = TC_LIVE;
@@ -890,7 +1216,12 @@ int tag_clone_site(TagSlot *src, Node *call, bool freed) {
     t->state = freed ? TST_FREED : TST_LIVE;
     t->ever_freed = freed || src->ever_freed;
     t->inst_of = sidx;
-    t->stack = src->stack;             /* 文案/作用域语义随母槽 */
+    t->stack = src->stack;
+    t->stack_kind = src->stack_kind;
+    t->base_tag = src->base_tag;
+    t->scope_depth = 0;
+    for (Scope *sc = g_scope; sc; sc = sc->parent) t->scope_depth++;
+    t->borrow = src->borrow;
     t->scope_freed = src->scope_freed;
     if (freed) { t->free_line = src->free_line; t->free_col = src->free_col; }
     src = tag_slot(sidx);
@@ -953,21 +1284,11 @@ void pfs_mirror_arg(Symbol *ps, Node *arg, Node *call, Node *fn) {
     }
 }
 
-/* §173：离开作用域 —— stackAlloc 的槽自动标 free（栈存储随帧消亡）。
- * 载体被存进容器/传出去之后再用，撞上的是 E0512（追踪不到容器里那份，
- * 但同一符号的 outer 副本还能追到）。 */void tag_scope_exit(Scope *sc, Node *n) {
+/* 栈来源与堆标签共用 TagSlot；离开作用域只按槽位状态判活，
+ * 存储标签、临时值和捕获借用都在同一轮标成 scope-freed。 */
+void tag_scope_exit(Scope *sc, Node *n) {
     Node *tail = (n->nitems > 0 && n->items[n->nitems - 1])
                  ? n->items[n->nitems - 1] : n;   /* 块的 line 是起点行 */
-    for (Symbol *s = sc->first; s; s = s->next) {
-        if (!s->tag_id || s->tag_state != TC_LIVE) continue;
-        TagSlot *t = tag_slot(s->tag_id);
-        if (!t || !t->stack || t->state != TST_LIVE) continue;
-        t->state = TST_FREED;
-        t->free_line = tail->line; t->free_col = tail->col;
-        t->scope_freed = true;
-        s->tag_state = TC_FREED;
-        if (t->carrier) t->carrier->tag_state = TC_FREED;
-    }
     /* §173 补丁八：本作用域期间创建的栈分配槽统一回收——贴标指针
      * 存进结构体字段/数组元素时没有直接载体符号，按符号扫会漏，
      * 槽就会在终扫被误报成堆泄漏（栈存储随帧消亡，谈不上泄漏）。 */
@@ -1212,22 +1533,6 @@ void tag_note_adopt(Node *call) {
     t->adopt_ar = ar;
     t->adopt_line = call->line;
     t->adopt_col = call->col;
-}
-
-/* §188：这一笔调用是不是「释放」。口径与 tag_block_has_free 一致：
- * deinit 变换产物、Allocator.free 方法、用户释放器封装（体内有
- * free/deinit 的函数，释放器传递）。 */
-static bool call_is_release(Node *call) {
-    if (call->xform_free) return true;
-    if (call->a && call->a->kind == NK_FIELD && call->a->name &&
-        !strcmp(call->a->name, "free") && call->a->a &&
-        (!call->a->a->ty || is_allocator_ty(call->a->a->ty)))
-        return true;
-    if (call->a && call->a->kind == NK_IDENT && call->a->sym &&
-        call->a->sym->decl && call->a->sym->decl->kind == NK_FN &&
-        fn_is_releaser(call->a->sym->decl))
-        return true;
-    return false;
 }
 
 /* 模块路径 → Module（豁免判定用；Node->mod 是装载时打的路径戳）。 */

@@ -1,0 +1,9 @@
+tag.enable;
+// expect: cannot return a pointer
+// expect-code: E0503
+// expect-count: 1
+const main = fn () *i32 {
+    var x: i32 = 1;
+    var p: ?*i32 = &x;
+    return p.?;
+};

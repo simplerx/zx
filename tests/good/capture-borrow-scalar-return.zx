@@ -1,0 +1,16 @@
+// expect-exit: 0
+// expect-output
+// 7
+tag.enable;
+const std = @mod("std");
+
+const scalar = fn () u8 {
+    var o: ?u8 = 7;
+    if (o) * t { return t.0; }
+    return 0;
+};
+
+pub const main = fn () i32 {
+    std.println("{}", scalar());
+    return 0;
+};

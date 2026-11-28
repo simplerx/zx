@@ -803,6 +803,8 @@ Value *type_desc_value(Type *t, Node *inst) {
                 Value *pv = val_undef(ty_ptr(t->fields[i].ty,
                                              !lvalue_mutable(inst), false, 0));
                 pv->xexpr = clone_tree(inst);
+                pv->xexpr->tag_id = tag_addr_origin(inst);
+                pv->xexpr->tag_state = TC_LIVE;
                 pv->off = (uint64_t)t->fields[i].offset;
                 fv->items[3] = pv;
             }
