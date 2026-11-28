@@ -181,6 +181,7 @@ static Type *check_if(Node *n, Type *expect) {
             if (s) { s->ty = cap_ty; s->state = 2;
                      s->reg_slot = region_of_expr(n->a);
                      s->cap_src = n->a;
+                     n->sym = s;
                      /* 捕获值有独立存储；指针载荷是否来自栈由 tag_capture_inherit
                       * 决定，不能仅因捕获绑定在栈上就判成栈指针。 */
                      s->in_fn = true;
@@ -335,6 +336,8 @@ static Type *check_while(Node *n, Type *expect) {
             Symbol *s = scope_add(&sc, n->name, SK_CAPTURE);
             if (s) { s->ty = cap_ty; s->state = 2;
                      s->in_fn = true;
+                     s->cap_src = n->a;
+                     n->sym = s;
                      s->storage_tag = tag_stack_new(ST_STORAGE, n->a, 0);
                      tag_capture_inherit(s, n->a, NULL);
                      if (n->cap_ptr) cap_mark_borrow(s, n->a); }
@@ -948,6 +951,8 @@ static Type *check_switch(Node *n, Type *expect) {
                     cs->ty = cap_ty;
                     cs->state = 2;
                     cs->in_fn = true;
+                    cs->cap_src = n->a;
+                    arm->sym = cs;
                     cs->storage_tag = tag_stack_new(ST_STORAGE, n->a, 0);
                     /* §174：捕获载荷继承主语 tag 账（变体名取自模式） */
                     const char *vn =

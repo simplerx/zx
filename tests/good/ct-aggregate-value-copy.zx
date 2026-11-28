@@ -1,0 +1,198 @@
+// expect-exit: 0
+// expect-output
+// source 1 2 3 4 5
+// result 91 2 93 4 5
+// made 11 22 13 24 15
+// snapshot 1 2 3 4 5
+// choice 41 42
+// choice-result 41 92
+// optional-source 61 62 63 64 65
+// optional-capture 91 62 63 64 65
+// while-capture 111 62 63 64 65
+// switch-capture 101 42 43 44 45
+// array 51 52 53
+// array-result 51 62 53
+// assigned 1 2 3 94 5
+// pointer 81 72
+// color 1
+// error-zero 0
+// error-failure 7
+// union-else 2
+// union-undefined-tag 0
+// union-undefined-arm 201
+const std = @mod("std");
+
+const Big = struct {
+    a: i64,
+    b: i64,
+    c: i64,
+    d: i64,
+    e: i64,
+};
+
+const source = Big{ .a = 1, .b = 2, .c = 3, .d = 4, .e = 5 };
+
+const mutateArg = fn (x: Big) Big{ var local = x; local.a = 91; local.c = 93; return local; };
+
+const result = mutateArg(source);
+
+const make = fn () Big{
+    var local = Big{ .a = 11, .b = 12, .c = 13, .d = 14, .e = 15 };
+    local.b = 22;
+    local.d = 24;
+    return local;
+};
+
+const made = make();
+
+const snapshotBeforeMutation = fn (x: Big) Big{
+    var local = x;
+    let saved = local;
+    local.a = 71;
+    local.e = 75;
+    return saved;
+};
+
+const snapshot = snapshotBeforeMutation(source);
+
+const Choice = union (enum) {
+    big: Big,
+    small: i32,
+};
+
+const choiceSource = Choice{ .big = Big{ .a = 41, .b = 42, .c = 43, .d = 44, .e = 45 } };
+
+const mutateChoice = fn (x: Choice) Choice{ var local = x; local.big.b = 92; return local; };
+
+const choiceResult = mutateChoice(choiceSource);
+
+const optionalSource: ?Big = Big{ .a = 61, .b = 62, .c = 63, .d = 64, .e = 65 };
+const optionalSnapshot = optionalSource.?;
+
+const captureOptional = fn (o: ?Big) Big{
+    if (o) value {
+        var local = value;
+        local.a = 91;
+        return local;
+    }
+    return Big{ .a = 0, .b = 0, .c = 0, .d = 0, .e = 0 };
+};
+
+const optionalResult = captureOptional(optionalSource);
+
+const captureWhile = fn (o: ?Big) Big{
+    var current = o;
+    var result = Big{ .a = 0, .b = 0, .c = 0, .d = 0, .e = 0 };
+    while (current) value {
+        var local = value;
+        local.a = 111;
+        result = local;
+        current = null;
+    }
+    return result;
+};
+
+const whileResult = captureWhile(optionalSource);
+
+const captureChoice = fn (x: Choice) Big{
+    switch (x) {
+        .big: value {
+            var local = value;
+            local.a = 101;
+            return local;
+        };
+        .small: {
+            return Big{ .a = 0, .b = 0, .c = 0, .d = 0, .e = 0 };
+        };
+    }
+};
+
+const switchResult = captureChoice(choiceSource);
+
+const smallChoice = Choice{ .small = 9 };
+const choiceElse = fn (x: Choice) i32 {
+    switch (x) {
+        .big: { return 1; };
+        else: { return 2; };
+    }
+};
+const elseResult = choiceElse(smallChoice);
+
+const UndefChoice = union (enum) {
+    big: Big,
+    small: i32,
+};
+const undefChoice = UndefChoice{ .big = undefined };
+const undefTag = (i32)undefChoice.tag;
+const undefArm = fn (x: UndefChoice) i32 {
+    switch (x) {
+        .big: { return 201; };
+        .small: { return 202; };
+        else: { return 203; };
+    }
+};
+const undefArmResult = undefArm(undefChoice);
+
+const arraySource: [3]i64 = .{51, 52, 53 };
+
+const mutateArray = fn (x: [3]i64)[3]i64 {
+    var local = x;
+    local[1] = 62;
+    return local;
+};
+
+const arrayResult = mutateArray(arraySource);
+
+const assignIntoVar = fn (x: Big) Big{
+    var local: Big = undefined;
+    local = x;
+    local.d = 94;
+    return local;
+};
+
+const assigned = assignIntoVar(source);
+
+const pointerSource: *[2]i64 = & .{71, 72 };
+
+const mutatePointer = fn (p: *[2]i64) i64 {
+    p[0][0] = 81;
+    return p[0][1];
+};
+
+const pointerResult = mutatePointer(pointerSource);
+
+const Color = enum { red, green, blue };
+const keepColor = fn (c: Color) Color{ return c; };
+const colorResult = keepColor(Color.green);
+
+const captureError = fn (e: !i32) i32 {
+    if (e) value { return value; }
+    else code { return (i32)code; }
+};
+
+const errorZero = captureError(0);
+const errorFailure = captureError((error) 7);
+
+pub const main = fn () i32 {
+    std.println("source {} {} {} {} {}", source.a, source.b, source.c, source.d, source.e);
+    std.println("result {} {} {} {} {}", result.a, result.b, result.c, result.d, result.e);
+    std.println("made {} {} {} {} {}", made.a, made.b, made.c, made.d, made.e);
+    std.println("snapshot {} {} {} {} {}", snapshot.a, snapshot.b, snapshot.c, snapshot.d, snapshot.e);
+    std.println("choice {} {}", choiceSource.big.a, choiceSource.big.b);
+    std.println("choice-result {} {}", choiceResult.big.a, choiceResult.big.b);
+    std.println("optional-source {} {} {} {} {}", optionalSnapshot.a, optionalSnapshot.b, optionalSnapshot.c, optionalSnapshot.d, optionalSnapshot.e);
+    std.println("optional-capture {} {} {} {} {}", optionalResult.a, optionalResult.b, optionalResult.c, optionalResult.d, optionalResult.e);
+    std.println("while-capture {} {} {} {} {}", whileResult.a, whileResult.b, whileResult.c, whileResult.d, whileResult.e);
+    std.println("switch-capture {} {} {} {} {}", switchResult.a, switchResult.b, switchResult.c, switchResult.d, switchResult.e);
+    std.println("array {} {} {}", arraySource[0], arraySource[1], arraySource[2]);
+    std.println("array-result {} {} {}", arrayResult[0], arrayResult[1], arrayResult[2]);
+    std.println("assigned {} {} {} {} {}", assigned.a, assigned.b, assigned.c, assigned.d, assigned.e);
+    std.println("pointer {} {}", pointerSource[0][0], pointerResult);
+    std.println("color {}", (i32)colorResult);
+    std.println("error-zero {}", errorZero);
+    std.println("error-failure {}", errorFailure);
+    std.println("union-else {}", elseResult);
+    std.println("union-undefined-tag {}", undefTag);
+    std.println("union-undefined-arm {}", undefArmResult);
+    return 0;
+};

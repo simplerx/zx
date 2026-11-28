@@ -68,7 +68,7 @@ struct Value {
     bool        neg;       /* V_INT：负数，ival 是绝对值 */
     bool        big;       /* V_INT：超出 u64，值在 {hi, ival}（绝对值的 128 位表示） */
     uint64_t    hi;        /* V_INT：绝对值的高 64 位（big 时有效） */
-    uint64_t    ival;
+    uint64_t    ival;      /* V_INT：绝对值；V_AGG(TY_UNION)：active 字段，UINT64_MAX 未知 */
     double      fval;
     ZxF128      f128val;    /* V_FLOAT 且 ty 是 f128 时生效 */
     bool        bval;

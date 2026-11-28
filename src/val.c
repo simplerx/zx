@@ -156,6 +156,7 @@ Value *val_type(Type *t) {
 Value *val_agg(Type *t, int n) {
     Value *r = valloc(V_AGG, t);
     r->nitems = n;
+    if (t && t->kind == TY_UNION) r->ival = UINT64_MAX;
     if (n) r->items = xcalloc((size_t)n, sizeof(Value *));
     return r;
 }

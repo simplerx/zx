@@ -141,6 +141,12 @@
 - 规则：`const ball = @mod("ball")` 等绑定一旦识别就固定为模块接收者；模块无公开成员时返回空列表，不能继续用 `namedTypeNear` 把同名字段 `ball: BallJoint` 当成接收者。别名扫描还要检查标识符边界，避免前缀串名。
 - 守门：有成员模块与空模块分别验证；旧二进制在空模块同名字段守门上补出 `BallJoint` 字段，新二进制不补且输出 `SMOKE ALL PASS`；多文件正例用 `ball: *BallJoint` 与模块别名共存，双前端精确解析模块成员。
 
+## 2026-11-28 — 编译期聚合按值边界不能共享 Value
+
+- 证据：`spec/decisions.md` §280；`src/sema_ct.c` 的 `ct_copy_value`；`tests/good/ct-aggregate-value-copy.zx`。
+- 规则：`V_AGG` 在编译期传参、声明、赋值、返回/收割、字面量字段、循环绑定与 if/while/switch 普通值捕获时按值复制；直接共享会让字段写入污染原常量和旧快照。`V_PTR` 仍指向同一底层对象，不能把视图深拷贝。`?T`/`!T` 条件按 tag 语义判定，不能用载荷真值替代；union 的 active 字段必须独立于载荷保存，`undefined` 载荷也保留标签。当前 `Value` 无法区分 `!error` 的成功载荷与失败码时拒绝折叠，不能猜分支。
+- 守门：大结构体原值不变、返回快照独立、union(enum)/数组/枚举一致、聚合赋值复制、optional/while/switch 捕获独立、union else、undefined active tag、指针别名仍可见；`!error` 歧义用 E0501 负例守住；旧实现和新实现双前端实跑对照。
+
 ## 长期 — 不能删守门变绿
 
 - 证据：`spec/decisions.md` 的能力线记录；`.workbuddy/memory/MEMORY.md` 的元规则。

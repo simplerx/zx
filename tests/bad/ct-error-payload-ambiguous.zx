@@ -1,0 +1,7 @@
+// expect-code: E0501
+const pick = fn (e: !error) i32 {
+    if (e) value { return 1; }
+    else code { return 2; }
+};
+
+const result = pick((error) 1);

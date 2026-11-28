@@ -43,6 +43,46 @@ void ct_clear(Node *n) {
 }
 static long g_ct_calls;
 
+/* 聚合按值复制；V_PTR 仍指向同一底层对象，视图不深拷贝。 */
+static Value *ct_copy_value(Value *v) {
+    if (!v || v->kind != V_AGG) return v;
+    Value *r = val_new(v->kind, v->ty);
+    *r = *v;
+    if (v->nitems) {
+        r->items = xcalloc((size_t)v->nitems, sizeof(Value *));
+        for (int i = 0; i < v->nitems; i++) r->items[i] = ct_copy_value(v->items[i]);
+    }
+    return r;
+}
+
+static bool ct_condition(Value *v, Type *t) {
+    /* 可选/错误值在 Value 中只存载荷，条件按表达式类型还原 tag 语义。 */
+    if (t && t->kind == TY_OPT)
+        return v && v->kind != V_NULL && v->kind != V_UNDEF;
+    if (t && t->kind == TY_ERR) {
+        if (t->elem && t->elem->kind == TY_ERROR) {
+            g_ct_stuck = true;
+            return false;
+        }
+        return !(v && v->ty && v->ty->kind == TY_ERROR);
+    }
+    return val_truthy(v);
+}
+
+static void ct_bind_capture(Symbol *s, Value *v) {
+    if (s) s->ct = ct_copy_value(v);
+}
+
+static int ct_union_active(Value *v) {
+    if (!v || v->kind != V_AGG || !v->ty || v->ty->kind != TY_UNION)
+        return -1;
+    if (v->ival != UINT64_MAX && v->ival < (uint64_t)v->ty->nfields)
+        return (int)v->ival;
+    for (int i = 0; i < v->nitems && i < v->ty->nfields; i++)
+        if (v->items[i] && v->items[i]->kind != V_UNDEF) return i;
+    return -1;
+}
+
 /* 深拷贝：泛型实例化要一棵属于自己的树，这样里面的 `struct{…}` 才有
  * 独立身份（ty_agg 用节点当键）。 */
 Node *clone_tree(Node *n) {
@@ -200,20 +240,13 @@ Value *ct_field(Node *n) {
 
     if (base->kind != V_AGG) return NULL;
 
-    /* 编译期 union(enum) 值的 .tag：唯一非 NULL 的载荷槽就是当前变体。
-     * 反射的 TypeInfo 值靠这条在 const/if 里比较种类；普通 const union
-     * 值也受益（之前折不出、留到运行期，现在编译期直接得整数）。 */
+    /* 编译期 union(enum) 值的 .tag：active 字段独立于载荷，undefined 也保留标签。 */
     if (n->name && !strcmp(n->name, "tag") && base->ty &&
         base->ty->kind == TY_UNION && base->ty->is_tagged) {
-        for (int i = 0; i < base->nitems && i < base->ty->nfields; i++) {
-            /* 未选中的变体被 ct_struct_lit 填成 V_UNDEF（占位）；选中的那个
-             * 才有真实载荷。跳过 undef 才拿得到正确 tag——否则永远命中 0。 */
-            Value *it = base->items[i];
-            if (it && it->kind != V_UNDEF)
-                return val_int(base->ty->tag_ty ? base->ty->tag_ty : ty_int(32, false),
-                               base->ty->fields[i].tag, false);
-        }
-        return NULL;
+        int active = ct_union_active(base);
+        if (active < 0) return NULL;
+        return val_int(base->ty->tag_ty ? base->ty->tag_ty : ty_int(32, false),
+                       base->ty->fields[active].tag, false);
     }
 
     if (!n->name) {                                /* .N */
@@ -244,6 +277,7 @@ static bool ct_store_global(Node *lhs) {
 static bool ct_store(Node *lhs, Value *v) {
     if (!lhs || !v) return false;
     if (ct_store_global(lhs)) return false;
+    v = ct_copy_value(v);
     if (lhs->kind == NK_IDENT) {
         if (!lhs->sym || lhs->sym->kind != SK_VAR) return false;
         lhs->sym->ct = v;
@@ -381,14 +415,15 @@ static Value *ct_struct_lit(Node *n) {
         int idx = ty_field_index(t, p->name);
         if (idx < 0) { free(seen); return NULL; }
         seen[idx] = true;
-        v->items[idx] = p->a ? ct_eval(p->a) : val_void();
+        if (t->kind == TY_UNION) v->ival = (uint64_t)idx;
+        v->items[idx] = p->a ? ct_copy_value(ct_eval(p->a)) : val_void();
     }
     /* 没写出来的字段用默认值。静态成员不是值的一部分——更不能拿它的初值来填：
      * `const ZERO = Vec{…}` 的初值就是一个 Vec 字面量，套进去会无限递归。 */
     for (int i = 0; i < nf; i++) {
         if (seen[i]) continue;
         if (t->fields[i].is_static) { v->items[i] = val_undef(t->fields[i].ty); continue; }
-        if (t->fields[i].dflt) v->items[i] = ct_eval(t->fields[i].dflt);
+        if (t->fields[i].dflt) v->items[i] = ct_copy_value(ct_eval(t->fields[i].dflt));
         else v->items[i] = val_undef(t->fields[i].ty);
     }
     free(seen);
@@ -402,7 +437,7 @@ static Value *ct_array_lit(Node *n) {
     if (n->flag && pt->kind == TY_ARRAY) {
         Value *arr = val_agg(pt, n->nitems);
         for (int i = 0; i < n->nitems; i++) {
-            arr->items[i] = ct_eval(n->items[i]);
+            arr->items[i] = ct_copy_value(ct_eval(n->items[i]));
             if (!arr->items[i]) return NULL;
         }
         return arr;
@@ -411,7 +446,7 @@ static Value *ct_array_lit(Node *n) {
     if (pt->kind != TY_PTR) return NULL;
     Value *arr = val_agg(ty_ptr(pt->elem, true, true, pt->len), n->nitems);
     for (int i = 0; i < n->nitems; i++) {
-        arr->items[i] = ct_eval(n->items[i]);
+        arr->items[i] = ct_copy_value(ct_eval(n->items[i]));
         if (!arr->items[i]) return NULL;
     }
     return val_ptr(pt, arr, 0);
@@ -486,7 +521,7 @@ Value *ct_call(Node *n) {
         Symbol *s = scope_add(&sc, pm->name, SK_PARAM);
         if (!s) continue;
         s->ty = i < ft->nparams ? ft->params[i] : ty_invalid();
-        s->ct = args[i];
+        s->ct = ct_copy_value(args[i]);
         s->ct_bind = true;
         if (args[i]->kind == V_TYPE) s->type_val = args[i]->tval;
         s->state = 2;
@@ -765,7 +800,7 @@ Value *ct_eval(Node *n) {
         Value *agg = val_agg(n->ty, n->nitems);
         bool ok = true;
         for (int i = 0; i < n->nitems; i++) {
-            agg->items[i] = ct_eval(n->items[i]);
+            agg->items[i] = ct_copy_value(ct_eval(n->items[i]));
             if (!agg->items[i]) ok = false;
         }
         if (ok) v = agg;
@@ -849,7 +884,13 @@ Value *ct_eval(Node *n) {
     case NK_IF: {
         Value *c = ct_eval(n->a);
         if (!c) break;
-        Node *br = val_truthy(c) ? n->b : n->c;
+        bool take = ct_condition(c, n->a->ty);
+        if (g_ct_stuck) break;
+        if (!n->cap_ptr) {
+            if (take) ct_bind_capture(n->sym, c);
+            else ct_bind_capture(n->d ? n->d->sym : NULL, c);
+        }
+        Node *br = take ? n->b : n->c;
         if (!br) { v = val_void(); break; }
         if (br->kind != NK_BLOCK) { v = ct_eval(br); break; }   /* if (c) 3 else 1 */
         CtFlow f = ct_run_block(br);
@@ -937,19 +978,19 @@ static CtFlow ct_run_raw(Node *n) {
         if (!n->sym) return ct_normal();
         if (!n->b) { n->sym->ct = val_undef(n->sym->ty); return ct_normal(); }
         Value *v = ct_eval(n->b);
-        n->sym->ct = v;
+        n->sym->ct = ct_copy_value(v);
         return ct_normal();
     }
 
     case NK_RETURN: {
         CtFlow f = { CT_RETURN, NULL, NULL };
-        f.val = n->a ? ct_eval(n->a) : val_void();
+        f.val = n->a ? ct_copy_value(ct_eval(n->a)) : val_void();
         return f;
     }
 
     case NK_YIELD: {
         CtFlow f = { CT_YIELD, NULL, n->label };
-        f.val = n->a ? ct_eval(n->a) : val_void();
+        f.val = n->a ? ct_copy_value(ct_eval(n->a)) : val_void();
         return f;
     }
 
@@ -968,7 +1009,13 @@ static CtFlow ct_run_raw(Node *n) {
          * 置 stuck 让整次折叠放弃：调用留给运行时，谁也不会被误伤。 */
         Value *c = ct_eval(n->a);
         if (!c) { g_ct_stuck = true; return ct_normal(); }
-        Node *br = val_truthy(c) ? n->b : n->c;
+        bool take = ct_condition(c, n->a->ty);
+        if (g_ct_stuck) return ct_normal();
+        if (!n->cap_ptr) {
+            if (take) ct_bind_capture(n->sym, c);
+            else ct_bind_capture(n->d ? n->d->sym : NULL, c);
+        }
+        Node *br = take ? n->b : n->c;
         return br ? ct_run_arm(br) : ct_normal();
     }
 
@@ -977,7 +1024,13 @@ static CtFlow ct_run_raw(Node *n) {
             ct_clear(n->a);
             Value *c = ct_eval(n->a);
             if (!c) { g_ct_stuck = true; return ct_normal(); }
-            if (!val_truthy(c)) {
+            bool take = ct_condition(c, n->a->ty);
+            if (g_ct_stuck) return ct_normal();
+            if (!n->cap_ptr) {
+                if (take) ct_bind_capture(n->sym, c);
+                else ct_bind_capture(n->d ? n->d->sym : NULL, c);
+            }
+            if (!take) {
                 if (n->c) return ct_run_arm(n->c);
                 return ct_normal();
             }
@@ -1029,7 +1082,7 @@ static CtFlow ct_run_raw(Node *n) {
         for (int k = 0; k < total; k++) {
             for (int i = 0; i < nbind && i < nseq; i++) {
                 Node *b = n->items[nseq + i];
-                if (b->sym) b->sym->ct = seqv[i]->items[k];
+                if (b->sym) b->sym->ct = ct_copy_value(seqv[i]->items[k]);
             }
             ct_clear(n->b);
             ct_clear(n->b);
@@ -1048,27 +1101,65 @@ static CtFlow ct_run_raw(Node *n) {
     case NK_SWITCH: {
         Value *s = ct_eval(n->a);
         if (!s) { g_ct_stuck = true; return ct_normal(); }
+        Type *st = n->a->ty;
+        if (st && st->kind == TY_ERR && st->elem && st->elem->kind == TY_ERROR) {
+            g_ct_stuck = true;
+            return ct_normal();
+        }
+        Value *subject = s;
+        int active = -1;
+        if (st && st->kind == TY_UNION) {
+            int64_t off = 0;
+            subject = ct_flat(s, &off);
+            active = ct_union_active(subject);
+            if (active < 0) { g_ct_stuck = true; return ct_normal(); }
+        }
         for (int i = 0; i < n->nitems; i++) {
             Node *arm = n->items[i];
             bool hit = false;
+            Value *capture = s;
             if (arm->flag) hit = true;
-            for (int k = 0; k < arm->nitems && !hit; k++) {
-                Node *p = arm->items[k];
-                if (p->kind == NK_FIELD && !p->a && p->name) {
-                    /* .some / .none / .ok / .err：只有 null 能用值比 */
-                    if (s->kind == V_NULL && !strcmp(p->name, "none")) hit = true;
-                    /* 编译期枚举模式（TypeInfo.Function 等）：subject 是枚举
-                     * tag 整数，变体名 → tag 值再比。 */
-                    if (s->kind == V_INT && s->ty && s->ty->kind == TY_ENUM) {
-                        Field *ef = ty_field(s->ty, p->name);
-                        if (ef && ef->tag == s->ival) hit = true;
-                    }
-                    continue;
+            if (st && st->kind == TY_UNION) {
+                if (!arm->flag) {
+                    Node *p = arm->nitems == 1 ? arm->items[0] : NULL;
+                    hit = p && p->kind == NK_FIELD && p->name &&
+                          !strcmp(p->name, subject->ty->fields[active].name);
+                    capture = subject->items[active];
                 }
-                Value *pv = ct_eval(p);
-                if (pv && val_eq(pv, s)) hit = true;
+            } else if (st && st->kind == TY_OPT) {
+                for (int k = 0; k < arm->nitems && !hit; k++) {
+                    Node *p = arm->items[k];
+                    if (p->kind != NK_FIELD || !p->name) continue;
+                    bool some = s->kind != V_NULL && s->kind != V_UNDEF;
+                    if ((some && !strcmp(p->name, "some")) ||
+                        (!some && !strcmp(p->name, "none"))) hit = true;
+                }
+            } else if (st && st->kind == TY_ERR) {
+                bool failed = s->ty && s->ty->kind == TY_ERROR;
+                for (int k = 0; k < arm->nitems && !hit; k++) {
+                    Node *p = arm->items[k];
+                    if (p->kind != NK_FIELD || !p->name) continue;
+                    if ((failed && !strcmp(p->name, "err")) ||
+                        (!failed && !strcmp(p->name, "ok"))) hit = true;
+                }
+            } else {
+                for (int k = 0; k < arm->nitems && !hit; k++) {
+                    Node *p = arm->items[k];
+                    if (p->kind == NK_FIELD && !p->a && p->name) {
+                        /* 编译期枚举模式（TypeInfo.Function 等）：subject 是枚举
+                         * tag 整数，变体名 → tag 值再比。 */
+                        if (s->kind == V_INT && s->ty && s->ty->kind == TY_ENUM) {
+                            Field *ef = ty_field(s->ty, p->name);
+                            if (ef && ef->tag == s->ival) hit = true;
+                        }
+                        continue;
+                    }
+                    Value *pv = ct_eval(p);
+                    if (pv && val_eq(pv, s)) hit = true;
+                }
             }
             if (!hit) continue;
+            if (!arm->cap_ptr) ct_bind_capture(arm->sym, capture);
             CtFlow f = ct_run_arm(arm->a);
             if (f.kind == CT_YIELD) return f;
             return f;
@@ -1316,7 +1407,7 @@ static Node *specialize_raw(Node *fn, Node *call, int *ncomp, Type **out_ft, Val
         if (!s) continue;
         s->ty = is_type_param(pm) ? ty_type()
                                   : (pm->a ? resolve_type(pm->a) : ty_invalid());
-        s->ct = args[i];
+        s->ct = ct_copy_value(args[i]);
         s->ct_bind = true;
         if (args[i]->kind == V_TYPE) s->type_val = args[i]->tval;
         s->state = 2;
